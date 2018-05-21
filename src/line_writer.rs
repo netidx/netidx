@@ -1,14 +1,11 @@
-use std::result;
-use std::marker::PhantomData;
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
-use std::convert::AsRef;
-use futures::prelude::*;
-use futures::unsync::mpsc::{channel, Receiver, Sender};
-use futures::unsync::oneshot;
-use tokio;
-use tokio::executor::current_thread::spawn;
-use tokio::io::{AsyncWrite, Write};
+use std::{
+  result,
+  marker::PhantomData,
+  sync::{Arc, Weak, Mutex, MutexGuard},
+  convert::AsRef
+};
+use futures::{prelude::*, sync::{mpsc::{channel, Receiver, Sender}, oneshot}};
+use tokio::{self, spawn, io::{AsyncWrite, Write}};
 use tokio_io::io::{WriteHalf, write_all};
 use error::*;
 
@@ -28,7 +25,7 @@ struct LineWriterInner<T, K> {
   kind: PhantomData<K>
 }
 
-struct LineWriterWeak<T, K>(Weak<RefCell<LineWriterInner<T, K>>>);
+struct LineWriterWeak<T, K>(Weak<Mutex<LineWriterInner<T, K>>>);
 
 impl<T,K> Clone for LineWriterWeak<T,K> {
   fn clone(&self) -> Self { LineWriterWeak(Weak::clone(&self.0)) }
@@ -40,13 +37,14 @@ impl<T,K> LineWriterWeak<T,K> {
   }
 }
 
-pub struct LineWriter<T, K>(Rc<RefCell<LineWriterInner<T, K>>>);
+pub struct LineWriter<T, K>(Arc<Mutex<LineWriterInner<T, K>>>);
 
 impl<T, K> Clone for LineWriter<T, K> {
-  fn clone(&self) -> Self { LineWriter(Rc::clone(&self.0)) }
+  fn clone(&self) -> Self { LineWriter(Arc::clone(&self.0)) }
 }
 
-impl<T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static> LineWriter<T, K> {
+impl<T: AsRef<[u8]> + Send + Sync + 'static,
+     K: AsyncWrite + Write + Send + Sync + 'static> LineWriter<T, K> {
   pub fn new(chan: WriteHalf<K>) -> Self {
     let (sender, receiver) = channel(10);
     let inner = LineWriterInner {
@@ -58,44 +56,50 @@ impl<T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static> LineWriter<T, K>
       dead: false,
       kind: PhantomData
     };
-    let t = LineWriter(Rc::new(RefCell::new(inner)));
+    let t = LineWriter(Arc::new(Mutex::new(inner)));
     spawn(start_inner_loop(t.downgrade(), receiver, chan));
     t
   }
 
   fn downgrade(&self) -> LineWriterWeak<T,K> {
-    LineWriterWeak(Rc::downgrade(&self.0))
+    LineWriterWeak(Arc::downgrade(&self.0))
   }
 
   #[async]
   fn send_loop(self) -> result::Result<(), ()> {
     loop {          
       let (msgs, mut sender, dead) = {
-        let mut t = self.0.borrow_mut();
+        let mut t = self.0.lock().unwrap();
         if t.queued.len() == 0 { break; }
         else { (t.queued.split_off(0), t.sender.clone(), t.dead) }
       };
       if !dead { await!(sender.send(msgs)).map_err(|_| ())?; }
       else {
-        for f in self.0.borrow_mut().flushes.drain(0..) {
+        for f in self.0.lock().unwrap().flushes.drain(0..) {
           let _ = f.send(());
         }
       }
     }
-    self.0.borrow_mut().running = false;
+    self.0.lock().unwrap().running = false;
     Ok(())
+  }
+
+  fn send_nolock<'a>(
+    &self,
+    mut t: MutexGuard<'a, LineWriterInner<T,K>>,
+    msg: Msg<T>
+  ) {
+    t.queued.push(msg);
+    if !t.running {
+      t.running = true;
+      drop(t);
+      spawn(self.clone().send_loop());
+    }
   }
 
   // send ensures messages are sent in order, but allows the sender
   // not to wait for each message to go out. To wait, use a flush.
-  fn send(&self, msg: Msg<T>) {
-    let mut t = self.0.borrow_mut();
-    t.queued.push(msg);
-    if !t.running {
-      t.running = true;
-      spawn(self.clone().send_loop())
-    }
-  }
+  fn send(&self, msg: Msg<T>) { self.send_nolock(self.0.lock().unwrap(), msg); }
 
   pub fn shutdown(&self) { self.send(Msg::Stop) }
 
@@ -107,18 +111,21 @@ impl<T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static> LineWriter<T, K>
   #[async]
   pub fn flush(self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
-    self.0.borrow_mut().flushes.push(tx);
-    self.send(Msg::Flush);
+    let mut t = self.0.lock().unwrap();
+    t.flushes.push(tx);
+    self.send_nolock(t, Msg::Flush);
     await!(rx)?;
     Ok(())
   }
 
   #[async]
   pub fn on_shutdown(self) -> Result<()> {
-    if self.0.borrow().dead { Ok(()) }
+    let mut t = self.0.lock().unwrap();
+    if t.dead { Ok(()) }
     else {
       let (tx, rx) = oneshot::channel();
-      self.0.borrow_mut().on_shutdown.push(tx);
+      t.on_shutdown.push(tx);
+      drop(t);
       Ok(await!(rx)?)
     }
   }
@@ -130,7 +137,8 @@ fn inner_loop<T, K>(
   receiver: Receiver<Vec<Msg<T>>>,
   mut chan: WriteHalf<K>
 ) -> Result<()>
-where T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static {
+where T: AsRef<[u8]> + Send + Sync + 'static,
+      K: AsyncWrite + Write + Send + Sync + 'static {
   let mut buf : Vec<u8> = Vec::new();
   #[async]
   'outer: for batch in receiver.map_err(|()| Error::from("stream error")) {
@@ -157,7 +165,7 @@ where T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static {
           }
           chan = await!(tokio::io::flush(chan))?;
           if let Some(t) = t.upgrade() {
-            let mut t = t.0.borrow_mut();
+            let mut t = t.0.lock().unwrap();
             if t.flushes.len() > 0 {
               let _ = t.flushes.remove(0).send(());
             }
@@ -181,12 +189,13 @@ fn start_inner_loop<T, K>(
   receiver: Receiver<Vec<Msg<T>>>,
   chan: WriteHalf<K>
 ) -> result::Result<(), ()>
-where T: AsRef<[u8]> + 'static, K: AsyncWrite + Write + 'static {
+where T: AsRef<[u8]> + Send + Sync + 'static,
+      K: AsyncWrite + Write + Send + Sync + 'static {
   let _ = await!(inner_loop(t.clone(), receiver, chan));
   if let Some(t) = t.upgrade() {
-    let mut t = t.0.borrow_mut();
+    let mut t = t.0.lock().unwrap();
     t.dead = true;
-    for f in t.flushes.split_off(0).into_iter() {
+    for f in t.flushes.drain(0..) {
       let _ = f.send(());
     }
     for s in t.on_shutdown.drain(0..) {
