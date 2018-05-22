@@ -85,9 +85,10 @@ pub struct Published<T>(PublishedUntyped, PhantomData<T>);
 
 impl<T: Serialize> Published<T> {
   pub fn update(&self, v: &T) -> Result<()> {
-    let t = (self.0).0.read().unwrap();
+    let mut t = (self.0).0.write().unwrap();
     let c = t.message_header.clone();
     let v = Encoded::new(serde_json::to_vec(v)?);
+    t.current = v.clone();
     for (_, cl) in t.subscribed.iter() { cl.write_two(c.clone(), v.clone()) }
     Ok(())
   }

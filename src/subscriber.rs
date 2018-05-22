@@ -1,23 +1,13 @@
-use std::result;
-use std::cell::{RefCell, Cell};
-use std::rc::{Rc, Weak};
-use std::io::BufReader;
-use std::convert::AsRef;
-use std::net::SocketAddr;
-use std::collections::{HashMap, VecDeque};
-use std::marker::PhantomData;
+use std::{
+  result, cell::Cell, sync::{Arc, Weak, RwLock}, io::BufReader,
+  convert::AsRef, net::SocketAddr, collections::{HashMap, VecDeque},
+  marker::PhantomData
+};
 use rand;
-use futures;
-use futures::prelude::*;
-use futures::{Poll, Async};
-use futures::unsync::oneshot;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use futures::{self, prelude::*, Poll, Async, sync::oneshot};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
-use tokio;
-use tokio::prelude::*;
-use tokio::executor::current_thread::spawn;
-use tokio::net::TcpStream;
+use tokio::{self, prelude::*, spawn, net::TcpStream};
 use tokio_io::io::ReadHalf;
 use path::Path;
 use line_writer::LineWriter;
@@ -29,7 +19,7 @@ static MAXQ: usize = 1000;
 
 struct UntypedSubscriptionInner {
   path: Path,
-  current: Rc<String>,
+  current: Arc<String>,
   subscriber: Subscriber,
   connection: Connection,
   streams: Vec<UntypedUpdatesWeak>,
@@ -58,7 +48,7 @@ impl Drop for UntypedSubscriptionInner {
 }
 
 #[derive(Clone)]
-struct UntypedSubscriptionWeak(Weak<RefCell<UntypedSubscriptionInner>>);
+struct UntypedSubscriptionWeak(Weak<RwLock<UntypedSubscriptionInner>>);
 
 impl UntypedSubscriptionWeak {
   fn upgrade(&self) -> Option<UntypedSubscription> {
@@ -67,7 +57,7 @@ impl UntypedSubscriptionWeak {
 }
 
 #[derive(Clone)]
-struct UntypedSubscription(Rc<RefCell<UntypedSubscriptionInner>>);
+struct UntypedSubscription(Arc<RwLock<UntypedSubscriptionInner>>);
 
 impl UntypedSubscription {
   fn new(
