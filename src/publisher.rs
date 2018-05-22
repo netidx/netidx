@@ -1,7 +1,7 @@
 use std::{
   self, result, marker::PhantomData, io::BufReader, convert::AsRef,
   collections::HashMap, net::{Ipv4Addr, SocketAddrV4, SocketAddr},
-  sync::{Arc, Weak, RwLock},
+  sync::{Arc, Weak, RwLock, Mutex},
 };
 use rand::{self, distributions::IndependentSample};
 use futures::{prelude::*, sync::{oneshot, mpsc::{channel, Receiver, Sender}}};
@@ -63,7 +63,7 @@ impl Drop for PublishedUntypedInner {
 }
 
 #[derive(Clone)]
-struct PublishedUntypedWeak(Weak<RwLock<PublishedUntypedInner>>);
+struct PublishedUntypedWeak(Weak<Mutex<PublishedUntypedInner>>);
 
 impl PublishedUntypedWeak {
   fn upgrade(&self) -> Option<PublishedUntyped> {
@@ -72,7 +72,7 @@ impl PublishedUntypedWeak {
 }
 
 #[derive(Clone)]
-struct PublishedUntyped(Arc<RwLock<PublishedUntypedInner>>);
+struct PublishedUntyped(Arc<Mutex<PublishedUntypedInner>>);
 
 impl PublishedUntyped {
   fn downgrade(&self) -> PublishedUntypedWeak {
@@ -85,7 +85,7 @@ pub struct Published<T>(PublishedUntyped, PhantomData<T>);
 
 impl<T: Serialize> Published<T> {
   pub fn update(&self, v: &T) -> Result<()> {
-    let mut t = (self.0).0.write().unwrap();
+    let mut t = (self.0).0.lock().unwrap();
     let c = t.message_header.clone();
     let v = Encoded::new(serde_json::to_vec(v)?);
     t.current = v.clone();
@@ -98,7 +98,7 @@ impl<T: Serialize> Published<T> {
     mut f: Box<FnMut(result::Result<U, serde_json::Error>) -> () + Send + Sync>
   ) {
     let f = Box::new(move |s: String| (f)(serde_json::from_str::<U>(s.as_ref())));
-    (self.0).0.write().unwrap().on_write = Some(f);
+    (self.0).0.lock().unwrap().on_write = Some(f);
   }
 }
 
@@ -219,7 +219,7 @@ impl Publisher {
       current: Encoded::new(serde_json::to_vec(&init)?),
       subscribed: HashMap::new()
     };
-    let ut = PublishedUntyped(Arc::new(RwLock::new(inner)));
+    let ut = PublishedUntyped(Arc::new(Mutex::new(inner)));
     let mut t = self.0.write().unwrap();
     if t.published.contains_key(&path) { bail!(ErrorKind::AlreadyPublished(path)) }
     else {
@@ -281,7 +281,7 @@ where S: Stream<Item=String, Error=Error> + 'static {
               if let Some(ref published) = pb.published.get(&path) {
                 if let Some(published) = published.upgrade() {
                   drop(pb);
-                  let mut inner = published.0.write().unwrap();
+                  let mut inner = published.0.lock().unwrap();
                   if let Some(ref mut on_write) = inner.on_write {
                     (on_write)(msg)
                   }
@@ -298,7 +298,7 @@ where S: Stream<Item=String, Error=Error> + 'static {
                   if let Some(ref published) = pb.published.get(&s) {
                     if let Some(published) = published.upgrade() {
                       drop(pb);
-                      published.0.write().unwrap().subscribed.remove(&addr);
+                      published.0.lock().unwrap().subscribed.remove(&addr);
                     }
                   }
                 };
@@ -321,7 +321,7 @@ where S: Stream<Item=String, Error=Error> + 'static {
                           None => Err(no(s)?),
                           Some(published) => {
                             drop(pb);
-                            let mut inner = published.0.write().unwrap();
+                            let mut inner = published.0.lock().unwrap();
                             inner.subscribed.insert(addr, writer.clone());
                             let c = inner.message_header.clone();
                             let v = inner.current.clone();
@@ -363,7 +363,7 @@ fn start_client(
     drop(pb);
     for (_, pv) in published.into_iter() {
       if let Some(pv) = pv.upgrade() {
-        let mut inner = pv.0.write().unwrap();
+        let mut inner = pv.0.lock().unwrap();
         inner.subscribed.remove(&addr);
       }
     }
