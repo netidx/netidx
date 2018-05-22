@@ -1,24 +1,13 @@
-use std;
-use std::result;
-use std::marker::PhantomData;
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
-use std::io::BufReader;
-use std::convert::AsRef;
-use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddrV4, SocketAddr};
-use rand;
-use rand::distributions::IndependentSample;
-use futures::prelude::*;
-use futures::unsync::mpsc::{channel, Receiver, Sender};
-use futures::unsync::oneshot;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use std::{
+  self, result, marker::PhantomData, io::BufReader, convert::AsRef,
+  collections::HashMap, net::{Ipv4Addr, SocketAddrV4, SocketAddr},
+  sync::{Arc, Weak, RwLock},
+};
+use rand::{self, distributions::IndependentSample};
+use futures::{prelude::*, sync::{oneshot, mpsc::{channel, Receiver, Sender}}};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
-use tokio;
-use tokio::prelude::*;
-use tokio::executor::current_thread::spawn;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{self, prelude::*, spawn, net::{TcpListener, TcpStream}};
 use tokio_io::io::ReadHalf;
 use path::Path;
 use resolver_client::Resolver;
@@ -28,7 +17,6 @@ use error::*;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
-// * handle writes back from the subscriber
 
 static MAX_CLIENTS: usize = 768;
 
@@ -53,30 +41,29 @@ struct PublishedUntypedInner {
   path: Path,
   message_header: Encoded,
   current: Encoded,
-  on_write: Option<Box<FnMut(String) -> ()>>,
+  on_write: Option<Box<FnMut(String) -> () + Send + Sync>>,
   subscribed: HashMap<SocketAddr, LineWriter<Encoded, TcpStream>>,
 }
 
 impl Drop for PublishedUntypedInner {
   fn drop(&mut self) {
-    let mut t = self.publisher.0.borrow_mut();
+    let mut t = self.publisher.0.write().unwrap();
     t.published.remove(&self.path);
-    {
-      let r = t.resolver.clone();
-      let addr = t.addr;
-      let path = self.path.clone();
-      async_block! { await!(r.unpublish(path, addr)) };
-    }
+    let r = t.resolver.clone();
+    let addr = t.addr;
+    drop(t);
+    let path = self.path.clone();
+    async_block! { await!(r.unpublish(path, addr)) };
     let msg =
       serde_json::to_vec(&FromPublisher::Unsubscribed(self.path.clone()))
       .expect("failed to encode unsubscribed message");
     let msg = Encoded::new(msg);
-    for (_, c) in self.subscribed.iter() { c.write(msg.clone()) }
+    for (_, c) in self.subscribed.iter() { c.write_one(msg.clone()) }
   }
 }
 
 #[derive(Clone)]
-struct PublishedUntypedWeak(Weak<RefCell<PublishedUntypedInner>>);
+struct PublishedUntypedWeak(Weak<RwLock<PublishedUntypedInner>>);
 
 impl PublishedUntypedWeak {
   fn upgrade(&self) -> Option<PublishedUntyped> {
@@ -85,11 +72,11 @@ impl PublishedUntypedWeak {
 }
 
 #[derive(Clone)]
-struct PublishedUntyped(Rc<RefCell<PublishedUntypedInner>>);
+struct PublishedUntyped(Arc<RwLock<PublishedUntypedInner>>);
 
 impl PublishedUntyped {
   fn downgrade(&self) -> PublishedUntypedWeak {
-    PublishedUntypedWeak(Rc::downgrade(&self.0))
+    PublishedUntypedWeak(Arc::downgrade(&self.0))
   }
 }
 
@@ -98,22 +85,19 @@ pub struct Published<T>(PublishedUntyped, PhantomData<T>);
 
 impl<T: Serialize> Published<T> {
   pub fn update(&self, v: &T) -> Result<()> {
-    let t = (self.0).0.borrow();
+    let t = (self.0).0.read().unwrap();
     let c = t.message_header.clone();
     let v = Encoded::new(serde_json::to_vec(v)?);
-    for (_, cl) in t.subscribed.iter() {
-      cl.write(c.clone());
-      cl.write(v.clone());
-    }
+    for (_, cl) in t.subscribed.iter() { cl.write_two(c.clone(), v.clone()) }
     Ok(())
   }
 
   pub fn on_write<U: DeserializeOwned + 'static>(
     &self,
-    mut f: Box<FnMut(result::Result<U, serde_json::Error>) -> ()>
+    mut f: Box<FnMut(result::Result<U, serde_json::Error>) -> () + Send + Sync>
   ) {
     let f = Box::new(move |s: String| (f)(serde_json::from_str::<U>(s.as_ref())));
-    (self.0).0.borrow_mut().on_write = Some(f);
+    (self.0).0.write().unwrap().on_write = Some(f);
   }
 }
 
@@ -153,7 +137,7 @@ impl Drop for PublisherInner {
 }
 
 #[derive(Clone)]
-struct PublisherWeak(Weak<RefCell<PublisherInner>>);
+struct PublisherWeak(Weak<RwLock<PublisherInner>>);
 
 impl PublisherWeak {
   fn upgrade(&self) -> Option<Publisher> {
@@ -169,11 +153,11 @@ pub enum BindCfg {
 }
 
 #[derive(Clone)]
-pub struct Publisher(Rc<RefCell<PublisherInner>>);
+pub struct Publisher(Arc<RwLock<PublisherInner>>);
 
 impl Publisher {
   fn downgrade(&self) -> PublisherWeak {
-    PublisherWeak(Rc::downgrade(&self.0))
+    PublisherWeak(Arc::downgrade(&self.0))
   }
 
   pub fn new(
@@ -214,36 +198,35 @@ impl Publisher {
       published: HashMap::new(),
       wait_clients: Vec::new(),
     };
-    let pb = Publisher(Rc::new(RefCell::new(pb)));
+    let pb = Publisher(Arc::new(RwLock::new(pb)));
     spawn(start_accept(pb.downgrade(), listener, stop));
     Ok(pb)
   }
 
-  pub fn addr(&self) -> SocketAddr { self.0.borrow().addr }
+  pub fn addr(&self) -> SocketAddr { self.0.read().unwrap().addr }
 
   #[async]
   pub fn publish<T: Serialize + 'static>(
     self, path: Path, init: T
   ) -> Result<Published<T>> {
-    if self.0.borrow().published.get(&path).is_some() {
-      bail!(ErrorKind::AlreadyPublished(path))
-    } else {
-      let header_msg = FromPublisher::Message(path.clone());
-      let inner = PublishedUntypedInner {
-        publisher: self.clone(),
-        path: path.clone(),
-        on_write: None,
-        message_header: Encoded::new(serde_json::to_vec(&header_msg)?),
-        current: Encoded::new(serde_json::to_vec(&init)?),
-        subscribed: HashMap::new()
-      };
-      let ut = PublishedUntyped(Rc::new(RefCell::new(inner)));
-      let addr = {
-        let mut t = self.0.borrow_mut();
-        t.published.insert(path.clone(), ut.downgrade());
-        t.addr
-      };
-      await!(self.0.borrow().resolver.clone().publish(path.clone(), addr))?;
+    let header_msg = FromPublisher::Message(path.clone());
+    let inner = PublishedUntypedInner {
+      publisher: self.clone(),
+      path: path.clone(),
+      on_write: None,
+      message_header: Encoded::new(serde_json::to_vec(&header_msg)?),
+      current: Encoded::new(serde_json::to_vec(&init)?),
+      subscribed: HashMap::new()
+    };
+    let ut = PublishedUntyped(Arc::new(RwLock::new(inner)));
+    let mut t = self.0.write().unwrap();
+    if t.published.contains_key(&path) { bail!(ErrorKind::AlreadyPublished(path)) }
+    else {
+      t.published.insert(path.clone(), ut.downgrade());
+      let addr = t.addr;
+      let resolver = t.resolver.clone();
+      drop(t);
+      await!(resolver.publish(path, addr))?;
       Ok(Published(ut, PhantomData))
     }
   }
@@ -251,7 +234,7 @@ impl Publisher {
   #[async]
   pub fn flush(self) -> Result<()> {
     let flushes =
-      self.0.borrow().clients.iter()
+      self.0.read().unwrap().clients.iter()
       .map(|(_, c)| c.clone().flush())
       .collect::<Vec<_>>();
     for flush in flushes.into_iter() { await!(flush)? }
@@ -260,10 +243,12 @@ impl Publisher {
 
   #[async]
   pub fn wait_client(self) -> Result<()> {
-    if self.0.borrow().clients.len() > 0 { Ok(()) }
+    let mut t = self.0.write().unwrap();
+    if t.clients.len() > 0 { Ok(()) }
     else {
       let (tx, rx) = oneshot::channel();
-      self.0.borrow_mut().wait_clients.push(tx);
+      t.wait_clients.push(tx);
+      drop(t);
       Ok(await!(rx)?)
     }
   }
@@ -280,19 +265,22 @@ where S: Stream<Item=String, Error=Error> + 'static {
   enum C { Msg(String), Stop };
   let stop = writer.clone().on_shutdown().into_stream().then(|_| Ok(C::Stop));
   let msgs = msgs.map(|m| C::Msg(m));
-  let mut wait_set: RefCell<Option<Path>> = RefCell::new(None);
+  let mut wait_set: Option<Path> = None;
   #[async]
   for msg in msgs.select(stop) {
     match msg {
       C::Stop => break,
-      C::Msg(msg) => 
-        match wait_set.replace(None) {
+      C::Msg(msg) => {
+        let ws = wait_set;
+        wait_set = None;
+        match ws {
           Some(path) => {
             if let Some(t) = t.upgrade() {
-              let pb = t.0.borrow();
+              let pb = t.0.read().unwrap();
               if let Some(ref published) = pb.published.get(&path) {
                 if let Some(published) = published.upgrade() {
-                  let mut inner = published.0.borrow_mut();
+                  drop(pb);
+                  let mut inner = published.0.write().unwrap();
                   if let Some(ref mut on_write) = inner.on_write {
                     (on_write)(msg)
                   }
@@ -302,19 +290,19 @@ where S: Stream<Item=String, Error=Error> + 'static {
           },
           None =>
             match serde_json::from_str(&msg)? {
-              ToPublisher::Set(path) => { wait_set.replace(Some(path)); },
+              ToPublisher::Set(path) => { wait_set = Some(path); },
               ToPublisher::Unsubscribe(s) => {
                 if let Some(t) = t.upgrade() {
-                  let pb = t.0.borrow();
+                  let pb = t.0.read().unwrap();
                   if let Some(ref published) = pb.published.get(&s) {
                     if let Some(published) = published.upgrade() {
-                      let mut inner = published.0.borrow_mut();
-                      inner.subscribed.remove(&addr);
+                      drop(pb);
+                      published.0.write().unwrap().subscribed.remove(&addr);
                     }
                   }
                 };
                 let resp = serde_json::to_vec(&FromPublisher::Unsubscribed(s))?;
-                writer.write(Encoded::new(resp));
+                writer.write_one(Encoded::new(resp));
               },
               ToPublisher::Subscribe(s) => {
                 fn no(s: Path) -> Result<Encoded> {
@@ -324,14 +312,15 @@ where S: Stream<Item=String, Error=Error> + 'static {
                 let resp = match t.upgrade() {
                   None => Err(no(s)?),
                   Some(t) => {
-                    let pb = t.0.borrow();
+                    let pb = t.0.read().unwrap();
                     match pb.published.get(&s) {
                       None => Err(no(s)?),
                       Some(ref published) => {
                         match published.upgrade() {
                           None => Err(no(s)?),
                           Some(published) => {
-                            let mut inner = published.0.borrow_mut();
+                            drop(pb);
+                            let mut inner = published.0.write().unwrap();
                             inner.subscribed.insert(addr, writer.clone());
                             let c = inner.message_header.clone();
                             let v = inner.current.clone();
@@ -343,15 +332,13 @@ where S: Stream<Item=String, Error=Error> + 'static {
                   }
                 };
                 match resp {
-                  Err(resp) => writer.write(resp),
-                  Ok((c, v)) => {
-                    writer.write(c);
-                    writer.write(v);
-                  }
+                  Err(resp) => writer.write_one(resp),
+                  Ok((c, v)) => writer.write_two(c, v),
                 }
               }
             }
         }
+      }
     }
   }
   Ok(())
@@ -369,11 +356,13 @@ fn start_client(
   let _ = await!(client_loop(t.clone(), addr, msgs, writer.clone()));
   writer.shutdown();
   if let Some(t) = t.upgrade() {
-    let mut pb = t.0.borrow_mut();
+    let mut pb = t.0.write().unwrap();
     pb.clients.remove(&addr);
-    for (_, pv) in pb.published.iter() {
+    let published = pb.published.clone();
+    drop(pb);
+    for (_, pv) in published.into_iter() {
       if let Some(pv) = pv.upgrade() {
-        let mut inner = pv.0.borrow_mut();
+        let mut inner = pv.0.write().unwrap();
         inner.subscribed.remove(&addr);
       }
     }
@@ -400,21 +389,17 @@ fn accept_loop(
     match msg {
       Combined::Stop => break,
       Combined::Client(cl) => {
-        let n = t.0.borrow().clients.len();
-        if n > MAX_CLIENTS {
-          let _ = await!(tokio::io::shutdown(cl));
-        } else {
+        let mut pb = t.0.write().unwrap();
+        if pb.clients.len() < MAX_CLIENTS {
           match cl.peer_addr() {
             Err(_) => (),
             Ok(addr) => {
               cl.set_nodelay(true).unwrap_or(());
               let (read, write) = cl.split();
               let writer = LineWriter::new(write);
-              let mut pb = t.0.borrow_mut();
               pb.clients.insert(addr, writer.clone());
-              for s in pb.wait_clients.drain(0..) {
-                let _ = s.send(());
-              }
+              for s in pb.wait_clients.drain(0..) { let _ = s.send(()); }
+              drop(pb);
               spawn(start_client(t.downgrade(), read, writer, addr));
             }
           }
@@ -433,6 +418,6 @@ fn start_accept(
 ) -> result::Result<(), ()> {
   // CR estokes: Do something with this error
   let _ = await!(accept_loop(t.clone(), serv, stop));
-  if let Some(t) = t.upgrade() { t.0.borrow_mut().shutdown() }
+  if let Some(t) = t.upgrade() { t.0.write().unwrap().shutdown() }
   Ok(())
 }

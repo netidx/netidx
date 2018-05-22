@@ -1,16 +1,11 @@
-use futures::prelude::*;
-use futures::unsync::oneshot;
-use tokio;
-use tokio::prelude::*;
-use tokio::executor::current_thread::spawn;
-use tokio::net::TcpStream;
+use futures::{prelude::*, sync::oneshot};
+use tokio::{self, spawn, prelude::*, net::TcpStream};
 use tokio_io::io::ReadHalf;
-use std::io::BufReader;
-use std::net::SocketAddr;
-use std::rc::{Rc, Weak};
-use std::cell::{RefCell, Cell};
-use std::result;
-use std::collections::VecDeque;
+use std::{
+  result, io::BufReader, net::SocketAddr,
+  collections::VecDeque, sync::{Arc, Weak, Mutex},
+  cell::Cell,
+};
 use path::Path;
 use serde_json;
 use line_writer::LineWriter;
@@ -32,7 +27,7 @@ impl Drop for ResolverInner {
 }
 
 #[derive(Clone)]
-struct ResolverWeak(Weak<RefCell<ResolverInner>>);
+struct ResolverWeak(Weak<Mutex<ResolverInner>>);
 
 impl ResolverWeak {
   fn upgrade(&self) -> Option<Resolver> {
@@ -41,11 +36,11 @@ impl ResolverWeak {
 }
 
 #[derive(Clone)]
-pub struct Resolver(Rc<RefCell<ResolverInner>>);
+pub struct Resolver(Arc<Mutex<ResolverInner>>);
 
 impl Resolver {
   fn downgrade(&self) -> ResolverWeak {
-    ResolverWeak(Rc::downgrade(&self.0))
+    ResolverWeak(Arc::downgrade(&self.0))
   }
 
   #[async(boxed)]
@@ -58,7 +53,7 @@ impl Resolver {
       queued: VecDeque::new(),
       stop: Cell::new(Some(stop_tx))
     };
-    let t = Resolver(Rc::new(RefCell::new(inner)));
+    let t = Resolver(Arc::new(Mutex::new(inner)));
     spawn(start_client(t.downgrade(), rx, stop_rx));
     Ok(t)
   }
@@ -68,9 +63,9 @@ impl Resolver {
     let (tx, rx) = oneshot::channel();
     {
       let msg = serde_json::to_vec(&m)?;
-      let mut t = self.0.borrow_mut();
+      let mut t = self.0.lock().unwrap();
       t.queued.push_back(tx);
-      t.writer.write(msg)
+      t.writer.write_one(msg)
     }
     match await!(rx)? {
       FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
@@ -133,7 +128,7 @@ fn client_loop(
       C::Msg(msg) => {
         let t = t.upgrade().ok_or_else(|| Error::from("client dropped"))?;
         let msg = serde_json::from_str(&msg)?;
-        let ret = t.0.borrow_mut().queued.pop_front();
+        let ret = t.0.lock().unwrap().queued.pop_front();
         match ret {
           Some(ret) => ret.send(msg).map_err(|_| Error::from("ipc error"))?,
           None => bail!("got unsolicited message from resolver")
@@ -158,10 +153,9 @@ fn start_client(
         Err(e) => format!("{}", e)
       });
   if let Some(t) = t.upgrade() {
-    t.0.borrow().writer.shutdown();
-    while let Some(c) = t.0.borrow_mut().queued.pop_front() {
-      let _ = c.send(msg.clone());
-    }
+    let mut t = t.0.lock().unwrap();
+    t.writer.shutdown();
+    while let Some(c) = t.queued.pop_front() { let _ = c.send(msg.clone()); }
   }
   Ok(())
 }

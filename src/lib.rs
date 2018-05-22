@@ -13,10 +13,10 @@ extern crate rand;
 extern crate error_chain;
 
 mod line_writer;
-//pub mod utils;
+pub mod utils;
 pub mod error;
 pub mod path;
-//pub mod resolver_client;
-//pub mod resolver_server;
-//pub mod publisher;
+pub mod resolver_client;
+pub mod resolver_server;
+pub mod publisher;
 //pub mod subscriber;

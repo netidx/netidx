@@ -1,12 +1,11 @@
 use futures::prelude::*;
-use std::rc::Rc;
-use std::cell::Cell;
+use std::{sync::Arc, cell::Cell};
 
 #[derive(Debug, Clone)]
-pub struct Encoded(Rc<Vec<u8>>);
+pub struct Encoded(Arc<Vec<u8>>);
 
 impl Encoded {
-  pub fn new(data: Vec<u8>) -> Self { Encoded(Rc::new(data)) }
+  pub fn new(data: Vec<u8>) -> Self { Encoded(Arc::new(data)) }
 }
 
 impl AsRef<[u8]> for Encoded {

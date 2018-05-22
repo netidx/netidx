@@ -1,5 +1,6 @@
 use std::{
   result,
+  iter::IntoIterator,
   marker::PhantomData,
   sync::{Arc, Weak, Mutex, MutexGuard},
   convert::AsRef
@@ -84,12 +85,7 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
     Ok(())
   }
 
-  fn send_nolock<'a>(
-    &self,
-    mut t: MutexGuard<'a, LineWriterInner<T,K>>,
-    msg: Msg<T>
-  ) {
-    t.queued.push(msg);
+  fn maybe_start_write_loop<'a>(&self, mut t: MutexGuard<'a, LineWriterInner<T, K>>) {
     if !t.running {
       t.running = true;
       drop(t);
@@ -97,13 +93,30 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
     }
   }
 
-  // send ensures messages are sent in order, but allows the sender
-  // not to wait for each message to go out. To wait, use a flush.
-  fn send(&self, msg: Msg<T>) { self.send_nolock(self.0.lock().unwrap(), msg); }
+  pub fn shutdown(&self) {
+    let mut t = self.0.lock().unwrap();
+    t.queued.push(Msg::Stop);
+    self.maybe_start_write_loop(t);
+  }
 
-  pub fn shutdown(&self) { self.send(Msg::Stop) }
+  pub fn write_one(&self, msg: T) {
+    let mut t = self.0.lock().unwrap();
+    t.queued.push(Msg::Write(msg));
+    self.maybe_start_write_loop(t);
+  }
 
-  pub fn write(&self, data: T) { self.send(Msg::Write(data)) }
+  pub fn write_two(&self, msg0: T, msg1: T) {
+    let mut t = self.0.lock().unwrap();
+    t.queued.push(Msg::Write(msg0));
+    t.queued.push(Msg::Write(msg1));
+    self.maybe_start_write_loop(t);
+  }
+
+  pub fn write_n<Q: IntoIterator<Item=T>>(&self, msgs: Q) {
+    let mut t = self.0.lock().unwrap();
+    for msg in msgs.into_iter() { t.queued.push(Msg::Write(msg)) };
+    self.maybe_start_write_loop(t);
+  }
 
   // when the future returned by flush is ready, all messages
   // sent before flush was called have been handed to the OS,
@@ -113,20 +126,25 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
     let (tx, rx) = oneshot::channel();
     let mut t = self.0.lock().unwrap();
     t.flushes.push(tx);
-    self.send_nolock(t, Msg::Flush);
+    t.queued.push(Msg::Flush);
+    self.maybe_start_write_loop(t);
     await!(rx)?;
     Ok(())
   }
 
   #[async]
   pub fn on_shutdown(self) -> Result<()> {
-    let mut t = self.0.lock().unwrap();
-    if t.dead { Ok(()) }
-    else {
-      let (tx, rx) = oneshot::channel();
-      t.on_shutdown.push(tx);
-      drop(t);
-      Ok(await!(rx)?)
+    let wait = {
+      let mut t = self.0.lock().unwrap();
+      if t.dead { None } else {
+        let (tx, rx) = oneshot::channel();
+        t.on_shutdown.push(tx);
+        Some(rx)
+      }
+    };
+    match wait {
+      None => Ok(()),
+      Some(rx) => Ok(await!(rx)?),
     }
   }
 }
