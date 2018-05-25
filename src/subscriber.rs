@@ -1,9 +1,9 @@
 use std::{
   result, sync::{Arc, Weak, RwLock}, io::BufReader, convert::AsRef, net::SocketAddr,
-  collections::{hash_map::Entry, HashMap, VecDeque}, marker::PhantomData
+  collections::{hash_map::Entry, HashMap, VecDeque}, marker::PhantomData, mem
 };
 use rand;
-use futures::{self, prelude::*, Poll, Async, sync::oneshot, sync::mpsc};
+use futures::{self, prelude::*, Poll, Async, sync::oneshot};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
 use tokio::{self, prelude::*, spawn, net::TcpStream};
@@ -104,7 +104,7 @@ impl UntypedSubscription {
 
 struct UntypedUpdatesInner {
   notify: Option<Box<Fn() -> () + Send + Sync + 'static>>,
-  hold: Option<mpsc::Sender<()>>,
+  hold: Option<oneshot::Sender<()>>,
   ready: VecDeque<Option<Arc<String>>>
 }
 
@@ -142,10 +142,9 @@ impl Stream for UntypedUpdates {
         }
       };
     if t.ready.len() < MAXQ / 2 {
-      if let Some(c) = t.hold.as_ref() {
-        let _ = c.clone().send(());
-        t.hold = None;
-      }
+      let mut hold = None;
+      mem::swap(&mut t.hold, &mut hold);
+      if let Some(c) = hold { let _ = c.send(()); }
     }
     res
   }
@@ -314,12 +313,12 @@ impl Subscriber {
     SubscriberWeak(Arc::downgrade(&self.0))
   }
 
-  fn fail_pending<E: Into<Error>>(&self, path: &Path, e: E) -> Error {
+  fn fail_pending<E: Into<Error> + ToString>(&self, path: &Path, e: E) -> Error {
     let mut t = self.0.write().unwrap();
     match t.subscriptions.get_mut(path) {
       None | Some(SubscriptionState::Subscribed(_)) => (),
       Some(SubscriptionState::Pending(ref mut q)) =>
-        for c in q.drain(0..) { let _ = c.send(Err(e.into())); }
+        for c in q.drain(0..) { let _ = c.send(Err(Error::from(e.to_string()))); }
     }
     t.subscriptions.remove(path);
     e.into()
@@ -332,8 +331,9 @@ impl Subscriber {
   ) -> Result<Subscription<T>> {
     loop {
       let mut t = self.0.write().unwrap();
+      let resolver = t.resolver.clone();
       match t.subscriptions.entry(path.clone()) {
-        Entry::Occupied(e) => {
+        Entry::Occupied(mut e) => {
           match e.get_mut() {
             SubscriptionState::Subscribed(ref ut) => {
               match ut.upgrade() {
@@ -350,7 +350,6 @@ impl Subscriber {
           }
         },
         Entry::Vacant(e) => {
-          let resolver = t.resolver.clone();
           e.insert(SubscriptionState::Pending(Vec::new()));
           drop(t);
           let mut addrs =
@@ -509,7 +508,7 @@ fn connection_loop(
                     let mut strm = strm.0.write().unwrap();
                     strm.ready.push_back(Some(Arc::clone(&ut.current)));
                     if strm.ready.len() > MAXQ {
-                      let (tx, rx) = mpsc::channel(1);
+                      let (tx, rx) = oneshot::channel();
                       strm.hold = Some(tx);
                       holds.push(rx)
                     }
@@ -519,7 +518,7 @@ fn connection_loop(
                 }
               }
             }
-            for hold in holds.drain(0..) { let _ = await!(hold.into_future()); }
+            for hold in holds.drain(0..) { let _ = await!(hold); }
           },
           None => {
             let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
