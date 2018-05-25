@@ -1,10 +1,9 @@
 use std::{
-  result, cell::Cell, sync::{Arc, Weak, RwLock}, io::BufReader,
-  convert::AsRef, net::SocketAddr, collections::{hash_map::Entry, HashMap, VecDeque},
-  marker::PhantomData
+  result, sync::{Arc, Weak, RwLock}, io::BufReader, convert::AsRef, net::SocketAddr,
+  collections::{hash_map::Entry, HashMap, VecDeque}, marker::PhantomData
 };
 use rand;
-use futures::{self, prelude::*, Poll, Async, sync::oneshot};
+use futures::{self, prelude::*, Poll, Async, sync::oneshot, sync::mpsc};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
 use tokio::{self, prelude::*, spawn, net::TcpStream};
@@ -84,7 +83,7 @@ impl UntypedSubscription {
       if t.dead { bail!(ErrorKind::SubscriptionIsDead) }
       else {
         let (tx, rx) = oneshot::channel();
-        t..nexts.push(tx);
+        t.nexts.push(tx);
         rx
       }
     };
@@ -93,8 +92,8 @@ impl UntypedSubscription {
 
   fn updates(&self) -> UntypedUpdates {
     let inner = UntypedUpdatesInner {
-      notify: Cell::new(None),
-      hold: Cell::new(None),
+      notify: None,
+      hold: None,
       ready: VecDeque::new()
     };
     let t = UntypedUpdates(Arc::new(RwLock::new(inner)));
@@ -104,8 +103,8 @@ impl UntypedSubscription {
 }
 
 struct UntypedUpdatesInner {
-  notify: Cell<Option<Box<Fn() -> ()>>>,
-  hold: Cell<Option<oneshot::Sender<()>>>,
+  notify: Option<Box<Fn() -> () + Send + Sync + 'static>>,
+  hold: Option<mpsc::Sender<()>>,
   ready: VecDeque<Option<Arc<String>>>
 }
 
@@ -138,13 +137,14 @@ impl Stream for UntypedUpdates {
         Some(v) => Ok(Async::Ready(v)),
         None => {
           let task = futures::task::current();
-          t.notify.replace(Some(Box::new(move || task.notify())));
+          t.notify = Some(Box::new(move || task.notify()));
           Ok(Async::NotReady)
         }
       };
     if t.ready.len() < MAXQ / 2 {
-      if let Some(hold) = t.hold.replace(None) {
-        let _ = hold.send(());
+      if let Some(c) = t.hold.as_ref() {
+        let _ = c.clone().send(());
+        t.hold = None;
       }
     }
     res
@@ -158,15 +158,14 @@ pub struct Subscription<T> {
 
 impl<T> ::std::fmt::Debug for Subscription<T> {
   fn fmt(&self, f: &mut ::std::fmt::Formatter) -> result::Result<(), ::std::fmt::Error> {
-    let t = self.0.read().unwrap();
-    let ut = t.untyped.0.read().unwrap();
+    let ut = self.untyped.0.read().unwrap();
     write!(f, "Subscription (path = {:?})", ut.path)
   }
 }
 
 impl<T> Clone for Subscription<T> {
   fn clone(&self) -> Self {
-    Subscription { untyped: Arc::clone(&self.untyped), phantom: PhantomData }
+    Subscription { untyped: self.untyped.clone(), phantom: PhantomData }
   }
 }
 
@@ -211,7 +210,7 @@ impl<T> Subscription<T> where T: DeserializeOwned {
   }
 
   pub fn flush(&self) -> impl Future<Item = (), Error = Error> {
-    self.untyped.read().unwrap().connection.flush()
+    self.untyped.0.read().unwrap().connection.flush()
   }
 }
 
@@ -226,12 +225,12 @@ struct ConnectionInner {
 impl Drop for ConnectionInner {
   fn drop(&mut self) {
     self.writer.shutdown();
-    self.subscriber.untyped.write().unwrap().connections.remove(&self.addr);
+    self.subscriber.0.write().unwrap().connections.remove(&self.addr);
   }
 }
 
 #[derive(Clone)]
-struct ConnectionWeak(Weak<RefCell<ConnectionInner>>);
+struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
 
 impl ConnectionWeak {
   fn upgrade(&self) -> Option<Connection> {
@@ -264,7 +263,7 @@ impl Connection {
 
   fn write<T: Serialize>(&self, v: &T) -> Result<()> {
     let d = serde_json::to_vec(v)?;
-    Ok(self.0.read().writer.write_one(d))
+    Ok(self.0.read().unwrap().writer.write_one(d))
   }
 
   fn flush(&self) -> impl Future<Item=(), Error=Error> {
@@ -320,10 +319,10 @@ impl Subscriber {
     match t.subscriptions.get_mut(path) {
       None | Some(SubscriptionState::Subscribed(_)) => (),
       Some(SubscriptionState::Pending(ref mut q)) =>
-        for c in q.drain(0..) { let _ = c.send(Err(Error::from(e))); }
+        for c in q.drain(0..) { let _ = c.send(Err(e.into())); }
     }
-    t.subscriptions.remove(&path);
-    Error::from(e)
+    t.subscriptions.remove(path);
+    e.into()
   }
 
   #[async]
@@ -331,47 +330,55 @@ impl Subscriber {
     self,
     path: Path
   ) -> Result<Subscription<T>> {
-    let mut t = self.0.write().unwrap();
-    match t.subscriptions.entry(path.clone()) {
-      Entry::Occupied(e) => {
-        match e.get_mut() {
-          SubscriptionState::Subscribed(ref ut) => Ok(Subscription::new(ut.clone())),
-          SubscriptionState::Pending(ref mut q) => {
-            let (send, recv) = oneshot::channel();
-            q.push(send);
-            drop(t)
-            Ok(Subscription::new(await!(recv)?))
-          }
-        }
-      },
-      Entry::Vacant(e) => {
-        let resolver = t.resolver.clone();
-        e.insert(SubscriptionState::Pending(Vec::new()));
-        drop(t);
-        let mut addrs =
-          match await!(resolver.resolve(path.clone())) {
-            Ok(addrs) => addrs,
-            Err(e) => bail!(self.fail_pending(e))
-          };
-        let mut last_error = None;
-        while let Some(addr) = choose_address(&mut addrs) {
-          match await!(self.clone().subscribe_addr(addr, path.clone())) {
-            Err(e) => last_error = Some(e),
-            Ok(s) => {
-              let mut t = self.0.write().unwrap();
-              match t.subscriptions.get_mut() {
-                None | Some(SubscriptionState::Subscribed(_)) => unreachable!("bug"),
-                Some(ref mut v @ SubscriptionState::Pending(ref mut q)) => {
-                  for c in q.drain(0..) { let _ = c.send(Ok(s.untyped.clone())) }
-                  *v = SubscriptionState::Subscribed(s.untyped.downgrade());
-                }
+    loop {
+      let mut t = self.0.write().unwrap();
+      match t.subscriptions.entry(path.clone()) {
+        Entry::Occupied(e) => {
+          match e.get_mut() {
+            SubscriptionState::Subscribed(ref ut) => {
+              match ut.upgrade() {
+                None => { e.remove_entry(); },
+                Some(ut) => return Ok(Subscription::new(ut)),
               }
-              Ok(s)
+            },
+            SubscriptionState::Pending(ref mut q) => {
+              let (send, recv) = oneshot::channel();
+              q.push(send);
+              drop(t);
+              return Ok(Subscription::new(await!(recv)??))
             }
           }
+        },
+        Entry::Vacant(e) => {
+          let resolver = t.resolver.clone();
+          e.insert(SubscriptionState::Pending(Vec::new()));
+          drop(t);
+          let mut addrs =
+            match await!(resolver.resolve(path.clone())) {
+              Ok(addrs) => addrs,
+              Err(e) => bail!(self.fail_pending(&path, e))
+            };
+          let mut last_error = None;
+          while let Some(addr) = choose_address(&mut addrs) {
+            match await!(self.clone().subscribe_addr(addr, path.clone())) {
+              Err(e) => last_error = Some(e),
+              Ok(s) => {
+                let mut t = self.0.write().unwrap();
+                match t.subscriptions.get_mut(&path) {
+                  None | Some(SubscriptionState::Subscribed(_)) => unreachable!("bug"),
+                  Some(SubscriptionState::Pending(ref mut q)) => {
+                    for c in q.drain(0..) { let _ = c.send(Ok(s.untyped.clone())); }
+                    *t.subscriptions.get_mut(&path).unwrap() =
+                      SubscriptionState::Subscribed(s.untyped.downgrade());
+                    }
+                  }
+                return Ok(s)
+              }
+            }
+          }
+          let e = last_error.unwrap_or(Error::from(ErrorKind::PathNotFound(path.clone())));
+          bail!(self.fail_pending(&path, e))
         }
-        let e = last_error.unwrap_or(Error::from(ErrorKind::PathNotFound(path)));
-        bail!(self.fail_pending(e))
       }
     }
   }
@@ -388,13 +395,13 @@ impl Subscriber {
         Some(ConnectionState::Connected(ref con)) =>
           match con.upgrade() {
             Some(con) => break con,
-            None => t.connections.remove(&addr),
+            None => { t.connections.remove(&addr); },
           },
         Some(ConnectionState::Pending(ref mut q)) => {
-          let (recv, send) = oneshot::channel();
+          let (send, recv) = oneshot::channel();
           q.push(send);
           drop(t);
-          break await!(recv)?;
+          break await!(recv)??;
         },
         None => {
           t.connections.insert(addr, ConnectionState::Pending(vec![]));
@@ -405,20 +412,21 @@ impl Subscriber {
               match t.connections.get_mut(&addr) {
                 Some(ConnectionState::Connected(_)) | None => unreachable!("bug"),
                 Some(ConnectionState::Pending(ref mut q)) => {
-                  for s in q.drain(0..) { let _ = s.send(Err(Error::from(&e))) }
+                  for s in q.drain(0..) { let _ = s.send(Err(Error::from(e.to_string()))); }
                   t.connections.remove(&addr);
                   bail!(e)
                 },
               }
             },
-            Ok(con) => {
+            Ok((reader, con)) => {
               spawn(start_connection(self.downgrade(), reader, con.downgrade()));
               let mut t = self.0.write().unwrap();
               match t.connections.get_mut(&addr) {
                 Some(ConnectionState::Connected(_)) | None => unreachable!("bug"),
-                Some(ref mut v @ ConnectionState::Pending(ref mut q)) => {
+                Some(ConnectionState::Pending(ref mut q)) => {
                   for s in q.drain(0..) { let _ = s.send(Ok(con.clone())); }
-                  *v = ConnectionState::Connected(con.downgrade());
+                  *t.connections.get_mut(&addr).unwrap() =
+                    ConnectionState::Connected(con.downgrade());
                   break con;
                 },
               }
@@ -431,7 +439,7 @@ impl Subscriber {
     let msg = serde_json::to_vec(&ToPublisher::Subscribe(path.clone()))?;
     let mut c = con.0.write().unwrap();
     c.pending.insert(path, send);
-    c.writer.write(msg);
+    c.writer.write_one(msg);
     drop(c);
     let ut = await!(recv)??;
     Ok(Subscription::new(ut))
@@ -484,7 +492,7 @@ fn connection_loop(
       Some(path) => {
         msg_pending = None;
         let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-        let ut = con.0.read().unwrap()subscriptions.get(&path).map(|ut| ut.clone());
+        let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
         match ut {
           Some(ref ut) => {
             if let Some(ut) = ut.upgrade() {
@@ -501,22 +509,21 @@ fn connection_loop(
                     let mut strm = strm.0.write().unwrap();
                     strm.ready.push_back(Some(Arc::clone(&ut.current)));
                     if strm.ready.len() > MAXQ {
-                      let (tx, rx) = oneshot::channel();
-                      strm.hold.replace(Some(tx));
+                      let (tx, rx) = mpsc::channel(1);
+                      strm.hold = Some(tx);
                       holds.push(rx)
                     }
-                    if let Some(notify) = strm.notify.replace(None) { (notify)(); }
+                    if let Some(ref notify) = strm.notify { (notify)(); }
+                    strm.notify = None;
                   }
                 }
               }
             }
-            for hold in holds.drain(0..) { let _ = await!(hold); }
+            for hold in holds.drain(0..) { let _ = await!(hold.into_future()); }
           },
           None => {
-            let ut =
-              UntypedSubscription::new(
-                path.clone(), Arc::new(line), con.clone(), t.clone()
-              );
+            let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
+            let ut = UntypedSubscription::new(path.clone(), Arc::new(line), con.clone(), t);
             let mut c = con.0.write().unwrap();
             match c.pending.remove(&path) {
               None => bail!("unsolicited"),
@@ -533,7 +540,7 @@ fn connection_loop(
   Ok(())
 }
 
-#[async(boxed)]
+#[async]
 fn start_connection(
   t: SubscriberWeak,
   reader: ReadHalf<TcpStream>,

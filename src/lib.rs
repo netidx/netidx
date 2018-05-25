@@ -1,4 +1,5 @@
 #![feature(proc_macro, generators, nll)]
+#![recursion_limit="2048"]
 
 extern crate serde;
 extern crate serde_json;
@@ -19,4 +20,4 @@ pub mod path;
 pub mod resolver_client;
 pub mod resolver_server;
 pub mod publisher;
-//pub mod subscriber;
+pub mod subscriber;
