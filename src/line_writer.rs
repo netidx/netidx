@@ -76,7 +76,8 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
       };
       if !dead { await!(sender.send(msgs)).map_err(|_| ())?; }
       else {
-        for f in self.0.lock().unwrap().flushes.drain(0..) {
+        let mut t = self.0.lock().unwrap();
+        for f in t.flushes.drain(0..) {
           let _ = f.send(());
         }
       }
@@ -124,10 +125,12 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   #[async]
   pub fn flush(self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
-    let mut t = self.0.lock().unwrap();
-    t.flushes.push(tx);
-    t.queued.push(Msg::Flush);
-    self.maybe_start_write_loop(t);
+    {
+      let mut t = self.0.lock().unwrap();
+      t.flushes.push(tx);
+      t.queued.push(Msg::Flush);
+      self.maybe_start_write_loop(t);
+    }
     await!(rx)?;
     Ok(())
   }

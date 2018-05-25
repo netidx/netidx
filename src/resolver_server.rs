@@ -90,15 +90,17 @@ fn handle_publish(
   }
    */
   t.client_to_addrs.entry(client).or_insert_with(HashSet::new).insert(addr);
-  let v = t.published.entry(path.clone()).or_insert(Published::One(addr));
-  match *v {
-    Published::Empty => { *v = Published::One(addr) },
-    Published::Many(ref mut set) => { set.insert(addr); },
-    Published::One(cur) =>
-      if cur != addr {
-        let s = [addr, cur].iter().map(|a| *a).collect::<HashSet<_>>();
-        *v = Published::Many(s)
-      }
+  {
+    let v = t.published.entry(path.clone()).or_insert(Published::One(addr));
+    match *v {
+      Published::Empty => { *v = Published::One(addr) },
+      Published::Many(ref mut set) => { set.insert(addr); },
+      Published::One(cur) =>
+        if cur != addr {
+          let s = [addr, cur].iter().map(|a| *a).collect::<HashSet<_>>();
+          *v = Published::Many(s)
+        }
+    }
   }
   {
     let mut p: &str = path.as_ref();
@@ -164,11 +166,11 @@ fn handle_unpublish_nolock(
       match path::dirname(p) {
         None => break,
         Some(parent) => {
-          let mut r =
-            t.published.range::<str, (Bound<&str>, Bound<&str>)>(
-              (Included(parent), Unbounded)
-            );
-          let remove = 
+          let remove = {
+            let mut r =
+              t.published.range::<str, (Bound<&str>, Bound<&str>)>(
+                (Included(parent), Unbounded)
+              );
             match r.next() {
               None => false, // parent doesn't exist, probably a bug
               Some((_, parent_v)) => {
@@ -180,7 +182,8 @@ fn handle_unpublish_nolock(
                   }
                 }
               }
-            };
+            }
+          };
           if remove { t.published.remove(parent); }
           p = parent;
         }

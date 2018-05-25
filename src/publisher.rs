@@ -220,16 +220,16 @@ impl Publisher {
       subscribed: HashMap::new()
     };
     let ut = PublishedUntyped(Arc::new(Mutex::new(inner)));
-    let mut t = self.0.write().unwrap();
-    if t.published.contains_key(&path) { bail!(ErrorKind::AlreadyPublished(path)) }
-    else {
-      t.published.insert(path.clone(), ut.downgrade());
-      let addr = t.addr;
-      let resolver = t.resolver.clone();
-      drop(t);
-      await!(resolver.publish(path, addr))?;
-      Ok(Published(ut, PhantomData))
-    }
+    let (addr, resolver) = {
+      let mut t = self.0.write().unwrap();
+      if t.published.contains_key(&path) { bail!(ErrorKind::AlreadyPublished(path)) }
+      else {
+        t.published.insert(path.clone(), ut.downgrade());
+        (t.addr, t.resolver.clone())
+      }
+    };
+    await!(resolver.publish(path, addr))?;
+    Ok(Published(ut, PhantomData))
   }
   
   #[async]
@@ -244,15 +244,24 @@ impl Publisher {
 
   #[async]
   pub fn wait_client(self) -> Result<()> {
-    let mut t = self.0.write().unwrap();
-    if t.clients.len() > 0 { Ok(()) }
-    else {
-      let (tx, rx) = oneshot::channel();
-      t.wait_clients.push(tx);
-      drop(t);
-      Ok(await!(rx)?)
-    }
+    let rx = {
+      let mut t = self.0.write().unwrap();
+      if t.clients.len() > 0 { return Ok(()) }
+      else {
+        let (tx, rx) = oneshot::channel();
+        t.wait_clients.push(tx);
+        rx
+      }
+    };
+    Ok(await!(rx)?)
   }
+}
+
+fn get_published(t: &PublisherWeak, path: &Path) -> Option<PublishedUntyped> {
+  t.upgrade().and_then(|t| {
+    let t = t.0.read().unwrap();
+    t.published.get(path).and_then(|p| p.upgrade())
+  })
 }
 
 #[async]
@@ -272,71 +281,40 @@ where S: Stream<Item=String, Error=Error> + 'static {
     match msg {
       C::Stop => break,
       C::Msg(msg) => {
-        let ws = wait_set;
-        wait_set = None;
+        let mut ws = None;
+        std::mem::swap(&mut wait_set, &mut ws);
         match ws {
           Some(path) => {
-            if let Some(t) = t.upgrade() {
-              let pb = t.0.read().unwrap();
-              if let Some(ref published) = pb.published.get(&path) {
-                if let Some(published) = published.upgrade() {
-                  drop(pb);
-                  let mut inner = published.0.lock().unwrap();
-                  if let Some(ref mut on_write) = inner.on_write {
-                    (on_write)(msg)
-                  }
-                }
-              }
+            if let Some(published) = get_published(&t, &path) {
+              let mut inner = published.0.lock().unwrap();
+              // CR estokes: this is asking for a deadlock
+              if let Some(ref mut f) = inner.on_write { (f)(msg) }
             }
           },
           None =>
             match serde_json::from_str(&msg)? {
               ToPublisher::Set(path) => { wait_set = Some(path); },
               ToPublisher::Unsubscribe(s) => {
-                if let Some(t) = t.upgrade() {
-                  let pb = t.0.read().unwrap();
-                  if let Some(ref published) = pb.published.get(&s) {
-                    if let Some(published) = published.upgrade() {
-                      drop(pb);
-                      published.0.lock().unwrap().subscribed.remove(&addr);
-                    }
-                  }
-                };
+                if let Some(published) = get_published(&t, &s) {
+                  published.0.lock().unwrap().subscribed.remove(&addr);
+                }
                 let resp = serde_json::to_vec(&FromPublisher::Unsubscribed(s))?;
                 writer.write_one(Encoded::new(resp));
               },
-              ToPublisher::Subscribe(s) => {
-                fn no(s: Path) -> Result<Encoded> {
-                  let v = serde_json::to_vec(&FromPublisher::NoSuchValue(s))?;
-                  Ok(Encoded::new(v))
-                };
-                let resp = match t.upgrade() {
-                  None => Err(no(s)?),
-                  Some(t) => {
-                    let pb = t.0.read().unwrap();
-                    match pb.published.get(&s) {
-                      None => Err(no(s)?),
-                      Some(ref published) => {
-                        match published.upgrade() {
-                          None => Err(no(s)?),
-                          Some(published) => {
-                            drop(pb);
-                            let mut inner = published.0.lock().unwrap();
-                            inner.subscribed.insert(addr, writer.clone());
-                            let c = inner.message_header.clone();
-                            let v = inner.current.clone();
-                            Ok((c, v))
-                          }
-                        }
-                      }
-                    }
+              ToPublisher::Subscribe(s) =>
+                match get_published(&t, &s) {
+                  None => {
+                    let v = serde_json::to_vec(&FromPublisher::NoSuchValue(s))?;
+                    writer.write_one(Encoded::new(v))
+                  },
+                  Some(published) => {
+                    let mut inner = published.0.lock().unwrap();
+                    inner.subscribed.insert(addr, writer.clone());
+                    let c = inner.message_header.clone();
+                    let v = inner.current.clone();
+                    writer.write_two(c, v)
                   }
-                };
-                match resp {
-                  Err(resp) => writer.write_one(resp),
-                  Ok((c, v)) => writer.write_two(c, v),
-                }
-              }
+                },
             }
         }
       }
