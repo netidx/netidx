@@ -556,8 +556,8 @@ fn connection_loop(
         },
       Some(path) => {
         msg_pending = None;
-        let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
         {
+          let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
           let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
           match ut {
             Some(ref ut) => {
@@ -581,8 +581,6 @@ fn connection_loop(
                 for next in nexts.drain(0..) { let _ = next.send(()); }
                 for strm in strms.drain(0..) {
                   let mut strm = strm.0.write().unwrap();
-                  // this is ok because there is only one thread
-                  // processing this connection.
                   strm.ready.push_back(Some(Arc::clone(&v)));
                   if strm.ready.len() > MAXQ {
                     let (tx, rx) = oneshot::channel();
