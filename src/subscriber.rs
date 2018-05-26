@@ -609,7 +609,9 @@ fn connection_loop(
             },
           }
         }
-        for hold in holds.split_off(0).into_iter() { let _ = await!(hold); }
+        while let Some(hold) = holds.pop() {
+          let _ = await!(hold);
+        }
       }
     }
   }
