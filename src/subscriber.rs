@@ -1,6 +1,7 @@
 use std::{
   result, sync::{Arc, Weak, RwLock}, io::BufReader, convert::AsRef, net::SocketAddr,
-  collections::{hash_map::Entry, HashMap, VecDeque}, marker::PhantomData, mem
+  collections::{hash_map::{Entry, OccupiedEntry}, HashMap, VecDeque},
+  marker::PhantomData, mem
 };
 use rand;
 use futures::{self, prelude::*, Poll, Async, sync::oneshot};
@@ -299,6 +300,28 @@ impl SubscriberWeak {
 #[derive(Clone)]
 pub struct Subscriber(Arc<RwLock<SubscriberInner>>);
 
+fn get_pending<'a>(
+  e: &'a mut OccupiedEntry<SocketAddr, ConnectionState>
+) -> &'a mut Vec<oneshot::Sender<Result<Connection>>> {
+  match e.get_mut() {
+    ConnectionState::Connected(_) => unreachable!("bug"),
+    ConnectionState::Pending(ref mut q) => q
+  }
+}
+
+fn choose_address(addrs: &mut Vec<SocketAddr>) -> Option<SocketAddr> {
+  let len = addrs.len();
+  if len == 0 { None }
+  else if len == 1 { addrs.pop() }
+  else {
+    use rand::distributions::range::Range;
+    use rand::distributions::IndependentSample;
+    let mut rng = rand::thread_rng();
+    let r = Range::new(0usize, len);
+    Some(addrs.remove(r.ind_sample(&mut rng)))
+  }
+}
+
 impl Subscriber {
   pub fn new(resolver: Resolver) -> Subscriber {
     let inner = SubscriberInner {
@@ -329,54 +352,106 @@ impl Subscriber {
     self,
     path: Path
   ) -> Result<Subscription<T>> {
-    loop {
+    enum Action {
+      Subscribed(UntypedSubscription),
+      Subscribe(Resolver),
+      Wait(oneshot::Receiver<Result<UntypedSubscription>>)
+    }
+    let action = {
       let mut t = self.0.write().unwrap();
       let resolver = t.resolver.clone();
       match t.subscriptions.entry(path.clone()) {
-        Entry::Occupied(mut e) => {
-          match e.get_mut() {
-            SubscriptionState::Subscribed(ref ut) => {
-              match ut.upgrade() {
-                None => { e.remove_entry(); },
-                Some(ut) => return Ok(Subscription::new(ut)),
-              }
-            },
-            SubscriptionState::Pending(ref mut q) => {
-              let (send, recv) = oneshot::channel();
-              q.push(send);
-              drop(t);
-              return Ok(Subscription::new(await!(recv)??))
-            }
-          }
-        },
         Entry::Vacant(e) => {
           e.insert(SubscriptionState::Pending(Vec::new()));
-          drop(t);
-          let mut addrs =
-            match await!(resolver.resolve(path.clone())) {
-              Ok(addrs) => addrs,
-              Err(e) => bail!(self.fail_pending(&path, e))
-            };
-          let mut last_error = None;
-          while let Some(addr) = choose_address(&mut addrs) {
-            match await!(self.clone().subscribe_addr(addr, path.clone())) {
-              Err(e) => last_error = Some(e),
-              Ok(s) => {
-                let mut t = self.0.write().unwrap();
-                match t.subscriptions.get_mut(&path) {
-                  None | Some(SubscriptionState::Subscribed(_)) => unreachable!("bug"),
-                  Some(SubscriptionState::Pending(ref mut q)) => {
-                    for c in q.drain(0..) { let _ = c.send(Ok(s.untyped.clone())); }
-                    *t.subscriptions.get_mut(&path).unwrap() =
-                      SubscriptionState::Subscribed(s.untyped.downgrade());
-                    }
-                  }
-                return Ok(s)
+          Action::Subscribe(resolver)
+        },
+        Entry::Occupied(mut e) => {
+          let action =
+            match e.get_mut() {
+              SubscriptionState::Subscribed(ref ut) => {
+                match ut.upgrade() {
+                  Some(ut) => Action::Subscribed(ut),
+                  None => Action::Subscribe(resolver),
+                }
+              },
+              SubscriptionState::Pending(ref mut q) => {
+                let (send, recv) = oneshot::channel();
+                q.push(send);
+                Action::Wait(recv)
               }
+            };
+          match action {
+            action @ Action::Wait(_) | action @ Action::Subscribed(_) => action,
+            action @ Action::Subscribe(_) => {
+              *e.get_mut() = SubscriptionState::Pending(Vec::new());
+              action
+            },
+          }
+        },
+      }
+    };
+    match action {
+      Action::Subscribed(ut) => Ok(Subscription::new(ut)),
+      Action::Wait(rx) => Ok(Subscription::new(await!(rx)??)),
+      Action::Subscribe(resolver) => {
+        let mut addrs =
+          match await!(resolver.resolve(path.clone())) {
+            Ok(addrs) => addrs,
+            Err(e) => bail!(self.fail_pending(&path, e))
+          };
+        let mut last_error = None;
+        while let Some(addr) = choose_address(&mut addrs) {
+          match await!(self.clone().subscribe_addr(addr, path.clone())) {
+            Err(e) => last_error = Some(e),
+            Ok(s) => {
+              let mut t = self.0.write().unwrap();
+              match t.subscriptions.get_mut(&path) {
+                None | Some(SubscriptionState::Subscribed(_)) => unreachable!("bug"),
+                Some(SubscriptionState::Pending(ref mut q)) =>
+                  for c in q.drain(0..) { let _ = c.send(Ok(s.untyped.clone())); },
+              }
+              *t.subscriptions.get_mut(&path).unwrap() =
+                SubscriptionState::Subscribed(s.untyped.downgrade());
+              return Ok(s)
             }
           }
-          let e = last_error.unwrap_or(Error::from(ErrorKind::PathNotFound(path.clone())));
-          bail!(self.fail_pending(&path, e))
+        }
+        let e = last_error.unwrap_or(Error::from(ErrorKind::PathNotFound(path.clone())));
+        bail!(self.fail_pending(&path, e))
+      }
+    }
+  }
+
+  #[async]
+  fn initiate_connection(self, addr: SocketAddr) -> Result<Connection> {
+    match await!(Connection::new(addr, self.clone())) {
+      Err(err) => {
+        let mut t = self.0.write().unwrap();
+        match t.connections.entry(addr) {
+          Entry::Vacant(_) => unreachable!("bug"),
+          Entry::Occupied(mut e) => {
+            {
+              let q = get_pending(&mut e);
+              for s in q.drain(0..) { let _ = s.send(Err(Error::from(err.to_string()))); }
+            }
+            e.remove();
+            bail!(err)
+          }
+        }
+      },
+      Ok((reader, con)) => {
+        spawn(start_connection(self.downgrade(), reader, con.downgrade()));
+        let mut t = self.0.write().unwrap();
+        match t.connections.entry(addr) {
+          Entry::Vacant(_) => unreachable!("bug"),
+          Entry::Occupied(e) => {
+            {
+              let q = get_pending(&mut e);
+              for s in q.drain(0..) { let _ = s.send(Ok(con.clone())); }
+            }
+            *e.get_mut() = ConnectionState::Connected(con.downgrade());
+            Ok(con)
+          },
         }
       }
     }
@@ -388,52 +463,45 @@ impl Subscriber {
     addr: SocketAddr,
     path: Path
   ) -> Result<Subscription<T>> {
-    let con = loop {
+    enum Action {
+      Connected(Connection),
+      Wait(oneshot::Receiver<Result<Connection>>),
+      Connect
+    }
+    let action = {
       let mut t = self.0.write().unwrap();
-      match t.connections.get_mut(&addr) {
-        Some(ConnectionState::Connected(ref con)) =>
-          match con.upgrade() {
-            Some(con) => break con,
-            None => { t.connections.remove(&addr); },
-          },
-        Some(ConnectionState::Pending(ref mut q)) => {
-          let (send, recv) = oneshot::channel();
-          q.push(send);
-          drop(t);
-          break await!(recv)??;
-        },
-        None => {
-          t.connections.insert(addr, ConnectionState::Pending(vec![]));
-          drop(t);
-          match await!(Connection::new(addr, self.clone())) {
-            Err(e) => {
-              let mut t = self.0.write().unwrap();
-              match t.connections.get_mut(&addr) {
-                Some(ConnectionState::Connected(_)) | None => unreachable!("bug"),
-                Some(ConnectionState::Pending(ref mut q)) => {
-                  for s in q.drain(0..) { let _ = s.send(Err(Error::from(e.to_string()))); }
-                  t.connections.remove(&addr);
-                  bail!(e)
+      match t.connections.entry(addr) {
+        Entry::Occupied(e) => {
+          let action = 
+            match e.get_mut() {
+              ConnectionState::Connected(ref con) =>
+                match con.upgrade() {
+                  Some(con) => Action::Connected(con),
+                  None => Action::Connect,
                 },
-              }
-            },
-            Ok((reader, con)) => {
-              spawn(start_connection(self.downgrade(), reader, con.downgrade()));
-              let mut t = self.0.write().unwrap();
-              match t.connections.get_mut(&addr) {
-                Some(ConnectionState::Connected(_)) | None => unreachable!("bug"),
-                Some(ConnectionState::Pending(ref mut q)) => {
-                  for s in q.drain(0..) { let _ = s.send(Ok(con.clone())); }
-                  *t.connections.get_mut(&addr).unwrap() =
-                    ConnectionState::Connected(con.downgrade());
-                  break con;
-                },
-              }
-            }
+              ConnectionState::Pending(ref mut q) => {
+                let (send, recv) = oneshot::channel();
+                q.push(send);
+                Action::Wait(recv)
+              },
+            };
+          match action {
+            a @ Action::Wait(_) | a @ Action::Connected(_) => a,
+            Action::Connect => { e.remove(); Action::Connect },
           }
-        }
+        },
+        Entry::Vacant(e) => {
+          e.insert(ConnectionState::Pending(vec![]));
+          Action::Connect
+        },
       }
     };
+    let con =
+      match action {
+        Action::Connected(con) => con,
+        Action::Wait(rx) => await!(rx)??,
+        Action::Connect => await!(self.clone().initiate_connection(addr))?
+      };
     let (send, recv) = oneshot::channel();
     let msg = serde_json::to_vec(&ToPublisher::Subscribe(path.clone()))?;
     let mut c = con.0.write().unwrap();
@@ -442,19 +510,6 @@ impl Subscriber {
     drop(c);
     let ut = await!(recv)??;
     Ok(Subscription::new(ut))
-  }
-}
-
-fn choose_address(addrs: &mut Vec<SocketAddr>) -> Option<SocketAddr> {
-  let len = addrs.len();
-  if len == 0 { None }
-  else if len == 1 { addrs.pop() }
-  else {
-    use rand::distributions::range::Range;
-    use rand::distributions::IndependentSample;
-    let mut rng = rand::thread_rng();
-    let r = Range::new(0usize, len);
-    Some(addrs.remove(r.ind_sample(&mut rng)))
   }
 }
 
