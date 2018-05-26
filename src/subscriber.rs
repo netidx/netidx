@@ -444,7 +444,7 @@ impl Subscriber {
         let mut t = self.0.write().unwrap();
         match t.connections.entry(addr) {
           Entry::Vacant(_) => unreachable!("bug"),
-          Entry::Occupied(e) => {
+          Entry::Occupied(mut e) => {
             {
               let q = get_pending(&mut e);
               for s in q.drain(0..) { let _ = s.send(Ok(con.clone())); }
@@ -471,7 +471,7 @@ impl Subscriber {
     let action = {
       let mut t = self.0.write().unwrap();
       match t.connections.entry(addr) {
-        Entry::Occupied(e) => {
+        Entry::Occupied(mut e) => {
           let action = 
             match e.get_mut() {
               ConnectionState::Connected(ref con) =>
@@ -504,10 +504,11 @@ impl Subscriber {
       };
     let (send, recv) = oneshot::channel();
     let msg = serde_json::to_vec(&ToPublisher::Subscribe(path.clone()))?;
-    let mut c = con.0.write().unwrap();
-    c.pending.insert(path, send);
-    c.writer.write_one(msg);
-    drop(c);
+    {
+      let mut c = con.0.write().unwrap();
+      c.pending.insert(path, send);
+      c.writer.write_one(msg);
+    }
     let ut = await!(recv)??;
     Ok(Subscription::new(ut))
   }
@@ -521,6 +522,8 @@ fn connection_loop(
 ) -> Result<()> {
   let mut msg_pending = None;
   let mut holds = Vec::new();
+  let mut strms = Vec::new();
+  let mut nexts = Vec::new();
   #[async]
   for line in tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e)) {
     match msg_pending {
@@ -529,7 +532,11 @@ fn connection_loop(
           FromPublisher::Message(path) => msg_pending = Some(path),
           FromPublisher::NoSuchValue(path) => {
             let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-            match con.0.write().unwrap().pending.remove(&path) {
+            let p = {
+              let mut con = con.0.write().unwrap();
+              con.pending.remove(&path)
+            };
+            match p {
               None => bail!("unsolicited"),
               Some(chan) =>
                 chan.send(Err(Error::from(ErrorKind::PathNotFound(path))))
@@ -538,7 +545,11 @@ fn connection_loop(
           },
           FromPublisher::Unsubscribed(path) => {
             let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-            if let Some(ref ut) = con.0.write().unwrap().subscriptions.remove(&path) {
+            let sub = {
+              let mut con = con.0.write().unwrap();
+              con.subscriptions.remove(&path)
+            };
+            if let Some(ref ut) = sub {
               if let Some(ut) = ut.upgrade() { ut.0.write().unwrap().unsubscribe() }
             }
           },
@@ -546,48 +557,59 @@ fn connection_loop(
       Some(path) => {
         msg_pending = None;
         let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-        let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
-        match ut {
-          Some(ref ut) => {
-            if let Some(ut) = ut.upgrade() {
-              let v = Arc::new(line);
-              let mut ut = ut.0.write().unwrap();
-              ut.current = v;
-              for next in ut.nexts.drain(0..) { let _ = next.send(()); }
-              let mut i = 0;
-              while i < ut.streams.len() {
-                match ut.streams[i].upgrade() {
-                  None => { ut.streams.remove(i); },
-                  Some(strm) => {
-                    i += 1;
-                    let mut strm = strm.0.write().unwrap();
-                    strm.ready.push_back(Some(Arc::clone(&ut.current)));
-                    if strm.ready.len() > MAXQ {
-                      let (tx, rx) = oneshot::channel();
-                      strm.hold = Some(tx);
-                      holds.push(rx)
+        {
+          let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
+          match ut {
+            Some(ref ut) => {
+              if let Some(ut) = ut.upgrade() {
+                let v = Arc::new(line);
+                {
+                  let mut ut = ut.0.write().unwrap();
+                  ut.current = Arc::clone(&v);
+                  let mut i = 0;
+                  while i < ut.streams.len() {
+                    match ut.streams[i].upgrade() {
+                      None => { ut.streams.remove(i); },
+                      Some(s) => {
+                        i += 1;
+                        strms.push(s)
+                      }
                     }
-                    if let Some(ref notify) = strm.notify { (notify)(); }
-                    strm.notify = None;
                   }
+                  for next in ut.nexts.drain(0..) { nexts.push(next); }
+                }
+                for next in nexts.drain(0..) { let _ = next.send(()); }
+                for strm in strms.drain(0..) {
+                  let mut strm = strm.0.write().unwrap();
+                  // this is ok because there is only one thread
+                  // processing this connection.
+                  strm.ready.push_back(Some(Arc::clone(&v)));
+                  if strm.ready.len() > MAXQ {
+                    let (tx, rx) = oneshot::channel();
+                    strm.hold = Some(tx);
+                    holds.push(rx)
+                  }
+                  if let Some(ref notify) = strm.notify { (notify)(); }
+                  strm.notify = None;
                 }
               }
-            }
-            for hold in holds.drain(0..) { let _ = await!(hold); }
-          },
-          None => {
-            let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
-            let ut = UntypedSubscription::new(path.clone(), Arc::new(line), con.clone(), t);
-            let mut c = con.0.write().unwrap();
-            match c.pending.remove(&path) {
-              None => bail!("unsolicited"),
-              Some(chan) => {
-                c.subscriptions.insert(path, ut.downgrade());
-                chan.send(Ok(ut)).map_err(|_| Error::from("ipc err"))?;
+            },
+            None => {
+              let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
+              let ut =
+                UntypedSubscription::new(path.clone(), Arc::new(line), con.clone(), t);
+              let mut c = con.0.write().unwrap();
+              match c.pending.remove(&path) {
+                None => bail!("unsolicited"),
+                Some(chan) => {
+                  c.subscriptions.insert(path, ut.downgrade());
+                  chan.send(Ok(ut)).map_err(|_| Error::from("ipc err"))?;
+                }
               }
-            }
-          },
+            },
+          }
         }
+        for hold in holds.split_off(0).into_iter() { let _ = await!(hold); }
       }
     }
   }
