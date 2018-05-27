@@ -21,3 +21,9 @@ pub mod resolver_client;
 pub mod resolver_server;
 pub mod publisher;
 pub mod subscriber;
+
+#[cfg(test)]
+extern crate tokio_timer;
+
+#[cfg(test)]
+mod tests;

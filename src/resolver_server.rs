@@ -1,17 +1,13 @@
-use futures::prelude::*;
-use tokio;
-use tokio::prelude::*;
-use tokio::executor::spawn;
-use tokio::net::{TcpStream, TcpListener};
+use futures::{prelude::*, sync::oneshot};
+use tokio::{self, prelude::*, executor::spawn, net::{TcpStream, TcpListener}};
 use tokio_io::io::{WriteHalf, write_all};
-use std::io::BufReader;
-use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
-use std::result;
-use std::collections::{
-  BTreeMap, HashMap, HashSet, hash_map::Entry,
-  Bound::{Included, Excluded, Unbounded},
-  Bound
+use std::{
+  io::BufReader, net::SocketAddr, sync::{Arc, RwLock}, result,
+  collections::{
+    BTreeMap, HashMap, HashSet, hash_map::Entry,
+    Bound::{Included, Excluded, Unbounded},
+    Bound
+  }
 };
 use path::{self, Path};
 use serde_json;
@@ -83,12 +79,10 @@ fn handle_publish(
     return FromResolver::Error("publish relative path".into())
   }
   let mut t = t.write().unwrap();
-  /*
   if *(t.addr_to_client.entry(addr).or_insert(client)) != client {
     let m = "address is already published by another client".into();
     return FromResolver::Error(m)
   }
-   */
   t.client_to_addrs.entry(client).or_insert_with(HashSet::new).insert(addr);
   {
     let v = t.published.entry(path.clone()).or_insert(Published::One(addr));
@@ -239,30 +233,43 @@ fn handle_shutdown(t: Context, client: SocketAddr) {
 }
 
 #[async]
-fn handle_client(t: Context, s: TcpStream, client: SocketAddr) -> Result<(), ()> {
+fn handle_client(
+  t: Context, s: TcpStream, client: SocketAddr, stop: oneshot::Receiver<()>
+) -> Result<(), ()> {
+  enum M { Stop, Line(String) }
   let (rx, mut tx) = s.split();
+  let msgs =
+    tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
+    .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
   #[async]
-  for msg in tokio::io::lines(BufReader::new(rx)).map_err(|_| ()) {
-    match serde_json::from_str::<ToResolver>(&msg).map_err(|_| ())? {
-      ToResolver::Resolve(path) => tx = await!(send(tx, handle_resolve(&t, path)))?,
-      ToResolver::List(parent) => tx = await!(send(tx, handle_list(&t, parent)))?,
-      ToResolver::Publish(path, addr) =>
-        tx = await!(send(tx, handle_publish(&t, path, addr, client)))?,
-      ToResolver::Unpublish(path, addr) => {
-        handle_unpublish(&t, path, addr, client);
-        tx = await!(send(tx, FromResolver::Unpublished))?
-      },
+  for msg in msgs {
+    match msg {
+      M::Stop => break,
+      M::Line(l) => {
+        match serde_json::from_str::<ToResolver>(&l).map_err(|_| ())? {
+          ToResolver::Resolve(path) => tx = await!(send(tx, handle_resolve(&t, path)))?,
+          ToResolver::List(parent) => tx = await!(send(tx, handle_list(&t, parent)))?,
+          ToResolver::Publish(path, addr) =>
+            tx = await!(send(tx, handle_publish(&t, path, addr, client)))?,
+          ToResolver::Unpublish(path, addr) => {
+            handle_unpublish(&t, path, addr, client);
+            tx = await!(send(tx, FromResolver::Unpublished))?
+          },
+        }
+      }
     }
   }
   Ok(())
 }
 
 #[async]
-fn start_client(t: Context, s: TcpStream) -> result::Result<(), ()> {
+fn start_client(
+  t: Context, s: TcpStream, stop: oneshot::Receiver<()>
+) -> result::Result<(), ()> {
   match s.peer_addr() {
     Err(_) => Err(()),
     Ok(client) => {
-      let _ = await!(handle_client(t.clone(), s, client));
+      let _ = await!(handle_client(t.clone(), s, client, stop));
       handle_shutdown(t, client);
       Ok(())
     }
@@ -270,7 +277,10 @@ fn start_client(t: Context, s: TcpStream) -> result::Result<(), ()> {
 }
 
 #[async]
-fn accept_loop(addr: SocketAddr) -> result::Result<(), ()> {
+fn accept_loop(
+  addr: SocketAddr,
+  stop: oneshot::Receiver<()>
+) -> result::Result<(), ()> {
   let t : Context =
     Arc::new(RwLock::new(ContextInner {
       published: BTreeMap::new(),
@@ -278,14 +288,32 @@ fn accept_loop(addr: SocketAddr) -> result::Result<(), ()> {
       addr_to_client: HashMap::new(),
       client_to_addrs: HashMap::new()
     }));
-  let listener = TcpListener::bind(&addr).map_err(|_| ())?;
+  enum M { Stop, Client(TcpStream) }
+  let mut stops: Vec<oneshot::Sender<()>> = Vec::new();
+  let msgs =
+    TcpListener::bind(&addr).map_err(|_| ())?
+    .incoming().map_err(|_| ()).map(|c| M::Client(c))
+    .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
   #[async]
-  for client in listener.incoming().map_err(|_| ()) {
-    spawn(start_client(t.clone(), client));
+  for msg in msgs {
+    match msg {
+      M::Stop => {
+        for s in stops.drain(0..) { s.send(())? }
+        break;
+      },
+      M::Client(client) => {
+        let (send_stop, recv_stop) = oneshot::channel();
+        stops.push(send_stop);
+        spawn(start_client(t.clone(), client, recv_stop));
+      }
+    }
   }
   Ok(())
 }
 
-pub fn run(addr: SocketAddr) -> Box<Future<Item=(), Error=()> + Send> {
-  Box::new(accept_loop(addr))
+pub fn run(
+  addr: SocketAddr,
+  stop: oneshot::Receiver<()>
+) -> Box<Future<Item=(), Error=()> + Send> {
+  Box::new(accept_loop(addr, stop))
 }
