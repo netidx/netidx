@@ -311,9 +311,19 @@ fn accept_loop(
   Ok(())
 }
 
-pub fn run(
-  addr: SocketAddr,
-  stop: oneshot::Receiver<()>
-) -> Box<Future<Item=(), Error=()> + Send> {
-  Box::new(accept_loop(addr, stop))
+pub struct Resolver(oneshot::Sender<()>);
+
+impl Drop for Resolver {
+  fn drop(&mut self) {
+    // this is kinda silly, but we must own the channel to use it
+    let (mut stop, _) = oneshot::channel();
+    ::std::mem::swap(&mut stop, &mut self.0);
+    let _ = stop.send(());
+  }
+}
+
+pub fn run(addr: SocketAddr) -> Resolver {
+  let (send_stop, recv_stop) = oneshot::channel();
+  spawn(accept_loop(addr, recv_stop));
+  Resolver(send_stop)
 }
