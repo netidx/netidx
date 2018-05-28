@@ -47,7 +47,6 @@ struct PublishedUntypedInner {
 
 impl Drop for PublishedUntypedInner {
   fn drop(&mut self) {
-    println!("drop publisher::PublishedUntypedInner {:?}", self.path);
     let mut t = self.publisher.0.write().unwrap();
     t.published.remove(&self.path);
     let r = t.resolver.clone();
@@ -122,20 +121,21 @@ impl PublisherInner {
       let r = self.resolver.clone();
       let stop = self.stop_accept.clone();
       for (_, c) in self.clients.iter() { c.shutdown() }
-      async_block! {
+      spawn(async_block! {
         let _ = await!(stop.send(()));
         for (s, _) in published.into_iter() {
           let _ = await!(r.clone().unpublish(s, addr));
         }
-        let r: Result<()> = Ok(());
-        r
-      };
+        Ok(())
+      });
     }
   }
 }
 
 impl Drop for PublisherInner {
-  fn drop(&mut self) { self.shutdown() }
+  fn drop(&mut self) {
+    self.shutdown()
+  }
 }
 
 #[derive(Clone)]

@@ -9,7 +9,7 @@ use tokio;
 use tokio_timer::{Delay, Deadline};
 use std::{net::SocketAddr, time::{Instant, Duration}, result::Result};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Test {
   field0: i64,
   field1: String,
@@ -49,9 +49,11 @@ fn test_pub(publisher: Publisher, v: Published<Test>) -> Result<(), ()> {
 #[async]
 fn test_sub(subscriber: Subscriber, done: Sender<()>) -> Result<(), ()> {
   let s = await!(subscriber.subscribe::<Test>(Path::from("/test/v"))).unwrap();
+  let test = Test::new();
   #[async]
-  for v in s.updates().map_err(|_| ()) { println!("{:#?}", v); }
-  println!("stream ended");
+  for v in s.updates().map_err(|_| ()) {
+    if v != test { panic!("unexpected value {:#?}", v) }
+  }
   done.send(()).unwrap();
   Ok(())
 }

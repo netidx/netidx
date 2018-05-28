@@ -547,7 +547,6 @@ fn connection_loop(
             }
           },
           FromPublisher::Unsubscribed(path) => {
-            println!("subscriber: unsubscribed from {:?}", path);
             let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
             let sub = {
               let mut con = con.0.write().unwrap();
