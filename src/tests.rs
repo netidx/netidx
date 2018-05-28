@@ -71,7 +71,7 @@ fn test_basic_pub_sub() {
       for i in 1..11 {
         test.field0 = i;
         v.update(&test).unwrap();
-        await!(Delay::new(Instant::now() + Duration::from_secs(1))).unwrap();
+        await!(Delay::new(Instant::now() + Duration::from_millis(100))).unwrap();
       }
       Ok(())
     });
