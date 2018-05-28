@@ -134,13 +134,17 @@ impl ContextInner {
   }
 }
 
-type Context = Arc<RwLock<ContextInner>>;
+struct Context(Arc<RwLock<ContextInner>>);
+
+impl Clone for Context {
+  fn clone(&self) -> Self { Context(Arc::clone(&self.0)) }
+}
 
 impl Context {
   fn handle_resolve(&self, path: Path) -> FromResolver {
     if !path.is_absolute() { FromResolver::Error("resolve relative path".into()) }
     else {
-      match self.read().unwrap().published.get(&path) {
+      match self.0.read().unwrap().published.get(&path) {
         None | Some(&Published::Empty) => FromResolver::Resolved(vec![]),
         Some(&Published::One(a)) => FromResolver::Resolved(vec![a]),
         Some(&Published::Many(ref a)) => {
@@ -160,7 +164,7 @@ impl Context {
     if !path.is_absolute() {
       return FromResolver::Error("publish relative path".into())
     }
-    let mut t = self.write().unwrap();
+    let mut t = self.0.write().unwrap();
     if *(t.addr_to_client.entry(addr).or_insert(client)) != client {
       let m = "address is already published by another client".into();
       return FromResolver::Error(m)
@@ -190,7 +194,7 @@ impl Context {
   }
 
   fn handle_unpublish(&self, path: Path, addr: SocketAddr, client: SocketAddr) {
-    let mut t = self.write().unwrap();
+    let mut t = self.0.write().unwrap();
     t.handle_unpublish(path, addr, client)
   }
 
@@ -198,7 +202,7 @@ impl Context {
     if !parent.is_absolute() {
       return FromResolver::Error("list relative path".into())
     }
-    let t = self.read().unwrap();
+    let t = self.0.read().unwrap();
     let parent : &str = parent.as_ref();
     let mut res = Vec::new();
     let paths =
@@ -218,7 +222,7 @@ impl Context {
   }
 
   fn handle_shutdown(self, client: SocketAddr) {
-    let mut t = self.write().unwrap();
+    let mut t = self.0.write().unwrap();
     let mut paths = Vec::new();
     if let Some(addrs) = t.client_to_addrs.remove(&client) {
       for addr in addrs.into_iter() {
@@ -238,7 +242,7 @@ impl Context {
   #[async]
   fn handle_client(
     self, s: TcpStream, client: SocketAddr, stop: oneshot::Receiver<()>
-  ) -> Result<(), ()> {
+  ) -> result::Result<(), ()> {
     enum M { Stop, Line(String) }
     let (rx, mut tx) = s.split();
     let msgs =
@@ -289,18 +293,19 @@ fn accept_loop(
   ready: oneshot::Sender<()>
 ) -> result::Result<(), ()> {
   let t : Context =
-    Arc::new(RwLock::new(ContextInner {
+    Context(Arc::new(RwLock::new(ContextInner {
       published: BTreeMap::new(),
       addr_to_paths: HashMap::new(),
       addr_to_client: HashMap::new(),
       client_to_addrs: HashMap::new(),
-    }));
+    })));
   enum M { Stop, Client(TcpStream) }
   let mut stops: Vec<oneshot::Sender<()>> = Vec::new();
   let msgs =
     TcpListener::bind(&addr).map_err(|_| ())?
     .incoming().map_err(|_| ()).map(|c| M::Client(c))
     .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
+  ready.send(()).map_err(|_| ())?;
   #[async]
   for msg in msgs {
     match msg {
@@ -311,14 +316,14 @@ fn accept_loop(
       M::Client(client) => {
         let (send_stop, recv_stop) = oneshot::channel();
         stops.push(send_stop);
-        spawn(start_client(t.clone(), client, recv_stop));
+        spawn(t.clone().start_client(client, recv_stop));
       }
     }
   }
   Ok(())
 }
 
-struct Resolver(Option<oneshot::Sender<()>>);
+pub struct Resolver(Option<oneshot::Sender<()>>);
 
 impl Drop for Resolver {
   fn drop(&mut self) {
@@ -328,12 +333,14 @@ impl Drop for Resolver {
   }
 }
 
+use error::*;
+
 impl Resolver {
   #[async]
   pub fn new(addr: SocketAddr) -> Result<Resolver> {
     let (send_stop, recv_stop) = oneshot::channel();
     let (send_ready, recv_ready) = oneshot::channel();
-    spawn(t.clone().accept_loop(addr, recv_stop, send_ready));
+    spawn(accept_loop(addr, recv_stop, send_ready));
     await!(recv_ready).map_err(|_| Error::from("ipc error"))?;
     Ok(Resolver(Some(send_stop)))
   }
