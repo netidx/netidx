@@ -36,15 +36,6 @@ enum Published {
   Many(HashSet<SocketAddr>)
 }
 
-struct ContextInner {
-  published: BTreeMap<Path, Published>,
-  addr_to_paths: HashMap<SocketAddr, HashSet<Path>>,
-  addr_to_client: HashMap<SocketAddr, SocketAddr>,
-  client_to_addrs: HashMap<SocketAddr, HashSet<SocketAddr>>
-}
-
-type Context = Arc<RwLock<ContextInner>>;
-
 #[async]
 fn send(
   w: WriteHalf<TcpStream>,
@@ -55,223 +46,238 @@ fn send(
   Ok(await!(write_all(w, "\n")).map_err(|_| ())?.0)
 }
 
-fn handle_resolve(t: &Context, path: Path) -> FromResolver {
-  if !path.is_absolute() { FromResolver::Error("resolve relative path".into()) }
-  else {
-    match t.read().unwrap().published.get(&path) {
-      None | Some(&Published::Empty) => FromResolver::Resolved(vec![]),
-      Some(&Published::One(a)) => FromResolver::Resolved(vec![a]),
-      Some(&Published::Many(ref a)) => {
-        let s = a.iter().map(|a| *a).collect::<Vec<_>>();
-        FromResolver::Resolved(s)
+struct ContextInner {
+  published: BTreeMap<Path, Published>,
+  addr_to_paths: HashMap<SocketAddr, HashSet<Path>>,
+  addr_to_client: HashMap<SocketAddr, SocketAddr>,
+  client_to_addrs: HashMap<SocketAddr, HashSet<SocketAddr>>,
+}
+
+impl ContextInner {
+  fn handle_unpublish(
+    &mut self,
+    path: Path,
+    addr: SocketAddr,
+    client: SocketAddr
+  ) {
+    match self.addr_to_paths.entry(addr) {
+      Entry::Vacant(_) => (),
+      Entry::Occupied(mut e) => {
+        let empty = {
+          let mut set = e.get_mut();
+          set.remove(&path);
+          set.is_empty()
+        };
+        if empty {
+          e.remove_entry();
+          self.addr_to_client.remove(&addr);
+          match self.client_to_addrs.entry(client) {
+            Entry::Vacant(_) => (),
+            Entry::Occupied(mut e) => {
+              let empty = {
+                let mut set = e.get_mut();
+                set.remove(&addr);
+                set.is_empty()
+              };
+              if empty { e.remove_entry(); }
+            }
+          }
+        }
       }
     }
-  }
-}
-
-fn handle_publish(
-  t: &Context,
-  path: Path,
-  addr: SocketAddr,
-  client: SocketAddr
-) -> FromResolver {
-  if !path.is_absolute() {
-    return FromResolver::Error("publish relative path".into())
-  }
-  let mut t = t.write().unwrap();
-  if *(t.addr_to_client.entry(addr).or_insert(client)) != client {
-    let m = "address is already published by another client".into();
-    return FromResolver::Error(m)
-  }
-  t.client_to_addrs.entry(client).or_insert_with(HashSet::new).insert(addr);
-  {
-    let v = t.published.entry(path.clone()).or_insert(Published::One(addr));
-    match *v {
-      Published::Empty => { *v = Published::One(addr) },
-      Published::Many(ref mut set) => { set.insert(addr); },
-      Published::One(cur) =>
-        if cur != addr {
-          let s = [addr, cur].iter().map(|a| *a).collect::<HashSet<_>>();
-          *v = Published::Many(s)
-        }
-    }
-  }
-  {
-    let mut p: &str = path.as_ref();
-    while let Some(sp) = path::dirname(p) {
-      t.published.entry(Path::from(sp)).or_insert(Published::Empty);
-      p = sp
-    }
-  }
-  t.addr_to_paths.entry(addr).or_insert_with(HashSet::new).insert(path);
-  FromResolver::Published
-}
-
-fn handle_unpublish_nolock(
-  t: &mut ContextInner,
-  path: Path,
-  addr: SocketAddr,
-  client: SocketAddr
-) {
-  match t.addr_to_paths.entry(addr) {
-    Entry::Vacant(_) => (),
-    Entry::Occupied(mut e) => {
-      let empty = {
-        let mut set = e.get_mut();
-        set.remove(&path);
-        set.is_empty()
-      };
-      if empty {
-        e.remove_entry();
-        t.addr_to_client.remove(&addr);
-        match t.client_to_addrs.entry(client) {
-          Entry::Vacant(_) => (),
-          Entry::Occupied(mut e) => {
-            let empty = {
-              let mut set = e.get_mut();
+    let remove =
+      match self.published.get_mut(&path) {
+        None => false,
+        Some(mut v) => {
+          match *v {
+            Published::Empty => false,
+            Published::One(a) => a == addr,
+            Published::Many(ref mut set) => {
               set.remove(&addr);
               set.is_empty()
-            };
-            if empty { e.remove_entry(); }
+            }
           }
         }
-      }
-    }
-  }
-  let remove =
-    match t.published.get_mut(&path) {
-      None => false,
-      Some(mut v) => {
-        match *v {
-          Published::Empty => false,
-          Published::One(a) => a == addr,
-          Published::Many(ref mut set) => {
-            set.remove(&addr);
-            set.is_empty()
-          }
-        }
-      }
-    };
-  if remove {
-    t.published.remove(&path);
-    // remove parents that have no further children
-    let mut p : &str = path.as_ref();
-    loop {
-      match path::dirname(p) {
-        None => break,
-        Some(parent) => {
-          let remove = {
-            let mut r =
-              t.published.range::<str, (Bound<&str>, Bound<&str>)>(
-                (Included(parent), Unbounded)
-              );
-            match r.next() {
-              None => false, // parent doesn't exist, probably a bug
-              Some((_, parent_v)) => {
-                if parent_v != &Published::Empty { break; }
-                else {
-                  match r.next() {
-                    None => true,
-                    Some((sib, _)) => !sib.starts_with(parent)
+      };
+    if remove {
+      self.published.remove(&path);
+      // remove parents that have no further children
+      let mut p : &str = path.as_ref();
+      loop {
+        match path::dirname(p) {
+          None => break,
+          Some(parent) => {
+            let remove = {
+              let mut r =
+                self.published.range::<str, (Bound<&str>, Bound<&str>)>(
+                  (Included(parent), Unbounded)
+                );
+              match r.next() {
+                None => false, // parent doesn't exist, probably a bug
+                Some((_, parent_v)) => {
+                  if parent_v != &Published::Empty { break; }
+                  else {
+                    match r.next() {
+                      None => true,
+                      Some((sib, _)) => !sib.starts_with(parent)
+                    }
                   }
                 }
               }
-            }
-          };
-          if remove { t.published.remove(parent); }
-          p = parent;
+            };
+            if remove { self.published.remove(parent); }
+            p = parent;
+          }
         }
       }
     }
   }
 }
 
-fn handle_unpublish(t: &Context, path: Path, addr: SocketAddr, client: SocketAddr) {
-  let mut t = t.write().unwrap();
-  handle_unpublish_nolock(&mut t, path, addr, client)
-}
+type Context = Arc<RwLock<ContextInner>>;
 
-fn handle_list(t: &Context, parent: Path) -> FromResolver {
-  if !parent.is_absolute() {
-    return FromResolver::Error("list relative path".into())
-  }
-  let t = t.read().unwrap();
-  let parent : &str = parent.as_ref();
-  let mut res = Vec::new();
-  let paths =
-    t.published.range::<str, (Bound<&str>, Bound<&str>)>(
-      (Excluded(parent), Unbounded)
-    );
-  for (p, _) in paths {
-    let d =
-      match path::dirname(p) {
-        None => "/",
-        Some(d) => d
-      };
-    if parent != d { break }
-    else { path::basename(p).map(|p| res.push(Path::from(p))); }
-  }
-  FromResolver::List(res)
-}
-
-fn handle_shutdown(t: Context, client: SocketAddr) {
-  let mut t = t.write().unwrap();
-  let mut paths = Vec::new();
-  if let Some(addrs) = t.client_to_addrs.remove(&client) {
-    for addr in addrs.into_iter() {
-      match t.addr_to_paths.remove(&addr) {
-        Some(v) => paths.push((addr, v)),
-        None => (),
+impl Context {
+  fn handle_resolve(&self, path: Path) -> FromResolver {
+    if !path.is_absolute() { FromResolver::Error("resolve relative path".into()) }
+    else {
+      match self.read().unwrap().published.get(&path) {
+        None | Some(&Published::Empty) => FromResolver::Resolved(vec![]),
+        Some(&Published::One(a)) => FromResolver::Resolved(vec![a]),
+        Some(&Published::Many(ref a)) => {
+          let s = a.iter().map(|a| *a).collect::<Vec<_>>();
+          FromResolver::Resolved(s)
+        }
       }
     }
   }
-  for (addr, paths) in paths.into_iter() {
-    for path in paths.into_iter() {
-      handle_unpublish_nolock(&mut t, path, addr, client)
+
+  fn handle_publish(
+    &self,
+    path: Path,
+    addr: SocketAddr,
+    client: SocketAddr
+  ) -> FromResolver {
+    if !path.is_absolute() {
+      return FromResolver::Error("publish relative path".into())
+    }
+    let mut t = self.write().unwrap();
+    if *(t.addr_to_client.entry(addr).or_insert(client)) != client {
+      let m = "address is already published by another client".into();
+      return FromResolver::Error(m)
+    }
+    t.client_to_addrs.entry(client).or_insert_with(HashSet::new).insert(addr);
+    {
+      let v = t.published.entry(path.clone()).or_insert(Published::One(addr));
+      match *v {
+        Published::Empty => { *v = Published::One(addr) },
+        Published::Many(ref mut set) => { set.insert(addr); },
+        Published::One(cur) =>
+          if cur != addr {
+            let s = [addr, cur].iter().map(|a| *a).collect::<HashSet<_>>();
+            *v = Published::Many(s)
+          }
+      }
+    }
+    {
+      let mut p: &str = path.as_ref();
+      while let Some(sp) = path::dirname(p) {
+        t.published.entry(Path::from(sp)).or_insert(Published::Empty);
+        p = sp
+      }
+    }
+    t.addr_to_paths.entry(addr).or_insert_with(HashSet::new).insert(path);
+    FromResolver::Published
+  }
+
+  fn handle_unpublish(&self, path: Path, addr: SocketAddr, client: SocketAddr) {
+    let mut t = self.write().unwrap();
+    t.handle_unpublish(path, addr, client)
+  }
+
+  fn handle_list(&self, parent: Path) -> FromResolver {
+    if !parent.is_absolute() {
+      return FromResolver::Error("list relative path".into())
+    }
+    let t = self.read().unwrap();
+    let parent : &str = parent.as_ref();
+    let mut res = Vec::new();
+    let paths =
+      t.published.range::<str, (Bound<&str>, Bound<&str>)>(
+        (Excluded(parent), Unbounded)
+      );
+    for (p, _) in paths {
+      let d =
+        match path::dirname(p) {
+          None => "/",
+          Some(d) => d
+        };
+      if parent != d { break }
+      else { path::basename(p).map(|p| res.push(Path::from(p))); }
+    }
+    FromResolver::List(res)
+  }
+
+  fn handle_shutdown(self, client: SocketAddr) {
+    let mut t = self.write().unwrap();
+    let mut paths = Vec::new();
+    if let Some(addrs) = t.client_to_addrs.remove(&client) {
+      for addr in addrs.into_iter() {
+        match t.addr_to_paths.remove(&addr) {
+          Some(v) => paths.push((addr, v)),
+          None => (),
+        }
+      }
+    }
+    for (addr, paths) in paths.into_iter() {
+      for path in paths.into_iter() {
+        t.handle_unpublish(path, addr, client)
+      }
     }
   }
-}
 
-#[async]
-fn handle_client(
-  t: Context, s: TcpStream, client: SocketAddr, stop: oneshot::Receiver<()>
-) -> Result<(), ()> {
-  enum M { Stop, Line(String) }
-  let (rx, mut tx) = s.split();
-  let msgs =
-    tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
-    .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
   #[async]
-  for msg in msgs {
-    match msg {
-      M::Stop => break,
-      M::Line(l) => {
-        match serde_json::from_str::<ToResolver>(&l).map_err(|_| ())? {
-          ToResolver::Resolve(path) => tx = await!(send(tx, handle_resolve(&t, path)))?,
-          ToResolver::List(parent) => tx = await!(send(tx, handle_list(&t, parent)))?,
-          ToResolver::Publish(path, addr) =>
-            tx = await!(send(tx, handle_publish(&t, path, addr, client)))?,
-          ToResolver::Unpublish(path, addr) => {
-            handle_unpublish(&t, path, addr, client);
-            tx = await!(send(tx, FromResolver::Unpublished))?
-          },
+  fn handle_client(
+    self, s: TcpStream, client: SocketAddr, stop: oneshot::Receiver<()>
+  ) -> Result<(), ()> {
+    enum M { Stop, Line(String) }
+    let (rx, mut tx) = s.split();
+    let msgs =
+      tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
+      .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
+    #[async]
+    for msg in msgs {
+      match msg {
+        M::Stop => break,
+        M::Line(l) => {
+          match serde_json::from_str::<ToResolver>(&l).map_err(|_| ())? {
+            ToResolver::Resolve(path) =>
+              tx = await!(send(tx, self.handle_resolve(path)))?,
+            ToResolver::List(parent) =>
+              tx = await!(send(tx, self.handle_list(parent)))?,
+            ToResolver::Publish(path, addr) =>
+              tx = await!(send(tx, self.handle_publish(path, addr, client)))?,
+            ToResolver::Unpublish(path, addr) => {
+              self.handle_unpublish(path, addr, client);
+              tx = await!(send(tx, FromResolver::Unpublished))?
+            },
+          }
         }
       }
     }
+    Ok(())
   }
-  Ok(())
-}
 
-#[async]
-fn start_client(
-  t: Context, s: TcpStream, stop: oneshot::Receiver<()>
-) -> result::Result<(), ()> {
-  match s.peer_addr() {
-    Err(_) => Err(()),
-    Ok(client) => {
-      let _ = await!(handle_client(t.clone(), s, client, stop));
-      handle_shutdown(t, client);
-      Ok(())
+  #[async]
+  fn start_client(
+    self, s: TcpStream, stop: oneshot::Receiver<()>
+  ) -> result::Result<(), ()> {
+    match s.peer_addr() {
+      Err(_) => Err(()),
+      Ok(client) => {
+        let _ = await!(self.clone().handle_client(s, client, stop));
+        self.handle_shutdown(client);
+        Ok(())
+      }
     }
   }
 }
@@ -279,14 +285,15 @@ fn start_client(
 #[async]
 fn accept_loop(
   addr: SocketAddr,
-  stop: oneshot::Receiver<()>
+  stop: oneshot::Receiver<()>,
+  ready: oneshot::Sender<()>
 ) -> result::Result<(), ()> {
   let t : Context =
     Arc::new(RwLock::new(ContextInner {
       published: BTreeMap::new(),
       addr_to_paths: HashMap::new(),
       addr_to_client: HashMap::new(),
-      client_to_addrs: HashMap::new()
+      client_to_addrs: HashMap::new(),
     }));
   enum M { Stop, Client(TcpStream) }
   let mut stops: Vec<oneshot::Sender<()>> = Vec::new();
@@ -311,19 +318,23 @@ fn accept_loop(
   Ok(())
 }
 
-pub struct Resolver(oneshot::Sender<()>);
+struct Resolver(Option<oneshot::Sender<()>>);
 
 impl Drop for Resolver {
   fn drop(&mut self) {
-    // this is kinda silly, but we must own the channel to use it
-    let (mut stop, _) = oneshot::channel();
+    let mut stop = None;
     ::std::mem::swap(&mut stop, &mut self.0);
-    let _ = stop.send(());
+    if let Some(stop) = stop { let _ = stop.send(()); }
   }
 }
 
-pub fn run(addr: SocketAddr) -> Resolver {
-  let (send_stop, recv_stop) = oneshot::channel();
-  spawn(accept_loop(addr, recv_stop));
-  Resolver(send_stop)
+impl Resolver {
+  #[async]
+  pub fn new(addr: SocketAddr) -> Result<Resolver> {
+    let (send_stop, recv_stop) = oneshot::channel();
+    let (send_ready, recv_ready) = oneshot::channel();
+    spawn(t.clone().accept_loop(addr, recv_stop, send_ready));
+    await!(recv_ready).map_err(|_| Error::from("ipc error"))?;
+    Ok(Resolver(Some(send_stop)))
+  }
 }

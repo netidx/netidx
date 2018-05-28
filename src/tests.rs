@@ -7,7 +7,10 @@ use path::Path;
 use futures::{prelude::*, sync::oneshot::{channel, Sender}};
 use tokio;
 use tokio_timer::{Delay, Deadline};
-use std::{net::SocketAddr, time::{Instant, Duration}, result::Result};
+use std::{
+  net::SocketAddr, time::{Instant, Duration}, result::Result,
+  sync::{Arc, Mutex}
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Test {
@@ -29,7 +32,7 @@ impl Test {
 #[async]
 fn startup() -> Result<(Publisher, Subscriber, resolver_server::Resolver), ()> {
   let addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
-  let resolver_server = resolver_server::run(addr);
+  let resolver_server = await!(resolver_server::run(addr)).unwrap();
   let resolver_client = await!(Resolver::new(addr)).unwrap();
   let publisher = Publisher::new(resolver_client.clone(), BindCfg::Any).unwrap();
   let subscriber = Subscriber::new(resolver_client.clone());
@@ -58,14 +61,20 @@ fn test_sub(subscriber: Subscriber, done: Sender<()>) -> Result<(), ()> {
 
 #[test]
 fn test_pub_sub() {
-  tokio::run(async_block! {
-    let (publisher, subscriber, resolver) = await!(startup()).unwrap();
-    let (send_done, recv_done) = channel();
-    tokio::spawn(test_pub(publisher));
-    tokio::spawn(test_sub(subscriber, send_done));
-    let to = Instant::now() + Duration::from_secs(15);
-    await!(Deadline::new(recv_done.map_err(|_| ()), to)).unwrap();
-    drop(resolver);
-    Ok(())
-  })
+  let success = Arc::new(Mutex::new(false));
+  tokio::run({
+    let success = success.clone();
+    async_block! {
+      let (publisher, subscriber, resolver) = await!(startup()).unwrap();
+      let (send_done, recv_done) = channel();
+      tokio::spawn(test_pub(publisher));
+      tokio::spawn(test_sub(subscriber, send_done));
+      let to = Instant::now() + Duration::from_secs(15);
+      await!(Deadline::new(recv_done.map_err(|_| ()), to)).unwrap();
+      drop(resolver);
+      *success.lock().unwrap() = true;
+      Ok(())
+    }
+  });
+  if !*success.lock().unwrap() { panic!("test failed") }
 }
