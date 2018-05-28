@@ -4,7 +4,7 @@ use resolver_server::Server;
 use subscriber::Subscriber;
 use publisher::{Publisher, BindCfg};
 use path::Path;
-use futures::{prelude::*, sync::oneshot::{Sender, channel}};
+use futures::{prelude::*, future, sync::oneshot::{Sender, channel}};
 use tokio;
 use tokio_timer::{Delay, Deadline};
 use std::{
@@ -68,16 +68,16 @@ fn test_basic_pub_sub() {
     tokio::spawn(async_block! {
       await!(publisher.clone().wait_client(1)).unwrap();
       let mut test = Test::new();
-      for i in 1..11 {
+      for i in 1..101 {
         test.field0 = i;
         v.update(&test).unwrap();
-        await!(Delay::new(Instant::now() + Duration::from_millis(100))).unwrap();
+        await!(Delay::new(Instant::now() + Duration::from_millis(10))).unwrap();
       }
       Ok(())
     });
     tokio::spawn(start_subscriber(subscriber.clone(), send0_done));
     tokio::spawn(start_subscriber(subscriber, send1_done));
-    let to = Instant::now() + Duration::from_secs(15);
+    let to = Instant::now() + Duration::from_secs(2);
     let done = recv0_done.map_err(|_| ()).join(recv1_done.map_err(|_| ()));
     await!(Deadline::new(done, to)).unwrap();
     drop(server);
