@@ -323,9 +323,9 @@ fn accept_loop(
   Ok(())
 }
 
-pub struct Resolver(Option<oneshot::Sender<()>>);
+pub struct Server(Option<oneshot::Sender<()>>);
 
-impl Drop for Resolver {
+impl Drop for Server {
   fn drop(&mut self) {
     let mut stop = None;
     ::std::mem::swap(&mut stop, &mut self.0);
@@ -335,13 +335,13 @@ impl Drop for Resolver {
 
 use error::*;
 
-impl Resolver {
+impl Server {
   #[async]
-  pub fn new(addr: SocketAddr) -> Result<Resolver> {
+  pub fn new(addr: SocketAddr) -> Result<Server> {
     let (send_stop, recv_stop) = oneshot::channel();
     let (send_ready, recv_ready) = oneshot::channel();
     spawn(accept_loop(addr, recv_stop, send_ready));
     await!(recv_ready).map_err(|_| Error::from("ipc error"))?;
-    Ok(Resolver(Some(send_stop)))
+    Ok(Server(Some(send_stop)))
   }
 }

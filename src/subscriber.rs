@@ -34,7 +34,10 @@ impl UntypedSubscriptionInner {
       self.subscriber.fail_pending(&self.path, "dead");
       for strm in self.streams.iter() {
         if let Some(strm) = strm.upgrade() {
-          strm.0.write().unwrap().ready.push_back(None)
+          let mut strm = strm.0.write().unwrap();
+          strm.ready.push_back(None);
+          if let Some(ref notify) = strm.notify { (notify)() }
+          strm.notify = None
         }
       }
     }
@@ -544,6 +547,7 @@ fn connection_loop(
             }
           },
           FromPublisher::Unsubscribed(path) => {
+            println!("subscriber: unsubscribed from {:?}", path);
             let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
             let sub = {
               let mut con = con.0.write().unwrap();

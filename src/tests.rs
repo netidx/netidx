@@ -1,16 +1,13 @@
 extern crate tokio_timer;
 use resolver_client::Resolver;
-use resolver_server;
+use resolver_server::Server;
 use subscriber::Subscriber;
-use publisher::{Publisher, BindCfg};
+use publisher::{Publisher, Published, BindCfg};
 use path::Path;
 use futures::{prelude::*, sync::oneshot::{channel, Sender}};
 use tokio;
 use tokio_timer::{Delay, Deadline};
-use std::{
-  net::SocketAddr, time::{Instant, Duration}, result::Result,
-  sync::{Arc, Mutex}
-};
+use std::{net::SocketAddr, time::{Instant, Duration}, result::Result};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Test {
@@ -30,18 +27,17 @@ impl Test {
 }
 
 #[async]
-fn startup() -> Result<(Publisher, Subscriber, resolver_server::Resolver), ()> {
+fn startup() -> Result<(Publisher, Subscriber, Server), ()> {
   let addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
-  let resolver_server = await!(resolver_server::run(addr)).unwrap();
-  let resolver_client = await!(Resolver::new(addr)).unwrap();
-  let publisher = Publisher::new(resolver_client.clone(), BindCfg::Any).unwrap();
-  let subscriber = Subscriber::new(resolver_client.clone());
-  Ok((publisher, subscriber, resolver_server))
+  let server = await!(Server::new(addr)).unwrap();
+  let resolver = await!(Resolver::new(addr)).unwrap();
+  let publisher = Publisher::new(resolver.clone(), BindCfg::Any).unwrap();
+  let subscriber = Subscriber::new(resolver.clone());
+  Ok((publisher, subscriber, server))
 }
 
 #[async]
-fn test_pub(publisher: Publisher) -> Result<(), ()> {
-  let v = await!(publisher.clone().publish(Path::from("/test/v"), Test::new())).unwrap();
+fn test_pub(publisher: Publisher, v: Published<Test>) -> Result<(), ()> {
   await!(publisher.clone().wait_client()).unwrap();
   for _ in 0..10 {
     v.update(&Test::new()).unwrap();
@@ -55,26 +51,24 @@ fn test_sub(subscriber: Subscriber, done: Sender<()>) -> Result<(), ()> {
   let s = await!(subscriber.subscribe::<Test>(Path::from("/test/v"))).unwrap();
   #[async]
   for v in s.updates().map_err(|_| ()) { println!("{:#?}", v); }
+  println!("stream ended");
   done.send(()).unwrap();
   Ok(())
 }
 
 #[test]
 fn test_pub_sub() {
-  let success = Arc::new(Mutex::new(false));
-  tokio::run({
-    let success = success.clone();
-    async_block! {
-      let (publisher, subscriber, resolver) = await!(startup()).unwrap();
-      let (send_done, recv_done) = channel();
-      tokio::spawn(test_pub(publisher));
-      tokio::spawn(test_sub(subscriber, send_done));
-      let to = Instant::now() + Duration::from_secs(15);
-      await!(Deadline::new(recv_done.map_err(|_| ()), to)).unwrap();
-      drop(resolver);
-      *success.lock().unwrap() = true;
-      Ok(())
-    }
-  });
-  if !*success.lock().unwrap() { panic!("test failed") }
+  tokio::run(async_block! {
+    let (publisher, subscriber, server) = await!(startup()).unwrap();
+    let (send_done, recv_done) = channel();
+    let v =
+      await!(publisher.clone().publish(Path::from("/test/v"), Test::new()))
+      .unwrap();
+    tokio::spawn(test_pub(publisher, v));
+    tokio::spawn(test_sub(subscriber, send_done));
+    let to = Instant::now() + Duration::from_secs(15);
+    await!(Deadline::new(recv_done.map_err(|_| ()), to)).unwrap();
+    drop(server);
+    Ok(())
+  })
 }

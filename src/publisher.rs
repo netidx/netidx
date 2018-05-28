@@ -47,13 +47,14 @@ struct PublishedUntypedInner {
 
 impl Drop for PublishedUntypedInner {
   fn drop(&mut self) {
+    println!("drop publisher::PublishedUntypedInner {:?}", self.path);
     let mut t = self.publisher.0.write().unwrap();
     t.published.remove(&self.path);
     let r = t.resolver.clone();
     let addr = t.addr;
     drop(t);
     let path = self.path.clone();
-    async_block! { await!(r.unpublish(path, addr)) };
+    spawn(async_block! { await!(r.unpublish(path, addr)).map_err(|_| ()) });
     let msg =
       serde_json::to_vec(&FromPublisher::Unsubscribed(self.path.clone()))
       .expect("failed to encode unsubscribed message");
