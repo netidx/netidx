@@ -3,15 +3,15 @@ use resolver_client::Resolver;
 use resolver_server;
 use subscriber::Subscriber;
 use publisher::{Publisher, BindCfg};
-use futures::prelude::*;
-use tokio::{self, prelude::*};
-use tokio_timer::Delay;
-use std::{net::SocketAddr, time::{Instant, Duration}};
-use error::*;
+use path::Path;
+use futures::{prelude::*, sync::oneshot::{channel, Sender}};
+use tokio;
+use tokio_timer::{Delay, Deadline};
+use std::{net::SocketAddr, time::{Instant, Duration}, result::Result};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Test {
-  field0: int,
+  field0: i64,
   field1: String,
   field2: Option<f64>
 }
@@ -27,35 +27,45 @@ impl Test {
 }
 
 #[async]
-fn startup() -> Result<(Publisher, Subscriber)> {
-  let addr = "127.0.0.1:1234".parse<SocketAddr>()?;
-  tokio::spawn(resolver_server::run(addr));
-  let resolver = await!(Resolver::new(addr))?;
-  let publisher = Publisher::new(resolver.clone(), BindCfg::Any)?;
-  let subscriber = Subscriber::new(resolver.clone());
-  Ok((publisher, subscriber))
+fn startup() -> Result<(Publisher, Subscriber, resolver_server::Resolver), ()> {
+  let addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
+  let resolver_server = resolver_server::run(addr);
+  let resolver_client = await!(Resolver::new(addr)).unwrap();
+  let publisher = Publisher::new(resolver_client.clone(), BindCfg::Any).unwrap();
+  let subscriber = Subscriber::new(resolver_client.clone());
+  Ok((publisher, subscriber, resolver_server))
+}
+
+#[async]
+fn test_pub(publisher: Publisher) -> Result<(), ()> {
+  let v = await!(publisher.clone().publish(Path::from("/test/v"), Test::new())).unwrap();
+  await!(publisher.clone().wait_client()).unwrap();
+  for _ in 0..10 {
+    v.update(&Test::new()).unwrap();
+    await!(Delay::new(Instant::now() + Duration::from_secs(1))).unwrap();
+  }
+  Ok(())
+}
+
+#[async]
+fn test_sub(subscriber: Subscriber, done: Sender<()>) -> Result<(), ()> {
+  let s = await!(subscriber.subscribe::<Test>(Path::from("/test/v"))).unwrap();
+  #[async]
+  for v in s.updates().map_err(|_| ()) { println!("{:#?}", v); }
+  done.send(()).unwrap();
+  Ok(())
 }
 
 #[test]
 fn test_pub_sub() {
   tokio::run(async_block! {
-    tokio::spawn(async_block! {
-      let v =
-        await!(publisher.clone().publish(Path::from("/test/v"), Test::new()))
-        .unwrap();
-      await!(publisher.clone().wait_client()).unwrap();
-      for i in 0..10 {
-        v.update(Test::new());
-        await!(Delay::new(Instant::now() + Duration::from_secs(1))).unwrap();
-      }
-      Ok(())
-    });
-    tokio::spawn(async_block! {
-      let s = await!(subscriber.subscribe::<Test>(Path::from("/test/v"))).unwrap();
-      #[async]
-      for v in s.updates() { println!("{:#?}", v); }
-      Ok(())
-    })
+    let (publisher, subscriber, resolver) = await!(startup()).unwrap();
+    let (send_done, recv_done) = channel();
+    tokio::spawn(test_pub(publisher));
+    tokio::spawn(test_sub(subscriber, send_done));
+    let to = Instant::now() + Duration::from_secs(15);
+    await!(Deadline::new(recv_done.map_err(|_| ()), to)).unwrap();
+    drop(resolver);
     Ok(())
   })
 }

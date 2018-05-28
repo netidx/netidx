@@ -1,5 +1,5 @@
 use futures::{prelude::*, sync::oneshot};
-use tokio::{self, prelude::*, executor::spawn, net::{TcpStream, TcpListener}};
+use tokio::{self, prelude::*, spawn, net::{TcpStream, TcpListener}};
 use tokio_io::io::{WriteHalf, write_all};
 use std::{
   io::BufReader, net::SocketAddr, sync::{Arc, RwLock}, result,

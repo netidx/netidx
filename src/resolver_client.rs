@@ -2,9 +2,8 @@ use futures::{prelude::*, sync::oneshot};
 use tokio::{self, spawn, prelude::*, net::TcpStream};
 use tokio_io::io::ReadHalf;
 use std::{
-  result, io::BufReader, net::SocketAddr,
+  result, io::BufReader, net::SocketAddr, mem,
   collections::VecDeque, sync::{Arc, Weak, Mutex},
-  cell::Cell,
 };
 use path::Path;
 use serde_json;
@@ -15,12 +14,14 @@ use error::*;
 struct ResolverInner {
   writer: LineWriter<Vec<u8>, TcpStream>,
   queued: VecDeque<oneshot::Sender<FromResolver>>,
-  stop: Cell<Option<oneshot::Sender<()>>>,
+  stop: Option<oneshot::Sender<()>>,
 }
 
 impl Drop for ResolverInner {
   fn drop(&mut self) {
-    if let Some(stop) = self.stop.replace(None) {
+    let mut stop = None;
+    mem::swap(&mut stop, &mut self.stop);
+    if let Some(stop) = stop {
       let _ = stop.send(());
     }
   }
@@ -43,7 +44,7 @@ impl Resolver {
     ResolverWeak(Arc::downgrade(&self.0))
   }
 
-  #[async(boxed)]
+  #[async]
   pub fn new(addr: SocketAddr) -> Result<Resolver> {
     let con = await!(TcpStream::connect(&addr))?;
     let (rx, tx) = con.split();
@@ -51,7 +52,7 @@ impl Resolver {
     let inner = ResolverInner {
       writer: LineWriter::new(tx),
       queued: VecDeque::new(),
-      stop: Cell::new(Some(stop_tx))
+      stop: Some(stop_tx)
     };
     let t = Resolver(Arc::new(Mutex::new(inner)));
     spawn(start_client(t.downgrade(), rx, stop_rx));
