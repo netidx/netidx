@@ -244,10 +244,10 @@ impl Publisher {
   }
 
   #[async]
-  pub fn wait_client(self) -> Result<()> {
+  pub fn wait_client(self, n: usize) -> Result<()> {
     let rx = {
       let mut t = self.0.write().unwrap();
-      if t.clients.len() > 0 { return Ok(()) }
+      if t.clients.len() >= n { return Ok(()) }
       else {
         let (tx, rx) = oneshot::channel();
         t.wait_clients.push(tx);
@@ -256,6 +256,8 @@ impl Publisher {
     };
     Ok(await!(rx)?)
   }
+
+  pub fn clients(&self) -> usize { self.0.read().unwrap().clients.len() }
 }
 
 fn get_published(t: &PublisherWeak, path: &Path) -> Option<PublishedUntyped> {
