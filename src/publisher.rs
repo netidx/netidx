@@ -235,10 +235,12 @@ impl Publisher {
   
   #[async]
   pub fn flush(self) -> Result<()> {
+    println!("collecting flushes");
     let flushes =
       self.0.read().unwrap().clients.iter()
       .map(|(_, c)| c.clone().flush())
       .collect::<Vec<_>>();
+    println!("awaiting flushes");
     for flush in flushes.into_iter() { await!(flush)? }
     Ok(())
   }

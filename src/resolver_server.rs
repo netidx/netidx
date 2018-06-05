@@ -134,7 +134,7 @@ impl ContextInner {
   }
 }
 
-struct Context(Arc<RwLock<ContextInner>>);
+pub struct Context(Arc<RwLock<ContextInner>>);
 
 impl Clone for Context {
   fn clone(&self) -> Self { Context(Arc::clone(&self.0)) }
@@ -272,7 +272,7 @@ impl Context {
   }
 
   #[async]
-  fn start_client(
+  pub fn start_client(
     self, s: TcpStream, stop: oneshot::Receiver<()>
   ) -> result::Result<(), ()> {
     match s.peer_addr() {
@@ -310,6 +310,7 @@ fn accept_loop(
   for msg in msgs {
     match msg {
       M::Stop => {
+        println!("got stop");
         for s in stops.drain(0..) { s.send(())? }
         break;
       },
@@ -320,6 +321,7 @@ fn accept_loop(
       }
     }
   }
+  println!("resolver server shutting down");
   Ok(())
 }
 

@@ -71,19 +71,27 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
     loop {          
       let (msgs, mut sender, dead) = {
         let mut t = self.0.lock().unwrap();
-        if t.queued.len() == 0 { break; }
-        else { (t.queued.split_off(0), t.sender.clone(), t.dead) }
+        if t.queued.len() == 0 {
+          t.running = false;
+          return Ok(());
+        } else {
+          (t.queued.split_off(0), t.sender.clone(), t.dead)
+        }
       };
-      if !dead { await!(sender.send(msgs)).map_err(|_| ())?; }
+      if dead { break }
       else {
-        let mut t = self.0.lock().unwrap();
-        for f in t.flushes.drain(0..) {
-          let _ = f.send(());
+        match await!(sender.send(msgs)) {
+          Ok(_) => (),
+          Err(_) => break
         }
       }
     }
-    self.0.lock().unwrap().running = false;
-    Ok(())
+    let mut t = self.0.lock().unwrap();
+    t.running = false;
+    for f in t.flushes.drain(0..) {
+      let _ = f.send(());
+    }
+    Err(())
   }
 
   fn maybe_start_write_loop<'a>(&self, mut t: MutexGuard<'a, LineWriterInner<T, K>>) {
@@ -126,11 +134,13 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   pub fn flush(self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
     {
+      println!("queuing flush");
       let mut t = self.0.lock().unwrap();
       t.flushes.push(tx);
       t.queued.push(Msg::Flush);
       self.maybe_start_write_loop(t);
     }
+    println!("flush queued");
     await!(rx)?;
     Ok(())
   }
@@ -178,6 +188,7 @@ where T: AsRef<[u8]> + Send + Sync + 'static,
           if v.as_ref()[v.as_ref().len() - 1] != 10u8 { buf.push('\n' as u8) }
         },
         Msg::Flush => {
+          println!("performing flush");
           if buf.len() > 0 {
             let r = await!(write_all(chan, buf))?;
             chan = r.0;
@@ -188,7 +199,10 @@ where T: AsRef<[u8]> + Send + Sync + 'static,
           if let Some(t) = t.upgrade() {
             let mut t = t.0.lock().unwrap();
             if t.flushes.len() > 0 {
+              println!("filling flush");
               let _ = t.flushes.remove(0).send(());
+            } else {
+              println!("no flush to fill");
             }
           }
         }

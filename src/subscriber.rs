@@ -233,7 +233,7 @@ impl Drop for ConnectionInner {
 }
 
 #[derive(Clone)]
-struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
+pub struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
 
 impl ConnectionWeak {
   fn upgrade(&self) -> Option<Connection> {
@@ -292,7 +292,7 @@ struct SubscriberInner {
 }
 
 #[derive(Clone)]
-struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
+pub struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
 
 impl SubscriberWeak {
   fn upgrade(&self) -> Option<Subscriber> {
@@ -518,7 +518,7 @@ impl Subscriber {
 }
 
 #[async]
-fn connection_loop(
+pub fn connection_loop(
   t: SubscriberWeak,
   reader: ReadHalf<TcpStream>,
   con: ConnectionWeak

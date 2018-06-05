@@ -28,7 +28,7 @@ impl Drop for ResolverInner {
 }
 
 #[derive(Clone)]
-struct ResolverWeak(Weak<Mutex<ResolverInner>>);
+pub struct ResolverWeak(Weak<Mutex<ResolverInner>>);
 
 impl ResolverWeak {
   fn upgrade(&self) -> Option<Resolver> {
@@ -108,7 +108,7 @@ impl Resolver {
 }
 
 #[async]
-fn client_loop(
+pub fn client_loop(
   t: ResolverWeak,
   rx: ReadHalf<TcpStream>,
   stop: oneshot::Receiver<()>
