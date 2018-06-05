@@ -13,7 +13,7 @@ use path::Path;
 use line_writer::LineWriter;
 use publisher::{FromPublisher, ToPublisher};
 use resolver_client::Resolver;
-use utils;
+use utils::{self, BatchItem};
 use error::*;
 
 static MAXQ: usize = 1000;
@@ -625,33 +625,37 @@ pub fn connection_loop(
   let mut holds : Vec<oneshot::Receiver<()>> = Vec::new();
   let mut strms : Vec<UntypedUpdates> = Vec::new();
   let mut nexts : Vec<oneshot::Sender<()>> = Vec::new();
-  let batches = {
+  let batched = {
     let lines = tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e));
     utils::batched(lines, 100000)
   };
   #[async]
-  for batch in batches {
-    for line in batch.into_iter() {
-      match msg_pending {
-        Some(path) => {
-          msg_pending = None;
-          msgs.entry(path).or_insert(Vec::new()).push(Arc::new(line))
-        },
-        None => {
-          match serde_json::from_str::<FromPublisher>(line.as_ref())? {
-            FromPublisher::Message(path) => msg_pending = Some(path),
-            FromPublisher::NoSuchValue(path) => novalue.push(path),
-            FromPublisher::Unsubscribed(path) => unsubscribed.push(path),
-          }
-        },
+  for item in batched {
+    match item {
+      BatchItem::InBatch(line) => {
+        match msg_pending {
+          Some(path) => {
+            msg_pending = None;
+            msgs.entry(path).or_insert(Vec::new()).push(Arc::new(line))
+          },
+          None => {
+            match serde_json::from_str::<FromPublisher>(line.as_ref())? {
+              FromPublisher::Message(path) => msg_pending = Some(path),
+              FromPublisher::NoSuchValue(path) => novalue.push(path),
+              FromPublisher::Unsubscribed(path) => unsubscribed.push(path),
+            }
+          },
+        }
+      },
+      BatchItem::EndBatch => {
+        process_batch(
+          &t, &con, &mut msgs, &mut novalue, &mut unsubscribed,
+          &mut holds, &mut strms, &mut nexts
+        )?;
+        while let Some(hold) = holds.pop() {
+          let _ = await!(hold);
+        }
       }
-    }
-    process_batch(
-      &t, &con, &mut msgs, &mut novalue, &mut unsubscribed,
-      &mut holds, &mut strms, &mut nexts
-    )?;
-    while let Some(hold) = holds.pop() {
-      let _ = await!(hold);
     }
   }
   Ok(())
