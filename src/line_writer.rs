@@ -18,7 +18,6 @@ enum Msg<T> {
 
 struct LineWriterInner<T, K> {
   sender: Sender<Vec<Msg<T>>>,
-  running: bool,
   queued: Vec<Msg<T>>,
   flushes: Vec<oneshot::Sender<()>>,
   on_shutdown: Vec<oneshot::Sender<()>>,
@@ -50,7 +49,6 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
     let (sender, receiver) = channel(10);
     let inner = LineWriterInner {
       sender,
-      running: false,
       queued: Vec::new(),
       flushes: Vec::new(),
       on_shutdown: Vec::new(),
@@ -67,45 +65,36 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   }
 
   #[async]
-  fn send_loop(self) -> result::Result<(), ()> {
-    loop {          
-      let (msgs, mut sender, dead) = {
-        let mut t = self.0.lock().unwrap();
-        if t.queued.len() == 0 {
-          t.running = false;
-          return Ok(());
-        } else {
-          (t.queued.split_off(0), t.sender.clone(), t.dead)
-        }
-      };
-      if dead { break }
-      else {
-        match await!(sender.send(msgs)) {
-          Ok(_) => (),
-          Err(_) => break
+  fn send_batch(self) -> result::Result<(), ()> {
+    let (msgs, mut sender, dead) = {
+      let mut t = self.0.lock().unwrap();
+      if t.queued.len() == 0 {
+        return Ok(());
+      } else {
+        (t.queued.split_off(0), t.sender.clone(), t.dead)
+      }
+    };
+    if dead { Err(()) }
+    else {
+      match await!(sender.send(msgs)) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+          let mut t = self.0.lock().unwrap();
+          for f in t.flushes.drain(0..) {
+            let _ = f.send(());
+          }
+          Err(())
         }
       }
-    }
-    let mut t = self.0.lock().unwrap();
-    t.running = false;
-    for f in t.flushes.drain(0..) {
-      let _ = f.send(());
-    }
-    Err(())
-  }
-
-  fn maybe_start_write_loop<'a>(&self, mut t: MutexGuard<'a, LineWriterInner<T, K>>) {
-    if !t.running {
-      t.running = true;
-      drop(t);
-      spawn(self.clone().send_loop());
     }
   }
 
   pub fn shutdown(&self) {
-    let mut t = self.0.lock().unwrap();
-    t.queued.push(Msg::Stop);
-    self.maybe_start_write_loop(t);
+    {
+      let mut t = self.0.lock().unwrap();
+      t.queued.push(Msg::Stop);
+    }
+    spawn(self.clone().send_batch());
   }
 
   pub fn write_one(&self, msg: T) {
@@ -125,8 +114,7 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   }
 
   pub fn flush_nowait(&self) {
-    let t = self.0.lock().unwrap();
-    self.maybe_start_write_loop(t);
+    spawn(self.clone().send_batch());
   }
 
   // when the future returned by flush is ready, all messages
@@ -139,8 +127,8 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
       let mut t = self.0.lock().unwrap();
       t.flushes.push(tx);
       t.queued.push(Msg::Flush);
-      self.maybe_start_write_loop(t);
     }
+    spawn(self.clone().send_batch());
     await!(rx)?;
     Ok(())
   }

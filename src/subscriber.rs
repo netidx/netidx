@@ -16,7 +16,7 @@ use resolver_client::Resolver;
 use utils::{self, BatchItem};
 use error::*;
 
-static MAXQ: usize = 1000;
+static MAXQ: usize = 10;
 
 pub struct UntypedSubscriptionInner {
   path: Path,

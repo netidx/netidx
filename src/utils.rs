@@ -97,10 +97,6 @@ impl<S: Stream> Stream for Batched<S> {
 
   fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
     if self.ended { return Ok(Async::Ready(None)) }
-    if self.blocked {
-      self.blocked = false;
-      return Ok(Async::NotReady)
-    }
     let mut err = None;
     mem::swap(&mut err, &mut self.error);
     if let Some(e) = err { return Err(e) }
@@ -110,18 +106,24 @@ impl<S: Stream> Stream for Batched<S> {
     }
     match self.stream.poll() {
       Ok(Async::Ready(Some(v))) => {
+        self.blocked = false;
         self.current += 1;
         Ok(Async::Ready(Some(BatchItem::InBatch(v))))
       },
       Ok(Async::Ready(None)) => {
+        self.blocked = false;
         self.ended = true;
         Ok(Async::Ready(Some(BatchItem::EndBatch)))
       },
       Ok(Async::NotReady) => {
-        self.blocked = true;
-        Ok(Async::Ready(Some(BatchItem::EndBatch)))
+        if self.blocked { Ok(Async::NotReady) }
+        else {
+          self.blocked = true;
+          Ok(Async::Ready(Some(BatchItem::EndBatch)))
+        }
       },
       Err(e) => {
+        self.blocked = false;
         self.error = Some(e);
         Ok(Async::Ready(Some(BatchItem::EndBatch)))
       }
