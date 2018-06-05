@@ -16,8 +16,6 @@ use resolver_client::Resolver;
 use utils::{self, BatchItem};
 use error::*;
 
-static MAXQ: usize = 10;
-
 pub struct UntypedSubscriptionInner {
   path: Path,
   current: Arc<String>,
@@ -95,11 +93,12 @@ impl UntypedSubscription {
     Ok(await!(rx)?)
   }
 
-  fn updates(&self) -> UntypedUpdates {
+  fn updates(&self, max_q: usize) -> UntypedUpdates {
     let inner = UntypedUpdatesInner {
       notify: None,
       hold: None,
-      ready: VecDeque::new()
+      ready: VecDeque::new(),
+      max_q,
     };
     let t = UntypedUpdates(Arc::new(RwLock::new(inner)));
     self.0.write().unwrap().streams.push(t.downgrade());
@@ -110,7 +109,8 @@ impl UntypedSubscription {
 struct UntypedUpdatesInner {
   notify: Option<Box<Fn() -> () + Send + Sync + 'static>>,
   hold: Option<oneshot::Sender<()>>,
-  ready: VecDeque<Option<Arc<String>>>
+  ready: VecDeque<Option<Arc<String>>>,
+  max_q: usize,
 }
 
 #[derive(Clone)]
@@ -146,7 +146,7 @@ impl Stream for UntypedUpdates {
           Ok(Async::NotReady)
         }
       };
-    if t.ready.len() < MAXQ / 2 {
+    if t.ready.len() < t.max_q / 2 {
       let mut hold = None;
       mem::swap(&mut t.hold, &mut hold);
       if let Some(c) = hold { let _ = c.send(()); }
@@ -197,14 +197,14 @@ impl<T> Subscription<T> where T: DeserializeOwned {
     self.untyped.clone().next()
   }
 
-  pub fn updates(&self) -> impl Stream<Item=T, Error=Error> {
-    self.untyped.updates().and_then(|v| {
+  pub fn updates(&self, max_q: usize) -> impl Stream<Item=T, Error=Error> {
+    self.untyped.updates(max_q).and_then(|v| {
       Ok(serde_json::from_str(v.as_ref())?)
     })
   }
 
-  pub fn updates_raw(&self) -> impl Stream<Item=Arc<String>, Error=Error> {
-    self.untyped.updates()
+  pub fn updates_raw(&self, max_q: usize) -> impl Stream<Item=Arc<String>, Error=Error> {
+    self.untyped.updates(max_q)
   }
 
   pub fn write<U: Serialize>(&self, v: &U) -> Result<()> {
@@ -557,7 +557,7 @@ fn process_batch(
           for strm in strms.drain(0..) {
             let mut strm = strm.0.write().unwrap();
             strm.ready.extend(updates.iter().map(|v| Some(v.clone())));
-            if strm.ready.len() > MAXQ {
+            if strm.ready.len() > strm.max_q {
               let (tx, rx) = oneshot::channel();
               strm.hold = Some(tx);
               holds.push(rx)
@@ -627,7 +627,7 @@ pub fn connection_loop(
   let mut nexts : Vec<oneshot::Sender<()>> = Vec::new();
   let batched = {
     let lines = tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e));
-    utils::batched(lines, 100000)
+    utils::batched(lines, 1000000)
   };
   #[async]
   for item in batched {
