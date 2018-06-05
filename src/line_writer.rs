@@ -111,19 +111,21 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   pub fn write_one(&self, msg: T) {
     let mut t = self.0.lock().unwrap();
     t.queued.push(Msg::Write(msg));
-    self.maybe_start_write_loop(t);
   }
 
   pub fn write_two(&self, msg0: T, msg1: T) {
     let mut t = self.0.lock().unwrap();
     t.queued.push(Msg::Write(msg0));
     t.queued.push(Msg::Write(msg1));
-    self.maybe_start_write_loop(t);
   }
 
   pub fn write_n<Q: IntoIterator<Item=T>>(&self, msgs: Q) {
     let mut t = self.0.lock().unwrap();
     for msg in msgs.into_iter() { t.queued.push(Msg::Write(msg)) };
+  }
+
+  pub fn flush_nowait(&self) {
+    let mut t = self.0.lock().unwrap();
     self.maybe_start_write_loop(t);
   }
 
@@ -134,13 +136,11 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   pub fn flush(self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
     {
-      println!("queuing flush");
       let mut t = self.0.lock().unwrap();
       t.flushes.push(tx);
       t.queued.push(Msg::Flush);
       self.maybe_start_write_loop(t);
     }
-    println!("flush queued");
     await!(rx)?;
     Ok(())
   }
@@ -188,7 +188,6 @@ where T: AsRef<[u8]> + Send + Sync + 'static,
           if v.as_ref()[v.as_ref().len() - 1] != 10u8 { buf.push('\n' as u8) }
         },
         Msg::Flush => {
-          println!("performing flush");
           if buf.len() > 0 {
             let r = await!(write_all(chan, buf))?;
             chan = r.0;
@@ -199,10 +198,7 @@ where T: AsRef<[u8]> + Send + Sync + 'static,
           if let Some(t) = t.upgrade() {
             let mut t = t.0.lock().unwrap();
             if t.flushes.len() > 0 {
-              println!("filling flush");
               let _ = t.flushes.remove(0).send(());
-            } else {
-              println!("no flush to fill");
             }
           }
         }

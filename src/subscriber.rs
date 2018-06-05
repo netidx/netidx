@@ -13,6 +13,7 @@ use path::Path;
 use line_writer::LineWriter;
 use publisher::{FromPublisher, ToPublisher};
 use resolver_client::Resolver;
+use utils;
 use error::*;
 
 static MAXQ: usize = 1000;
@@ -511,10 +512,101 @@ impl Subscriber {
       let mut c = con.0.write().unwrap();
       c.pending.insert(path, send);
       c.writer.write_one(msg);
+      c.writer.flush_nowait();
     }
     let ut = await!(recv)??;
     Ok(Subscription::new(ut))
   }
+}
+
+fn process_batch(
+  t: &SubscriberWeak,
+  con: &ConnectionWeak,
+  msgs: &mut HashMap<Path, Vec<Arc<String>>>,
+  novalue: &mut Vec<Path>,
+  unsubscribed: &mut Vec<Path>,
+  holds: &mut Vec<oneshot::Receiver<()>>,
+  strms: &mut Vec<UntypedUpdatesWeak>,
+  nexts: &mut Vec<oneshot::Sender<()>>
+) -> Result<()> {
+  let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
+  // process msgs
+  for (path, updates) in msgs.drain() {
+    let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
+    match ut {
+      Some(ref ut) => {
+        if let Some(ut) = ut.upgrade() {
+          {
+            let mut ut = ut.0.write().unwrap();
+            if let Some(ref up) = updates.last() {
+              ut.current = up.clone();
+            }
+            let mut i = 0;
+            while i < ut.streams.len() {
+              match ut.streams[i].upgrade() {
+                None => { ut.streams.remove(i); },
+                Some(s) => {
+                  i += 1;
+                  strms.push(s)
+                }
+              }
+            }
+            for next in ut.nexts.drain(0..) { nexts.push(next); }
+          }
+          for next in nexts.drain(0..) { let _ = next.send(()); }
+          for strm in strms.drain(0..) {
+            let mut strm = strm.0.write().unwrap();
+            strm.ready.extend(updates.iter().map(|v| Some(v.clone())));
+            if strm.ready.len() > MAXQ {
+              let (tx, rx) = oneshot::channel();
+              strm.hold = Some(tx);
+              holds.push(rx)
+            }
+            if let Some(ref notify) = strm.notify { (notify)(); }
+            strm.notify = None;
+          }
+        }
+      },
+      None => {
+        if let Some(ref up) = updates.last() {
+          let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
+          let ut = UntypedSubscription::new(path.clone(), up.clone(), con.clone(), t);
+          let mut c = con.0.write().unwrap();
+          match c.pending.remove(&path) {
+            None => bail!("unsolicited"),
+            Some(chan) => {
+              c.subscriptions.insert(path, ut.downgrade());
+              chan.send(Ok(ut)).map_err(|_| Error::from("ipc err"))?;
+            }
+          }
+        }
+      },
+    }
+  }
+  // process no value control msgs
+  for path in novalue.drain(0..) {
+    let p = {
+      let mut con = con.0.write().unwrap();
+      con.pending.remove(&path)
+    };
+    match p {
+      None => bail!("unsolicited"),
+      Some(chan) =>
+        chan.send(Err(Error::from(ErrorKind::PathNotFound(path))))
+        .map_err(|_| Error::from("ipc err"))?
+    }
+  }
+  // process unsubscribed control msgs
+  for path in unsubscribed.drain(0..) {
+    let sub = {
+      let mut con = con.0.write().unwrap();
+      con.subscriptions.remove(&path)
+    };
+    if let Some(ref ut) = sub {
+      if let Some(ut) = ut.upgrade() { ut.0.write().unwrap().unsubscribe() }
+    }
+  }
+  Ok(())
 }
 
 #[async]
@@ -524,96 +616,39 @@ pub fn connection_loop(
   con: ConnectionWeak
 ) -> Result<()> {
   let mut msg_pending = None;
-  let mut holds = Vec::new();
-  let mut strms = Vec::new();
-  let mut nexts = Vec::new();
+  let mut msgs : HashMap<Path, Vec<Arc<String>>> = HashMap::new();
+  let mut novalue : Vec<Path> = Vec::new();
+  let mut unsubscribed: Vec<Path> = Vec::new();
+  let mut holds : Vec<oneshot::Receiver<()>> = Vec::new();
+  let mut strms : Vec<UntypedUpdatesWeak> = Vec::new();
+  let mut nexts : Vec<oneshot::Sender<()>> = Vec::new();
+  let batches = {
+    let lines = tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e));
+    utils::batched(lines, 100000)
+  };
   #[async]
-  for line in tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e)) {
-    match msg_pending {
-      None =>
-        match serde_json::from_str::<FromPublisher>(line.as_ref())? {
-          FromPublisher::Message(path) => msg_pending = Some(path),
-          FromPublisher::NoSuchValue(path) => {
-            let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-            let p = {
-              let mut con = con.0.write().unwrap();
-              con.pending.remove(&path)
-            };
-            match p {
-              None => bail!("unsolicited"),
-              Some(chan) =>
-                chan.send(Err(Error::from(ErrorKind::PathNotFound(path))))
-                .map_err(|_| Error::from("ipc err"))?
-            }
-          },
-          FromPublisher::Unsubscribed(path) => {
-            let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-            let sub = {
-              let mut con = con.0.write().unwrap();
-              con.subscriptions.remove(&path)
-            };
-            if let Some(ref ut) = sub {
-              if let Some(ut) = ut.upgrade() { ut.0.write().unwrap().unsubscribe() }
-            }
-          },
+  for batch in batches {
+    for line in batch.into_iter() {
+      match msg_pending {
+        Some(path) => {
+          msg_pending = None;
+          msgs.entry(path).or_insert(Vec::new()).push(Arc::new(line))
         },
-      Some(path) => {
-        msg_pending = None;
-        {
-          let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
-          let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
-          match ut {
-            Some(ref ut) => {
-              if let Some(ut) = ut.upgrade() {
-                let v = Arc::new(line);
-                {
-                  let mut ut = ut.0.write().unwrap();
-                  ut.current = Arc::clone(&v);
-                  let mut i = 0;
-                  while i < ut.streams.len() {
-                    match ut.streams[i].upgrade() {
-                      None => { ut.streams.remove(i); },
-                      Some(s) => {
-                        i += 1;
-                        strms.push(s)
-                      }
-                    }
-                  }
-                  for next in ut.nexts.drain(0..) { nexts.push(next); }
-                }
-                for next in nexts.drain(0..) { let _ = next.send(()); }
-                for strm in strms.drain(0..) {
-                  let mut strm = strm.0.write().unwrap();
-                  strm.ready.push_back(Some(Arc::clone(&v)));
-                  if strm.ready.len() > MAXQ {
-                    let (tx, rx) = oneshot::channel();
-                    strm.hold = Some(tx);
-                    holds.push(rx)
-                  }
-                  if let Some(ref notify) = strm.notify { (notify)(); }
-                  strm.notify = None;
-                }
-              }
-            },
-            None => {
-              let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
-              let ut =
-                UntypedSubscription::new(path.clone(), Arc::new(line), con.clone(), t);
-              let mut c = con.0.write().unwrap();
-              match c.pending.remove(&path) {
-                None => bail!("unsolicited"),
-                Some(chan) => {
-                  c.subscriptions.insert(path, ut.downgrade());
-                  chan.send(Ok(ut)).map_err(|_| Error::from("ipc err"))?;
-                }
-              }
-            },
+        None => {
+          match serde_json::from_str::<FromPublisher>(line.as_ref()) {
+            FromPublisher::Message(path) => msg_pending = Some(path),
+            FromPublisher::NoSuchValue(path) => novalue.push(path),
+            FromPublisher::Unsubscribed(path) => unsubscribed.push(path),
           }
-        }
-        while let Some(hold) = holds.pop() {
-          let _ = await!(hold);
-        }
+        },
       }
+    }
+    process_batch(
+      &t, &con, &mut msgs, &mut novalue, &mut unsubscribed,
+      &mut holds, &mut strms, &mut nexts
+    )?;
+    while let Some(hold) = holds.pop() {
+      let _ = await!(hold);
     }
   }
   Ok(())

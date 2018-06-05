@@ -66,7 +66,8 @@ impl Resolver {
       let msg = serde_json::to_vec(&m)?;
       let mut t = self.0.lock().unwrap();
       t.queued.push_back(tx);
-      t.writer.write_one(msg)
+      t.writer.write_one(msg);
+      t.writer.flush_nowait();
     }
     match await!(rx)? {
       FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),

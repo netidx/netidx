@@ -1,5 +1,5 @@
 use futures::prelude::*;
-use std::{sync::Arc, cell::Cell};
+use std::{sync::Arc, mem};
 
 #[derive(Debug, Clone)]
 pub struct Encoded(Arc<Vec<u8>>);
@@ -14,7 +14,7 @@ impl AsRef<[u8]> for Encoded {
 
 pub struct Batched<S: Stream> {
   stream: S,
-  error: Cell<Option<<S as Stream>::Error>>,
+  error: Option<<S as Stream>::Error>,
   ended: bool,
   max: usize
 }
@@ -22,7 +22,7 @@ pub struct Batched<S: Stream> {
 pub fn batched<S: Stream>(stream: S, max: usize) -> Batched<S> {
   Batched {
     stream, max,
-    error: Cell::new(None),
+    error: None,
     ended: false
   }
 }
@@ -33,7 +33,9 @@ impl<S: Stream> Stream for Batched<S> {
 
   fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
     if self.ended { return Ok(Async::Ready(None)) }
-    if let Some(e) = self.error.replace(None) { return Err(e) }
+    let mut e = None;
+    mem::swap(&mut self.error, &mut e);
+    if let Some(e) = e { return Err(e) }
     let mut ready = vec![];
     loop {
       if ready.len() >= self.max { return Ok(Async::Ready(Some(ready))) }
@@ -53,7 +55,8 @@ impl<S: Stream> Stream for Batched<S> {
         Err(e) => {
           if ready.len() == 0 { return Err(e) }
           else {
-            self.error.replace(Some(e));
+            let mut err = Some(e);
+            mem::swap(&mut self.error, &mut err);
             return Ok(Async::Ready(Some(ready)))
           }
         },

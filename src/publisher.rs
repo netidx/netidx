@@ -58,7 +58,10 @@ impl Drop for PublishedUntypedInner {
       serde_json::to_vec(&FromPublisher::Unsubscribed(self.path.clone()))
       .expect("failed to encode unsubscribed message");
     let msg = Encoded::new(msg);
-    for (_, c) in self.subscribed.iter() { c.write_one(msg.clone()) }
+    for (_, c) in self.subscribed.iter() {
+      c.write_one(msg.clone());
+      c.flush_nowait();
+    }
   }
 }
 
@@ -235,12 +238,10 @@ impl Publisher {
   
   #[async]
   pub fn flush(self) -> Result<()> {
-    println!("collecting flushes");
     let flushes =
       self.0.read().unwrap().clients.iter()
       .map(|(_, c)| c.clone().flush())
       .collect::<Vec<_>>();
-    println!("awaiting flushes");
     for flush in flushes.into_iter() { await!(flush)? }
     Ok(())
   }
@@ -305,19 +306,22 @@ where S: Stream<Item=String, Error=Error> + 'static {
                 }
                 let resp = serde_json::to_vec(&FromPublisher::Unsubscribed(s))?;
                 writer.write_one(Encoded::new(resp));
+                writer.flush_nowait();
               },
               ToPublisher::Subscribe(s) =>
                 match get_published(&t, &s) {
                   None => {
                     let v = serde_json::to_vec(&FromPublisher::NoSuchValue(s))?;
-                    writer.write_one(Encoded::new(v))
+                    writer.write_one(Encoded::new(v));
+                    writer.flush_nowait();
                   },
                   Some(published) => {
                     let mut inner = published.0.lock().unwrap();
                     inner.subscribed.insert(addr, writer.clone());
                     let c = inner.message_header.clone();
                     let v = inner.current.clone();
-                    writer.write_two(c, v)
+                    writer.write_two(c, v);
+                    writer.flush_nowait();
                   }
                 },
             }
