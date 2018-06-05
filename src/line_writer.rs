@@ -125,7 +125,7 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   }
 
   pub fn flush_nowait(&self) {
-    let mut t = self.0.lock().unwrap();
+    let t = self.0.lock().unwrap();
     self.maybe_start_write_loop(t);
   }
 

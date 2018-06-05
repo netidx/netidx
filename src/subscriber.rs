@@ -18,7 +18,7 @@ use error::*;
 
 static MAXQ: usize = 1000;
 
-struct UntypedSubscriptionInner {
+pub struct UntypedSubscriptionInner {
   path: Path,
   current: Arc<String>,
   subscriber: Subscriber,
@@ -29,7 +29,7 @@ struct UntypedSubscriptionInner {
 }
 
 impl UntypedSubscriptionInner {
-  fn unsubscribe(&mut self) {
+  pub fn unsubscribe(&mut self) {
     if !self.dead {
       self.dead = true;
       self.subscriber.fail_pending(&self.path, "dead");
@@ -526,20 +526,20 @@ fn process_batch(
   novalue: &mut Vec<Path>,
   unsubscribed: &mut Vec<Path>,
   holds: &mut Vec<oneshot::Receiver<()>>,
-  strms: &mut Vec<UntypedUpdatesWeak>,
+  strms: &mut Vec<UntypedUpdates>,
   nexts: &mut Vec<oneshot::Sender<()>>
 ) -> Result<()> {
   let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
   // process msgs
-  for (path, updates) in msgs.drain() {
-    let ut = con.0.read().unwrap().subscriptions.get(&path).map(|ut| ut.clone());
+  for (path, updates) in msgs.iter_mut() {
+    let ut = con.0.read().unwrap().subscriptions.get(path).map(|ut| ut.clone());
     match ut {
       Some(ref ut) => {
         if let Some(ut) = ut.upgrade() {
           {
             let mut ut = ut.0.write().unwrap();
             if let Some(ref up) = updates.last() {
-              ut.current = up.clone();
+              ut.current = Arc::clone(up);
             }
             let mut i = 0;
             while i < ut.streams.len() {
@@ -565,17 +565,18 @@ fn process_batch(
             if let Some(ref notify) = strm.notify { (notify)(); }
             strm.notify = None;
           }
+          updates.clear();
         }
       },
       None => {
         if let Some(ref up) = updates.last() {
           let t = t.upgrade().ok_or_else(|| Error::from("subscriber dropped"))?;
-          let ut = UntypedSubscription::new(path.clone(), up.clone(), con.clone(), t);
+          let ut = UntypedSubscription::new(path.clone(), Arc::clone(up), con.clone(), t);
           let mut c = con.0.write().unwrap();
-          match c.pending.remove(&path) {
+          match c.pending.remove(path) {
             None => bail!("unsolicited"),
             Some(chan) => {
-              c.subscriptions.insert(path, ut.downgrade());
+              c.subscriptions.insert(path.clone(), ut.downgrade());
               chan.send(Ok(ut)).map_err(|_| Error::from("ipc err"))?;
             }
           }
@@ -585,6 +586,7 @@ fn process_batch(
   }
   // process no value control msgs
   for path in novalue.drain(0..) {
+    msgs.remove(&path);
     let p = {
       let mut con = con.0.write().unwrap();
       con.pending.remove(&path)
@@ -598,6 +600,7 @@ fn process_batch(
   }
   // process unsubscribed control msgs
   for path in unsubscribed.drain(0..) {
+    msgs.remove(&path);
     let sub = {
       let mut con = con.0.write().unwrap();
       con.subscriptions.remove(&path)
@@ -620,7 +623,7 @@ pub fn connection_loop(
   let mut novalue : Vec<Path> = Vec::new();
   let mut unsubscribed: Vec<Path> = Vec::new();
   let mut holds : Vec<oneshot::Receiver<()>> = Vec::new();
-  let mut strms : Vec<UntypedUpdatesWeak> = Vec::new();
+  let mut strms : Vec<UntypedUpdates> = Vec::new();
   let mut nexts : Vec<oneshot::Sender<()>> = Vec::new();
   let batches = {
     let lines = tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e));
@@ -635,7 +638,7 @@ pub fn connection_loop(
           msgs.entry(path).or_insert(Vec::new()).push(Arc::new(line))
         },
         None => {
-          match serde_json::from_str::<FromPublisher>(line.as_ref()) {
+          match serde_json::from_str::<FromPublisher>(line.as_ref())? {
             FromPublisher::Message(path) => msg_pending = Some(path),
             FromPublisher::NoSuchValue(path) => novalue.push(path),
             FromPublisher::Unsubscribed(path) => unsubscribed.push(path),
