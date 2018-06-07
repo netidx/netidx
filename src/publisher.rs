@@ -20,19 +20,28 @@ use error::*;
 
 static MAX_CLIENTS: usize = 768;
 
+/// This is the set of protocol messages that may be sent to the publisher
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ToPublisher {
+  /// Subscribe to the specified value, if it is not available the result will be NoSuchValue
   Subscribe(Path),
-  // the payload will be on the next line after the set tag
+  /// Write to the specified value, the payload must be the next line after this message
   Set(Path),
+  /// Unsubscribe from the specified value, this will always result in an Unsubscibed message
+  /// even if you weren't ever subscribed to the value, or it doesn't exist.
   Unsubscribe(Path)
 }
 
+/// This is the set of protocol messages that may come from the publisher
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum FromPublisher {
+  /// The requested subscription to Path cannot be completed because it doesn't exist
   NoSuchValue(Path),
+  /// You have been unsubscriped from Path. This can be the result of an Unsubscribe message,
+  /// or it may be sent unsolicited, in the case the value is no longer published, or the
+  /// publisher is in the process of shutting down.
   Unsubscribed(Path),
-  // the payload will be on the next line after the message tag
+  /// The next line contains an updated value for Path
   Message(Path)
 }
 
@@ -83,10 +92,25 @@ impl PublishedUntyped {
   }
 }
 
+// Err(Dead) should contain the last published value
+/// This represents a published value. Internally it is wrapped in an
+/// Arc, so cloning it is essentially free. When all references to a
+/// given published value have been dropped it will be unpublished
+/// from the resolver, subscribers will be notified that no further
+/// updates will happen (the updates stream will end, get will return
+/// `Err(Dead)`), and subsuquent subscriptions will fail.
 #[derive(Clone)]
 pub struct Published<T>(PublishedUntyped, PhantomData<T>);
 
 impl<T: Serialize> Published<T> {
+  /// Update the published value. For existing subscribers this only
+  /// queues the update, it will not be sent out until you call
+  /// `flush` on the publisher. This gives you control of batching
+  /// multiple updates into as few syscalls as is possible, which can
+  /// be important for throughput.
+  ///
+  /// New subscribers will see the latest value immediatly,
+  /// reguardless of whether you've flushed it or not.
   pub fn update(&self, v: &T) -> Result<()> {
     let mut t = (self.0).0.lock().unwrap();
     let c = t.message_header.clone();
@@ -96,6 +120,11 @@ impl<T: Serialize> Published<T> {
     Ok(())
   }
 
+  /// EXPERIMENTAL Register `f` to be called when the subscriber calls
+  /// `write` on a value. Sadly, you may not call `update` from this
+  /// closure, since you hold the `Published` lock. This shortcoming
+  /// may be addressed in the future, or this api may be completely
+  /// changed or just removed.
   pub fn on_write<U: DeserializeOwned + 'static>(
     &self,
     mut f: Box<FnMut(result::Result<U, serde_json::Error>) -> () + Send + Sync>
@@ -150,13 +179,24 @@ impl PublisherWeak {
   }
 }
 
+/// Control how the publisher picks a `SocketAddr` to bind to
 #[derive(Clone, Copy, Debug)]
 pub enum BindCfg {
+  /// Bind to `127.0.0.1`, automatically pick an unused port starting
+  /// at 5000 and ending at the ephemeral port range. Error if no
+  /// unused port can be found.
   Local,
+  /// Bind to `0.0.0.0`, automatically pick an unused port as in `Local`.
   Any,
+  /// Bind to the specifed `SocketAddr`, error if it is in use.
   Exact(SocketAddr)
 }
 
+/// Publisher allows to publish values, and gives central control of
+/// flushing queued updates. Publisher is internally wrapped in an
+/// Arc, so cloning it is virtually free. When all references to
+/// published values, and all references to publisher have been
+/// dropped the publisher will shutdown the listener.
 #[derive(Clone)]
 pub struct Publisher(Arc<RwLock<PublisherInner>>);
 
@@ -165,6 +205,9 @@ impl Publisher {
     PublisherWeak(Arc::downgrade(&self.0))
   }
 
+  // CR estokes: shouldn't this be async? if for no other reason than
+  // to signal that the listener is ready to receive subscribers ...
+  /// Create a new publisher, and start the listener.
   pub fn new(
     resolver: Resolver,
     bind_cfg: BindCfg
@@ -208,8 +251,15 @@ impl Publisher {
     Ok(pb)
   }
 
+  /// get the `SocketAddr` that publisher is bound to
   pub fn addr(&self) -> SocketAddr { self.0.read().unwrap().addr }
 
+  /// Publish `Path` with initial value `init`. Subscribers can
+  /// subscribe to the value as soon as the future returned by this
+  /// function is ready.
+  ///
+  /// Multiple publishers may publish values at the same path. See
+  /// `subscriber::Subscriber::subscribe` for details.
   #[async]
   pub fn publish<T: Serialize + 'static>(
     self, path: Path, init: T
@@ -236,16 +286,26 @@ impl Publisher {
     Ok(Published(ut, PhantomData))
   }
   
-  #[async]
-  pub fn flush(self) -> Result<()> {
+  /// Send all queued updates out to subscribers. When the future
+  /// returned by this function is ready all data has been flushed to
+  /// the underlying OS sockets.
+  ///
+  /// If you don't want to wait for the future you can just throw it
+  /// away, `flush` triggers sending the data whether you await the
+  /// future or not.
+  pub fn flush(self) -> impl Future<Item=(), Error=Error> {
     let flushes =
       self.0.read().unwrap().clients.iter()
       .map(|(_, c)| c.clone().flush())
       .collect::<Vec<_>>();
-    for flush in flushes.into_iter() { await!(flush)? }
-    Ok(())
+    async_block! {
+      for flush in flushes.into_iter() { await!(flush)? }
+      Ok(())
+    }
   }
 
+  /// Returns a future that will become ready when there are `n` or
+  /// more subscribers subscribing to at least one value.
   #[async]
   pub fn wait_client(self, n: usize) -> Result<()> {
     let rx = {
@@ -260,6 +320,7 @@ impl Publisher {
     Ok(await!(rx)?)
   }
 
+  /// Returns the number of subscribers subscribing to at least one value.
   pub fn clients(&self) -> usize { self.0.read().unwrap().clients.len() }
 }
 

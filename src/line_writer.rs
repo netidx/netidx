@@ -120,8 +120,7 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
   // when the future returned by flush is ready, all messages
   // sent before flush was called have been handed to the OS,
   // or the connection has failed
-  #[async]
-  pub fn flush(self) -> Result<()> {
+  pub fn flush(self) -> impl Future<Item=(), Error=Error> {
     let (tx, rx) = oneshot::channel();
     {
       let mut t = self.0.lock().unwrap();
@@ -129,8 +128,10 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
       t.queued.push(Msg::Flush);
     }
     spawn(self.clone().send_batch());
-    await!(rx)?;
-    Ok(())
+    async_block! {
+      await!(rx)?;
+      Ok(())
+    }
   }
 
   #[async]

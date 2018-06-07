@@ -16,17 +16,21 @@ use resolver_client::Resolver;
 use utils::{self, BatchItem};
 use error::*;
 
+/// This is only public because of rustc/#50865, it will be private
+/// when that bug is fixed
 pub struct UntypedSubscriptionInner {
   path: Path,
   current: Arc<String>,
   subscriber: Subscriber,
   connection: Connection,
   streams: Vec<UntypedUpdatesWeak>,
-  nexts: Vec<oneshot::Sender<()>>,
+  nexts: Vec<oneshot::Sender<Result<()>>>,
   dead: bool
 }
 
 impl UntypedSubscriptionInner {
+  /// This is only public because of rustc/#50865, it will be private
+  /// when that bug is fixed
   pub fn unsubscribe(&mut self) {
     if !self.dead {
       self.dead = true;
@@ -82,14 +86,14 @@ impl UntypedSubscription {
   fn next(self) -> impl Future<Item=(), Error=Error> {
     let rx = {
       let mut t = self.0.write().unwrap();
-      if t.dead { bail!(ErrorKind::SubscriptionIsDead) }
+      let (tx, rx) = oneshot::channel();
+      if t.dead { let _ = tx.send(Err(Error::from(ErrorKind::SubscriptionIsDead))); rx }
       else {
-        let (tx, rx) = oneshot::channel();
         t.nexts.push(tx);
         rx
       }
     };
-    async_block! { Ok(await!(rx)?) }
+    async_block! { Ok(await!(rx)??) }
   }
 
   fn updates(&self, max_q: usize) -> UntypedUpdates {
@@ -154,6 +158,10 @@ impl Stream for UntypedUpdates {
   }
 }
 
+/// This represents a subscription to one value. Internally this type
+/// is wrapped in an Arc, so cloning it is nearly free. When all
+/// references to a subscription are dropped the subscriber will
+/// unsubscribe from the value.
 pub struct Subscription<T> {
   untyped: UntypedSubscription,
   phantom: PhantomData<T>
@@ -177,41 +185,83 @@ impl<T> Subscription<T> where T: DeserializeOwned {
     Subscription { untyped, phantom: PhantomData }
   }
 
+  /// get the current value, return an error if the value can't be
+  /// deserialized as a `T`. There are no other possible errors, a
+  /// subscription always has a current value. 
   pub fn get(&self) -> Result<T> {
     let cur = {
       let ut = self.untyped.0.read().unwrap();
-      if ut.dead { bail!(ErrorKind::SubscriptionIsDead); }
       Arc::clone(&ut.current)
     };
     Ok(serde_json::from_str(cur.as_ref())?)
   }
 
-  pub fn get_raw(&self) -> Result<Arc<String>> {
+  /// get the raw JSON string of the current value.
+  pub fn get_raw(&self) -> Arc<String> {
     let ut = self.untyped.0.read().unwrap();
-    if ut.dead { bail!(ErrorKind::SubscriptionIsDead) }
-    else { Ok(Arc::clone(&ut.current)) }
+    Arc::clone(&ut.current)
   }
 
+  /// return true if the subscription is dead, false otherwise
+  pub fn is_dead(&self) -> bool {
+    let ut = self.untyped.0.read().unwrap();
+    ut.dead
+  }
+
+  /// return a future that will become ready when the value is
+  /// updated. Interest in the update will be recorded when you call
+  /// `next`, not when you `await!` the returned future. This can be
+  /// important in some cases, e.g. when using `write` to ask the
+  /// publisher to do something and then update.
+  ///
+  /// ```
+  /// let s0_next = s0.next(); // don't await yet, but do queue our interest
+  /// await!(s0.write(PleaseDoSomething)).unwrap();
+  ///
+  /// wait for the publisher to do something, and update. If we had
+  /// started the `next` call after the write we might have missed the
+  /// new value, and ended up waiting forever.
+  ///
+  /// await!(s0_next).unwrap();
+  /// println!("{}", s0.get().unwrap())
+  /// ```
   pub fn next(self) -> impl Future<Item=(), Error=Error> {
     self.untyped.clone().next()
   }
 
+  /// return a stream of updates to the value. All updates will arrive
+  /// in the sequence they were sent. No update will be skipped. The
+  /// current value will NOT be included in the stream, only
+  /// subsuquent values. `get` followed by `updates` cannot be relied
+  /// upon not to miss an update between the two calls, as such
+  /// protocols requiring strict ordering and no skipping should rely
+  /// only on `updates`, and should not use `get`.
   pub fn updates(&self, max_q: usize) -> impl Stream<Item=T, Error=Error> {
     self.untyped.updates(max_q).and_then(|v| {
       Ok(serde_json::from_str(v.as_ref())?)
     })
   }
 
+  /// return a stream of raw JSON string updates to the value,
+  /// otherwise semantically the same as `updates`.
   pub fn updates_raw(&self, max_q: usize) -> impl Stream<Item=Arc<String>, Error=Error> {
     self.untyped.updates(max_q)
   }
 
+  /// queue a value to be sent back to the publisher. Each publisher
+  /// will handle this differently, and the default behavior is to
+  /// ignore the value. This feature is experimental and may be
+  /// replaced or removed in the future.
   pub fn write<U: Serialize>(&self, v: &U) -> Result<()> {
     let ut = self.untyped.0.read().unwrap();
     ut.connection.write(&ToPublisher::Set(ut.path.clone()))?;
     ut.connection.write(v)
   }
 
+  /// flush queued values back to the publisher, return a future that
+  /// will be ready when the values have been flushed to the unerlying
+  /// OS socket. If you don't want to `await!` the future you can
+  /// safely throw it away, the flush will happen anyway.
   pub fn flush(&self) -> impl Future<Item = (), Error = Error> {
     self.untyped.0.read().unwrap().connection.flush()
   }
@@ -232,6 +282,8 @@ impl Drop for ConnectionInner {
   }
 }
 
+/// This is only public because of rustc/#50865, it will be private
+/// when that bug is fixed
 #[derive(Clone)]
 pub struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
 
@@ -291,6 +343,8 @@ struct SubscriberInner {
   subscriptions: HashMap<Path, SubscriptionState>,
 }
 
+/// This is only public because of rustc/#50865, it will be private
+/// when that bug is fixed
 #[derive(Clone)]
 pub struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
 
@@ -300,6 +354,10 @@ impl SubscriberWeak {
   }
 }
 
+/// This encapsulates the subscriber. Internally it is wrapped in an
+/// Arc, so cloning it is virtually free. If you are done subscribing
+/// you can safely drop references to it, it will be kept alive as
+/// long as there are living subscriptions.
 #[derive(Clone)]
 pub struct Subscriber(Arc<RwLock<SubscriberInner>>);
 
@@ -326,6 +384,7 @@ fn choose_address(addrs: &mut Vec<SocketAddr>) -> Option<SocketAddr> {
 }
 
 impl Subscriber {
+  /// Create a new subscriber.
   pub fn new(resolver: Resolver) -> Subscriber {
     let inner = SubscriberInner {
       resolver,
@@ -350,6 +409,20 @@ impl Subscriber {
     e.into()
   }
 
+  // CR estokes: add a timeout to prevent various network events from
+  // making subscribe hang forever?
+  /// Subscribe to the specified path, expecting the resulting values
+  /// to have type `T`. Will fail if the value is not available, the
+  /// publisher can't be reached, or the resolver server can't be
+  /// reached. `subscribe` will not fail if the resulting values can't
+  /// be deserialized to `T`, `get` or `updates` will fail instead.
+  ///
+  /// In the case where multiple publishers publish values to `path`,
+  /// `subscribe` will create a rendom permutation of the list of
+  /// publishers of `path`, and will try to subscribe to each until
+  /// one succeeds or all of them have failed. In the case where one
+  /// succeeds `subscribe` returns normally, otherwise it returns the
+  /// last error it encountered.
   #[async]
   pub fn subscribe<T: DeserializeOwned>(
     self,
@@ -526,7 +599,7 @@ fn process_batch(
   unsubscribed: &mut Vec<Path>,
   holds: &mut Vec<oneshot::Receiver<()>>,
   strms: &mut Vec<UntypedUpdates>,
-  nexts: &mut Vec<oneshot::Sender<()>>
+  nexts: &mut Vec<oneshot::Sender<Result<()>>>
 ) -> Result<()> {
   let con = con.upgrade().ok_or_else(|| Error::from("connection closed"))?;
   // process msgs
@@ -552,7 +625,7 @@ fn process_batch(
             }
             for next in ut.nexts.drain(0..) { nexts.push(next); }
           }
-          for next in nexts.drain(0..) { let _ = next.send(()); }
+          for next in nexts.drain(0..) { let _ = next.send(Ok(())); }
           for strm in strms.drain(0..) {
             let mut strm = strm.0.write().unwrap();
             strm.ready.extend(updates.iter().map(|v| Some(v.clone())));
@@ -623,7 +696,7 @@ pub fn connection_loop(
   let mut unsubscribed: Vec<Path> = Vec::new();
   let mut holds : Vec<oneshot::Receiver<()>> = Vec::new();
   let mut strms : Vec<UntypedUpdates> = Vec::new();
-  let mut nexts : Vec<oneshot::Sender<()>> = Vec::new();
+  let mut nexts : Vec<oneshot::Sender<Result<()>>> = Vec::new();
   let batched = {
     let lines = tokio::io::lines(BufReader::new(reader)).map_err(|e| Error::from(e));
     utils::batched(lines, 1000000)
