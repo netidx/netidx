@@ -25,6 +25,7 @@ struct UntypedSubscriptionInner {
   connection: Connection,
   streams: Vec<UntypedUpdatesWeak>,
   nexts: Vec<oneshot::Sender<Result<()>>>,
+  deads: Vec<oneshot::Sender<()>>,
   dead: bool
 }
 
@@ -35,6 +36,9 @@ impl UntypedSubscriptionInner {
     if !self.dead {
       self.dead = true;
       self.subscriber.fail_pending(&self.path, "dead");
+      for dead in self.deads.drain(0..) {
+        let _ = dead.send(());
+      }
       for strm in self.streams.iter() {
         if let Some(strm) = strm.upgrade() {
           let mut strm = strm.0.write().unwrap();
@@ -74,7 +78,8 @@ impl UntypedSubscription {
   ) -> UntypedSubscription {
     let inner = UntypedSubscriptionInner {
       path, current, connection, subscriber,
-      dead: false, streams: Vec::new(), nexts: Vec::new()
+      dead: false, streams: Vec::new(), nexts: Vec::new(),
+      deads: Vec::new()
     };
     UntypedSubscription(Arc::new(RwLock::new(inner)))
   }
@@ -202,10 +207,24 @@ impl<T> Subscription<T> where T: DeserializeOwned {
     Arc::clone(&ut.current)
   }
 
-  /// return true if the subscription is dead, false otherwise
+  /// return true if the subscription is dead, false otherwise.
   pub fn is_dead(&self) -> bool {
     let ut = self.untyped.0.read().unwrap();
     ut.dead
+  }
+
+  /// return a future that will become ready if the subscription dies.
+  pub fn dead(&self) -> impl Future<Item = (), Error = Error> {
+    let rx = {
+      let mut ut = self.untyped.0.write().unwrap();
+      let (tx, rx) = oneshot::channel();
+      if ut.dead { let _ = tx.send(()); rx }
+      else {
+        ut.deads.push(tx);
+        rx
+      }
+    };
+    async_block! { Ok(await!(rx)?) }
   }
 
   /// return a future that will become ready when the value is
@@ -218,9 +237,9 @@ impl<T> Subscription<T> where T: DeserializeOwned {
   /// let s0_next = s0.next(); // don't await yet, but do queue our interest
   /// await!(s0.write(PleaseDoSomething)).unwrap();
   ///
-  /// wait for the publisher to do something, and update. If we had
-  /// started the `next` call after the write we might have missed the
-  /// new value, and ended up waiting forever.
+  /// // wait for the publisher to do something, and update. If we had
+  /// // started the `next` call after the write we might have missed the
+  /// // new value, and ended up waiting forever.
   ///
   /// await!(s0_next).unwrap();
   /// println!("{}", s0.get().unwrap())
@@ -414,8 +433,9 @@ impl Subscriber {
   /// Subscribe to the specified path, expecting the resulting values
   /// to have type `T`. Will fail if the value is not available, the
   /// publisher can't be reached, or the resolver server can't be
-  /// reached. `subscribe` will not fail if the resulting values can't
-  /// be deserialized to `T`, `get` or `updates` will fail instead.
+  /// reached.
+  ///
+  /// # Multiple Publishers for `path`
   ///
   /// In the case where multiple publishers publish values to `path`,
   /// `subscribe` will create a rendom permutation of the list of
@@ -423,6 +443,8 @@ impl Subscriber {
   /// one succeeds or all of them have failed. In the case where one
   /// succeeds `subscribe` returns normally, otherwise it returns the
   /// last error it encountered.
+  ///
+  /// # Already Subscribed to `path`
   ///
   /// If you are already subscribed to `path` then calling subscribe
   /// again will not cause any additional message to be sent to the
@@ -435,6 +457,8 @@ impl Subscriber {
   /// into two or more different types. In some cases that is a
   /// perfectly reasonable thing to want to do (e.g. deserialize into
   /// a `serde_json::Value` and also a concrete type).
+  ///
+  /// # When Deserialization Happens
   ///
   /// Regarding deserialization, you only pay for it when you look at
   /// the value. E.G. when you call `get`, or when you call

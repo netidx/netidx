@@ -11,6 +11,10 @@ error_chain! {
   }
 
   errors {
+    Unsubscribed {
+      description("the publisher canceled the subscription"),
+      display("the publisher canceled the subscription"),
+    }
     SubscriptionIsDead {
       description("the subscription is dead, it can no longer be used"),
       display("the subscription is dead, it can no longer be used")
