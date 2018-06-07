@@ -79,8 +79,7 @@ impl UntypedSubscription {
     UntypedSubscriptionWeak(Arc::downgrade(&self.0))
   }
 
-  #[async]
-  fn next(self) -> Result<()> {
+  fn next(self) -> impl Future<Item=(), Error=Error> {
     let rx = {
       let mut t = self.0.write().unwrap();
       if t.dead { bail!(ErrorKind::SubscriptionIsDead) }
@@ -90,7 +89,7 @@ impl UntypedSubscription {
         rx
       }
     };
-    Ok(await!(rx)?)
+    async_block! { Ok(await!(rx)?) }
   }
 
   fn updates(&self, max_q: usize) -> UntypedUpdates {
