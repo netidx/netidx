@@ -1,13 +1,13 @@
+//! Share values between programs using human readable names,
+//! publish/subscribe semantics, and a simple JSON message format.
+//!
 //! json_pubsub consists of three essential parts, a hierarchical
-//! namespace of available values (maintained by resolver_server), a
-//! publisher, to provide values, and a subscriber to consume
-//! values. Published values behave somewhat like values in memory, at
-//! least compared to a normal tcp socket, in that there is always a
-//! current value. Multiple subscribers may subscribe to a given value
-//! at different times, and each one will be immediatly given the
-//! latest value, they don't need to wait for the value to be
-//! updated. When a value is updated, every subscriber receives the
-//! new value. For example,
+//! namespace of values (maintained by resolver_server), a publisher,
+//! to provide values, and a subscriber to consume values. Published
+//! values always have a current value. Multiple subscribers may
+//! subscribe to a given value at different times, and each one will
+//! be immediately given the current value. When a value is updated,
+//! every subscriber receives the new value. For example,
 //!
 //! ```
 //! use resolver_client::Resolver;
@@ -18,7 +18,7 @@
 //! use futures::prelude::*;
 //! use tokio;
 //!
-//! let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+//! let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1234);
 //! let server = await!(Server::new(addr)).unwrap();
 //! let resolver = await!(Resolver::new(addr)).unwrap();
 //! let publisher = Publisher::new(resolver.clone(), BindCfg::Any).unwrap();
@@ -32,7 +32,7 @@
 //!
 //! // note you can call get on a subscription as many times as you like
 //! assert_eq!(s0.get().unwrap(), 4);
-//! assert_eq!(s1.get().update(), 4);
+//! assert_eq!(s1.get().unwrap(), 4);
 //!
 //! // register to be notified via a future when the value is updated,
 //! // do the registration before actually updating to avoid a race.

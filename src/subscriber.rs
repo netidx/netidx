@@ -18,7 +18,7 @@ use error::*;
 
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
-pub struct UntypedSubscriptionInner {
+struct UntypedSubscriptionInner {
   path: Path,
   current: Arc<String>,
   subscriber: Subscriber,
@@ -31,7 +31,7 @@ pub struct UntypedSubscriptionInner {
 impl UntypedSubscriptionInner {
   /// This is only public because of rustc/#50865, it will be private
   /// when that bug is fixed
-  pub fn unsubscribe(&mut self) {
+  fn unsubscribe(&mut self) {
     if !self.dead {
       self.dead = true;
       self.subscriber.fail_pending(&self.path, "dead");
@@ -285,7 +285,7 @@ impl Drop for ConnectionInner {
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
 #[derive(Clone)]
-pub struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
+struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
 
 impl ConnectionWeak {
   fn upgrade(&self) -> Option<Connection> {
@@ -346,7 +346,7 @@ struct SubscriberInner {
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
 #[derive(Clone)]
-pub struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
+struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
 
 impl SubscriberWeak {
   fn upgrade(&self) -> Option<Subscriber> {
@@ -423,6 +423,27 @@ impl Subscriber {
   /// one succeeds or all of them have failed. In the case where one
   /// succeeds `subscribe` returns normally, otherwise it returns the
   /// last error it encountered.
+  ///
+  /// If you are already subscribed to `path` then calling subscribe
+  /// again will not cause any additional message to be sent to the
+  /// publisher, you will just get another handle to the subscription,
+  /// as if you had called `clone` on it. However because each call to
+  /// `subscribe` can have a different `T` you can have multiple
+  /// subscriptions to the same value that are deserialized to
+  /// different types. Again, this won't cause the publisher to send
+  /// you twice as much data, you'll just deserialize the same data
+  /// into two or more different types. In some cases that is a
+  /// perfectly reasonable thing to want to do (e.g. deserialize into
+  /// a `serde_json::Value` and also a concrete type).
+  ///
+  /// Regarding deserialization, you only pay for it when you look at
+  /// the value. E.G. when you call `get`, or when you call
+  /// `updates`. If you never do either of these things then the
+  /// values will not be deserialized at all. So, for example, if you
+  /// only care to occasionally sample a quickly updating value, don't
+  /// call `updates`, call `get` on a timer, and you won't have to pay
+  /// to deserialize every value in the stream, just the ones you look
+  /// at.
   #[async]
   pub fn subscribe<T: DeserializeOwned>(
     self,
@@ -684,8 +705,11 @@ fn process_batch(
   Ok(())
 }
 
+
+/// This is only public because of rustc/#50865, it will be private
+/// when that bug is fixed
 #[async]
-pub fn connection_loop(
+fn connection_loop(
   t: SubscriberWeak,
   reader: ReadHalf<TcpStream>,
   con: ConnectionWeak

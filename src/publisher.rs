@@ -97,8 +97,8 @@ impl PublishedUntyped {
 /// Arc, so cloning it is essentially free. When all references to a
 /// given published value have been dropped it will be unpublished
 /// from the resolver, subscribers will be notified that no further
-/// updates will happen (the updates stream will end, get will return
-/// `Err(Dead)`), and subsuquent subscriptions will fail.
+/// updates will happen (the updates stream will end, and is_dead will
+/// return true), and subsuquent subscriptions will fail.
 #[derive(Clone)]
 pub struct Published<T>(PublishedUntyped, PhantomData<T>);
 
