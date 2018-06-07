@@ -93,15 +93,13 @@ mod subscriber {
     let r = await!(Resolver::new(RESOLVER.parse::<SocketAddr>().unwrap()))?;
     let s = Subscriber::new(r);
     let s0 = await!(s.subscribe::<V>(Path::from("/path0/path1/v0")))?;
-    let v = s0.get()?;
-    println!("{}", s0.get_raw()?);
-    println!("{:?}", v);
     let mut c : usize = 0;
     let start = Instant::now();
     let mut prev = v.field0;
     #[async]
     for v in s0.updates(1000000) {
-      if v.field0 != prev + 1 {
+      if c == 0 { prev = v.field0; }
+      else if v.field0 != prev + 1 {
         println!("error out of seq, prev: {}, v: {:?}", prev, v);
       }
       prev = v.field0;
