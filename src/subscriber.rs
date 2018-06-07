@@ -255,6 +255,13 @@ impl<T> Subscription<T> where T: DeserializeOwned {
   /// upon not to miss an update between the two calls, as such
   /// protocols requiring strict ordering and no skipping should rely
   /// only on `updates`, and should not use `get`.
+  /// # Example
+  /// ```
+  /// #[async]
+  /// for v in s0.updates() {
+  ///     process_update(v)
+  /// }
+  /// ```
   pub fn updates(&self, max_q: usize) -> impl Stream<Item=T, Error=Error> {
     self.untyped.updates(max_q).and_then(|v| {
       Ok(serde_json::from_str(v.as_ref())?)
