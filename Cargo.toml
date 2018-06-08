@@ -1,5 +1,5 @@
 [package]
-name = "json_pubsub"
+name = "json-pubsub"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 

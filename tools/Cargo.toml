@@ -1,5 +1,5 @@
 [package]
-name = "test"
+name = "json-pubsub-tools"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 
@@ -17,4 +17,4 @@ tokio-io = "0.1"
 tokio-timer = "0.2"
 futures = "0.1"
 futures-await = "0.1"
-json_pubsub = {path = ".."}
+json-pubsub = {path = ".."}
