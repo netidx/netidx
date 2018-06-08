@@ -18,7 +18,7 @@ use error::*;
 
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
-struct UntypedSubscriptionInner {
+pub struct UntypedSubscriptionInner {
   path: Path,
   current: Arc<String>,
   subscriber: Subscriber,
@@ -32,7 +32,7 @@ struct UntypedSubscriptionInner {
 impl UntypedSubscriptionInner {
   /// This is only public because of rustc/#50865, it will be private
   /// when that bug is fixed
-  fn unsubscribe(&mut self) {
+  pub fn unsubscribe(&mut self) {
     if !self.dead {
       self.dead = true;
       self.subscriber.fail_pending(&self.path, "dead");
@@ -311,7 +311,7 @@ impl Drop for ConnectionInner {
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
 #[derive(Clone)]
-struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
+pub struct ConnectionWeak(Weak<RwLock<ConnectionInner>>);
 
 impl ConnectionWeak {
   fn upgrade(&self) -> Option<Connection> {
@@ -372,7 +372,7 @@ struct SubscriberInner {
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
 #[derive(Clone)]
-struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
+pub struct SubscriberWeak(Weak<RwLock<SubscriberInner>>);
 
 impl SubscriberWeak {
   fn upgrade(&self) -> Option<Subscriber> {
@@ -740,7 +740,7 @@ fn process_batch(
 /// This is only public because of rustc/#50865, it will be private
 /// when that bug is fixed
 #[async]
-fn connection_loop(
+pub fn connection_loop(
   t: SubscriberWeak,
   reader: ReadHalf<TcpStream>,
   con: ConnectionWeak
