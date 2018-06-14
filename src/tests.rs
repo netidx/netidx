@@ -1,5 +1,5 @@
 extern crate tokio_timer;
-use resolver_client::Resolver;
+use resolver::Resolver;
 use resolver_server::Server;
 use subscriber::Subscriber;
 use publisher::{Publisher, BindCfg};

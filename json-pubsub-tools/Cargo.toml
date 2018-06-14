@@ -3,11 +3,6 @@ name = "json-pubsub-tools"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 
-[profile.dev]
-opt-level = 0
-codegen-units = 1
-incremental = false
-
 [dependencies]
 serde = "1.0"
 serde_derive = "1.0"
@@ -18,3 +13,4 @@ tokio-timer = "0.2"
 futures = "0.1"
 futures-await = "0.1"
 json-pubsub = {path = ".."}
+structopt = "0.2"

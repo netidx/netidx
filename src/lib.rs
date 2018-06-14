@@ -10,7 +10,7 @@
 //! every subscriber receives the new value. For example,
 //!
 //! ```
-//! use resolver_client::Resolver;
+//! use resolver::Resolver;
 //! use resolver_server::Server;
 //! use subscriber::Subscriber;
 //! use publisher::{Publisher, BindCfg};
@@ -112,7 +112,7 @@ mod line_writer;
 mod utils;
 pub mod error;
 pub mod path;
-pub mod resolver_client;
+pub mod resolver;
 pub mod resolver_server;
 pub mod publisher;
 pub mod subscriber;

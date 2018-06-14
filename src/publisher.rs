@@ -10,7 +10,7 @@ use serde_json;
 use tokio::{self, prelude::*, spawn, net::{TcpListener, TcpStream}};
 use tokio_io::io::ReadHalf;
 use path::Path;
-use resolver_client::Resolver;
+use resolver::Resolver;
 use line_writer::LineWriter;
 use utils::Encoded;
 use error::*;
