@@ -103,6 +103,7 @@ extern crate serde_derive;
 extern crate chrono;
 extern crate tokio;
 extern crate tokio_io;
+extern crate tokio_timer;
 extern crate futures_await as futures;
 extern crate rand;
 #[macro_use]

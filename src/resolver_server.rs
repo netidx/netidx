@@ -1,6 +1,7 @@
 use futures::{prelude::*, sync::oneshot};
 use tokio::{self, prelude::*, spawn, net::{TcpStream, TcpListener}};
 use tokio_io::io::{WriteHalf, write_all};
+use tokio_timer::Interval;
 use std::{
   io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
   time::{Instant, Duration},
@@ -42,7 +43,9 @@ pub enum FromResolver {
   List(Vec<Path>),
   Published,
   Unpublished,
-  Error(String)
+  Error(String),
+  TtlOk,
+  TtlExpired
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +175,7 @@ fn send<T: Serialize + 'static>(
 }
 
 struct ClientInfoInner {
+  id: Uuid,
   ttl: Duration,
   last: Instant,
   published: Store,
@@ -181,8 +185,9 @@ struct ClientInfoInner {
 struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
 
 impl ClientInfo {
-  fn new(ttl: u64, stop: oneshot::Sender<()>) -> Self {
+  fn new(id: Uuid, ttl: u64, stop: oneshot::Sender<()>) -> Self {
     let inner = ClientInfoInner {
+      id,
       ttl: Duration::from_secs(ttl),
       last: Instant::now(),
       published: Store::new(),
@@ -198,7 +203,7 @@ impl Clone for ClientInfo {
 
 struct ContextInner {
   published: Store,
-  clients: HashMap<String, ClientInfo>,
+  clients: HashMap<Uuid, ClientInfo>,
   stops: HashMap<usize, oneshot::Sender<()>>,
 }
 
@@ -257,16 +262,6 @@ impl Clone for Context {
   fn clone(&self) -> Self { Context(Arc::clone(&self.0)) }
 }
 
-  /*
-    let client : ClientInfo = {
-      let t = ctx.0.read().unwrap();
-      t.clients.get("foo").unwrap().clone()
-    };
-    let client_stop : oneshot::Receiver<()> = oneshot::channel().1;
-    (client, client_stop)
-  };
-*/
-
 #[async]
 fn handle_client(
   ctx: Context, s: TcpStream, server_stop: oneshot::Receiver<()>, instance_uuid: Uuid
@@ -276,39 +271,35 @@ fn handle_client(
   let msgs =
     tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
     .select(server_stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
-  let (hello, msgs) =
+  let (hello, id, msgs) =
     match await!(msgs.into_future()) {
       Err(..) => return Err(()),
       Ok((None, _)) => return Err(()),
       Ok((Some(M::Stop), _)) => return Ok(()),
-      Ok((Some(M::Line(l)), msgs)) => (l, msgs)
+      Ok((Some(M::Line(l)), msgs)) => {
+        let h = serde_json::from_str::<ClientHello>(&l).map_err(|_| ())?;
+        let id = Uuid::from_str(&h.uuid).map_err(|_| ())?;
+        if h.ttl <= 0 || h.ttl > 3600 { return Err(()) }
+        (h, id, msgs)
+      }
     };
-  let (client, client_stop) = {
-    let h = serde_json::from_str::<ClientHello>(&hello).map_err(|_| ())?;    
-    if h.ttl <= 0 || h.ttl > 3600 { return Err(()) }
+  let (client, client_stop, mut client_added) = {
     let (tx_stop, rx_stop) = oneshot::channel();
-    let client : ClientInfo = {
-      let mut t = ctx.0.write().unwrap();
-      match t.clients.entry(h.uuid) {
-        Entry::Vacant(e) => {
-          let client = ClientInfo::new(h.ttl as u64, tx_stop);
-          e.insert(client.clone());
-          client
-        },
-        Entry::Occupied(e) => {
-          let client = e.get();
-          {
-            let mut cl = client.0.lock().unwrap();
-            cl.last = Instant::now();
-            cl.stop = Some(tx_stop);
-          }
-          client.clone()
+    let (client, added) = {
+      let mut t = ctx.0.read().unwrap();
+      match t.clients.get(&id) {
+        None => (ClientInfo::new(id, h.ttl as u64, tx_stop), false),
+        Some(client) => {
+          let mut cl = client.0.lock().unwrap();
+          cl.last = Instant::now();
+          cl.stop = Some(tx_stop);
+          (client.clone(), true)
         }
       }
     };
     let instance_uuid : String = format!("{}", instance_uuid);
     tx = await!(send::<ServerHello>(tx, ServerHello { instance_uuid }))?;
-    (client, rx_stop)
+    (client, rx_stop, added)
   };
   let msgs = msgs.select(client_stop.into_stream().map_err(|_| ()).map(|_| M::Stop));
   let msgs = batched(msgs, 10000);
@@ -334,9 +325,13 @@ fn handle_client(
         },
       BatchItem::EndBatch => {         
         if batch_needs_write_lock {
+          let mut t = ctx.0.write().unwrap();
           let mut ci = client.0.lock().unwrap();
           ci.last = Instant::now();
-          let mut t = ctx.0.write().unwrap();
+          if not client_added {
+            client_added = true;
+            t.clients.insert(id, client.clone());
+          }
           for m in batch.drain(0..) {
             match m {
               ToResolver::Alive => (),
@@ -349,11 +344,11 @@ fn handle_client(
             }
           }
         } else {
+          let t = ctx.0.read().unwrap();
           {
             let mut ci = client.0.lock().unwrap();
             ci.last = Instant::now();
           }
-          let t = ctx.0.read().unwrap();
           for m in batch.drain(0..) {
             match m {
               ToResolver::Alive => (),
@@ -384,6 +379,38 @@ fn start_client(
   let _ = await!(handle_client(ctx.clone(), s, server_stop, instance_uuid));
   let mut t = ctx.0.write().unwrap();
   t.stops.remove(&client);
+  Ok(())
+}
+
+#[async]
+fn client_scavenger(
+  ctx: Context, stop: oneshot::Receiver<()>
+) -> result::Result<(), ()> {
+  enum M { Tick(Instant), Stop }
+  let msgs =
+    Interval::new(Instant::now(), Duration::from_secs(10))
+    .map_err(|_| ())
+    .map(|_| M::Tick)
+    .select(stop.into_future().map_err(|_| ()).map(|_| M::Stop));
+  let mut delete: Vec<Uuid> = Vec::new();
+  for m in msgs {
+    match m {
+      M::Stop => break,
+      M::Tick(now) => {
+        let mut t = ctx.0.write().unwrap();
+        for (id, client) in t.clients.iter() {
+          let mut cl = client.0.lock().unwrap();
+          if now - cl.last > cl.ttl {
+            t.timeout_client(&mut t, &mut cl);
+            delete.push(*id);
+          }
+        }
+        for id in delete.drain(0..) {
+          t.clients.remove(&id);
+        }
+      }
+    }
+  }
   Ok(())
 }
 
