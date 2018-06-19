@@ -107,6 +107,7 @@ extern crate futures_await as futures;
 extern crate rand;
 #[macro_use]
 extern crate error_chain;
+extern crate uuid;
 
 mod line_writer;
 mod utils;

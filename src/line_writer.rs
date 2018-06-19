@@ -2,7 +2,7 @@ use std::{
   result,
   iter::IntoIterator,
   marker::PhantomData,
-  sync::{Arc, Weak, Mutex, MutexGuard},
+  sync::{Arc, Weak, Mutex},
   convert::AsRef
 };
 use futures::{prelude::*, sync::{mpsc::{channel, Receiver, Sender}, oneshot}};

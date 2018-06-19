@@ -14,6 +14,7 @@ futures = "0.1"
 futures-await = "0.1"
 rand = "0.4"
 error-chain = "0.11"
+uuid = { version = "0.6", features = ["v4"] }
 #arccstr = "1.1"
 
 [dev-dependencies]

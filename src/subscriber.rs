@@ -12,7 +12,7 @@ use tokio_io::io::ReadHalf;
 use path::Path;
 use line_writer::LineWriter;
 use publisher::{FromPublisher, ToPublisher};
-use resolver_client::Resolver;
+use resolver::Resolver;
 use utils::{self, BatchItem};
 use error::*;
 
