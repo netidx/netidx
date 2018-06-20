@@ -20,17 +20,14 @@ use serde_json;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientHello {
   ttl: i64, // seconds 1 - 3600
-  uuid: String
+  uuid: Uuid
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ServerHello {
-  instance_uuid: String
-}
+pub struct ServerHello { ttl_expired: bool }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ToResolver {
-  Alive,
   Resolve(Path),
   Publish(Path, SocketAddr),
   Unpublish(Path, SocketAddr),
@@ -43,9 +40,7 @@ pub enum FromResolver {
   List(Vec<Path>),
   Published,
   Unpublished,
-  Error(String),
-  TtlOk,
-  TtlExpired
+  Error(String)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,10 +196,38 @@ impl Clone for ClientInfo {
   fn clone(&self) -> Self { ClientInfo(Arc::clone(&self.0)) }
 }
 
+struct Stops {
+  stops: HashMap<usize, oneshot::Sender<()>>,
+  stop_id: usize,
+}
+
+impl Stops {
+  fn new() -> Self {
+    Stops {
+      stops: HashMap::new(),
+      stop_id: 0
+    }
+  }
+
+  fn make(&mut self) -> (oneshot::Receiver<()>, usize) {
+    let (tx, rx) = oneshot::channel();
+    let id = self.stop_id;
+    self.stops.insert(id, tx);
+    self.stop_id += 1;
+    (rx, id)
+  }
+
+  fn remove(&mut self, id: &usize) { self.stops.remove(id); }
+
+  fn stop(&mut self) {
+    for (_, s) in self.stops.drain() { let _ = s.send(()); }
+  }
+}
+
 struct ContextInner {
   published: Store,
   clients: HashMap<Uuid, ClientInfo>,
-  stops: HashMap<usize, oneshot::Sender<()>>,
+  stops: Stops
 }
 
 impl ContextInner {
@@ -264,41 +287,39 @@ impl Clone for Context {
 
 #[async]
 fn handle_client(
-  ctx: Context, s: TcpStream, server_stop: oneshot::Receiver<()>, instance_uuid: Uuid
+  ctx: Context, s: TcpStream, server_stop: oneshot::Receiver<()>
 ) -> result::Result<(), ()> {
   enum M { Stop, Line(String) }
   let (rx, mut tx) = s.split();
   let msgs =
     tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
     .select(server_stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
-  let (hello, id, msgs) =
+  let (hello, msgs) =
     match await!(msgs.into_future()) {
       Err(..) => return Err(()),
       Ok((None, _)) => return Err(()),
       Ok((Some(M::Stop), _)) => return Ok(()),
       Ok((Some(M::Line(l)), msgs)) => {
         let h = serde_json::from_str::<ClientHello>(&l).map_err(|_| ())?;
-        let id = Uuid::from_str(&h.uuid).map_err(|_| ())?;
         if h.ttl <= 0 || h.ttl > 3600 { return Err(()) }
-        (h, id, msgs)
+        (h, msgs)
       }
     };
   let (client, client_stop, mut client_added) = {
     let (tx_stop, rx_stop) = oneshot::channel();
-    let (client, added) = {
+    let (client, added, ttl_expired) = {
       let mut t = ctx.0.read().unwrap();
-      match t.clients.get(&id) {
-        None => (ClientInfo::new(id, h.ttl as u64, tx_stop), false),
+      match t.clients.get(&hello.uuid) {
+        None => (ClientInfo::new(hello.uuid, hello.ttl as u64, tx_stop), false, true),
         Some(client) => {
           let mut cl = client.0.lock().unwrap();
           cl.last = Instant::now();
           cl.stop = Some(tx_stop);
-          (client.clone(), true)
+          (client.clone(), true, false)
         }
       }
     };
-    let instance_uuid : String = format!("{}", instance_uuid);
-    tx = await!(send::<ServerHello>(tx, ServerHello { instance_uuid }))?;
+    tx = await!(send::<ServerHello>(tx, ServerHello { ttl_expired }))?;
     (client, rx_stop, added)
   };
   let msgs = msgs.select(client_stop.into_stream().map_err(|_| ()).map(|_| M::Stop));
@@ -314,9 +335,7 @@ fn handle_client(
           M::Stop => break,
           M::Line(l) =>
             match serde_json::from_str::<ToResolver>(&l).map_err(|_| ())? {
-              m@ ToResolver::Resolve(..)
-                | m@ ToResolver::List(..)
-                | m@ ToResolver::Alive => batch.push(m),
+              m@ ToResolver::Resolve(..) | m@ ToResolver::List(..) => batch.push(m),
               m@ ToResolver::Publish(..) | m@ ToResolver::Unpublish(..) => {
                 batch_needs_write_lock = true;
                 batch.push(m)
@@ -328,13 +347,12 @@ fn handle_client(
           let mut t = ctx.0.write().unwrap();
           let mut ci = client.0.lock().unwrap();
           ci.last = Instant::now();
-          if not client_added {
+          if !client_added {
             client_added = true;
-            t.clients.insert(id, client.clone());
+            t.clients.insert(hello.uuid, client.clone());
           }
           for m in batch.drain(0..) {
             match m {
-              ToResolver::Alive => (),
               ToResolver::Resolve(ref path) => response.push(t.resolve(path)),
               ToResolver::List(ref path) => response.push(t.list(path)),
               ToResolver::Publish(path, addr) =>
@@ -351,7 +369,6 @@ fn handle_client(
           }
           for m in batch.drain(0..) {
             match m {
-              ToResolver::Alive => (),
               ToResolver::Resolve(ref path) => response.push(t.resolve(path)),
               ToResolver::List(ref path) => response.push(t.list(path)),
               ToResolver::Publish(..) | ToResolver::Unpublish(..) =>
@@ -374,11 +391,9 @@ fn start_client(
   ctx: Context, s: TcpStream,
   client: usize,
   server_stop: oneshot::Receiver<()>,
-  instance_uuid: Uuid
 ) -> result::Result<(), ()> {
-  let _ = await!(handle_client(ctx.clone(), s, server_stop, instance_uuid));
-  let mut t = ctx.0.write().unwrap();
-  t.stops.remove(&client);
+  let _ = await!(handle_client(ctx.clone(), s, server_stop));
+  ctx.0.write().unwrap().stops.remove(&client);
   Ok(())
 }
 
@@ -390,24 +405,25 @@ fn client_scavenger(
   let msgs =
     Interval::new(Instant::now(), Duration::from_secs(10))
     .map_err(|_| ())
-    .map(|_| M::Tick)
-    .select(stop.into_future().map_err(|_| ()).map(|_| M::Stop));
+    .map(|i| M::Tick(i))
+    .select(stop.into_stream().map_err(|_| ()).map(|_| M::Stop));
+  let mut check: Vec<(Uuid, ClientInfo)> = Vec::new();
   let mut delete: Vec<Uuid> = Vec::new();
+  #[async]
   for m in msgs {
     match m {
       M::Stop => break,
       M::Tick(now) => {
         let mut t = ctx.0.write().unwrap();
-        for (id, client) in t.clients.iter() {
+        for (id, client) in t.clients.iter() { check.push((*id, client.clone())) }
+        for (id, client) in check.drain(0..) {
           let mut cl = client.0.lock().unwrap();
           if now - cl.last > cl.ttl {
-            t.timeout_client(&mut t, &mut cl);
-            delete.push(*id);
+            t.timeout_client(&mut cl);
+            delete.push(id);
           }
         }
-        for id in delete.drain(0..) {
-          t.clients.remove(&id);
-        }
+        for id in delete.drain(0..) { t.clients.remove(&id); }
       }
     }
   }
@@ -420,13 +436,11 @@ fn accept_loop(
   stop: oneshot::Receiver<()>,
   ready: oneshot::Sender<()>,
 ) -> result::Result<(), ()> {
-  let instance_uuid = Uuid::new_v4();
-  let mut cid = 0;
   let t : Context =
     Context(Arc::new(RwLock::new(ContextInner {
       published: Store::new(),
       clients: HashMap::new(),
-      stops: HashMap::new(),
+      stops: Stops::new(),
     })));
   enum M { Stop, Client(TcpStream) }
   let msgs =
@@ -434,23 +448,19 @@ fn accept_loop(
     .incoming().map_err(|_| ()).map(|c| M::Client(c))
     .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
   let _ = ready.send(());
+  spawn(client_scavenger(t.clone(), t.0.write().unwrap().stops.make().0));
   #[async]
   for msg in msgs {
     match msg {
       M::Stop => break,
       M::Client(client) => {
-        let (tx_stop, rx_stop) = oneshot::channel();
-        {
-          let mut ctx = t.0.write().unwrap();
-          ctx.stops.insert(cid, tx_stop);
-        }
-        spawn(start_client(t.clone(), client, cid, rx_stop, instance_uuid));
-        cid += 1
+        let (stop, cid) = t.0.write().unwrap().stops.make();
+        spawn(start_client(t.clone(), client, cid, stop));
       },
     }
   }
   let mut ctx = t.0.write().unwrap();
-  for (_, s) in ctx.stops.drain() { let _ = s.send(()); }
+  ctx.stops.stop();
   Ok(())
 }
 
