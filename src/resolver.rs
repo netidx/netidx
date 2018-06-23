@@ -1,4 +1,4 @@
-use futures::{prelude::*, sync::oneshot};
+use futures::{prelude::*, sync::oneshot, sync::mpsc};
 use tokio::{self, spawn, prelude::*, net::TcpStream};
 use tokio_io::io::ReadHalf;
 use std::{
@@ -9,11 +9,20 @@ use path::Path;
 use serde_json;
 use line_writer::LineWriter;
 use resolver_server::{ToResolver, FromResolver};
+use resolver_store::Store;
 use error::*;
 
+enum Queued {
+  Read((ToResolver, oneshot::Sender<FromResolver>)),
+  Write((Vec<ToResolver>, oneshot::Sender<Result<()>>)),
+}
+
 struct ResolverInner {
-  writer: LineWriter<Vec<u8>, TcpStream>,
-  queued: VecDeque<oneshot::Sender<FromResolver>>,
+  published: Store,
+  queued: VecDeque<Queued>,
+  batch: Vec<ToResolver>,
+  backoff: usize,
+  wakeup: Option<oneshot::Sender<()>>,
   stop: Option<oneshot::Sender<()>>,
 }
 
@@ -46,16 +55,13 @@ impl Resolver {
 
   #[async]
   pub fn new(addr: SocketAddr) -> Result<Resolver> {
-    let con = await!(TcpStream::connect(&addr))?;
-    let (rx, tx) = con.split();
-    let (stop_tx, stop_rx) = oneshot::channel();
+    let (tx, rx) = mpsc::channel(1000);
     let inner = ResolverInner {
-      writer: LineWriter::new(tx),
-      queued: VecDeque::new(),
-      stop: Some(stop_tx)
+      batch: Vec::new(),
+      to_send: tx
     };
     let t = Resolver(Arc::new(Mutex::new(inner)));
-    spawn(start_client(t.downgrade(), rx, stop_rx));
+    spawn(start_client(t.downgrade(), rx));
     Ok(t)
   }
 
@@ -141,6 +147,11 @@ pub fn client_loop(
   Ok(())
 }
 
+/*
+    let con = await!(TcpStream::connect(&addr))?;
+    let (rx, tx) = con.split();
+    let (stop_tx, stop_rx) = oneshot::channel();
+*/
 #[async]
 fn start_client(
   t: ResolverWeak,
