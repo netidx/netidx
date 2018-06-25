@@ -1,14 +1,18 @@
+//! A pipe is a batch oriented, heap allocated, syncronized, inter
+//! thread queue. It is a multi producer multi consumer structure with
+//! a read end and a write end, each end may be cheaply cloned, sent
+//! between threads, and used by multiple threads simultaneously.
+
 use futures::prelude::*;
 use futures::sync::oneshot;
 use std::{sync::{Arc, Mutex}, collections::VecDeque, mem, iter::Extend};
 use error::*;
 
 struct PipeInner<T> {
-  read_waiters: Vec<oneshot::Sender<()>>,
-  write_waiters: Vec<oneshot::Sender<()>>,
+  waiters: Vec<oneshot::Sender<()>>,
+  flushes: Vec<oneshot::Sender<()>>,
   buffer: VecDeque<T>,
-  closed: bool,
-  limit: usize,
+  closed: bool
 }
 
 #[derive(Clone)]
@@ -20,35 +24,44 @@ impl<T> Drop for Sentinal<T> {
   fn drop(&mut self) {
     let mut t = (self.0).0.lock().unwrap();
     t.closed = true;
-    for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
-    for s in t.write_waiters.drain(0..) { let _ = s.send(()); }
+    for s in t.waiters.drain(0..) { let _ = s.send(()); }
   }
 }
 
+/// The write end of the pipe.
 #[derive(Clone)]
-pub(crate) struct Writer<T>(Pipe<T>, Arc<Sentinal<T>>);
+pub struct Writer<T>(Pipe<T>, Arc<Sentinal<T>>);
 
 impl<T: 'static> Writer<T> {
-  pub(crate) fn write(&self, v: T) {
+  /// Add an element to the current batch. The read end will not see
+  /// the element until flush is called.
+  pub fn write(&self, v: T) {
     let mut t = (self.0).0.lock().unwrap();
     t.buffer.push_back(v);
   }
 
-  pub(crate) fn write_many<V: IntoIterator<Item=T>>(&self, batch: V) {
+  /// Add many elements to the current batch. The read end will not
+  /// see the elements until flush is called.
+  pub fn write_many<V: IntoIterator<Item=T>>(&self, batch: V) {
     let mut t = (self.0).0.lock().unwrap();
     t.buffer.extend(batch);
   }
 
+  /// Flush the currently queued batch to the reader. The future
+  /// returned by flush will be ready when the entire batch has been
+  /// removed by one or more readers. If elements are queued, and the
+  /// writer is dropped before flush is called, the elements will not
+  /// be processed.
   #[async]
-  pub(crate) fn flush(self) -> Result<()> {
+  pub fn flush(self) -> Result<()> {
     let wait = {
       let mut t = (self.0).0.lock().unwrap();
       if t.closed { bail!("pipe is closed") }
-      for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
-      if t.buffer.len() <= t.limit { None }
+      if t.buffer.len() == 0 { None }
       else {
         let (tx, rx) = oneshot::channel();
-        t.write_waiters.push(tx);
+        t.flushes.push(tx);
+        for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
         Some(rx)
       }
     };
@@ -57,70 +70,82 @@ impl<T: 'static> Writer<T> {
       None => Ok(())
     }
   }
+
+  /// Return the length of the current batch
+  pub fn len(&self) {
+    let t = (self.0).0.lock().unwrap();
+    t.buffer.len()
+  }
 }
 
+/// The read end of the pipe
 #[derive(Clone)]
-pub(crate) struct Reader<T>(Arc<Mutex<PipeInner<T>>>, Arc<Sentinal<T>>);
+pub struct Reader<T>(Arc<Mutex<PipeInner<T>>>, Arc<Sentinal<T>>);
 
 impl<T: 'static> Reader<T> {
+  /// Wait until a batch is ready, read and return one element from it.
   #[async]
-  fn read_raw<V, F: FnMut(&mut VecDeque<T>) -> Option<V>>(self, f: F) -> Result<V> {
+  pub fn read_one(self) -> Result<T> {
+    Ok(await!(self.process(|buf| buf.pop_front().unwrap()))?)
+  }
+
+  /// Wait until a batch is ready, read and return it.
+  #[async]
+  pub fn read(self) -> Result<VecDeque<T>> {
+    Ok(await!(self.process(|buf| {
+      let mut new = VecDeque::new();
+      mem::swap(&mut new, buf);
+      new
+    }))?)
+  }
+
+  /// Wait until a batch is ready, read it into the passed in container.
+  #[async]
+  pub fn read_into<C: Extend<T> + 'static>(self, mut container: C) -> Result<C> {
+    Ok(await!(self.process(move |buf| {
+      container.extend(buf.drain(0..));
+      container
+    }))?)
+  }
+
+  /// Wait until a batch is ready, process it with F. F is responsible
+  /// for removing elements from the batch as they are processed. It
+  /// will not be finished until all elements have been removed. you
+  /// don't have to remove all elements from a batch in one call, you
+  /// can call this function again as many times as needed until the
+  /// batch is processed.
+  #[async]
+  pub fn process<V, F>(self, f: F) -> Result<V>
+    where V: 'static, F: FnMut(&mut VecDeque<T>) -> V
+  {
     loop {
       let wait = {
-        let mut t = (self.0).0.lock().unwrap();
-        if t.buffer.len() == 0 && t.closed { bail!("pipe is closed") }
-        match f(&mut t.buffer) {
-          Some(v) => {
-            if t.buffer.len() <= t.buffer.limit {
-              for s in t.write_waiters.drain(0..) { let _ = s.send(()); }
-            }
-            return Ok(v)
-          },
-          None => {
-            let (tx, rx) = oneshot::channel();
-            t.read_waiters.push(tx);
-            for s in t.write_waiters.drain(0..) { let _ = s.send(()); }
-            rx
+        let mut t = (self.0).0.lock().unwrap();        
+        if t.flushes.len() == 0 {
+          if t.closed { bail!("pipe is closed") }
+          let (tx, rx) = oneshot::channel();
+          t.read_waiters.push(tx);
+          rx
+        } else {
+          let r = f(&mut t.buffer);
+          if t.buffer.len() == 0 {
+            for s in t.flushes.drain(0..) { let _ = s.send(()); }
           }
-        }
+          return Ok(r)
+        },
       };
       await!(wait)?
     }
   }
-
-  #[async]
-  pub(crate) fn read(self) -> Result<T> {
-    Ok(await!(self.read_raw(|buf| buf.pop_front()))?)
-  }
-
-  #[async]
-  pub(crate) fn read_all(self) -> Result<VecDeque<T>> {
-    Ok(await!(self.read_raw(|buf| {
-      if buf.len() == 0 { None }
-      else {
-        let mut new = VecDeque::new();
-        mem::swap(&mut new, buf);
-        Some(new)
-      }
-    }))?)
-  }
-
-  #[async]
-  pub(crate) fn read_into<C: Extend<T> + 'static>(self, mut container: C) -> Result<C> {
-    Ok(await!(self.read_raw(move |buf| {
-      if buf.len() == 0 { None }
-      else {
-        container.extend(buf.drain(0..));
-        Some(container)
-      }
-    }))?)
-  }
 }
 
-pub(crate) fn pipe<T>() -> (Writer<T>, Reader<T>) {
+/// create a new pipe
+pub fn pipe<T>() -> (Writer<T>, Reader<T>) {
   let pipe = Arc::new(Mutex::new(Pipe {
-    waiters: Vec::new(),
-    buffer: VecDeque::new()
+    read_waiters: Vec::new(),
+    write_waiters: Vec::new(),
+    buffer: VecDeque::new(),
+    closed: false
   }));
   let sentinal = Arc::new(Sentinal(pipe.clone()));
   (Writer(pipe.clone(), sentinal.clone()), Reader(pipe, sentinal))

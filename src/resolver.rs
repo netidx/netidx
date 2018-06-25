@@ -10,6 +10,7 @@ use serde_json;
 use line_writer::LineWriter;
 use resolver_server::{ToResolver, FromResolver};
 use resolver_store::Store;
+use pipe::{pipe, Reader, Writer};
 use error::*;
 
 enum Queued {
