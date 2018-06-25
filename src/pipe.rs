@@ -33,15 +33,15 @@ impl<T> Drop for Sentinal<T> {
 pub struct Writer<T>(Pipe<T>, Arc<Sentinal<T>>);
 
 impl<T: 'static> Writer<T> {
-  /// Add an element to the current batch. The read end will not see
-  /// the element until flush is called.
+  /// Add an element to the current batch. Nothing will happen until
+  /// flush is called.
   pub fn write(&self, v: T) {
     let mut t = (self.0).0.lock().unwrap();
     t.buffer.push_back(v);
   }
 
-  /// Add many elements to the current batch. The read end will not
-  /// see the elements until flush is called.
+  /// Add many elements to the current batch. Nothing will happen
+  /// until flush is called.
   pub fn write_many<V: IntoIterator<Item=T>>(&self, batch: V) {
     let mut t = (self.0).0.lock().unwrap();
     t.buffer.extend(batch);
@@ -61,7 +61,7 @@ impl<T: 'static> Writer<T> {
       else {
         let (tx, rx) = oneshot::channel();
         t.flushes.push(tx);
-        for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
+        for s in t.waiters.drain(0..) { let _ = s.send(()); }
         Some(rx)
       }
     };
@@ -80,7 +80,7 @@ impl<T: 'static> Writer<T> {
 
 /// The read end of the pipe
 #[derive(Clone)]
-pub struct Reader<T>(Arc<Mutex<PipeInner<T>>>, Arc<Sentinal<T>>);
+pub struct Reader<T>(Pipe<T>, Arc<Sentinal<T>>);
 
 impl<T: 'static> Reader<T> {
   /// Wait until a batch is ready, read and return one element from it.
@@ -116,7 +116,7 @@ impl<T: 'static> Reader<T> {
   /// batch is processed.
   #[async]
   pub fn process<V, F>(self, f: F) -> Result<V>
-    where V: 'static, F: FnMut(&mut VecDeque<T>) -> V
+    where V: 'static, F: FnMut(&mut VecDeque<T>) -> V + 'static
   {
     loop {
       let wait = {
@@ -124,7 +124,7 @@ impl<T: 'static> Reader<T> {
         if t.flushes.len() == 0 {
           if t.closed { bail!("pipe is closed") }
           let (tx, rx) = oneshot::channel();
-          t.read_waiters.push(tx);
+          t.waiters.push(tx);
           rx
         } else {
           let r = f(&mut t.buffer);
@@ -132,7 +132,7 @@ impl<T: 'static> Reader<T> {
             for s in t.flushes.drain(0..) { let _ = s.send(()); }
           }
           return Ok(r)
-        },
+        }
       };
       await!(wait)?
     }
@@ -141,12 +141,12 @@ impl<T: 'static> Reader<T> {
 
 /// create a new pipe
 pub fn pipe<T>() -> (Writer<T>, Reader<T>) {
-  let pipe = Arc::new(Mutex::new(Pipe {
-    read_waiters: Vec::new(),
-    write_waiters: Vec::new(),
+  let pipe = Pipe(Arc::new(Mutex::new(Pipe {
+    waiters: Vec::new(),
+    flushes: Vec::new(),
     buffer: VecDeque::new(),
     closed: false
-  }));
+  })));
   let sentinal = Arc::new(Sentinal(pipe.clone()));
   (Writer(pipe.clone(), sentinal.clone()), Reader(pipe, sentinal))
 }
