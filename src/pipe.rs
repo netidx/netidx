@@ -1,6 +1,6 @@
 use futures::prelude::*;
 use futures::sync::oneshot;
-use std::{sync::{Arc, Mutex}, collections::VecDeque, mem};
+use std::{sync::{Arc, Mutex}, collections::VecDeque, mem, iter::Extend};
 use error::*;
 
 struct PipeInner<T> {
@@ -16,9 +16,9 @@ struct Pipe<T>(Arc<Mutex<PipeInner<T>>>);
 
 struct Sentinal<T>(Pipe<T>);
 
-impl Drop for Sentinal<T> {
+impl<T> Drop for Sentinal<T> {
   fn drop(&mut self) {
-    let mut t = self.0.0.lock().unwrap();
+    let mut t = (self.0).0.lock().unwrap();
     t.closed = true;
     for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
     for s in t.write_waiters.drain(0..) { let _ = s.send(()); }
@@ -28,23 +28,23 @@ impl Drop for Sentinal<T> {
 #[derive(Clone)]
 pub(crate) struct Writer<T>(Pipe<T>, Arc<Sentinal<T>>);
 
-impl Writer<T> {
+impl<T: 'static> Writer<T> {
   pub(crate) fn write(&self, v: T) {
-    let mut t = self.0.0.lock().unwrap();
+    let mut t = (self.0).0.lock().unwrap();
     t.buffer.push_back(v);
   }
 
   pub(crate) fn write_many<V: IntoIterator<Item=T>>(&self, batch: V) {
-    let mut t = self.0.0.lock().unwrap();
+    let mut t = (self.0).0.lock().unwrap();
     t.buffer.extend(batch);
   }
 
   #[async]
   pub(crate) fn flush(self) -> Result<()> {
     let wait = {
-      let mut t = self.0.0.lock().unwrap();
+      let mut t = (self.0).0.lock().unwrap();
       if t.closed { bail!("pipe is closed") }
-      for s in t.read_waiters.drain(0..) { let _ = s.send(()) }
+      for s in t.read_waiters.drain(0..) { let _ = s.send(()); }
       if t.buffer.len() <= t.limit { None }
       else {
         let (tx, rx) = oneshot::channel();
@@ -60,17 +60,16 @@ impl Writer<T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Reader<T>(Arc<Mutex<PipeInner<T>>>);
+pub(crate) struct Reader<T>(Arc<Mutex<PipeInner<T>>>, Arc<Sentinal<T>>);
 
-impl Reader<T> {
+impl<T: 'static> Reader<T> {
   #[async]
-  fn read_raw<V, F>(self, f: F) -> Result<V>
-  where F: Fn(&mut VecDeque<T>) -> Option<V> {
+  fn read_raw<V, F: FnMut(&mut VecDeque<T>) -> Option<V>>(self, f: F) -> Result<V> {
     loop {
       let wait = {
-        let mut t = self.0.0.lock().unwrap();
+        let mut t = (self.0).0.lock().unwrap();
         if t.buffer.len() == 0 && t.closed { bail!("pipe is closed") }
-        match f(t.buffer) {
+        match f(&mut t.buffer) {
           Some(v) => {
             if t.buffer.len() <= t.buffer.limit {
               for s in t.write_waiters.drain(0..) { let _ = s.send(()); }
@@ -103,14 +102,26 @@ impl Reader<T> {
         mem::swap(&mut new, buf);
         Some(new)
       }
-    })))
+    }))?)
+  }
+
+  #[async]
+  pub(crate) fn read_into<C: Extend<T> + 'static>(self, mut container: C) -> Result<C> {
+    Ok(await!(self.read_raw(move |buf| {
+      if buf.len() == 0 { None }
+      else {
+        container.extend(buf.drain(0..));
+        Some(container)
+      }
+    }))?)
   }
 }
 
-pub(crate) fn pipe() -> (Writer<T>, Reader<T>) {
-  let i = Arc::new(Mutex::new(Pipe {
+pub(crate) fn pipe<T>() -> (Writer<T>, Reader<T>) {
+  let pipe = Arc::new(Mutex::new(Pipe {
     waiters: Vec::new(),
     buffer: VecDeque::new()
   }));
-  (Writer(i.clone()), Reader(i))
+  let sentinal = Arc::new(Sentinal(pipe.clone()));
+  (Writer(pipe.clone(), sentinal.clone()), Reader(pipe, sentinal))
 }
