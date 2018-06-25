@@ -15,67 +15,24 @@ use error::*;
 
 enum Queued {
   Read((ToResolver, oneshot::Sender<FromResolver>)),
-  Write((Vec<ToResolver>, oneshot::Sender<Result<()>>)),
-}
-
-struct ResolverInner {
-  published: Store,
-  queued: VecDeque<Queued>,
-  batch: Vec<ToResolver>,
-  backoff: usize,
-  wakeup: Option<oneshot::Sender<()>>,
-  stop: Option<oneshot::Sender<()>>,
-}
-
-impl Drop for ResolverInner {
-  fn drop(&mut self) {
-    let mut stop = None;
-    mem::swap(&mut stop, &mut self.stop);
-    if let Some(stop) = stop {
-      let _ = stop.send(());
-    }
-  }
+  Write(ToResolver)
 }
 
 #[derive(Clone)]
-pub struct ResolverWeak(Weak<Mutex<ResolverInner>>);
-
-impl ResolverWeak {
-  fn upgrade(&self) -> Option<Resolver> {
-    Weak::upgrade(&self.0).map(|r| Resolver(r))
-  }
-}
-
-#[derive(Clone)]
-pub struct Resolver(Arc<Mutex<ResolverInner>>);
+struct Resolver(Writer<Queued>)
 
 impl Resolver {
-  fn downgrade(&self) -> ResolverWeak {
-    ResolverWeak(Arc::downgrade(&self.0))
-  }
-
-  #[async]
-  pub fn new(addr: SocketAddr) -> Result<Resolver> {
-    let (tx, rx) = mpsc::channel(1000);
-    let inner = ResolverInner {
-      batch: Vec::new(),
-      to_send: tx
-    };
-    let t = Resolver(Arc::new(Mutex::new(inner)));
-    spawn(start_client(t.downgrade(), rx));
-    Ok(t)
+  pub fn new(addr: SocketAddr) -> Resolver {
+    let (tx, rx) = pipe();
+    spawn(start_client(addr, rx));
+    Ok(Resolver(tx))
   }
 
   #[async]
   fn send(self, m: ToResolver) -> Result<FromResolver> {
     let (tx, rx) = oneshot::channel();
-    {
-      let msg = serde_json::to_vec(&m)?;
-      let mut t = self.0.lock().unwrap();
-      t.queued.push_back(tx);
-      t.writer.write_one(msg);
-      t.writer.flush_nowait();
-    }
+    self.0.write(Queued::Read(m, tx));
+    await!(self.0.clone().flush())?;
     match await!(rx)? {
       FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
       m => Ok(m)
@@ -98,21 +55,15 @@ impl Resolver {
     }
   }
 
-  #[async]
-  pub fn publish(self, path: Path, port: SocketAddr) -> Result<()> {
-    match await!(self.send(ToResolver::Publish(path, port)))? {
-      FromResolver::Published => Ok(()),
-      _ => Err(Error::from(ErrorKind::ResolverUnexpected))
-    }
+  pub fn publish(&self, path: Path, port: SocketAddr) {
+    self.0.write(Queued::Write(ToResolver::Publish(path, port)))
   }
 
-  #[async]
-  pub fn unpublish(self, path: Path, port: SocketAddr) -> Result<()> {
-    match await!(self.send(ToResolver::Unpublish(path, port)))? {
-      FromResolver::Unpublished => Ok(()),
-      _ => bail!(ErrorKind::ResolverUnexpected)
-    }
+  pub fn unpublish(&self, path: Path, port: SocketAddr) {
+    self.0.write(Queued::Write(ToResolver::Unpublish(path, port)))
   }
+
+  pub fn flush(self) -> impl Future<Item=(), Error=Error> { self.0.clone().flush() }
 }
 
 #[async]
