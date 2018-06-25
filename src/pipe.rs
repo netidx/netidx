@@ -5,7 +5,7 @@
 
 use futures::prelude::*;
 use futures::sync::oneshot;
-use std::{sync::{Arc, Mutex}, collections::VecDeque, mem, iter::Extend};
+use std::{sync::{Arc, Mutex, MutexGuard}, collections::VecDeque, mem, iter::Extend};
 use error::*;
 
 struct PipeInner<T> {
@@ -108,12 +108,12 @@ impl<T: 'static> Reader<T> {
     }))?)
   }
 
-  /// Wait until a batch is ready, process it with F. F is responsible
-  /// for removing elements from the batch as they are processed. It
-  /// will not be finished until all elements have been removed. you
-  /// don't have to remove all elements from a batch in one call, you
-  /// can call this function again as many times as needed until the
-  /// batch is processed.
+  /// Wait for a batch to be ready, and then process it with f. F is
+  /// responsible for removing elements from the batch as they are
+  /// processed. It will not be finished until all elements have been
+  /// removed. you don't have to remove all elements from a batch in
+  /// one call, you can call this function again as many times as
+  /// needed until the batch is processed.
   #[async]
   pub fn process<V, F>(self, f: F) -> Result<V>
     where V: 'static, F: FnMut(&mut VecDeque<T>) -> V + 'static
@@ -135,6 +135,23 @@ impl<T: 'static> Reader<T> {
         }
       };
       await!(wait)?
+    }
+  }
+
+  /// Access the current batch with f. If the batch is empty `with`
+  /// returns `None` and does not call f. Otherwise `with` returns
+  /// `Some(f(batch))`.
+  pub fn with<V, F>(&self, f: F) -> Option<V>
+    where V: 'static, F: FnMut(&mut VecDeque<T>) -> V + 'static
+  {
+    let mut t = (self.0).0.lock().unwrap();        
+    if t.flushes.len() == 0 { None }
+    else {
+      let r = f(&mut t.buffer);
+      if t.buffer.len() == 0 {
+        for s in t.flushes.drain(0..) { let _ = s.send(()); }
+      }
+      Some(r)
     }
   }
 }

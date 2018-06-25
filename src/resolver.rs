@@ -63,7 +63,9 @@ impl Resolver {
     self.0.write(Queued::Write(ToResolver::Unpublish(path, port)))
   }
 
-  pub fn flush(self) -> impl Future<Item=(), Error=Error> { self.0.clone().flush() }
+  pub fn flush(self) -> impl Future<Item=(), Error=Error> {
+    self.0.clone().flush()
+  }
 }
 
 #[async]
@@ -106,9 +108,8 @@ pub fn client_loop(
 */
 #[async]
 fn start_client(
-  t: ResolverWeak,
-  rx: ReadHalf<TcpStream>,
-  stop: oneshot::Receiver<()>
+  addr: SocketAddr,
+  rx: Reader<Queued>
 ) -> result::Result<(), ()> {
   let r = await!(client_loop(t.clone(), rx, stop));
   let msg =
@@ -123,4 +124,4 @@ fn start_client(
     while let Some(c) = t.queued.pop_front() { let _ = c.send(msg.clone()); }
   }
   Ok(())
-}
+p}
