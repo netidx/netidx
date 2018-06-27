@@ -113,7 +113,7 @@ extern crate uuid;
 mod line_writer;
 mod utils;
 mod resolver_store;
-mod pipe;
+//mod pipe;
 pub mod error;
 pub mod path;
 pub mod resolver;
