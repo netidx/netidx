@@ -16,6 +16,7 @@ use uuid::Uuid;
 use error::*;
 
 static TTL: i64 = 600;
+static LINGER: i64 = 10;
 
 struct ResolverInner {
   queued: VecDeque<(ToResolver, oneshot::Sender<FromResolver>)>,
@@ -105,8 +106,9 @@ impl Resolver {
 fn resend(
   t: &ResolverWeak,
   writer: &LineWriter<TcpStream>,
-  hello: &ServerHello
+  hello: &str
 ) -> Result<usize> {
+  let hello = serde_json::from_str::<ServerHello>(hello)?;
   match hello {
     None => bail!("no hello from server"),
     Some(ServerHello {ttl_expired}) => {
@@ -122,19 +124,19 @@ fn resend(
                 Published::One(addr, n) => {
                   resent += n;
                   let m = ToResolver::Publish(path.clone(), addr);
-                  for _ in 0..n { writer.write_one(serde_json::to_vec(&m)).unwrap() }
+                  for _ in 0..n { writer.write_one(serde_json::to_vec(&m)?) }
                 },
                 Published::Many(addrs) => {
                   for (addr, n) in addrs.iter() {
                     resent += n;
                     let m = ToResolver::Publish(path.clone(), addr);
-                    for _ in 0..n { writer.write_one(serde_json::to_vec(&m).unwrap()) }
+                    for _ in 0..n { writer.write_one(serde_json::to_vec(&m)?) }
                   }
                 }
               }
             }
           }
-          writer.write_n(t.queued.iter().map(|(m, _)| serde_json::to_vec(m).unwrap()));
+          for (m, _) in t.queued.iter() { writer.write_one(serde_json::to_vec(m)?) }
           resent
         }
       }
@@ -151,16 +153,13 @@ pub fn client_loop(
   enum C { Notify, Wakeup(Instant), Msg(String) };
   let (rx, tx) = con.split();
   let writer = LineWriter(tx);
-  let msgs = tokio::io::lines(BufReader::new(rx)).then(|l| match l {
-    Ok(l) => Ok(C::Msg(l)),
-    Err(e) => Err(Error::from(e))
-  });
+  let msgs = tokio::io::lines(BufReader::new(rx)).map_err(|e| Error::from(e));
   let notify = notify.then(|r| match r {
     Ok(()) => Ok(C::Notify),
     Err(_) => Err(Error::from("ipc err"))
   });
   let now = Instant::now();
-  let wait = Duration::from_secs(TTL / 2);
+  let wait = Duration::from_secs(LINGER);
   let wakeup = Interval::new(now, wait).then(|r| match r {
     Ok(i) => C::Wakeup(i),
     Err(e) => Err(Error::from(e))
@@ -175,13 +174,17 @@ pub fn client_loop(
   }
   await!(writer.clone().flush())?;
   let (hello, msgs) = await!(msgs.into_future()).map_err(|(e, _)| e)?;
-  let mut resent = resend(&t, &writer, &hello)?;
+  let (mut resent, mut send_upto) = resend(&t, &writer, &hello)?;
   await!(writer.clone().flush())?;
+  let msgs = msgs.map(|m| C::Msg(m));
   let mut last = now;
   #[async]
   for msg in msgs {
     match msg {
-      C::Stop => break,
+      C::Wakeup(now) => if now - last > Duration::from_secs(TTL) { break },
+      C::Notify => {
+        
+      },
       C::Msg(msg) => {
         let t = t.upgrade().ok_or_else(|| Error::from("client dropped"))?;
         let msg = serde_json::from_str(&msg)?;
