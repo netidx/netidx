@@ -143,31 +143,58 @@ mod tests {
   fn test() {
     let mut store = Store::new();
     let mut n = 0;
-    for (path, addr) in ADDRS {
+    for (path, addr) in &ADDRS {
       let addr = addr.parse::<SocketAddr>()?;
       let path = Path::from(path);
       store.publish(path.clone(), addr);
-      if n < 2 && store.resolve(&path).len() != 1 {
-        panic!("published path wrong {}", path)
-      } else if n < 4 && store.resolve(&path).len() != 2 {
-        panic!("published path wrong {}", path)
-      } else if n >= 4 && store.resolve(&path).len() != 1 {
-        panic!("published path wrong {}", path)
-      }
+      if n < 2 && store.resolve(&path).len() != 1 { panic!() }
+      else if n < 4 && store.resolve(&path).len() != 2 { panic!() }
+      else if n >= 4 && store.resolve(&path).len() != 1 { panic!() }
       n += 1
     }
+    let paths = store.list(&Path::from("/"));
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].as_ref(), "app");
+    let paths = store.list(&Path::from("/app"));
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].as_ref(), "test");
     let paths = store.list(&Path::from("/app/test"));
-    if paths.len() != 2 { panic!(); }
-    if path[0].as_ref() != "app0" { panic!("list00 {}", path[0]) }
-    if path[1].as_ref() != "app1" { panic!("list01 {}", path[1]) }
+    assert_eq!(paths.len(), 2);
+    assert_eq!(path[0].as_ref(), "app0");
+    assert_eq!(path[1].as_ref(), "app1");
     let paths = store.list(&Path::from("/app/test/app0"));
-    if paths.len() != 2 { panic!() }
-    if path[0].as_ref() != "v0" { panic!("list10, {}", path[0]) }
-    if path[1].as_ref() != "v1" { panic!("list11, {}", path[1]) }
+    assert_eq!(paths.len(), 2);
+    assert_eq!(path[0].as_ref(), "v0");
+    assert_eq!(path[1].as_ref(), "v1");
     let paths = store.list(&Path::from("/app/test/app1"));
-    if paths.len() != 3 { panic!() }
-    if path[0].as_ref() != "v2" { panic!("list20, {}", path[0]) }
-    if path[1].as_ref() != "v3" { panic!("list21, {}", path[1]) }
-    if path[2].as_ref() != "v4" { panic!("list22, {}", path[2]) }
+    assert_eq!(paths.len(), 3);
+    assert_eq!(path[0].as_ref(), "v2");
+    assert_eq!(path[1].as_ref(), "v3");
+    assert_eq!(path[2].as_ref(), "v4");
+    n = 0
+    for (path, addr) in ADDRS[0..4] {
+      let addr = addr.parse::<SocketAddr>()?;
+      let path = Path::from(path);
+      store.unpublish(&path, &addr);
+      if n < 2 && store.resolve(&path).len() != 1 { panic!() }
+      else if n < 4 && store.resolve(&path).len() != 0 { panic!() }
+      n += 1;
+    }
+    let paths = store.list(&Path::from("/"));
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].as_ref(), "app");
+    let paths = store.list(&Path::from("/app"));
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].as_ref(), "test");
+    let paths = store.list(&Path::from("/app/test"));
+    assert_eq!(paths.len(), 1);
+    assert_eq!(path[1].as_ref(), "app1");
+    let paths = store.list(&Path::from("/app/test/app0"));
+    assert_eq!(paths.len(), 0);
+    let paths = store.list(&Path::from("/app/test/app1"));
+    assert_eq!(paths.len(), 3);
+    assert_eq!(path[0].as_ref(), "v2");
+    assert_eq!(path[1].as_ref(), "v3");
+    assert_eq!(path[2].as_ref(), "v4");
   }
 }
