@@ -143,13 +143,16 @@ mod tests {
   fn test() {
     let mut store = Store::new();
     let mut n = 0;
+    let addrs =
+      vec!["127.0.0.1:100".parse::<SocketAddr>().unwrap(),
+           "127.0.0.1:101".parse::<SocketAddr>().unwrap()];
     for (path, addr) in &ADDRS {
-      let addr = addr.parse::<SocketAddr>()?;
+      let addr = addr.parse::<SocketAddr>().unwrap();
       let path = Path::from(path);
       store.publish(path.clone(), addr);
-      if n < 2 && store.resolve(&path).len() != 1 { panic!() }
-      else if n < 4 && store.resolve(&path).len() != 2 { panic!() }
-      else if n >= 4 && store.resolve(&path).len() != 1 { panic!() }
+      if n < 2 && store.resolve(&path) != vec![addr] { panic!() }
+      else if n < 4 && store.resolve(&path) != addrs { panic!() }
+      else if n >= 4 && store.resolve(&path) != vec![addr] { panic!() }
       n += 1
     }
     let paths = store.list(&Path::from("/"));
@@ -173,11 +176,11 @@ mod tests {
     assert_eq!(path[2].as_ref(), "v4");
     n = 0
     for (path, addr) in ADDRS[0..4] {
-      let addr = addr.parse::<SocketAddr>()?;
+      let addr = addr.parse::<SocketAddr>().unwrap();
       let path = Path::from(path);
       store.unpublish(&path, &addr);
-      if n < 2 && store.resolve(&path).len() != 1 { panic!() }
-      else if n < 4 && store.resolve(&path).len() != 0 { panic!() }
+      if n < 2 && store.resolve(&path) != vec![addrs[1]] { panic!() }
+      else if n < 4 && store.resolve(&path) != vec![] { panic!() }
       n += 1;
     }
     let paths = store.list(&Path::from("/"));
@@ -196,5 +199,22 @@ mod tests {
     assert_eq!(path[0].as_ref(), "v2");
     assert_eq!(path[1].as_ref(), "v3");
     assert_eq!(path[2].as_ref(), "v4");
+  }
+
+  #[test]
+  fn test_refcnt() {
+    let mut store = Store::new();
+    let path = Path::from("/foo/bar/baz");
+    let addr = "127.0.0.1:111".parse::<SocketAddr>().unwrap();
+    store.publish(path.clone(), addr);
+    store.publish(path.clone(), addr);
+    store.publish(path, addr);
+    assert_eq!(store.resolve(&path), vec![addr]);
+    store.unpublish(&path, &addr);
+    assert_eq!(store.resolve(&path), vec![addr]);
+    store.unpublish(&path, &addr);
+    assert_eq!(store.resolve(&path), vec![addr]);
+    store.unpublish(&path, &addr);
+    assert_eq!(store.resolve(&path), vec![]);
   }
 }
