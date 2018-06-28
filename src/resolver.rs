@@ -1,11 +1,10 @@
 use futures::{prelude::*, sync::oneshot, sync::mpsc};
 use tokio::{self, spawn, prelude::*, net::TcpStream};
-use tokio_io::io::ReadHalf;
 use tokio_timer::{Interval, sleep};
 use std::{
   result, io::BufReader, net::SocketAddr, mem,
   collections::VecDeque, sync::{Arc, Weak, Mutex},
-  time::Duration,
+  time::{Duration, Instant},
 };
 use path::Path;
 use serde_json;
@@ -15,8 +14,8 @@ use resolver_store::{Store, Published};
 use uuid::Uuid;
 use error::*;
 
-static TTL: i64 = 600;
-static LINGER: i64 = 10;
+static TTL: u64 = 600;
+static LINGER: u64 = 10;
 
 struct ResolverInner {
   waiting_reply: VecDeque<(ToResolver, oneshot::Sender<FromResolver>)>,
@@ -32,12 +31,12 @@ impl Drop for ResolverInner {
   fn drop(&mut self) {
     let mut dead = None;
     mem::swap(&mut dead, &mut self.dead);
-    if let Some(dead) = dead { dead.send(()); }
+    if let Some(dead) = dead { let _ = dead.send(()); }
   }
 }
 
 #[derive(Clone)]
-struct Resolver(Arc<Mutex<ResolverInner>>);
+pub struct Resolver(Arc<Mutex<ResolverInner>>);
 
 #[derive(Clone)]
 struct ResolverWeak(Weak<Mutex<ResolverInner>>);
@@ -62,10 +61,9 @@ impl Resolver {
     t
   }
 
-  fn downgrade(&self) -> ResolverWeak { ResolverWeak(self.0.downgrade()) }
+  fn downgrade(&self) -> ResolverWeak { ResolverWeak(Arc::downgrade(&self.0)) }
 
-  #[async]
-  fn send(self, m: ToResolver) -> Result<FromResolver> {
+  fn send(self, m: ToResolver) -> impl Future<Item=FromResolver, Error=Error> {
     let (tx, rx) = oneshot::channel();
     let notify = {
       let mut t = self.0.lock().unwrap();
@@ -74,14 +72,16 @@ impl Resolver {
       else {
         let (tx, rx) = mpsc::channel(100);
         t.notify = Some(tx.clone());
-        spawn(start_connection(self.downgrade(), tx));
-        rx
+        spawn(start_connection(self.downgrade(), rx));
+        tx
       }
     };
-    let _ = await!(notify.send(()))?;
-    match await!(rx)? {
-      FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
-      m => Ok(m)
+    async_block! {
+      let _ = await!(notify.send(()))?;
+      match await!(rx)? {
+        FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
+        m => Ok(m)
+      }
     }
   }
 
@@ -103,15 +103,15 @@ impl Resolver {
 
   #[async]
   pub fn publish(self, path: Path, port: SocketAddr) -> Result<()> {
-    match await!(self.send(ToResolver::Publish(path, port))) {
+    match await!(self.send(ToResolver::Publish(path, port)))? {
       FromResolver::Published => Ok(()),
       _ => Err(Error::from(ErrorKind::ResolverUnexpected))
     }
   }
 
   #[async]
-  pub fn unpublish(self, path: Path, port: SocketAddr) {
-    match await!(self.send(ToResolver::Unpublish(path, port))) {
+  pub fn unpublish(self, path: Path, port: SocketAddr) -> Result<()> {
+    match await!(self.send(ToResolver::Unpublish(path, port)))? {
       FromResolver::Unpublished => Ok(()),
       _ => Err(Error::from(ErrorKind::ResolverUnexpected))
     }
@@ -120,59 +120,50 @@ impl Resolver {
 
 fn resend(
   t: &ResolverWeak,
-  writer: &LineWriter<TcpStream>,
+  writer: &LineWriter<Vec<u8>, TcpStream>,
   hello: &str
 ) -> Result<usize> {
-  let hello = serde_json::from_str::<ServerHello>(hello)?;
-  match hello {
-    None => bail!("no hello from server"),
-    Some(ServerHello {ttl_expired}) => {
-      match t.upgrade() {
-        None => bail!("we are dead"),
-        Some(t) => {
-          let mut t = t.0.lock().unwrap();
-          let mut resent = 0;
-          if ttl_expired {
-            for (path, published) in t.store.iter() {
-              match published {
-                Published::Empty => (),
-                Published::One(addr, n) => {
-                  resent += n;
-                  let m = ToResolver::Publish(path.clone(), addr);
-                  for _ in 0..n { writer.write_one(serde_json::to_vec(&m)?) }
-                },
-                Published::Many(addrs) => {
-                  for (addr, n) in addrs.iter() {
-                    resent += n;
-                    let m = ToResolver::Publish(path.clone(), addr);
-                    for _ in 0..n { writer.write_one(serde_json::to_vec(&m)?) }
-                  }
-                }
-              }
-            }
+  let ServerHello {ttl_expired} = serde_json::from_str::<ServerHello>(hello)?;
+  let t = t.upgrade().ok_or_else(|| Error::from("dropped"))?;
+  let mut t = t.0.lock().unwrap();
+  let mut resent = 0;
+  if ttl_expired {
+    for (path, published) in t.published.iter() {
+      match published {
+        Published::Empty => (),
+        Published::One(addr, n) => {
+          resent += *n;
+          let m = ToResolver::Publish(path.clone(), *addr);
+          for _ in 0..*n { writer.write_one(serde_json::to_vec(&m)?) }
+        },
+        Published::Many(addrs) => {
+          for (addr, n) in addrs.iter() {
+            resent += n;
+            let m = ToResolver::Publish(path.clone(), *addr);
+            for _ in 0..*n { writer.write_one(serde_json::to_vec(&m)?) }
           }
-          for (m, r) in t.never_sent.drain(0..) {
-            t.waiting_reply.push_back((m, r))
-          }
-          for (m, _) in t.waiting_reply.iter() {
-            writer.write_one(serde_json::to_vec(m)?);
-          }
-          resent
         }
       }
     }
   }
+  while let Some((m, r)) = t.never_sent.pop_front() {
+    t.waiting_reply.push_back((m, r));
+  }
+  for (m, _) in t.waiting_reply.iter() {
+    writer.write_one(serde_json::to_vec(m)?);
+  }
+  Ok(resent)
 }
 
 #[async]
-pub fn client_loop(
+fn connection_loop(
   t: ResolverWeak,
   con: TcpStream,
   notify: mpsc::Receiver<()>
 ) -> Result<()> {
   enum C { Notify, Wakeup(Instant), Msg(String) };
   let (rx, tx) = con.split();
-  let writer = LineWriter(tx);
+  let writer : LineWriter<Vec<u8>, TcpStream> = LineWriter::new(tx);
   let msgs = tokio::io::lines(BufReader::new(rx)).map_err(|e| Error::from(e));
   let notify = notify.then(|r| match r {
     Ok(()) => Ok(C::Notify),
@@ -181,29 +172,30 @@ pub fn client_loop(
   let now = Instant::now();
   let wait = Duration::from_secs(LINGER);
   let wakeup = Interval::new(now, wait).then(|r| match r {
-    Ok(i) => C::Wakeup(i),
+    Ok(i) => Ok(C::Wakeup(i)),
     Err(e) => Err(Error::from(e))
   });
   match t.upgrade() {
     None => return Ok(()),
     Some(t) => {
       let mut t = t.0.lock().unwrap();
-      let hello = ClientHello {ttl: TTL, uuid: t.our_id};
-      writer.write_one(serde_json::to_vec(&hello))
+      let hello = ClientHello {ttl: TTL as i64, uuid: t.our_id};
+      writer.write_one(serde_json::to_vec(&hello)?)
     }
   }
   await!(writer.clone().flush())?;
   let (hello, msgs) = await!(msgs.into_future()).map_err(|(e, _)| e)?;
+  let hello = hello.ok_or_else(|| Error::from("no hello from server"))?;
   let mut resent = resend(&t, &writer, &hello)?;
   await!(writer.clone().flush())?;
   let msgs = msgs.map(|m| C::Msg(m));
   let mut last_count : usize = 0;
   let mut count : usize = 0;
   #[async]
-  for msg in msgs {
+  for msg in msgs.select(notify).select(wakeup) {
     match msg {
       C::Wakeup(_) => {
-        let t = t.upgrade().ok_or_else(|| Error::from("client dropped"));
+        let t = t.upgrade().ok_or_else(|| Error::from("client dropped"))?;
         let t = t.0.lock().unwrap();
         if last_count == count
           && t.waiting_reply.len() == 0
@@ -216,7 +208,7 @@ pub fn client_loop(
           count += 1;
           let t = t.upgrade().ok_or_else(|| Error::from("client dropped"))?;
           let mut t = t.0.lock().unwrap();
-          for (m, r) in t.never_sent.drain(0..) {
+          while let Some((m, r)) = t.never_sent.pop_front() {
             writer.write_one(serde_json::to_vec(&m)?);
             t.waiting_reply.push_back((m, r))
           }
@@ -234,29 +226,29 @@ pub fn client_loop(
             None => bail!("unsolicited response"),
             Some((sent, r)) => {
               match m {
-                m@ FromResolver::Error(_)
-                  | m@ FromResolver::List(_)
-                  | m@ FromResolver::Resolved(_) => { let _ = r.send(m); },
+                m@ FromResolver::Error(..)
+                  | m@ FromResolver::List(..)
+                  | m@ FromResolver::Resolved(..) => { let _ = r.send(m); },
                 FromResolver::Published => {
                   match sent {
-                    ToResolver::Published(path, addr) => {
-                      t.published.publish(path, addr);
+                    ToResolver::Publish(path, addr) => { 
+                     t.published.publish(path, addr);
                       let _ = r.send(m);
                     },
-                    ToResolver::List(_)
-                      | ToResolver::Resolve(_)
-                      | ToResolver::Unpublish => bail!("unexpected reply")
+                    ToResolver::List(..)
+                      | ToResolver::Resolve(..)
+                      | ToResolver::Unpublish(..) => bail!("unexpected reply")
                   }
                 },
                 FromResolver::Unpublished => {
                   match sent {
                     ToResolver::Unpublish(path, addr) => {
-                      t.published.unpublish(path, addr);
+                      t.published.unpublish(&path, &addr);
                       let _ = r.send(m);
                     },
-                    ToResolver::List(_)
-                      | ToResolver::Resolve(_)
-                      | ToResolver::Publish(_) => bail!("unexpected reply")
+                    ToResolver::List(..)
+                      | ToResolver::Resolve(..)
+                      | ToResolver::Publish(..) => bail!("unexpected reply")
                   }
                 },
               }
@@ -312,7 +304,7 @@ fn start_connection(
 }
 
 #[async]
-fn heartbeat_loop(t: ResolverWeak, dead: oneshot::Receiver<()>) -> Result<(), ()> {
+fn heartbeat_loop(t: ResolverWeak, dead: oneshot::Receiver<()>) -> result::Result<(), ()> {
   enum M { Heartbeat, Stop }
   let wake =
     Interval::new(Instant::now(), Duration::from_secs(TTL / 2)).then(|r| match r {
@@ -320,7 +312,7 @@ fn heartbeat_loop(t: ResolverWeak, dead: oneshot::Receiver<()>) -> Result<(), ()
       Err(_) => Err(())
     });
   let stop = dead.into_stream().then(|r| match r {
-    Ok(()) => Ok(()),
+    Ok(()) => Ok(M::Stop),
     Err(_) => Err(())
   });
   #[async]
@@ -333,7 +325,7 @@ fn heartbeat_loop(t: ResolverWeak, dead: oneshot::Receiver<()>) -> Result<(), ()
         if ti.notify.is_none() {
           let (tx, rx) = mpsc::channel(100);
           ti.notify = Some(tx);
-          spawn(start_connection(t.downgrade(), rx))
+          spawn(start_connection(t.downgrade(), rx));
         }
       },
     }

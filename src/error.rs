@@ -1,13 +1,16 @@
 use std;
 use serde_json;
-use futures::Canceled;
+use futures::{Canceled, sync::mpsc};
 use path::Path;
+use tokio_timer;
 
 error_chain! {
   foreign_links {
     JsonErr(serde_json::Error);
     IOErr(std::io::Error);
     OneshotErr(Canceled);
+    Timer(tokio_timer::Error);
+    ChannelIO(mpsc::SendError<()>);
   }
 
   errors {

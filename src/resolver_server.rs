@@ -5,27 +5,23 @@ use tokio_timer::Interval;
 use std::{
   io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
   time::{Instant, Duration},
-  collections::{
-    BTreeMap, HashMap, hash_map::Entry,
-    Bound::{Included, Excluded, Unbounded},
-    Bound
-  }
+  collections::HashMap
 };
 use uuid::Uuid;
-use path::{self, Path};
-use utils::{Batched, BatchItem, batched};
+use path::Path;
+use utils::{BatchItem, batched};
 use serde::Serialize;
 use serde_json;
 use resolver_store::{Store, Published};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientHello {
-  ttl: i64, // seconds 1 - 3600
-  uuid: Uuid
+  pub ttl: i64, // seconds 1 - 3600
+  pub uuid: Uuid
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ServerHello { ttl_expired: bool }
+pub struct ServerHello { pub ttl_expired: bool }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ToResolver {
@@ -54,7 +50,6 @@ fn send<T: Serialize + 'static>(
 }
 
 struct ClientInfoInner {
-  id: Uuid,
   ttl: Duration,
   last: Instant,
   published: Store,
@@ -64,9 +59,8 @@ struct ClientInfoInner {
 struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
 
 impl ClientInfo {
-  fn new(id: Uuid, ttl: u64, stop: oneshot::Sender<()>) -> Self {
+  fn new(ttl: u64, stop: oneshot::Sender<()>) -> Self {
     let inner = ClientInfoInner {
-      id,
       ttl: Duration::from_secs(ttl),
       last: Instant::now(),
       published: Store::new(),
@@ -197,7 +191,7 @@ fn handle_client(
     let (client, added, ttl_expired) = {
       let mut t = ctx.0.read().unwrap();
       match t.clients.get(&hello.uuid) {
-        None => (ClientInfo::new(hello.uuid, hello.ttl as u64, tx_stop), false, true),
+        None => (ClientInfo::new(hello.ttl as u64, tx_stop), false, true),
         Some(client) => {
           let mut cl = client.0.lock().unwrap();
           cl.last = Instant::now();
