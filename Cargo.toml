@@ -16,7 +16,7 @@ futures-await = "0.1"
 rand = "0.4"
 error-chain = "0.11"
 uuid = { version = "0.6", features = ["v4", "serde"] }
-#arccstr = "1.1"
+arccstr = { version = "1.2", features = ["serde"] }
 
 [dev-dependencies]
 tokio-timer = "0.2"

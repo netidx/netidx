@@ -109,6 +109,7 @@ extern crate rand;
 #[macro_use]
 extern crate error_chain;
 extern crate uuid;
+extern crate arccstr;
 
 mod line_writer;
 mod utils;
@@ -119,9 +120,6 @@ pub mod resolver;
 pub mod resolver_server;
 pub mod publisher;
 pub mod subscriber;
-
-#[cfg(test)]
-extern crate tokio_timer;
 
 #[cfg(test)]
 mod tests;
