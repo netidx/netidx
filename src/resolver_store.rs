@@ -102,7 +102,7 @@ impl Store {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
-        let parent = &*parent;
+        let parent : &str = &*parent;
         let mut res = Vec::new();
         let paths =
             self.0.range::<str, (Bound<&str>, Bound<&str>)>(

@@ -28,14 +28,14 @@ impl Deref for Path {
     type Target = str;
 
     fn deref(&self) -> &str {
-        unsafe { from_utf8_unchecked(self.0.as_bytes()) }
+        unsafe { from_utf8_unchecked(self.0.to_bytes()) }
     }
 }
 
 impl From<String> for Path {
     fn from(s: String) -> Path {
         Path(ArcCStr::from(
-            CStr::from_bytes_with_null(
+            CStr::from_bytes_with_nul(
                 canonize(&s).as_bytes()
             ).unwrap()
         ))
@@ -45,7 +45,7 @@ impl From<String> for Path {
 impl<'a> From<&'a str> for Path {
     fn from(s: &str) -> Path {
         Path(ArcCStr::from(
-            CStr::from_bytes_with_null(
+            CStr::from_bytes_with_nul(
                 canonize(s).as_bytes()
             ).unwrap()
         ))
@@ -55,7 +55,7 @@ impl<'a> From<&'a str> for Path {
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {        
         Path(ArcCStr::from(
-            CStr::from_bytes_with_null(
+            CStr::from_bytes_with_nul(
                 canonize(&*s).as_bytes()
             ).unwrap()
         ))
