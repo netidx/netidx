@@ -93,6 +93,7 @@
 //! one might imagine, because `serde_json` is capable of producing
 //! gigabits per second of JSON on a single 8550U cpu core.
 
+#![forbid(unsafe_code)]
 #![feature(proc_macro, proc_macro_non_items, generators)]
 #![recursion_limit="2048"]
 
@@ -110,6 +111,7 @@ extern crate rand;
 extern crate error_chain;
 extern crate uuid;
 extern crate arccstr;
+extern crate immutable_chunkmap;
 
 mod line_writer;
 mod utils;

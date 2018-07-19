@@ -1,102 +1,149 @@
 use std::{
-    net::SocketAddr, iter::Iterator,
-    collections::{BTreeMap, HashMap, Bound, Bound::{Included, Excluded, Unbounded}},
+    net::SocketAddr, iter::Iterator, sync::Arc,
+    collections::{Bound, Bound::{Included, Excluded, Unbounded}},
 };
+use immutable_chunkmap::{map::Map, set::Set};
 use path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Published {
-    Empty,
-    One(SocketAddr, usize),
-    Many(HashMap<SocketAddr, usize>)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action { Publish, Unpublish }
+
+type Addrs = Arc<Set<SocketAddr>>;
+
+pub(crate) struct Store {
+    published: Map<Path, Addrs>,
+    addrs: Map<Addrs, usize>,
+    empty: Addrs
 }
 
-pub(crate) struct Store(BTreeMap<Path, Published>);
-
-impl Store {
-    pub(crate) fn new() -> Self { Store(BTreeMap::new()) }
-
-    pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr) {
-        let v = self.0.entry(path).or_insert(Published::One(addr, 1));
-        match *v {
-            Published::Empty => { *v = Published::One(addr, 1) },
-            Published::Many(ref mut set) => *set.entry(addr).or_insert(0) += 1,
-            Published::One(cur, i) =>
-                if cur == addr {
-                    *v = Published::One(cur, i + 1)
-                } else {
-                    let s =
-                        [(addr, 1), (cur, i)].iter().map(|&(a, i)| (a, i))
-                        .collect::<HashMap<_, _>>();
-                    *v = Published::Many(s)
-                }
-        }
-    }
-
-    pub(crate) fn unpublish(&mut self, path: &Path, addr: &SocketAddr) {
-        let remove =
-            match self.0.get_mut(path) {
-                None => false,
-                Some(mut v) => {
-                    match *v {
-                        Published::Empty => false,
-                        Published::One(a, ref mut i) => a == *addr && { *i -= 1; *i <= 0 },
-                        Published::Many(ref mut set) => {
-                            let remove = 
-                                match set.get_mut(addr) {
-                                    None => false,
-                                    Some(i) => {
-                                        *i -= 1;
-                                        *i <= 0
-                                    }
-                                };
-                            if remove { set.remove(&addr); }
-                            set.is_empty()
+fn cleanup_rm(s: Map<Path, Addrs>, p: &str) -> Map<Path, Addrs> {
+    let mut r = s.range(Included(p), Unbounded);
+    match r.next() {
+        None =>
+            match Path::dirname(p) {
+                None => s,
+                Some(parent) => cleanup_rm(s, parent)
+            },
+        Some((_, pv)) => {
+            if pv.len() != 0  { s }
+            else {
+                match r.next() {
+                    None => {
+                        let s = s.remove(p).0;
+                        match Path::dirname(p) {
+                            None => s,
+                            Some(parent) => cleanup_rm(s, parent)
                         }
-                    }
-                }
-            };
-        if remove {
-            self.0.remove(path);
-            // remove parents that have no further children
-            let mut p : &str = path.as_ref();
-            loop {
-                match Path::dirname(p) {
-                    None => break,
-                    Some(parent) => {
-                        let remove = {
-                            let mut r =
-                                self.0.range::<str, (Bound<&str>, Bound<&str>)>(
-                                    (Included(parent), Unbounded)
-                                );
-                            match r.next() {
-                                None => false, // parent doesn't exist, probably a bug
-                                Some((_, parent_v)) => {
-                                    if parent_v != &Published::Empty { break; }
-                                    else {
-                                        match r.next() {
-                                            None => true,
-                                            Some((sib, _)) => !sib.starts_with(parent)
-                                        }
-                                    }
-                                }
+                    },
+                    Some((sib, _)) => {
+                        if sib.starts_with(p) { s }
+                        else {
+                            let s = s.remove(p).0;
+                            match Path::dirname(p) {
+                                None => s,
+                                Some(parent) => cleanup_rm(s, parent)
                             }
-                        };
-                        if remove { self.0.remove(parent); }
-                        p = parent;
+                        }
                     }
                 }
             }
         }
     }
+}
 
-    pub(crate) fn resolve(&self, path: &Path) -> Vec<SocketAddr> {
+fn parents(
+    s: Map<Path, Addrs>, child: &str, empty: &Addrs
+) -> Map<Path, Addrs> {
+    match Path::dirname(child) {
+        None => s,
+        Some(dirname) =>
+            match s.get(dirname) {
+                Some(_) => s,
+                None => {
+                    let s = s.insert(Path::from(dirname), empty.clone());
+                    parents(s, dirname, empty)
+                }
+            }
+    }
+}
+
+impl Store {
+    pub(crate) fn new() -> Self {
+        Store { published: Map::new(), addrs: Map::new(), empty: Arc::new(Set::new()) }
+    }
+
+    pub(crate) fn change<E>(
+        &self, ops: E
+    ) -> Self where E: IntoIterator<Item=(Path, (Action, SocketAddr))> {
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut addrs = self.addrs.clone();
+        let published =
+            self.published.update_many(ops, &mut |p, (action, addr), current| {
+                let current = current.unwrap_or_else(|| &self.empty);
+                let (s, changed) = match action {
+                    Action::Publish => {
+                        let (s, present) = current.insert(addr);
+                        if !present && s.len() == 1 { added.push(p.clone()) }
+                        (s, !present)
+                    },
+                    Action::Unpublish => {
+                        let (s, present) = current.remove(&addr);
+                        if present && s.len() == 0 { removed.push(p.clone()) }
+                        (s, present)
+                    }
+                };
+                if !changed { Some(current.clone()) }
+                else {
+                    let mut res = None;
+                    addrs = addrs.update_many(
+                        &[(&s, ()), (&current, ())], &mut |k, (), cur| {
+                            if res.is_none() {
+                                match cur {
+                                    Some((a, i)) => {
+                                        res = Some(a.clone());
+                                        Some((a.clone(), i + 1))
+                                    },
+                                    None => {
+                                        if s.len() == 0 {
+                                            res = Some(self.empty.clone());
+                                            None
+                                        } else {
+                                            let s = Arc::new(s);
+                                            res = Some(s.clone());
+                                            Some((s, 1))
+                                        }
+                                    }
+                                }
+                            } else {
+                                match cur {
+                                    None => None,
+                                    Some((_, i)) => {
+                                        if i <= 1 { None }
+                                        else { Some((current.clone(), i - 1)) }
+                                    }
+                                }
+                            }
+                        });
+                    res
+                }
+            });
+        let published = added.iter().fold(published, |s, p| parents(s, p, &self.empty));
+        let published = removed.iter().fold(published, &cleanup_rm);
+        Store { published, addrs, empty: self.empty.clone() }
+    }
+
+    pub(crate) fn resolve(&self, path: &Path) -> Resolve {
         match self.0.get(path) {
-            None | Some(&Published::Empty) => vec![],
-            Some(&Published::One(a, _)) => vec![a],
-            Some(&Published::Many(ref a)) => {
-                let s = a.iter().map(|(a, _)| *a).collect::<Vec<_>>();
-                s
+            None | Some(Published::Empty) => Resolve::Empty,
+            Some(Published::One(a, _)) => Resolve::One(a),
+            Some(Published::Many(a)) => {
+                if a.len() == 2 {
+                    let mut i = a.into_iter();
+                    Resolve::Two(*i.next().unwrap().0, i.next().unwrap().0)
+                } else {
+                    Resolve::Many(a.into_iter().map(|(a, _)| *a).collect::<Vec<_>>())
+                }
             }
         }
     }
