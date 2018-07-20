@@ -33,7 +33,7 @@ impl Drop for AddrsInner {
 pub(crate) type Addrs = Arc<AddrsInner>;
 
 #[derive(Clone)]
-struct Store {
+pub(crate) struct Store {
     write: Arc<Mutex<Map<Path, Addrs>>>,
     read: Arc<RwLock<Map<Path, Addrs>>>
 }
@@ -145,33 +145,36 @@ impl Store {
         *self.read.write().unwrap() = up;
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> Vec<Addrs> {
-        match self.read.read().unwrap().get(path) {
-            None => Vec::new(),
-            Some(s) => s.into_iter().map(|a| *a).collect()
-        }
-    }
-
-    pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
-        let parent : &str = &*parent;
-        let mut res = Vec::new();
-        let read = self.read.read().unwrap();
-        let paths = read.range(Excluded(parent), Unbounded);
-        for (p, _) in paths {
-            let d =
-                match Path::dirname(p) {
-                    None => "/",
-                    Some(d) => d
-                };
-            if parent != d { break }
-            else { Path::basename(p).map(|p| res.push(Path::from(p))); }
-        }
-        res
-    }
-
     pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
         self.read.read().unwrap().clone().into_iter()
     }
+
+    pub(crate) fn read(&self) -> Map<Path, Addrs> {
+        self.read.read().unwrap().clone()
+    }
+}
+
+pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<Addrs> {
+    match t.get(path) {
+        None => Vec::new(),
+        Some(s) => s.into_iter().map(|a| *a).collect()
+    }
+}
+
+pub(crate) fn list(t: &Map<Path, Addrs>, parent: &Path) -> Vec<Path> {
+    let parent : &str = &*parent;
+    let mut res = Vec::new();
+    let paths = t.range(Excluded(parent), Unbounded);
+    for (p, _) in paths {
+        let d =
+            match Path::dirname(p) {
+                None => "/",
+                Some(d) => d
+            };
+        if parent != d { break }
+        else { Path::basename(p).map(|p| res.push(Path::from(p))); }
+    }
+    res
 }
 
 #[cfg(test)]

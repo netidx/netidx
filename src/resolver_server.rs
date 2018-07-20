@@ -14,7 +14,11 @@ use serde_json;
 use resolver_store::{Action, Store};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ClientHello(Option<(i64, SocketAddr)>);
+pub enum ClientHello {
+    ReadOnly,
+    ReadWrite { ttl: i64, write_addr: SocketAddr }
+}
+ 
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerHello { pub ttl_expired: bool }
@@ -104,7 +108,7 @@ impl Stops {
 #[derive(Clone)]
 struct Context {
     published: Store,
-    clients: Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>,
+    clients: Arc<RwLock<HashMap<SocketAddr, ClientInfo>>>,
     stops: Arc<Mutex<Stops>>
 }
 
@@ -116,11 +120,6 @@ impl Context {
         self.published.change(client.published.iter().map(|p| {
             (p, (Action::Unpublish, client.addr))
         }))
-    }
-
-    fn resolve(&self, path: &Path) -> FromResolver {
-        if !path.is_absolute() { FromResolver::Error("resolve relative path".into()) }
-        else { FromResolver::Resolved(self.published.resolve(path)) }
     }
 
     fn publish(
@@ -147,13 +146,6 @@ impl Context {
         }));
         FromResolver::Unpublished
     }
-
-    fn list(&self, parent: &Path) -> FromResolver {
-        if !parent.is_absolute() {
-            return FromResolver::Error("list relative path".into())
-        }
-        FromResolver::List(self.published.list(parent))
-    }
 }
 
 #[async]
@@ -161,6 +153,8 @@ fn handle_client(
     ctx: Context, s: TcpStream, server_stop: oneshot::Receiver<()>
 ) -> result::Result<(), ()> {
     enum M { Stop, Line(String) }
+    let addr = s.peer_addr().map_err(|_| ())?;
+    s.set_nodelay(true).map_err(|_| ())?;
     let (rx, mut tx) = s.split();
     let msgs =
         tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
@@ -170,26 +164,31 @@ fn handle_client(
             Err(..) => return Err(()),
             Ok((None, _)) => return Err(()),
             Ok((Some(M::Stop), _)) => return Ok(()),
-            Ok((Some(M::Line(l)), msgs)) => {
-                let h = serde_json::from_str::<ClientHello>(&l).map_err(|_| ())?;
-                if h.ttl <= 0 || h.ttl > 3600 { return Err(()) }
-                (h, msgs)
-            }
+            Ok((Some(M::Line(l)), msgs)) =>
+                (serde_json::from_str::<ClientHello>(&l).map_err(|_| ())?, msgs)
         };
     let (client, client_stop, mut client_added) = {
         let (tx_stop, rx_stop) = oneshot::channel();
-        let (client, added, ttl_expired) = {
-            let mut t = ctx.0.read().unwrap();
-            match t.clients.get(&hello.uuid) {
-                None => (ClientInfo::new(hello.ttl as u64, tx_stop), false, true),
-                Some(client) => {
-                    let mut cl = client.0.lock().unwrap();
-                    cl.last = Instant::now();
-                    cl.stop = Some(tx_stop);
-                    (client.clone(), true, false)
+        let (client, added, ttl_expired) =
+            match hello {
+                ClientHello::ReadOnly =>
+                    (ClientInfo::new(addr, 120, tx_stop), false, false),
+                ClientHello::ReadWrite {ttl, write_addr} => {
+                    if ttl <= 0 || ttl > 3600 { return Err(()) }
+                    match ctx.clients.read().unwrap().get(&write_addr) {
+                        None => {
+                            let c = ClientInfo::new(write_addr, ttl as u64, tx_stop);
+                            (c, false, true)
+                        },
+                        Some(client) => {
+                            let mut cl = client.0.lock().unwrap();
+                            cl.last = Instant::now();
+                            cl.stop = Some(tx_stop);
+                            (client.clone(), true, false)
+                        }
+                    }
                 }
-            }
-        };
+            };
         tx = await!(send::<ServerHello>(tx, ServerHello { ttl_expired }))?;
         (client, rx_stop, added)
     };
@@ -221,7 +220,11 @@ fn handle_client(
                     ci.last = Instant::now();
                     if !client_added {
                         client_added = true;
-                        t.clients.insert(hello.uuid, client.clone());
+                        match hello {
+                            ClientHello::ReadOnly => return Err(()),
+                            ClientHello::ReadWrite {write_addr, ..} =>
+                                t.clients.insert(write_addr, client.clone());
+                        }
                     }
                     for m in batch.drain(0..) {
                         match m {
