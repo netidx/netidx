@@ -5,13 +5,13 @@ use tokio_timer::Interval;
 use std::{
     io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
     time::{Instant, Duration},
-    collections::{HashMap, HashSet}
+    collections::{HashMap, HashSet, BTreeSet}
 };
 use path::Path;
 use utils::{BatchItem, batched};
 use serde::Serialize;
 use serde_json;
-use resolver_store::Store;
+use resolver_store::{Action, Store};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientHello(Option<(i64, SocketAddr)>);
@@ -24,7 +24,8 @@ pub enum ToResolver {
     Resolve(Path),
     List(Path),
     Publish(Vec<Path>),
-    Unpublish(Vec<Path>)
+    Unpublish(Vec<Path>),
+    Clear
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -46,20 +47,22 @@ fn send<T: Serialize + 'static>(
 }
 
 struct ClientInfoInner {
+    addr: SocketAddr
     ttl: Duration,
     last: Instant,
-    published: HashSet<Path>,
+    published: BTreeSet<Path>,
     stop: Option<oneshot::Sender<()>>,
 }
 
 struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
 
 impl ClientInfo {
-    fn new(ttl: u64, stop: oneshot::Sender<()>) -> Self {
+    fn new(addr: SocketAddr, ttl: u64, stop: oneshot::Sender<()>) -> Self {
         let inner = ClientInfoInner {
+            addr,
             ttl: Duration::from_secs(ttl),
             last: Instant::now(),
-            published: HashSet::new(),
+            published: BTreeSet::new(),
             stop: Some(stop),
         };
         ClientInfo(Arc::new(Mutex::new(inner)))
@@ -98,54 +101,50 @@ impl Stops {
     }
 }
 
+#[derive(Clone)]
 struct Context {
-    published_write: Arc<Mutex<Store>>,
-    published_read: Arc<RwLock<Store>>,
+    published: Store,
     clients: Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>,
     stops: Arc<Mutex<Stops>>
 }
 
-impl ContextInner {
-    fn timeout_client(&mut self, client: &mut ClientInfoInner) {
+impl Context {
+    fn timeout_client(&self, client: &mut ClientInfoInner) {
         let mut stop = None;
         ::std::mem::swap(&mut client.stop, &mut stop);
         if let Some(stop) = stop { let _ = stop.send(()); }
-        for (ref path, ref published) in client.published.iter() {
-            match published {
-                Published::Empty => (),
-                Published::One(ref addr, i) =>
-                    for _ in 0..*i { self.published.unpublish(path, addr) },
-                Published::Many(ref set) =>
-                    for (addr, i) in set.iter() {
-                        for _ in 0..*i { self.published.unpublish(path, addr) }
-                    }
-            }
-        }
+        self.published.change(client.published.iter().map(|p| {
+            (p, (Action::Unpublish, client.addr))
+        }))
     }
 
     fn resolve(&self, path: &Path) -> FromResolver {
         if !path.is_absolute() { FromResolver::Error("resolve relative path".into()) }
-        else {
-            FromResolver::Resolved(self.published.resolve(path))
-        }
+        else { FromResolver::Resolved(self.published.resolve(path)) }
     }
 
     fn publish(
-        &mut self, path: Path, addr: SocketAddr, client: &mut ClientInfoInner
+        &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
     ) -> FromResolver {
-        if !path.is_absolute() {
+        paths.sort_unstable();
+        if !paths.iter().all(|p| p.is_absolute()) {
             return FromResolver::Error("publish relative path".into())
         }
-        self.published.publish(path.clone(), addr);
-        client.published.publish(path, addr);
+        for p in &paths { client.insert(p.clone()); }
+        self.published.change(paths.into_iter().map(|p| {
+            (p, (Action::Publish, client.addr))
+        }));
         FromResolver::Published
     }
 
     fn unpublish(
-        &mut self, path: Path, addr: SocketAddr, client: &mut ClientInfoInner
+        &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
     ) -> FromResolver {
-        self.published.unpublish(&path, &addr);
-        client.published.unpublish(&path, &addr);
+        paths.sort_unstable();
+        for p in &paths { client.published.remove(p); }
+        self.published.unpublish(paths.into_iter().map(|p| {
+            (p, (Action::Unpublish, client.addr))
+        }));
         FromResolver::Unpublished
     }
 
@@ -155,12 +154,6 @@ impl ContextInner {
         }
         FromResolver::List(self.published.list(parent))
     }
-}
-
-pub struct Context(Arc<RwLock<ContextInner>>);
-
-impl Clone for Context {
-    fn clone(&self) -> Self { Context(Arc::clone(&self.0)) }
 }
 
 #[async]
