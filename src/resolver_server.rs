@@ -5,20 +5,16 @@ use tokio_timer::Interval;
 use std::{
     io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
     time::{Instant, Duration},
-    collections::HashMap
+    collections::{HashMap, HashSet}
 };
-use uuid::Uuid;
 use path::Path;
 use utils::{BatchItem, batched};
 use serde::Serialize;
 use serde_json;
-use resolver_store::{Store, Published};
+use resolver_store::Store;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ClientHello {
-    pub ttl: i64, // seconds 1 - 3600
-    pub uuid: Uuid
-}
+pub struct ClientHello(Option<(i64, SocketAddr)>);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerHello { pub ttl_expired: bool }
@@ -26,9 +22,9 @@ pub struct ServerHello { pub ttl_expired: bool }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ToResolver {
     Resolve(Path),
-    Publish(Path, SocketAddr),
-    Unpublish(Path, SocketAddr),
-    List(Path)
+    List(Path),
+    Publish(Vec<Path>),
+    Unpublish(Vec<Path>)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -52,7 +48,7 @@ fn send<T: Serialize + 'static>(
 struct ClientInfoInner {
     ttl: Duration,
     last: Instant,
-    published: Store,
+    published: HashSet<Path>,
     stop: Option<oneshot::Sender<()>>,
 }
 
@@ -63,7 +59,7 @@ impl ClientInfo {
         let inner = ClientInfoInner {
             ttl: Duration::from_secs(ttl),
             last: Instant::now(),
-            published: Store::new(),
+            published: HashSet::new(),
             stop: Some(stop),
         };
         ClientInfo(Arc::new(Mutex::new(inner)))
@@ -102,10 +98,11 @@ impl Stops {
     }
 }
 
-struct ContextInner {
-    published: Store,
-    clients: HashMap<Uuid, ClientInfo>,
-    stops: Stops
+struct Context {
+    published_write: Arc<Mutex<Store>>,
+    published_read: Arc<RwLock<Store>>,
+    clients: Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>,
+    stops: Arc<Mutex<Stops>>
 }
 
 impl ContextInner {

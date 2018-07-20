@@ -1,6 +1,6 @@
 use std::{
-    net::SocketAddr, iter::Iterator, sync::{Arc, Weak, Mutex},
-    collections::{Bound, Bound::{Included, Excluded, Unbounded}, HashSet, HashMap},
+    net::SocketAddr, iter::Iterator, sync::{Arc, Weak, RwLock, Mutex},
+    collections::{Bound::{Included, Excluded, Unbounded}, HashSet, HashMap},
     ops::Deref,
 };
 use immutable_chunkmap::{map::Map, set::Set};
@@ -32,7 +32,11 @@ impl Drop for AddrsInner {
 
 pub(crate) type Addrs = Arc<AddrsInner>;
 
-pub(crate) struct Store(Map<Path, Addrs>);
+#[derive(Clone)]
+struct Store {
+    write: Arc<Mutex<Map<Path, Addrs>>>,
+    read: Arc<RwLock<Map<Path, Addrs>>>
+}
 
 fn parents_to_rm(s: &Map<Path, Addrs>, removed: HashSet<Path>) -> HashSet<Path> {
     let mut to_rm = HashSet::new();
@@ -85,20 +89,20 @@ fn parents_to_add(s: &Map<Path, Addrs>, children: HashSet<Path>) -> HashSet<Path
 impl Store {
     pub(crate) fn new() -> Self {
         Store {
-            published: Map::new(),
-            addrs: Set::new(),
-            empty: Arc::new(Set::new())
+            write: Arc::new(Mutex::new(Map::new())),
+            read: Arc::new(RwLock::new(Map::new()))
         }
     }
 
-    pub(crate) fn change<E>(
-        &self, ops: E
-    ) -> Self where E: IntoIterator<Item=(Path, (Action, SocketAddr))> {
+    pub(crate) fn change<E>(&self, ops: E)
+    where E: IntoIterator<Item=(Path, (Action, SocketAddr))>
+    {
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let published = {
+        let mut write = self.write.lock().unwrap();
+        let up = {
             let mut addrs = ADDRS.lock();
-            self.0.update_many(ops, &mut |p, (action, addr), cur| {
+            write.update_many(ops, &mut |p, (action, addr), cur| {
                 let cur = cur.unwrap_or_else(|| &*EMPTY);
                 let (s, changed) = match action {
                     Action::Publish => {
@@ -129,23 +133,27 @@ impl Store {
             })
         };
         let parent_ops =
-            parents_to_rm(&published, removed).into_iter().map(|p| (p, false)).chain(
-                parents_to_add(&published, added).into_iter().map(|p| (p, true))
+            parents_to_rm(&up, removed).into_iter().map(|p| (p, false)).chain(
+                parents_to_add(&up, added).into_iter().map(|p| (p, true))
             );
-        let published =
-            published.update_many(parent_ops, &mut |p, add, _| {
+        let up =
+            up.update_many(parent_ops, &mut |p, add, _| {
                 if add { Some(p, EMPTY.clone()) }
                 else { None }
             });
-        Store(published)
+        *write = up.clone();
+        *self.read.write().unwrap() = up;
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> Option<Addrs> { self.0.get(path) }
+    pub(crate) fn resolve(&self, path: &Path) -> Option<Addrs> {
+        self.read.read().unwrap().get(path)
+    }
 
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
         let parent : &str = &*parent;
         let mut res = Vec::new();
-        let paths = self.0.range(Excluded(parent), Unbounded);
+        let read = self.read.read().unwrap();
+        let paths = read.range(Excluded(parent), Unbounded);
         for (p, _) in paths {
             let d =
                 match Path::dirname(p) {
@@ -159,7 +167,7 @@ impl Store {
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
-        self.0.into_iter()
+        self.read.read().unwrap().clone().into_iter()
     }
 }
 
