@@ -1,75 +1,94 @@
 use std::{
-    net::SocketAddr, iter::Iterator, sync::Arc,
-    collections::{Bound, Bound::{Included, Excluded, Unbounded}},
+    net::SocketAddr, iter::Iterator, sync::{Arc, Weak, Mutex},
+    collections::{Bound, Bound::{Included, Excluded, Unbounded}, HashSet, HashMap},
+    ops::Deref,
 };
 use immutable_chunkmap::{map::Map, set::Set};
 use path::Path;
 
+lazy_static! {
+    static ref EMPTY: Addrs = Arc::new(Set::new());
+    static ref ADDRS: Mutex<HashMap<Set<SocketAddr>, Weak<AddrsInner>>> =
+        Mutex::new(HashMap::new());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action { Publish, Unpublish }
 
-type Addrs = Arc<Set<SocketAddr>>;
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct AddrsInner(Set<SocketAddr>);
 
-pub(crate) struct Store {
-    published: Map<Path, Addrs>,
-    addrs: Map<Addrs, usize>,
-    empty: Addrs
+impl Deref for AddrsInner {
+    type Target = Set<SocketAddr>;
+    fn deref(&self) -> &Set<SocketAddr> { &self.0 }
 }
 
-fn cleanup_rm(s: Map<Path, Addrs>, p: &str) -> Map<Path, Addrs> {
-    let mut r = s.range(Included(p), Unbounded);
-    match r.next() {
-        None =>
-            match Path::dirname(p) {
-                None => s,
-                Some(parent) => cleanup_rm(s, parent)
-            },
-        Some((_, pv)) => {
-            if pv.len() != 0  { s }
-            else {
-                match r.next() {
-                    None => {
-                        let s = s.remove(p).0;
-                        match Path::dirname(p) {
-                            None => s,
-                            Some(parent) => cleanup_rm(s, parent)
-                        }
-                    },
-                    Some((sib, _)) => {
-                        if sib.starts_with(p) { s }
-                        else {
-                            let s = s.remove(p).0;
-                            match Path::dirname(p) {
-                                None => s,
-                                Some(parent) => cleanup_rm(s, parent)
-                            }
-                        }
+impl Drop for AddrsInner {
+    fn drop(&mut self) {
+        let mut addrs = ADDRS.lock();
+        addrs.remove(&self.0)
+    }
+}
+
+type Addrs = Arc<AddrsInner>;
+
+pub(crate) struct Store(Map<Path, Addrs>);
+
+fn parents_to_rm(s: &Map<Path, Addrs>, removed: HashSet<Path>) -> HashSet<Path> {
+    let mut to_rm = HashSet::new();
+    for p in removed.drain() {
+        let mut p : &str = p.as_ref();
+        loop {
+            let mut r = s.range(Included(p), Unbounded);
+            if let Some((_, pv)) = r.next() {
+                if pv.len() != 0 { break }
+                else {
+                    match r.next() {
+                        Some((sib, _)) if sib.starts_with(p) => break,
+                        None | Some(_) => to_rm.insert(Path::from(p))
                     }
                 }
             }
+            match Path::dirname(p) {
+                Some(parent) => p = parent,
+                None => break
+            }
         }
     }
+    to_rm
 }
 
-fn parents(
-    s: Map<Path, Addrs>, child: &str, empty: &Addrs
-) -> Map<Path, Addrs> {
-    match Path::dirname(child) {
-        None => s,
-        Some(dirname) =>
-            match s.get(dirname) {
-                Some(_) => s,
-                None => {
-                    let s = s.insert(Path::from(dirname), empty.clone());
-                    parents(s, dirname, empty)
-                }
+fn parents_to_add(s: &Map<Path, Addrs>, children: HashSet<Path>) -> HashSet<Path> {
+    let mut to_add = HashSet::new();
+    for child in children.drain() {
+        let mut child : &str = child.as_ref();
+        loop {
+            match Path::dirname(child) {
+                None => break,
+                Some(dirname) =>
+                    match s.get(dirname) {
+                        Some(_) => break,
+                        None => {
+                            if to_add.contains(dirname) { break }
+                            else {
+                                to_add.insert(Path::from(dirname));
+                                child = dirname;
+                            }
+                        }
+                    }
             }
+        }
     }
+    to_add
 }
 
 impl Store {
     pub(crate) fn new() -> Self {
-        Store { published: Map::new(), addrs: Map::new(), empty: Arc::new(Set::new()) }
+        Store {
+            published: Map::new(),
+            addrs: Set::new(),
+            empty: Arc::new(Set::new())
+        }
     }
 
     pub(crate) fn change<E>(
@@ -77,60 +96,48 @@ impl Store {
     ) -> Self where E: IntoIterator<Item=(Path, (Action, SocketAddr))> {
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let mut addrs = self.addrs.clone();
-        let published =
-            self.published.update_many(ops, &mut |p, (action, addr), current| {
-                let current = current.unwrap_or_else(|| &self.empty);
+        let published = {
+            let mut addrs = ADDRS.lock();
+            self.0.update_many(ops, &mut |p, (action, addr), cur| {
+                let cur = cur.unwrap_or_else(|| &*EMPTY);
                 let (s, changed) = match action {
                     Action::Publish => {
-                        let (s, present) = current.insert(addr);
+                        let (s, present) = cur.insert(addr);
                         if !present && s.len() == 1 { added.push(p.clone()) }
                         (s, !present)
                     },
                     Action::Unpublish => {
-                        let (s, present) = current.remove(&addr);
+                        let (s, present) = cur.remove(&addr);
                         if present && s.len() == 0 { removed.push(p.clone()) }
                         (s, present)
                     }
                 };
-                if !changed { Some(current.clone()) }
+                if !changed { Some(cur.clone()) }
                 else {
-                    let mut res = None;
-                    addrs = addrs.update_many(
-                        &[(&s, ()), (&current, ())], &mut |k, (), cur| {
-                            if res.is_none() {
-                                match cur {
-                                    Some((a, i)) => {
-                                        res = Some(a.clone());
-                                        Some((a.clone(), i + 1))
-                                    },
-                                    None => {
-                                        if s.len() == 0 {
-                                            res = Some(self.empty.clone());
-                                            None
-                                        } else {
-                                            let s = Arc::new(s);
-                                            res = Some(s.clone());
-                                            Some((s, 1))
-                                        }
-                                    }
-                                }
-                            } else {
-                                match cur {
-                                    None => None,
-                                    Some((_, i)) => {
-                                        if i <= 1 { None }
-                                        else { Some((current.clone(), i - 1)) }
-                                    }
-                                }
+                    if s.len() == 0 { Some(EMPTY.clone()) }
+                    else {
+                        match addrs.get(&s) {
+                            Some(s) => Some(s.upgrade().unwrap()),
+                            None => {
+                                let a = Arc::new(AddrsInner(s.clone()));
+                                addrs.insert(s, a.downgrade());
+                                Some(a)
                             }
-                        });
-                    res
+                        }
+                    }
                 }
+            })
+        };
+        let parent_ops =
+            parents_to_rm(&published, removed).into_iter().map(|p| (p, false)).chain(
+                parents_to_add(&published, added).into_iter().map(|p| (p, true))
+            );
+        let published =
+            published.update_many(parent_ops, &mut |p, add, _| {
+                if add { Some(p, EMPTY.clone()) }
+                else { None }
             });
-        let published = added.iter().fold(published, |s, p| parents(s, p, &self.empty));
-        let published = removed.iter().fold(published, &cleanup_rm);
-        Store { published, addrs, empty: self.empty.clone() }
+        Store(published)
     }
 
     pub(crate) fn resolve(&self, path: &Path) -> Resolve {
