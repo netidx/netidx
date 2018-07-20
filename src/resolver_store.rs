@@ -16,7 +16,7 @@ lazy_static! {
 pub(crate) enum Action { Publish, Unpublish }
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-struct AddrsInner(Set<SocketAddr>);
+pub(crate) struct AddrsInner(Set<SocketAddr>);
 
 impl Deref for AddrsInner {
     type Target = Set<SocketAddr>;
@@ -30,7 +30,7 @@ impl Drop for AddrsInner {
     }
 }
 
-type Addrs = Arc<AddrsInner>;
+pub(crate) type Addrs = Arc<AddrsInner>;
 
 pub(crate) struct Store(Map<Path, Addrs>);
 
@@ -140,28 +140,12 @@ impl Store {
         Store(published)
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> Resolve {
-        match self.0.get(path) {
-            None | Some(Published::Empty) => Resolve::Empty,
-            Some(Published::One(a, _)) => Resolve::One(a),
-            Some(Published::Many(a)) => {
-                if a.len() == 2 {
-                    let mut i = a.into_iter();
-                    Resolve::Two(*i.next().unwrap().0, i.next().unwrap().0)
-                } else {
-                    Resolve::Many(a.into_iter().map(|(a, _)| *a).collect::<Vec<_>>())
-                }
-            }
-        }
-    }
+    pub(crate) fn resolve(&self, path: &Path) -> Option<Addrs> { self.0.get(path) }
 
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
         let parent : &str = &*parent;
         let mut res = Vec::new();
-        let paths =
-            self.0.range::<str, (Bound<&str>, Bound<&str>)>(
-                (Excluded(parent), Unbounded)
-            );
+        let paths = self.0.range(Excluded(parent), Unbounded);
         for (p, _) in paths {
             let d =
                 match Path::dirname(p) {
@@ -174,8 +158,8 @@ impl Store {
         res
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Published)> {
-        self.0.iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
+        self.0.into_iter()
     }
 }
 
