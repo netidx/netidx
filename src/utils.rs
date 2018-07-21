@@ -1,5 +1,5 @@
 use futures::prelude::*;
-use std::{sync::Arc, mem};
+use std::{sync::Arc, mem, ops::{Generator, GeneratorState}};
 
 #[derive(Debug, Clone)]
 pub struct Encoded(Arc<Vec<u8>>);
@@ -76,6 +76,43 @@ impl<S: Stream> Stream for Batched<S> {
                 self.error = Some(e);
                 Ok(Async::Ready(Some(BatchItem::EndBatch)))
             }
+        }
+    }
+}
+
+// stuff imported from futures await so that we can sometimes write a
+// manual generator and use it as a future
+
+pub trait IsResult {
+    type Ok;
+    type Err;
+
+    fn into_result(self) -> Result<Self::Ok, Self::Err>;
+}
+
+impl<T, E> IsResult for Result<T, E> {
+    type Ok = T;
+    type Err = E;
+
+    fn into_result(self) -> Result<Self::Ok, Self::Err> { self }
+}
+
+pub enum uninhabited {}
+
+pub struct GenFuture<T>(pub T);
+
+impl<T> Future for GenFuture<T>
+where T: Generator<Yield = Async<uninhabited>>,
+      T::Return: IsResult,
+{
+    type Item = <T::Return as IsResult>::Ok;
+    type Error = <T::Return as IsResult>::Err;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match unsafe { self.0.resume() } {
+            GeneratorState::Yielded(Async::NotReady) => Ok(Async::NotReady),
+            GeneratorState::Yielded(Async::Ready(u)) => match u {},
+            GeneratorState::Complete(e) => e.into_result().map(Async::Ready),
         }
     }
 }

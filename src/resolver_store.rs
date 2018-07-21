@@ -64,7 +64,7 @@ fn parents_to_rm(s: &Map<Path, Addrs>, removed: HashSet<Path>) -> HashSet<Path> 
 
 fn parents_to_add(s: &Map<Path, Addrs>, children: HashSet<Path>) -> HashSet<Path> {
     let mut to_add = HashSet::new();
-    for child in children.drain() {
+    for child in children.into_iter() {
         let mut child : &str = child.as_ref();
         loop {
             match Path::dirname(child) {
@@ -94,16 +94,23 @@ impl Store {
         }
     }
 
-    pub(crate) fn change<E>(&self, ops: E)
+    pub(crate) fn change<E>(&self, ops: E) -> Vec<Path>
     where E: IntoIterator<Item=(Path, (Action, SocketAddr))>
     {
+        let mut paths = Vec::new();
         let mut added = Vec::new();
         let mut removed = Vec::new();
         let mut write = self.write.lock().unwrap();
         let up = {
             let mut addrs = ADDRS.lock();
             write.update_many(ops, &mut |p, (action, addr), cur| {
-                let cur = cur.unwrap_or_else(|| &*EMPTY);
+                let (p, cur) = match cur {
+                    None => (p, &*EMPTY),
+                    Some((p, cur)) => {
+                        paths.push(p.clone());
+                        (p.clone(), cur)
+                    }
+                };
                 let (s, changed) = match action {
                     Action::Publish => {
                         let (s, present) = cur.insert(addr);
@@ -116,16 +123,16 @@ impl Store {
                         (s, present)
                     }
                 };
-                if !changed { Some(cur.clone()) }
+                if !changed { Some((p, cur.clone())) }
                 else {
-                    if s.len() == 0 { Some(EMPTY.clone()) }
+                    if s.len() == 0 { Some((p, EMPTY.clone())) }
                     else {
                         match addrs.get(&s) {
-                            Some(s) => Some(s.upgrade().unwrap()),
+                            Some(s) => Some((p, s.upgrade().unwrap())),
                             None => {
                                 let a = Arc::new(AddrsInner(s.clone()));
                                 addrs.insert(s, a.downgrade());
-                                Some(a)
+                                Some((p, a))
                             }
                         }
                     }
@@ -134,7 +141,7 @@ impl Store {
         };
         let parent_ops =
             parents_to_rm(&up, removed).into_iter().map(|p| (p, false)).chain(
-                parents_to_add(&up, added).into_iter().map(|p| (p, true))
+                parents_to_add(&up, added).iter().map(|p| (p, true))
             );
         let up =
             up.update_many(parent_ops, &mut |p, add, _| {
@@ -143,15 +150,14 @@ impl Store {
             });
         *write = up.clone();
         *self.read.write().unwrap() = up;
+        paths
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
         self.read.read().unwrap().clone().into_iter()
     }
 
-    pub(crate) fn read(&self) -> Map<Path, Addrs> {
-        self.read.read().unwrap().clone()
-    }
+    pub(crate) fn read(&self) -> Map<Path, Addrs> { self.read.read().unwrap().clone() }
 }
 
 pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<Addrs> {
