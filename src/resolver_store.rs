@@ -150,12 +150,11 @@ impl Store {
             });
         *write = up.clone();
         let old = {
-            /* overwriting read could result in a LOT of other Arcs
-            getting dropped. we want the write thread to pay for
-            that, so we need to make sure we do not hold the write
-            lock of the read tree when it happens.  so we ref the
-            current read tree before we update it, and then drop it
-            only once we have released the write lock. */
+            /* overwriting read could result in a LOT of Arcs getting
+            dropped, which could take a long time. We must not hold
+            the write lock on read (thereby blocking all reads) while
+            that happens, so we clone the old thing and only drop it
+            after releasing the lock. */
             let mut read = self.read.write().unwrap();
             let old = read.clone();
             *read = up;
