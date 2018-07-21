@@ -289,7 +289,7 @@ fn client_loop(
             BatchItem::EndBatch => {
                 let mut ci = client.0.lock().unwrap();
                 let mut store = ctx.store.read();
-                ci.last = Instant::now();
+                ci.timeout.unbounded_send(ci.ttl).map_err(|_| ())?;
                 for m in batch.drain(0..) {
                     match m {
                         ToResolver::Publish(paths) => {
