@@ -118,10 +118,20 @@ impl Stops {
 struct Context {
     published: Store,
     clients: Arc<RwLock<HashMap<SocketAddr, ClientInfo>>>,
-    stops: Arc<Mutex<Stops>>
+    stops: Arc<Mutex<Stops>>,
+    connections: Arc<Mutex<usize>>,
 }
 
 impl Context {
+    fn new() -> Self {
+        Context {
+            published: Store::new(),
+            clients: Arc::new(RwLock::new(HashMap::new())),
+            stops: Arc::new(Mutex::new()),
+            connections: Arc::new(Mutex::new(0))
+        }
+    }
+
     fn timeout_client(&self, client: &mut ClientInfoInner) {
         let mut stop = None;
         ::std::mem::swap(&mut client.stop, &mut stop);
@@ -325,6 +335,7 @@ fn client_loop(
 fn start_client_loop(ctx: Context, s: TcpStream) -> result::Result<(), ()> {
     let (server_stop, client) = ctx.stops.lock().unwrap().make();
     let _ = await!(client_loop(ctx.clone(), s, server_stop));
+    *ctx.connections.lock().unwrap() -= 1;
     ctx.stops.lock().unwrap().remove(&client);
     Ok(())
 }
@@ -332,30 +343,31 @@ fn start_client_loop(ctx: Context, s: TcpStream) -> result::Result<(), ()> {
 #[async]
 fn accept_loop(
     addr: SocketAddr,
+    max_connections: usize,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<()>,
 ) -> result::Result<(), ()> {
-    let t : Context =
-        Context(Arc::new(RwLock::new(ContextInner {
-            published: Store::new(),
-            clients: HashMap::new(),
-            stops: Stops::new(),
-        })));
+    let t = Context::new();
     enum M { Stop, Client(TcpStream) }
     let msgs =
         TcpListener::bind(&addr).map_err(|_| ())?
         .incoming().map_err(|_| ()).map(|c| M::Client(c))
         .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
     let _ = ready.send(());
-    spawn(client_scavenger(t.clone(), t.0.write().unwrap().stops.make().0));
     #[async]
     for msg in msgs {
         match msg {
-            M::Client(client) => spawn(start_client(t.clone(), client)),
+            M::Client(client) => {
+                let mut connections = t.connections.lock().unwrap();
+                *connections += 1;
+                if *connections < max_connections {
+                    spawn(start_client_loop(t.clone(), client));
+                }
+            },
             M::Stop => break,
         }
     }
-    t.stops.lock().unwrap().stop()
+    t.stops.lock().unwrap().stop();
     Ok(())
 }
 
@@ -373,10 +385,10 @@ use error::*;
 
 impl Server {
     #[async]
-    pub fn new(addr: SocketAddr) -> Result<Server> {
+    pub fn new(addr: SocketAddr, max_connections: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        spawn(accept_loop(addr, recv_stop, send_ready));
+        spawn(accept_loop(addr, max_connections, recv_stop, send_ready));
         await!(recv_ready).map_err(|_| Error::from("ipc error"))?;
         Ok(Server(Some(send_stop)))
     }
