@@ -4,8 +4,7 @@ use tokio_io::io::{WriteHalf, write_all};
 use tokio_timer::Delay;
 use std::{
     io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
-    time::{Instant, Duration},
-    collections::{HashMap, BTreeSet}
+    time::{Instant, Duration}, mem::swap, collections::{HashMap, BTreeSet}
 };
 use path::Path;
 use utils::{BatchItem, batched, GenFuture};
@@ -134,7 +133,7 @@ impl Context {
 
     fn timeout_client(&self, client: &mut ClientInfoInner) {
         let mut stop = None;
-        ::std::mem::swap(&mut client.stop, &mut stop);
+        swap(&mut client.stop, &mut stop);
         if let Some(stop) = stop { let _ = stop.send(()); }
         if client.published.len() > 0 {
             self.published.change(client.published.iter().map(|p| {
@@ -259,6 +258,11 @@ fn client_loop(
                             let mut cl = client.0.lock().unwrap();
                             cl.ttl = ttl;
                             cl.timeout.unbounded_send(ttl).map_err(|_| ())?;
+                            let mut old_stop = None;
+                            swap(&mut cl.stop, old_stop);
+                            if let Some(old_stop) = old_stop {
+                                let _ = old_stop.send(());
+                            }
                             cl.stop = Some(tx_stop);
                             (client.clone(), true, false)
                         }
