@@ -1,7 +1,10 @@
+cargo-features = ["edition"]
+
 [package]
 name = "json-pubsub"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 serde = "1.0"
@@ -11,8 +14,9 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = "0.1"
 tokio-io = "0.1"
 tokio-timer = "0.2"
+tokio-async-await = "0.1"
 futures = "0.1"
-futures-await = "0.1"
+#futures-await = "0.1"
 rand = "0.4"
 error-chain = "0.11"
 uuid = { version = "0.6", features = ["v4", "serde"] }
