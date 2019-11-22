@@ -1,4 +1,3 @@
-use arccstr::ArcCStr;
 use std::{
     borrow::Borrow, ops::Deref, convert::{AsRef, From},
     ffi::CStr, str::from_utf8_unchecked
@@ -7,18 +6,9 @@ use std::{
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
 
-// invariant: The contents of the ArcCstr are always valid UTF8.
-// invariant: The only valid UTF8 code point containing NULL is the code point for NULL
-// null characters aren't really useful in path anyway, so it's not a
-// big problem to disallow them (filter them out).
-
-/// A path in the json-pubsub namespace. This is stored as an ArcCstr,
-/// so clone is virtually free, and the representation is very
-/// compact. The only restiction is that NULL characters are not
-/// allowed in the path, they will be removed on creation. Since the
-/// only inputs are valid utf8, it can be derefed to a str at no cost.
+/// A path in the json-pubsub namespace. Paths are immutable and reference counted.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Path(ArcCStr);
+pub struct Path(Arc<str>);
 
 impl Borrow<str> for Path {
     fn borrow(&self) -> &str { &*self }
@@ -28,42 +18,49 @@ impl Deref for Path {
     type Target = str;
 
     fn deref(&self) -> &str {
-        unsafe { from_utf8_unchecked(self.0.to_bytes()) }
+        self.0.as_str()
     }
 }
 
 impl From<String> for Path {
     fn from(s: String) -> Path {
-        Path(ArcCStr::from(
-            CStr::from_bytes_with_nul(
-                canonize(&s).as_bytes()
-            ).unwrap()
-        ))
+        if is_canonical(&s) {
+            Path(Arc::from(s.as_str()))
+        } else {
+            Path(Arc::from(canonize(&s).as_str()))
+        }
     }
 }
 
 impl<'a> From<&'a str> for Path {
     fn from(s: &str) -> Path {
-        Path(ArcCStr::from(
-            CStr::from_bytes_with_nul(
-                canonize(s).as_bytes()
-            ).unwrap()
-        ))
+        if is_canonical(s) {
+            Path(Arc::from(s))
+        } else {
+            Path(Arc::from(canonize(s).as_str()))
+        }
     }
 }
 
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {        
-        Path(ArcCStr::from(
-            CStr::from_bytes_with_nul(
-                canonize(&*s).as_bytes()
-            ).unwrap()
-        ))
+        if is_canonical(s.as_str()) {
+            Path(Arc::from(s))
+        } else {
+            Path(Arc::from(canonize(&*s).as_str()))
+        }
     }
 }
 
+fn is_canonical(s: &str) -> bool {
+    for _ in Path::parts(s).filter(|p| *p == "") {
+        return false;
+    }
+    true
+}
+
 fn canonize(s: &str) -> String {
-    let mut res = s.replace("\0", "");
+    let mut res = String::with_capacity(s.len());
     if s.len() > 0 {
         if s.starts_with(SEP) { res.push(SEP) }
         let mut first = true;
@@ -73,7 +70,6 @@ fn canonize(s: &str) -> String {
             res.push_str(p);
         }
     }
-    res.push('\0');
     res
 }
 
@@ -111,7 +107,7 @@ impl Path {
         let other = other.as_ref();
         if other.len() == 0 { self.clone() }
         else {
-            let mut res = String::with_capacity(self.len() + other.len() + 1);
+            let mut res = String::with_capacity(self.len() + other.len());
             res.push_str(&self);
             res.push(SEP);
             res.push_str(other);
