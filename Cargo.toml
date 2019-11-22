@@ -1,7 +1,10 @@
+cargo-features = ["edition"]
+
 [package]
 name = "json-pubsub"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 async-std = { version = "1.1", features = ["unstable"] }
@@ -14,5 +17,4 @@ rand = "0.7"
 error-chain = "0.12"
 uuid = { version = "0.8", features = ["v4", "serde"] }
 lazy_static = "1.4"
-arccstr = "1.2"
 immutable-chunkmap = "0.5"
