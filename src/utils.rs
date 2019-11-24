@@ -1,3 +1,30 @@
+/*
+use async_std::{
+    futures::{self, Future},
+    sync::{Arc, Mutex},
+    pin::Pin,
+    task::{Context, Waker, Poll},
+};
+
+struct SharedInner<T> {
+    waiting: Vec<Waker>,
+    v: Option<T>
+}
+
+#[derive(Clone)]
+struct Shared<T>(Arc<Mutex<SharedInner<T>>>);
+
+impl<T> Future for Shared<T> where T: Clone {
+    type Output: T;
+
+    fn poll(self: Pin<&mut self>, cx: &mut Context) -> Poll<Self::Output> {
+        let t = self.0.lock().unwrap();
+        match t.v {
+            None => t.waiting.push(cx.
+        }
+    }
+}
+
 use futures::prelude::*;
 use std::{sync::Arc, mem, ops::{Generator, GeneratorState}};
 
@@ -116,3 +143,4 @@ where T: Generator<Yield = Async<uninhabited>>,
         }
     }
 }
+*/

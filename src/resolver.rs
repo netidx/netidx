@@ -1,14 +1,18 @@
-use futures::{prelude::*, sync::oneshot, sync::mpsc};
-use tokio::{self, spawn, prelude::*, net::TcpStream};
-use tokio_timer::{Interval, sleep};
-use std::{
-    result, io::BufReader, net::SocketAddr, mem,
-    collections::VecDeque, sync::{Arc, Weak, Mutex},
+use futures::{
+    future::{FutureExt, RemoteHandle},
+    channel::{mpsc, oneshot},
+};
+use async_std::{
+    result, mem, task, future,
+    io::BufReader,
+    net::{SocketAddr, TcpStream},
+    collections::VecDeque,
+    sync::{Arc, Weak, Mutex},
     time::{Duration, Instant},
 };
+use futures_codec::Framed;
+use futures_cbor_codec::Codec;
 use path::Path;
-use serde_json;
-use line_writer::LineWriter;
 use resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello};
 use resolver_store::{Store, Published};
 use uuid::Uuid;
@@ -17,48 +21,17 @@ use error::*;
 static TTL: u64 = 600;
 static LINGER: u64 = 10;
 
-struct ResolverInner {
-    waiting_reply: VecDeque<(ToResolver, oneshot::Sender<FromResolver>)>,
-    never_sent: VecDeque<(ToResolver, oneshot::Sender<FromResolver>)>,
-    published: Store,
-    our_id: Uuid,
-    address: SocketAddr,
-    notify: Option<mpsc::Sender<()>>,
-    dead: Option<oneshot::Sender<()>>,
-}
-
-impl Drop for ResolverInner {
-    fn drop(&mut self) {
-        let mut dead = None;
-        mem::swap(&mut dead, &mut self.dead);
-        if let Some(dead) = dead { let _ = dead.send(()); }
-    }
-}
+type FromCon = oneshot::Sender<Result<FromResolver>>;
+type ToCon = (ToResolver, FromCon);
 
 #[derive(Clone)]
-pub struct Resolver(Arc<Mutex<ResolverInner>>);
-
-#[derive(Clone)]
-struct ResolverWeak(Weak<Mutex<ResolverInner>>);
-
-impl ResolverWeak {
-    fn upgrade(&self) -> Option<Resolver> { self.0.upgrade().map(|r| Resolver(r)) }
-}
-
+struct Resolver(mpsc::Sender<ToCon>);
+ 
 impl Resolver {
     pub fn new(address: SocketAddr) -> Resolver {
-        let (tx, rx) = oneshot::channel();
-        let t = Resolver(Arc::new(Mutex::new(ResolverInner {
-            waiting_reply: VecDeque::new(),
-            never_sent: VecDeque::new(),
-            published: Store::new(),
-            our_id: Uuid::new_v4(),
-            address,
-            notify: None,
-            dead: Some(tx),
-        })));
-        spawn(heartbeat_loop(t.downgrade(), rx));
-        t
+        let (tx, rx) = mpsc::channel(10);
+        task::spawn(connection(rx, address));
+        Resolver(tx)
     }
 
     fn downgrade(&self) -> ResolverWeak { ResolverWeak(Arc::downgrade(&self.0)) }
@@ -265,75 +238,85 @@ fn connection_loop(
     Ok(())
 }
 
-#[async]
-fn start_connection(
-    t: ResolverWeak,
-    mut notify: mpsc::Receiver<()>
-) -> result::Result<(), ()> {
+async fn heartbeat_loop(r: ResolverWeak, rx: Receiver<()>) {
     loop {
-        let con = {
-            let mut backoff = 1;
-            loop {
-                match t.upgrade() {
-                    None => return Ok(()),
-                    Some(t) => {
-                        let addr = t.0.lock().unwrap().address;
-                        match await!(TcpStream::connect(&addr)) {
-                            Ok(con) => break con,
-                            Err(_) => {
-                                await!(sleep(Duration::from_secs(backoff)))
-                                    .map_err(|_| ())?;
-                                backoff += 1
-                            }
-                        }
+        let activity = rx.recv().map(|o| match o {
+            Some(()) => M::ClientActivity,
+            None => M::Stop
+        });
+        match activity.race(hb).race(dc).await {
+            M::Stop => break,
+            M::Activity => ()
+            M::TimeToHB => {
+                match r.upgrade() {
+                    None => break,
+                    Some(r) => {
+                        let _ = get_connection(&r);
                     }
                 }
             }
-        };
-        let _ = await!(connection_loop(t.clone(), con, notify));
-        match t.upgrade() {
-            None => return Ok(()),
-            Some(t) => {
-                let mut t = t.0.lock().unwrap();
-                if t.never_sent.len() == 0 || t.waiting_reply.len() == 0 {
-                    t.notify = None;
-                    return Ok(())
-                } else {
-                    let (tx, rx) = mpsc::channel(100);
-                    t.notify = Some(tx);
-                    notify = rx;
+            M::TimeToDC => {
+                match r.upgrade() {
+                    None => break,
+                    Some(r) => {
+                        let inner = r.lock().unwrap();
+                        inner.con = ConnectionState::NotConnected;
+                    }
                 }
             }
         }
     }
 }
 
-#[async]
-fn heartbeat_loop(t: ResolverWeak, dead: oneshot::Receiver<()>) -> result::Result<(), ()> {
-    enum M { Heartbeat, Stop }
-    let wake =
-        Interval::new(Instant::now(), Duration::from_secs(TTL / 2)).then(|r| match r {
-            Ok(_) => Ok(M::Heartbeat),
-            Err(_) => Err(())
-        });
-    let stop = dead.into_stream().then(|r| match r {
-        Ok(()) => Ok(M::Stop),
-        Err(_) => Err(())
-    });
-    #[async]
-    for msg in wake.select(stop) {
-        match msg {
-            M::Stop => break,
-            M::Heartbeat => {
-                let t = t.upgrade().ok_or_else(|| ())?;
-                let mut ti = t.0.lock().unwrap();
-                if ti.notify.is_none() {
-                    let (tx, rx) = mpsc::channel(100);
-                    ti.notify = Some(tx);
-                    spawn(start_connection(t.downgrade(), rx));
+async fn connect(addr: SocketAddr, our_id: Uuid, store: &Store) -> BufReader<TcpStream> {
+    let mut backoff = 0;
+    let backoff = move || {
+        backoff += 1
+        task::sleep(Duration::from_secs(backoff))
+    };
+    loop {
+        let mut con = {
+            loop {
+                match TcpStream::connect(&addr).await {
+                    Ok(con) => break con,
+                    Err(_) => backoff().await,
                 }
-            },
+            }
+        };
+        let hello = ClientHello {ttl: TTL as i64, uuid: our_id};
+        let msg = rmp_serde::to_vec(&hello);
+        match con.write_all(&msg).await {
+            Err(_) => backoff().await,
+            Ok(()) => {
+            }
         }
     }
-    Ok(())
+}
+
+async fn connection(rx: mpsc::Receiver<ToCon>, addr: SocketAddr) {
+    enum M {
+        TimeToHB,
+        TimeToDC,
+        Msg(ToCon),
+        Stop,
+    }
+    let our_id = Uuid::new_v4();
+    let published = Store::new();
+    let mut pending: VecDeque<FromCon> = VecDeque::new();
+    let mut con: Option<TcpStream> = None;
+    let ttl = Duration::from_secs(TTL / 2);
+    let linger = Duration::from_secs(LINGER);
+
+    loop {
+        let hb = future::ready(M::TimeToHB).delay(ttl);
+        let dc = future::ready(M::TimeToDC).delay(linger);
+        let msg = rx.next().map(|m| match m {
+            None => M::Stop,
+            Some(m) => M::Msg(m)
+        });
+
+        match hb.race(dc).race(msg) {
+            M::TimeToHB => 
+        }
+    }
 }
