@@ -153,7 +153,7 @@ impl Store {
     pub(crate) fn read(&self) -> Map<Path, Addrs> { self.0.load().clone() }
 }
 
-pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<Addrs> {
+pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<SocketAddr> {
     match t.get(path) {
         None => Vec::new(),
         Some(s) => s.into_iter().map(|a| *a).collect()
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_refcnt() {
-p        let mut store = Store::new();
+        let mut store = Store::new();
         let path = Path::from("/foo/bar/baz");
         let addr = "127.0.0.1:111".parse::<SocketAddr>().unwrap();
         store.publish(path.clone(), addr);

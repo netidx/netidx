@@ -286,7 +286,7 @@ fn client_loop(
         }
     };
     let msgs = msgs.select(client_stop.into_stream().map_err(|_| ()).map(|_| M::Stop));
-    let msgs = batched(msgs, 1000);
+    let msgs = batched(msgs, 100000);
     let mut batch : Vec<ToResolver> = Vec::new();
     let mut response : Vec<FromResolver> = Vec::new();
     #[async]
