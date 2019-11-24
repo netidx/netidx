@@ -91,43 +91,6 @@ impl Resolver {
     }
 }
 
-fn resend(
-    t: &ResolverWeak,
-    writer: &LineWriter<Vec<u8>, TcpStream>,
-    hello: &str
-) -> Result<usize> {
-    let ServerHello {ttl_expired} = serde_json::from_str::<ServerHello>(hello)?;
-    let t = t.upgrade().ok_or_else(|| Error::from("dropped"))?;
-    let mut t = t.0.lock().unwrap();
-    let mut resent = 0;
-    if ttl_expired {
-        for (path, published) in t.published.iter() {
-            match published {
-                Published::Empty => (),
-                Published::One(addr, n) => {
-                    resent += *n;
-                    let m = ToResolver::Publish(path.clone(), *addr);
-                    for _ in 0..*n { writer.write_one(serde_json::to_vec(&m)?) }
-                },
-                Published::Many(addrs) => {
-                    for (addr, n) in addrs.iter() {
-                        resent += n;
-                        let m = ToResolver::Publish(path.clone(), *addr);
-                        for _ in 0..*n { writer.write_one(serde_json::to_vec(&m)?) }
-                    }
-                }
-            }
-        }
-    }
-    while let Some((m, r)) = t.never_sent.pop_front() {
-        t.waiting_reply.push_back((m, r));
-    }
-    for (m, _) in t.waiting_reply.iter() {
-        writer.write_one(serde_json::to_vec(m)?);
-    }
-    Ok(resent)
-}
-
 #[async]
 fn connection_loop(
     t: ResolverWeak,
@@ -268,26 +231,63 @@ async fn heartbeat_loop(r: ResolverWeak, rx: Receiver<()>) {
     }
 }
 
-async fn connect(addr: SocketAddr, our_id: Uuid, store: &Store) -> BufReader<TcpStream> {
+type Con = Framed<TcpStream, Codec<FromResolver, ToResolver>>;
+
+async fn resend(hello: ServerHello, published: &Store, con: &mut Con) -> Result<usize> {
+    let mut resent = 0;
+    if ttl_expired {
+        let msgs = Vec::new();
+        for (path, published) in published.iter() {
+            match published {
+                Published::Empty => (),
+                Published::One(addr, n) => {
+                    resent += *n;
+                    for _ in 0..*n {
+                        msgs.push(ToResolver::Publish(path.clone(), *addr));
+                    }
+                },
+                Published::Many(addrs) => {
+                    for (addr, n) in addrs.iter() {
+                        resent += n;
+                        let m = ToResolver::Publish(path.clone(), *addr);
+                        for _ in 0..*n { writer.write_one(serde_json::to_vec(&m)?) }
+                    }
+                }
+            }
+        }
+    }
+    while let Some((m, r)) = t.never_sent.pop_front() {
+        t.waiting_reply.push_back((m, r));
+    }
+    for (m, _) in t.waiting_reply.iter() {
+        writer.write_one(serde_json::to_vec(m)?);
+    }
+    Ok(resent)
+}
+
+async fn connect(addr: SocketAddr, our_id: Uuid, store: &Store) -> Con {
     let mut backoff = 0;
-    let backoff = move || {
-        backoff += 1
-        task::sleep(Duration::from_secs(backoff))
-    };
     loop {
+        if backoff > 0 {
+            task::sleep(Duration::from_secs(backoff)).await;
+        }
+        backoff += 1;
         let mut con = {
             loop {
                 match TcpStream::connect(&addr).await {
                     Ok(con) => break con,
-                    Err(_) => backoff().await,
+                    Err(_) => (),
                 }
             }
         };
-        let hello = ClientHello {ttl: TTL as i64, uuid: our_id};
-        let msg = rmp_serde::to_vec(&hello);
-        match con.write_all(&msg).await {
-            Err(_) => backoff().await,
-            Ok(()) => {
+        let mut con = Framed::new(con, Codec::new());
+        match con.send(ClientHello {ttl: TTL as i64, uuid: our_id}).await {
+            Err(_) => (),
+            Ok(()) => match con.next() {
+                Err(_) => (),
+                Ok(hello_reply) => {
+                    
+                }
             }
         }
     }
