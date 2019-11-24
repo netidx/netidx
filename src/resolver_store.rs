@@ -1,3 +1,4 @@
+use crossbeam_arccell::ArcCell;
 use std::{
     net::SocketAddr, iter::Iterator, sync::{Arc, Weak, RwLock, Mutex},
     collections::{Bound::{Included, Excluded, Unbounded}, HashSet, HashMap},
@@ -8,8 +9,8 @@ use path::Path;
 
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Set::new());
-    static ref ADDRS: Mutex<HashMap<Set<SocketAddr>, Weak<AddrsInner>>> =
-        Mutex::new(HashMap::new());
+    static ref ADDRS: Arc<Mutex<HashMap<Set<SocketAddr>, Weak<AddrsInner>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,18 +26,16 @@ impl Deref for AddrsInner {
 
 impl Drop for AddrsInner {
     fn drop(&mut self) {
-        let mut addrs = ADDRS.lock();
-        addrs.remove(&self.0)
+        ADDRS.update(|addrs| addrs.remove(&self.0).0)
     }
 }
 
 pub(crate) type Addrs = Arc<AddrsInner>;
 
+// updates are serialized by the ADDRS lock, however reads may
+// continue while an update is in progress.
 #[derive(Clone)]
-pub(crate) struct Store {
-    write: Arc<Mutex<Map<Path, Addrs>>>,
-    read: Arc<RwLock<Map<Path, Addrs>>>
-}
+pub(crate) struct Store(ArcCell<Map<Path, Addrs>>);
 
 fn parents_to_rm(s: &Map<Path, Addrs>, removed: HashSet<Path>) -> HashSet<Path> {
     let mut to_rm = HashSet::new();
@@ -88,22 +87,18 @@ fn parents_to_add(s: &Map<Path, Addrs>, children: HashSet<Path>) -> HashSet<Path
 
 impl Store {
     pub(crate) fn new() -> Self {
-        Store {
-            write: Arc::new(Mutex::new(Map::new())),
-            read: Arc::new(RwLock::new(Map::new()))
-        }
+        Store(ArcCell::new(Map::new()))
     }
 
     pub(crate) fn change<E>(&self, ops: E) -> Vec<Path>
     where E: IntoIterator<Item=(Path, (Action, SocketAddr))>
     {
+        let addrs = ADDRS.lock();
         let mut paths = Vec::new();
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let mut write = self.write.lock().unwrap();
         let up = {
-            let mut addrs = ADDRS.lock();
-            write.update_many(ops, &mut |p, (action, addr), cur| {
+            self.0.load().update_many(ops, &mut |p, (action, addr), cur| {
                 let (p, cur) = match cur {
                     None => (p, &*EMPTY),
                     Some((p, cur)) => {
@@ -148,19 +143,8 @@ impl Store {
                 if add { Some(p, EMPTY.clone()) }
                 else { None }
             });
-        *write = up.clone();
-        let old = {
-            /* overwriting read could result in a LOT of Arcs getting
-            dropped, which could take a long time. We must not hold
-            the write lock on read (thereby blocking all reads) while
-            that happens, so we clone the old thing and only drop it
-            after releasing the lock. */
-            let mut read = self.read.write().unwrap();
-            let old = read.clone();
-            *read = up;
-            old
-        };
-        drop(old);
+        // this is safe because writes are serialized by the ADDRS lock
+        self.0.update(move |_| up);
         paths
     }
 
