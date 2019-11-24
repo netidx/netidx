@@ -93,66 +93,64 @@ impl Store {
     pub(crate) fn change<E>(&self, ops: E) -> Vec<Path>
     where E: IntoIterator<Item=(Path, (Action, SocketAddr))>
     {
-        let addrs = ADDRS.lock();
+        // this lock ensures that only one write can happen at a time
+        let addrs = ADDRS.lock().unwrap();
         let mut paths = Vec::new();
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let up = {
-            self.0.load().update_many(ops, &mut |p, (action, addr), cur| {
-                let (p, cur) = match cur {
-                    None => (p, &*EMPTY),
-                    Some((p, cur)) => {
-                        paths.push(p.clone());
-                        (p.clone(), cur)
-                    }
-                };
-                let (s, changed) = match action {
-                    Action::Publish => {
-                        let (s, present) = cur.insert(addr);
-                        if !present && s.len() == 1 { added.push(p.clone()) }
-                        (s, !present)
-                    },
-                    Action::Unpublish => {
-                        let (s, present) = cur.remove(&addr);
-                        if present && s.len() == 0 { removed.push(p.clone()) }
-                        (s, present)
-                    }
-                };
-                if !changed { Some((p, cur.clone())) }
+        let up = self.0.load().update_many(ops, &mut |p, (action, addr), cur| {
+            let (p, cur) = match cur {
+                None => (p, &*EMPTY),
+                Some((p, cur)) => {
+                    paths.push(p.clone());
+                    (p.clone(), cur)
+                }
+            };
+            let (s, changed) = match action {
+                Action::Publish => {
+                    let (s, present) = cur.insert(addr);
+                    if !present && s.len() == 1 { added.push(p.clone()) }
+                    (s, !present)
+                },
+                Action::Unpublish => {
+                    let (s, present) = cur.remove(&addr);
+                    if present && s.len() == 0 { removed.push(p.clone()) }
+                    (s, present)
+                }
+            };
+            if !changed { Some((p, cur.clone())) }
+            else {
+                if s.len() == 0 { Some((p, EMPTY.clone())) }
                 else {
-                    if s.len() == 0 { Some((p, EMPTY.clone())) }
-                    else {
-                        match addrs.get(&s) {
-                            Some(s) => Some((p, s.upgrade().unwrap())),
-                            None => {
-                                let a = Arc::new(AddrsInner(s.clone()));
-                                addrs.insert(s, a.downgrade());
-                                Some((p, a))
-                            }
+                    match addrs.get(&s) {
+                        Some(s) => Some((p, s.upgrade().unwrap())),
+                        None => {
+                            let a = Arc::new(AddrsInner(s.clone()));
+                            addrs.insert(s, a.downgrade());
+                            Some((p, a))
                         }
                     }
                 }
-            })
-        };
+            }
+        });
         let parent_ops =
             parents_to_rm(&up, removed).into_iter().map(|p| (p, false)).chain(
                 parents_to_add(&up, added).iter().map(|p| (p, true))
             );
-        let up =
-            up.update_many(parent_ops, &mut |p, add, _| {
-                if add { Some(p, EMPTY.clone()) }
-                else { None }
-            });
+        let up = up.update_many(parent_ops, &mut |p, add, _| {
+            if add { Some(p, EMPTY.clone()) }
+            else { None }
+        });
         // this is safe because writes are serialized by the ADDRS lock
         self.0.update(move |_| up);
         paths
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
-        self.read.read().unwrap().clone().into_iter()
+        self.0.load().clone().into_iter()
     }
 
-    pub(crate) fn read(&self) -> Map<Path, Addrs> { self.read.read().unwrap().clone() }
+    pub(crate) fn read(&self) -> Map<Path, Addrs> { self.0.load().clone() }
 }
 
 pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<Addrs> {
