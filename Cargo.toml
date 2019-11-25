@@ -11,7 +11,9 @@ async-std = { version = "1.1", features = ["unstable"] }
 serde = "1.0"
 serde_derive = "1.0"
 futures_codec = "0.3"
-futures_codec_cbor = "0.1"
+rmp = "0.8"
+rmpv = "0.4"
+rmp-serde = "0.14"
 rand = "0.7"
 error-chain = "0.12"
 uuid = { version = "0.8", features = ["v4", "serde"] }

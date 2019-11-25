@@ -13,7 +13,7 @@ use std::{
 };
 use async_std::{ prelude::*, task, future };
 use futures_codec::Framed;
-use futures_cbor_codec::Codec;
+use utils::MPCodec;
 use path::Path;
 use resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello};
 use error::*;
@@ -110,7 +110,7 @@ impl <R: Writeable> Resolver<R> {
     }
 }
 
-type Con = Framed<TcpStream, Codec<FromResolver, &ToResolver>>;
+type Con<'a> = Framed<TcpStream, MPCodec<&'a ToResolver, FromResolver>>;
 
 macro_rules! or_continue {
     (e:expr) => {
@@ -133,18 +133,18 @@ async fn connect(
         }
         backoff += 1;
         let mut con = or_continue!(TcpStream::connect(&addr).await);
-        let mut con = Framed::new(con, Codec::new());
+        let mut con = Framed::new(con, MPCodec::<ToResolver, FromResolver>::new());
         let hello = match publisher {
             None => ClientHello::ReadOnly,
             Some(write_addr) => ClientHello::ReadWrite {ttl: TTL, write_addr},
         };
-        or_continue!(con.send(&ClientHello {ttl: TTL as i64, uuid: our_id}).await);
+        or_continue!(con.send(&hello).await);
         let hello = or_continue!(con.next().await);
         if !ttl_expired {
             break con
         } else {
             let paths = published.iter().cloned().collect();
-            or_continue!(con.send(ToResolver::Publish(paths)).await);
+            or_continue!(con.send(&ToResolver::Publish(paths)).await);
             match or_continue!(con.next().await) {
                 FromResolver::Published => break con,
                 _ => continue

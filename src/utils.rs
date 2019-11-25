@@ -1,44 +1,79 @@
-/*
+use futures::prelude::*;
 use async_std::{
-    futures::{self, Future},
+    prelude::*,
     sync::{Arc, Mutex},
     pin::Pin,
     task::{Context, Waker, Poll},
 };
+use bytes::{BytesMut, BigEndian, ByteOrder};
+use futures_codec::{Encoder, Decoder};
+use std::{sync::Arc, mem, marker::PhantomData, io::{self, Write}, result::Result};
+use serde::{Serialize, de::DeserializeOwned};
 
-struct SharedInner<T> {
-    waiting: Vec<Waker>,
-    v: Option<T>
+struct BytesWriter<'a>(&'a mut BytesMut);
+
+impl Write for BytesWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+	self.bytes.extend(buf);
+	Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+	Ok(())
+    }
 }
 
-#[derive(Clone)]
-struct Shared<T>(Arc<Mutex<SharedInner<T>>>);
+static U64S: usize = mem::size_of::<u64>();
 
-impl<T> Future for Shared<T> where T: Clone {
-    type Output: T;
+struct MPEncode<T>(PhantomData<T>);
 
-    fn poll(self: Pin<&mut self>, cx: &mut Context) -> Poll<Self::Output> {
-        let t = self.0.lock().unwrap();
-        match t.v {
-            None => t.waiting.push(cx.
+impl<'a, T: Serialize + 'a> Encoder for MPEncode<T> {
+    type Item = &'a T;
+    type Error = rmp_serde::encode::Error;
+
+    fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if dst.capacity() < U64S {
+            dst.reserve(U64S * 20);
+        }
+        let mut header = dst.split_to(U64SZ);
+        rmp_serde::encode::write_named(BytesWriter(dst), src)?;
+        BigEndian::write_u64(&mut header, dst.len());
+        Ok(())
+    }
+}
+
+struct MPDecode<T>(PhantomData<T>);
+
+impl<T: DeserializeOwned> Decoder for MPDecode<T> {
+    type Item = T;
+    type Error = rmp_serde::decode::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < U64S {
+            Ok(None)
+        } else {
+            let len = BigEndian::read_u64(src);
+            if src.len() - U64S < len {
+                Ok(None)
+            } else {
+                src.advance(U64S);
+                let res = rmp_serde::decode::from_read(src);
+                src.advance(len);
+                res
+            }
         }
     }
 }
 
-use futures::prelude::*;
-use std::{sync::Arc, mem, ops::{Generator, GeneratorState}};
+pub struct MPCodec<T, F>(MPEncode<T>, MPDecode<F>);
 
-#[derive(Debug, Clone)]
-pub struct Encoded(Arc<Vec<u8>>);
-
-impl Encoded {
-    pub fn new(data: Vec<u8>) -> Self { Encoded(Arc::new(data)) }
+impl<T: Serialize, F: DeserializeOwned> MPCodec<T, F> {
+    fn new() -> MPCodec<T, F> {
+        MPCodec(MPEncode(PhantomData), MPDecode(PhantomData))
+    }
 }
 
-impl AsRef<[u8]> for Encoded {
-    fn as_ref(&self) -> &[u8] { self.0.as_ref().as_ref() }
-}
-
+/*
 pub(crate) fn batched<S: Stream>(stream: S, max: usize) -> Batched<S> {
     Batched {
         stream, max,
@@ -106,7 +141,9 @@ impl<S: Stream> Stream for Batched<S> {
         }
     }
 }
+*/
 
+/*
 // stuff imported from futures await so that we can sometimes write a
 // manual generator and use it as a future
 
