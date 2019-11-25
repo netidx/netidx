@@ -1,11 +1,14 @@
-use futures::{prelude::*, sync::oneshot, sync::mpsc};
-use tokio::{self, prelude::*, spawn, net::{TcpStream, TcpListener}};
-use tokio_io::io::{WriteHalf, write_all};
-use tokio_timer::Delay;
+use futures::{sync::oneshot, sync::mpsc};
 use std::{
-    io::BufReader, net::SocketAddr, sync::{Arc, RwLock, Mutex}, result,
-    time::{Instant, Duration}, mem::swap, collections::{HashMap, BTreeSet}
+    result,
+    mem::swap,
+    collections::{HashMap, BTreeSet},
+    sync::{Arc, RwLock, Mutex}
+    time::{Instant, Duration},
+    io::BufReader,
+    net::SocketAddr,
 };
+use async_std::{prelude::*, task, future};
 use path::Path;
 use utils::{BatchItem, batched, GenFuture};
 use serde::Serialize;

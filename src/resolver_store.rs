@@ -1,6 +1,6 @@
-use crossbeam_arccell::ArcCell;
+use crossbeam_arccell::{ArcCell, ArcCellGuard};
 use std::{
-    net::SocketAddr, iter::Iterator, sync::{Arc, Weak, RwLock, Mutex},
+    net::SocketAddr, sync::{Arc, Weak, Mutex},
     collections::{Bound::{Included, Excluded, Unbounded}, HashSet, HashMap},
     ops::Deref,
 };
@@ -146,11 +146,7 @@ impl Store {
         paths
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item=(&Path, &Addrs)> {
-        self.0.load().clone().into_iter()
-    }
-
-    pub(crate) fn read(&self) -> Map<Path, Addrs> { self.0.load().clone() }
+    pub(crate) fn read(&self) -> ArcCellGuard<'_, Map<Path, Addrs>> { self.0.load() }
 }
 
 pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<SocketAddr> {

@@ -2,8 +2,8 @@ use futures::{
     future::{FutureExt, TryFutureExt, RemoteHandle},
     channel::{mpsc, oneshot},
 };
-use async_std::{
-    result, mem, task, future,
+use std::{
+    result, mem,
     io::BufReader,
     net::{SocketAddr, TcpStream},
     collections::{VecDeque, HashSet},
@@ -11,6 +11,7 @@ use async_std::{
     time::{Duration, Instant},
     marker::PhantomData,
 };
+use async_std::{ prelude::*, task, future };
 use futures_codec::Framed;
 use futures_cbor_codec::Codec;
 use path::Path;
