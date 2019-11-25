@@ -15,7 +15,7 @@ use resolver_store::{Action, Store};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ClientHello {
     ReadOnly,
-    ReadWrite { ttl: i64, write_addr: SocketAddr }
+    ReadWrite { ttl: u64, write_addr: SocketAddr }
 }
  
 
@@ -24,7 +24,7 @@ pub struct ServerHello { pub ttl_expired: bool }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ToResolver {
-    Resolve(Path),
+    Resolve(Vec<Path>),
     List(Path),
     Publish(Vec<Path>),
     Unpublish(Vec<Path>),
@@ -33,7 +33,7 @@ pub enum ToResolver {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum FromResolver {
-    Resolved(Vec<SocketAddr>),
+    Resolved(Vec<Vec<SocketAddr>>),
     List(Vec<Path>),
     Published,
     Unpublished,

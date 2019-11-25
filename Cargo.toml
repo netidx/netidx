@@ -1,5 +1,3 @@
-cargo-features = ["edition"]
-
 [package]
 name = "json-pubsub"
 version = "0.1.0"
@@ -12,11 +10,11 @@ futures = "0.3"
 async-std = { version = "1.1", features = ["unstable"] }
 serde = "1.0"
 serde_derive = "1.0"
-serde_cbor = "0.10"
 futures_codec = "0.3"
-futures_cbor_codec = "0.1"
+futures_codec_cbor = "0.1"
 rand = "0.7"
 error-chain = "0.12"
 uuid = { version = "0.8", features = ["v4", "serde"] }
 lazy_static = "1.4"
 immutable-chunkmap = "0.5"
+bytes = "0.4"
