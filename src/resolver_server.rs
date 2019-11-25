@@ -1,7 +1,6 @@
-use futures::{sync::oneshot, sync::mpsc};
+use futures::{sync::oneshot, sync::mpsc, future::FutureExt as FRSFutureExt};
 use std::{
-    result,
-    mem::swap,
+    result, mem,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Mutex}
     time::{Instant, Duration},
@@ -44,6 +43,7 @@ pub enum FromResolver {
     Error(String)
 }
 
+/*
 #[async]
 fn send<T: Serialize + 'static>(
     w: WriteHalf<TcpStream>, m: T
@@ -52,6 +52,7 @@ fn send<T: Serialize + 'static>(
     let w = await!(write_all(w, m)).map_err(|_| ())?.0;
     Ok(await!(write_all(w, "\n")).map_err(|_| ())?.0)
 }
+*/
 
 struct ClientInfoInner {
     addr: SocketAddr,
@@ -75,12 +76,12 @@ impl ClientInfo {
         let (tx, rx) = mpsc::unbounded();
         let inner = ClientInfoInner {
             addr, ttl,
-            published: BTreeSet::new(),
+            published: HashSet::new(),
             stop: Some(stop),
             timeout: tx
         };
         let cl = ClientInfo(Arc::new(Mutex::new(inner)));
-        spawn(start_timeout_loop(ctx, cl.clone(), ttl, rx));
+        task::spawn(timeout_loop(ctx, cl.clone(), ttl, rx));
         cl
     }
 }
@@ -136,9 +137,7 @@ impl Context {
     }
 
     fn timeout_client(&self, client: &mut ClientInfoInner) {
-        let mut stop = None;
-        swap(&mut client.stop, &mut stop);
-        if let Some(stop) = stop { let _ = stop.send(()); }
+        if let Some(s) = mem::replace(&mut client.stop, None) { let _ = s.send(()); }
         if client.published.len() > 0 {
             self.published.change(client.published.iter().map(|p| {
                 (p, (Action::Unpublish, client.addr))
@@ -149,7 +148,6 @@ impl Context {
     fn publish(
         &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
     ) -> FromResolver {
-        paths.sort_unstable();
         if !paths.iter().all(|p| p.is_absolute()) {
             return FromResolver::Error("publish relative path".into())
         }
@@ -163,7 +161,6 @@ impl Context {
     fn unpublish(
         &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
     ) -> FromResolver {
-        paths.sort_unstable();
         let paths = self.published.unpublish(paths.into_iter().map(|p| {
             (p, (Action::Unpublish, client.addr))
         }));
@@ -172,56 +169,39 @@ impl Context {
     }
 }
 
-fn timeout_loop(
+async fn timeout_loop(
     ctx: Context,
     client: ClientInfo,
     init: Duration,
-    mut msgs: mpsc::UnboundedReceiver<Duration>,
-    mut server_stop: oneshot::Receiver<()>
-) -> impl Future<Item=(), Error=()> {
-    // this is a manual generator so we can reset the timer
-    let mut timeout = Delay::new(Instant::now() + init);
-    let mut generator = || {
-        match server_stop.poll() {
-            Err(_) => return Err(()),
-            Ok(Async::Ready(())) => return Ok(()),
-            Ok(Async::NotReady) =>
-                match msgs.poll() {
-                    Err(_) => return Err(()),
-                    Ok(Async::Ready(None)) => return Ok(()),
-                    Ok(Async::Ready(Some(ttl))) => timeout.reset(Instant::now() + ttl),
-                    Ok(Async::NotReady) =>
-                        match timeout.poll() {
-                            Err(_) => return Err(()),
-                            Ok(Async::NotReady) => yield Async::NotReady,
-                            Ok(Async::Ready(_)) => {
-                                let mut cl = client.0.lock().unwrap();
-                                let mut clients = ctx.clients.write().unwrap();
-                                ctx.timeout_client(&mut cl);
-                                clients.remove(&cl.addr);
-                                return Ok(())
-                            }
-                        }
-                }
-        }
-        Ok(())
-    };
-    GenFuture(generator)
-}
-
-#[async]
-fn start_timeout_loop(
-    ctx: Context,
-    client: ClientInfo,
-    init_ttl: Duration,
-    msgs: mpsc::UnboundedReceiver<Duration>
-) -> result::Result<(), ()> {
+    msgs: mpsc::UnboundedReceiver<Duration>,
+) {
+    enum M {
+        Stop,
+        Timeout,
+        Activity(Duration),
+    }
+    let mut timeout = init;
     let (server_stop, cid) = ctx.stops.lock().unwrap().make();
-    let _ = await!(timeout_loop(
-        ctx.clone(), client.clone(), init_ttl, msgs, server_stop
-    ));
+    let stop = server_stop.map(|_| M::Stop).shared();
+    loop {
+        let timeout = future::ready(M::Timeout).delay(timeout);
+        let activity = msgs.next().map(|v| match v {
+            Err(_) => M::Stop,
+            Ok(v) => M::Activity(v),
+        });
+        match timeout.race(stop.clone()).race(activity).await {
+            M::Stop => break,
+            M::Activity(ttl) => { timeout = ttl; },
+            M::Timeout => {
+                let mut cl = client.0.lock().unwrap();
+                let mut clients = ctx.clients.write().unwrap();
+                ctx.timeout_client(&mut cl);
+                clients.remove(&cl.addr);
+                return Ok(())
+            }
+        }
+    }
     ctx.stops.lock().unwrap().remove(&cid);
-    Ok(())
 }
 
 #[async]
