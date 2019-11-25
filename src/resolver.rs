@@ -109,7 +109,7 @@ impl <R: Writeable> Resolver<R> {
     }
 }
 
-type Con = Framed<TcpStream, Codec<FromResolver, ToResolver>>;
+type Con = Framed<TcpStream, Codec<FromResolver, &ToResolver>>;
 
 macro_rules! or_continue {
     (e:expr) => {
@@ -137,7 +137,7 @@ async fn connect(
             None => ClientHello::ReadOnly,
             Some(write_addr) => ClientHello::ReadWrite {ttl: TTL, write_addr},
         };
-        or_continue!(con.send(ClientHello {ttl: TTL as i64, uuid: our_id}).await);
+        or_continue!(con.send(&ClientHello {ttl: TTL as i64, uuid: our_id}).await);
         let hello = or_continue!(con.next().await);
         if !ttl_expired {
             break con
@@ -164,7 +164,6 @@ async fn connection(
         Stop,
     }
     let mut published = HashSet::new();
-    let mut pending: VecDeque<FromCon> = VecDeque::new();
     let mut con: Option<Con> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
@@ -190,8 +189,13 @@ async fn connection(
                         con.as_mut().unwrap()
                     }
                 };
-                let r = con.send(m).err_into().and_then(|()| con.next().err_into());
-                let _ = reply.send(r.await);
+                let r = con.send(&m).err_into()
+                    .and_then(|()| con.next().err_into())
+                    .await;
+                if let (ToResolver::Publish(p), Ok(FromResolver::Published)) = (m, r) {
+                    published.extend(p.into_iter());
+                }
+                let _ = reply.send(r);
             }
         }
     }

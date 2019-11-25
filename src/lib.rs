@@ -93,36 +93,18 @@
 //! one might imagine, because `serde_json` is capable of producing
 //! gigabits per second of JSON on a single 8550U cpu core.
 
-#![feature(proc_macro_non_items, await_macro, async_await, futures_api)]
-#![recursion_limit="2048"]
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate error_chain;
+#[macro_use] extern crate lazy_static;
 
-extern crate serde;
-extern crate serde_json;
-#[macro_use]
-extern crate serde_derive;
-extern crate chrono;
-extern crate tokio;
-extern crate tokio_io;
-extern crate tokio_timer;
-extern crate futures_await as futures;
-extern crate rand;
-#[macro_use]
-extern crate error_chain;
-extern crate uuid;
-extern crate arccstr;
-extern crate immutable_chunkmap;
-#[macro_use]
-extern crate lazy_static;
-
-mod line_writer;
 mod utils;
 mod resolver_store;
 pub mod error;
 pub mod path;
 pub mod resolver;
 pub mod resolver_server;
-pub mod publisher;
-pub mod subscriber;
+//pub mod publisher;
+//pub mod subscriber;
 
-#[cfg(test)]
-mod tests;
+//#[cfg(test)]
+//mod tests;
