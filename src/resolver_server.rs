@@ -9,10 +9,11 @@ use std::{
     net::SocketAddr,
 };
 use async_std::{prelude::*, task, future};
+use futures_codec::Framed;
+use futures_cbor_codec::Codec;
 use path::Path;
 use utils::{BatchItem, batched, GenFuture};
 use serde::Serialize;
-use serde_json;
 use resolver_store::{Action, Store};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
