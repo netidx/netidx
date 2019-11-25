@@ -2,7 +2,7 @@ use futures::{sync::oneshot, sync::mpsc};
 use std::{
     result,
     mem::swap,
-    collections::{HashMap, BTreeSet},
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Mutex}
     time::{Instant, Duration},
     io::BufReader,
@@ -12,7 +12,7 @@ use async_std::{prelude::*, task, future};
 use futures_codec::Framed;
 use futures_cbor_codec::Codec;
 use path::Path;
-use utils::{BatchItem, batched, GenFuture};
+use utils::MPCodec;
 use serde::Serialize;
 use resolver_store::{Action, Store};
 
@@ -56,7 +56,7 @@ fn send<T: Serialize + 'static>(
 struct ClientInfoInner {
     addr: SocketAddr,
     ttl: Duration,
-    published: BTreeSet<Path>,
+    published: HashSet<Path>,
     stop: Option<oneshot::Sender<()>>,
     timeout: mpsc::UnboundedSender<Duration>
 }

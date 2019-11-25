@@ -38,30 +38,17 @@ imple Writeable for ReadWrite {}
 
 #[derive(Clone)]
 pub struct Resolver<R> {
-    sender: mpsc::Sender<ToCon>,
+    sender: mpsc::UnboundedSender<ToCon>,
     kind: PhantomData<R>
 };
 
 impl<R> Resolver<R> {
     async fn send(&self, m: ToResolver) -> Result<FromResolver> {
         let (tx, rx) = oneshot::channel();
-        let notify = {
-            let mut t = self.0.lock().unwrap();
-            t.never_sent.push_back((m, tx));
-            if t.notify.is_some() { t.notify.as_ref().unwrap().clone() }
-            else {
-                let (tx, rx) = mpsc::channel(100);
-                t.notify = Some(tx.clone());
-                spawn(start_connection(self.downgrade(), rx));
-                tx
-            }
-        };
-        async {
-            let _ = await!(notify.send(()))?;
-            match await!(rx)? {
-                FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
-                m => Ok(m)
-            }
+        self.sender.send((m, tx)).err_into().await?;
+        match rx.err_into().await? {
+            FromResolver::Error(s) => bail!(ErrorKind::ResolverError(s)),
+            m => Ok(m)
         }
     }
 
@@ -154,7 +141,7 @@ async fn connect(
 }
 
 async fn connection(
-    receiver: mpsc::Receiver<ToCon>,
+    receiver: mpsc::UnboundedReceiver<ToCon>,
     resolver: SocketAddr,
     publisher: Option<SocketAddr>
 ) {
