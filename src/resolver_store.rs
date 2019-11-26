@@ -6,7 +6,7 @@ use std::{
         Bound, Bound::{Included, Excluded, Unbounded},
         HashSet, HashMap, BTreeMap
     },
-    ops::{Deref, DerefMut, RangeFrom},
+    ops::{Deref, DerefMut},
 };
 
 // We hashcons the address sets. On average, a publisher should publish many paths.
@@ -43,7 +43,7 @@ impl HCAddrs {
 
     fn add_address(&mut self, current: &Addrs, addr: SocketAddr) -> Addrs {
         let set: HashSet<SocketAddr> =
-            HashSet::from_iter(current.into_iter().chain(iter::once(addr)));
+            HashSet::from_iter(current.iter().copied().chain(iter::once(addr)));
         self.hashcons(set.into_iter().collect())
     }
 
@@ -51,15 +51,16 @@ impl HCAddrs {
         if current.len() == 1 && current[0] == addr {
             None
         } else {
-            let s = current.into_iter().filter(|a| a != &addr);
+            let s = current.iter().copied().filter(|a| a != &addr);
             Some(self.hashcons(s.collect()))
         }
     }
 }
 
 lazy_static! {
-    static ref EMPTY: Addrs = Arc::new(Vec::new());
-    static ref ADDRS: Arc<Mutex<HCAddrs>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref EMPTY: Addrs = Arc::new(AddrsInner(Vec::new()));
+    static ref ADDRS: Arc<Mutex<HCAddrs>> =
+        Arc::new(Mutex::new(HCAddrs(HashMap::new())));
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -72,7 +73,7 @@ impl Deref for AddrsInner {
 
 impl Drop for AddrsInner {
     fn drop(&mut self) {
-        let addrs = ADDRS.lock().unwrap();
+        let mut addrs = ADDRS.lock().unwrap();
         addrs.remove(&self.0);
     }
 }
@@ -129,36 +130,38 @@ impl StoreInner {
     }
 
     fn unpublish(&mut self, hc: &mut HCAddrs, path: Path, addr: SocketAddr) {
-        self.by_addr.get_mut(&addr).into_iter().for_each(|s| s.remove(&path));
-        self.by_path.get_mut(&path).and_then(|addrs| {
-            match hc.remove_address(addrs, addr) {
+        self.by_addr.get_mut(&addr).into_iter().for_each(|s| { s.remove(&path); });
+        match self.by_path.get_mut(&path) {
+            None => (),
+            Some(addrs) => match hc.remove_address(addrs, addr) {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
                     self.remove_path(path.as_ref())
                 }
             }
-        })
+        }
     }
 
     fn unpublish_addr(&mut self, hc: &mut HCAddrs, addr: SocketAddr) {
-        self.by_addr.remove(&addr).and_then(|paths| {
+        self.by_addr.remove(&addr).into_iter().for_each(|paths| {
             for path in paths {
-                self.unpublish(hc, path, *addr);
+                self.unpublish(hc, path, addr);
             }
         })
     }
 
     fn resolve(&self, path: &str) -> Vec<SocketAddr> {
         self.by_path.get(path)
-            .and_then(|a| a.iter().copied().collect())
+            .map(|a| a.iter().copied().collect())
             .unwrap_or_else(|| Vec::new())
     }
 
     fn list(&self, parent: &str) -> Vec<Path> {
-        self.by_path.range(Excluded(parent), Unbounded)
+        self.by_path
+            .range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
             .take_while(|(p, _)| parent == Path::dirname(p).unwrap_or("/"))
-            .map(|(p, v)| p.clone())
+            .map(|(p, _)| p.clone())
             .collect()
     }
 }
@@ -175,24 +178,24 @@ impl Store {
     }
 
     pub(crate) fn publish(&self, paths: Vec<Path>, addr: SocketAddr) {
-        let inner = self.0.write().unwrap();
-        let hc = ADDRS.lock().unwrap();
+        let mut inner = self.0.write().unwrap();
+        let mut hc = ADDRS.lock().unwrap();
         for path in paths {
             inner.publish(&mut *hc, path, addr);
         }
     }
 
     pub(crate) fn unpublish(&self, paths: Vec<Path>, addr: SocketAddr) {
-        let inner = self.0.write().unwrap();
-        let hc = ADDRS.lock().unwrap();
+        let mut inner = self.0.write().unwrap();
+        let mut hc = ADDRS.lock().unwrap();
         for path in paths {
             inner.unpublish(&mut *hc, path, addr);
         }
     }
 
     pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
-        let inner = self.0.write().unwrap();
-        let hc = ADDRS.lock().unwrap();
+        let mut inner = self.0.write().unwrap();
+        let mut hc = ADDRS.lock().unwrap();
         inner.unpublish_addr(&mut *hc, addr);
     }
 

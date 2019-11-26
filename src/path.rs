@@ -17,7 +17,7 @@ impl Deref for Path {
     type Target = str;
 
     fn deref(&self) -> &str {
-        self.0.as_str()
+        &*self.0
     }
 }
 
@@ -44,9 +44,9 @@ impl<'a> From<&'a str> for Path {
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {        
         if is_canonical(s.as_str()) {
-            Path(Arc::from(s))
+            Path(Arc::from(s.as_str()))
         } else {
-            Path(Arc::from(canonize(&*s).as_str()))
+            Path(Arc::from(canonize(s.as_str()).as_str()))
         }
     }
 }
