@@ -1,18 +1,21 @@
+use crate::path::Path;
 use std::{
     iter::{self, FromIterator},
     net::SocketAddr, sync::{Arc, Weak, Mutex, RwLock},
-    collections::{Bound::{Included, Excluded, Unbounded}, HashSet, HashMap, BTreeMap},
-    ops::{Deref, DerefMut},
+    collections::{
+        Bound, Bound::{Included, Excluded, Unbounded},
+        HashSet, HashMap, BTreeMap
+    },
+    ops::{Deref, DerefMut, RangeFrom},
 };
-use path::Path;
 
 // We hashcons the address sets. On average, a publisher should publish many paths.
 // for each published value we only store the path once, since it's an Arc<str>,
 // and a pointer to the set of addresses it is published by. 
-struct HCAddrs(HashMap<HashSet<SocketAddr>, Weak<AddrsInner>>);
+struct HCAddrs(HashMap<Vec<SocketAddr>, Weak<AddrsInner>>);
 
 impl Deref for HCAddrs {
-    type Target = HashMap<HashSet<SocketAddr>, Weak<AddrsInner>>;
+    type Target = HashMap<Vec<SocketAddr>, Weak<AddrsInner>>;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
@@ -27,49 +30,50 @@ impl HCAddrs {
         HCAddrs(HashMap::new())
     }
 
-    fn hashcons(&mut self, set: HashSet<SocketAddr>) -> Addrs {
+    fn hashcons(&mut self, set: Vec<SocketAddr>) -> Addrs {
         match self.get(&set).and_then(|v| v.upgrade()) {
-            Some(addrs) => Some(addrs),
+            Some(addrs) => addrs,
             None => {
-                let addrs = Addrs(Arc::new(AddrsInner(set.clone())));
-                self.insert(set, addrs.downgrade());
-                Some(addrs)
+                let addrs = Arc::new(AddrsInner(set.clone()));
+                self.insert(set, Arc::downgrade(&addrs));
+                addrs
             }
         }
     }
 
     fn add_address(&mut self, current: &Addrs, addr: SocketAddr) -> Addrs {
-        let set = HashSet::from_iter(current.iter().copied().chain(iter::once(addr)));
-        self.hashcons(set)
+        let set: HashSet<SocketAddr> =
+            HashSet::from_iter(current.into_iter().chain(iter::once(addr)));
+        self.hashcons(set.into_iter().collect())
     }
 
     fn remove_address(&mut self, current: &Addrs, addr: SocketAddr) -> Option<Addrs> {
-        if current.contains_key(&addr) && current.len() == 1 {
+        if current.len() == 1 && current[0] == addr {
             None
         } else {
-            let set = HashSet::from(current.iter().filter(|a| a != addr).copied());
-            Some(self.hashcons(set))
+            let s = current.into_iter().filter(|a| a != &addr);
+            Some(self.hashcons(s.collect()))
         }
     }
 }
 
 lazy_static! {
-    static ref EMPTY: Addrs = Arc::new(HashSet::new());
+    static ref EMPTY: Addrs = Arc::new(Vec::new());
     static ref ADDRS: Arc<Mutex<HCAddrs>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AddrsInner(HashSet<SocketAddr>);
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub(crate) struct AddrsInner(Vec<SocketAddr>);
 
 impl Deref for AddrsInner {
-    type Target = HashSet<SocketAddr>;
-    fn deref(&self) -> &HashSet<SocketAddr> { &self.0 }
+    type Target = Vec<SocketAddr>;
+    fn deref(&self) -> &Vec<SocketAddr> { &self.0 }
 }
 
 impl Drop for AddrsInner {
     fn drop(&mut self) {
         let addrs = ADDRS.lock().unwrap();
-        addrs.remove(&self.0)
+        addrs.remove(&self.0);
     }
 }
 
@@ -83,13 +87,15 @@ struct StoreInner {
 impl StoreInner {
     fn remove_path(&mut self, mut p: &str) {
         loop {
-            let mut r = self.by_path.range(Included(p), Unbounded);
+            let mut r = self.by_path.range::<str, (Bound<&str>, Bound<&str>)>(
+                (Included(p), Unbounded)
+            );
             if let Some((_, pv)) = r.next() {
                 if pv.len() != 0 { break }
                 else {
                     match r.next() {
                         Some((sib, _)) if sib.starts_with(p) => break,
-                        None | Some(_) => self.by_path.remove(p),
+                        None | Some(_) => { self.by_path.remove(p); },
                     }
                 }
             }
@@ -119,16 +125,16 @@ impl StoreInner {
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = hc.add_address(addrs, addr);
         self.add_path(path.as_ref());
-        self.by_addr.entry(addr).insert(path);
+        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path);
     }
 
     fn unpublish(&mut self, hc: &mut HCAddrs, path: Path, addr: SocketAddr) {
+        self.by_addr.get_mut(&addr).into_iter().for_each(|s| s.remove(&path));
         self.by_path.get_mut(&path).and_then(|addrs| {
-            match hc.remove_address(addrs, *addr) {
+            match hc.remove_address(addrs, addr) {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
-                    self.by_addr.get_mut(&path).and_then(|paths| paths.remove(&path));
                     self.remove_path(path.as_ref())
                 }
             }
