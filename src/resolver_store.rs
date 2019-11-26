@@ -157,122 +157,74 @@ impl StoreInner {
     }
 }
 
-// updates are serialized by the ADDRS lock, however reads may
-// continue while an update is in progress.
 #[derive(Clone)]
 pub(crate) struct Store(Arc<RwLock<StoreInner>>);
 
 impl Store {
     pub(crate) fn new() -> Self {
-        Store(ArcCell::new(Map::new()))
+        Store(Arc::new(RwLock::new(StoreInner {
+            by_path: BTreeMap::new(),
+            by_addr: HashMap::new(),
+        })))
     }
 
-    pub(crate) fn change<E>(&self, ops: E)
-    where E: IntoIterator<Item=(&Path, (Action, SocketAddr))>
-    {
-        // this lock ensures that only one write can happen at a time
-        let addrs = ADDRS.lock().unwrap();
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
-        let up = self.0.load().update_many(ops, &mut |p, (action, addr), cur| {
-            let (p, cur) = match cur {
-                None => (p, &*EMPTY),
-                Some((p, cur)) => (p.clone(), cur)
-            };
-            let (s, changed) = match action {
-                Action::Publish => {
-                    let (s, present) = cur.insert(addr);
-                    if !present && s.len() == 1 { added.push(p.clone()) }
-                    (s, !present)
-                },
-                Action::Unpublish => {
-                    let (s, present) = cur.remove(&addr);
-                    if present && s.len() == 0 { removed.push(p.clone()) }
-                    (s, present)
-                }
-            };
-            if !changed { Some((p, cur.clone())) }
-            else {
-                if s.len() == 0 { Some((p, EMPTY.clone())) }
-                else {
-                    match addrs.get(&s) {
-                        Some(s) => Some((p, s.upgrade().unwrap())),
-                        None => {
-                            let a = Arc::new(AddrsInner(s.clone()));
-                            addrs.insert(s, a.downgrade());
-                            Some((p, a))
-                        }
-                    }
-                }
-            }
-        });
-        let parent_ops =
-            parents_to_rm(&up, removed).into_iter().map(|p| (p, false)).chain(
-                parents_to_add(&up, added).iter().map(|p| (p, true))
-            );
-        let up = up.update_many(parent_ops, &mut |p, add, _| {
-            if add { Some(p, EMPTY.clone()) }
-            else { None }
-        });
-        // this is safe because writes are serialized by the ADDRS lock
-        self.0.update(move |_| up);
+    pub(crate) fn publish(&self, paths: Vec<Path>, addr: SocketAddr) {
+        let inner = self.0.write().unwrap();
+        let hc = ADDRS.lock().unwrap();
+        for path in paths {
+            inner.publish(&mut *hc, path, addr);
+        }
     }
 
-    pub(crate) fn read(&self) -> ArcCellGuard<'_, Map<Path, Addrs>> { self.0.load() }
-}
-
-pub(crate) fn resolve(t: &Map<Path, Addrs>, path: &Path) -> Vec<SocketAddr> {
-    match t.get(path) {
-        None => Vec::new(),
-        Some(s) => s.into_iter().map(|a| *a).collect()
+    pub(crate) fn unpublish(&self, paths: Vec<Path>, addr: SocketAddr) {
+        let inner = self.0.write().unwrap();
+        let hc = ADDRS.lock().unwrap();
+        for path in paths {
+            inner.unpublish(&mut *hc, path, addr);
+        }
     }
-}
 
-pub(crate) fn list(t: &Map<Path, Addrs>, parent: &Path) -> Vec<Path> {
-    let parent : &str = &*parent;
-    let mut res = Vec::new();
-    let paths = t.range(Excluded(parent), Unbounded);
-    for (p, _) in paths {
-        let d =
-            match Path::dirname(p) {
-                None => "/",
-                Some(d) => d
-            };
-        if parent != d { break }
-        else { Path::basename(p).map(|p| res.push(Path::from(p))); }
+    pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
+        let inner = self.0.write().unwrap();
+        let hc = ADDRS.lock().unwrap();
+        inner.unpublish_addr(&mut *hc, addr);
     }
-    res
+
+    pub(crate) fn resolve(&self, paths: &Vec<Path>) -> Vec<Vec<SocketAddr>> {
+        let inner = self.0.read().unwrap();
+        paths.iter().map(|p| inner.resolve(p.as_ref())).collect()
+    }
+
+    pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
+        let inner = self.0.read().unwrap();
+        inner.list(parent)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    static ADDRS: [(&str, &str)] = [
-        ("/app/test/app0/v0", "127.0.0.1:100"),
-        ("/app/test/app0/v1", "127.0.0.1:100"),
-        ("/app/test/app0/v0", "127.0.0.1:101"),
-        ("/app/test/app0/v1", "127.0.0.1:101"),
-        ("/app/test/app1/v2", "127.0.0.1:105"),
-        ("/app/test/app1/v3", "127.0.0.1:105"),
-        ("/app/test/app1/v4", "127.0.0.1:105")
-    ];
-
     #[test]
     fn test() {
+        let apps = vec![
+            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:100"),
+            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:101"),
+            (vec!["/app/test/app1/v2", "/app/test/app1/v3", "/app/test/app1/v4"],
+             "127.0.0.1:105"),
+        ];
         let mut store = Store::new();
-        let mut n = 0;
         let addrs =
             vec!["127.0.0.1:100".parse::<SocketAddr>().unwrap(),
                  "127.0.0.1:101".parse::<SocketAddr>().unwrap()];
-        for (path, addr) in &ADDRS {
+        for (paths, addr) in &apps {
+            let parsed = paths.iter().map(Path::from).collect();
             let addr = addr.parse::<SocketAddr>().unwrap();
-            let path = Path::from(path);
-            store.publish(path.clone(), addr);
-            if n < 2 && store.resolve(&path) != vec![addr] { panic!() }
-            else if n < 4 && store.resolve(&path) != addrs { panic!() }
-            else if n >= 4 && store.resolve(&path) != vec![addr] { panic!() }
-            n += 1
+            store.publish(parsed.clone(), addr);
+            let expected = paths.iter().map(|_| vec![*addr]).collect::<Vec<_>>();
+            if store.resolve(&parsed) != expected {
+                panic!()
+            }
         }
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
@@ -293,15 +245,11 @@ mod tests {
         assert_eq!(paths[0].as_ref(), "v2");
         assert_eq!(paths[1].as_ref(), "v3");
         assert_eq!(paths[2].as_ref(), "v4");
-        n = 0;
-        for (path, addr) in ADDRS[0..4] {
-            let addr = addr.parse::<SocketAddr>().unwrap();
-            let path = Path::from(path);
-            store.unpublish(&path, &addr);
-            if n < 2 && store.resolve(&path) != vec![addrs[1]] { panic!() }
-            else if n < 4 && store.resolve(&path) != vec![] { panic!() }
-            n += 1;
-        }
+        let (paths, addr) = apps[2];
+        let addr = addr.parse::<SocketAddr>().unwrap();
+        let parsed = paths.iter().map(Path::from).collect();
+        store.unpublish(parsed.clone(), *addr);
+        if store.resolve(&parsed) != vec![] { panic!() }
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].as_ref(), "app");
@@ -318,22 +266,5 @@ mod tests {
         assert_eq!(paths[0].as_ref(), "v2");
         assert_eq!(paths[1].as_ref(), "v3");
         assert_eq!(paths[2].as_ref(), "v4");
-    }
-
-    #[test]
-    fn test_refcnt() {
-        let mut store = Store::new();
-        let path = Path::from("/foo/bar/baz");
-        let addr = "127.0.0.1:111".parse::<SocketAddr>().unwrap();
-        store.publish(path.clone(), addr);
-        store.publish(path.clone(), addr);
-        store.publish(path, addr);
-        assert_eq!(store.resolve(&path), vec![addr]);
-        store.unpublish(&path, &addr);
-        assert_eq!(store.resolve(&path), vec![addr]);
-        store.unpublish(&path, &addr);
-        assert_eq!(store.resolve(&path), vec![addr]);
-        store.unpublish(&path, &addr);
-        assert_eq!(store.resolve(&path), vec![]);
     }
 }
