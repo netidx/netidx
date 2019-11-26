@@ -1,6 +1,6 @@
 use std::{
     iter::{self, FromIterator},
-    net::SocketAddr, sync::{Arc, Weak, Mutex},
+    net::SocketAddr, sync::{Arc, Weak, Mutex, RwLock},
     collections::{Bound::{Included, Excluded, Unbounded}, HashSet, HashMap, BTreeMap},
     ops::{Deref, DerefMut},
 };
@@ -47,8 +47,7 @@ impl HCAddrs {
         if current.contains_key(&addr) && current.len() == 1 {
             None
         } else {
-            let mut set = HashSet::from(current.iter().copied());
-            set.remove(&addr);
+            let set = HashSet::from(current.iter().filter(|a| a != addr).copied());
             Some(self.hashcons(set))
         }
     }
@@ -82,7 +81,7 @@ struct StoreInner {
 }
 
 impl StoreInner {
-    fn rm_path(&mut self, mut p: &str) {
+    fn remove_path(&mut self, mut p: &str) {
         loop {
             let mut r = self.by_path.range(Included(p), Unbounded);
             if let Some((_, pv)) = r.next() {
@@ -126,12 +125,35 @@ impl StoreInner {
     fn unpublish(&mut self, hc: &mut HCAddrs, path: Path, addr: SocketAddr) {
         self.by_path.get_mut(&path).and_then(|addrs| {
             match hc.remove_address(addrs, *addr) {
+                Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
-                    
+                    self.by_addr.get_mut(&path).and_then(|paths| paths.remove(&path));
+                    self.remove_path(path.as_ref())
                 }
             }
         })
+    }
+
+    fn unpublish_addr(&mut self, hc: &mut HCAddrs, addr: SocketAddr) {
+        self.by_addr.remove(&addr).and_then(|paths| {
+            for path in paths {
+                self.unpublish(hc, path, *addr);
+            }
+        })
+    }
+
+    fn resolve(&self, path: &str) -> Vec<SocketAddr> {
+        self.by_path.get(path)
+            .and_then(|a| a.iter().copied().collect())
+            .unwrap_or_else(|| Vec::new())
+    }
+
+    fn list(&self, parent: &str) -> Vec<Path> {
+        self.by_path.range(Excluded(parent), Unbounded)
+            .take_while(|(p, _)| parent == Path::dirname(p).unwrap_or("/"))
+            .map(|(p, v)| p.clone())
+            .collect()
     }
 }
 
