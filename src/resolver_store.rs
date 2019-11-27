@@ -92,6 +92,7 @@ impl StoreInner {
             if save {
                 break
             } else {
+                let n = n - 1;
                 self.by_level.get_mut(&n).into_iter().for_each(|l| { l.remove(p); })
             }
         }
@@ -116,7 +117,7 @@ impl StoreInner {
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
         self.add_parents(path.as_ref());
-        let n = dbg!(Path::levels(dbg!(path.as_ref())));
+        let n = Path::levels(path.as_ref());
         self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
     }
 
@@ -231,14 +232,14 @@ mod tests {
                 panic!()
             }
         }
-        dbg!(store.0.read().unwrap());
+        store.0.read().unwrap();
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].as_ref(), "/app");
         let paths = store.list(&Path::from("/app"));
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].as_ref(), "/app/test");
-        let paths = dbg!(store.list(&Path::from("/app/test")));
+        let paths = store.list(&Path::from("/app/test"));
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].as_ref(), "/app/test/app0");
         assert_eq!(paths[1].as_ref(), "/app/test/app1");
@@ -255,7 +256,7 @@ mod tests {
         let addr = addr.parse::<SocketAddr>().unwrap();
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
         store.unpublish(parsed.clone(), addr);
-        if store.resolve(&parsed).len() != 0 { panic!() }
+        if store.resolve(&parsed).iter().any(|v| v.contains(&addr)) { panic!() }
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].as_ref(), "/app");
@@ -264,13 +265,12 @@ mod tests {
         assert_eq!(paths[0].as_ref(), "/app/test");
         let paths = store.list(&Path::from("/app/test"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[1].as_ref(), "/app/test/app1");
-        let paths = store.list(&Path::from("/app/test/app0"));
-        assert_eq!(paths.len(), 0);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0");
         let paths = store.list(&Path::from("/app/test/app1"));
-        assert_eq!(paths.len(), 3);
-        assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
-        assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
-        assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
+        assert_eq!(paths.len(), 0);
+        let paths = store.list(&Path::from("/app/test/app0"));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
     }
 }
