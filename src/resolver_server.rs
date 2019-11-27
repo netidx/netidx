@@ -1,5 +1,9 @@
 use crate::utils::MPCodec;
-use futures::{sync::oneshot, sync::mpsc, future::FutureExt as FRSFutureExt};
+use futures::{
+    sync::oneshot,
+    sync::mpsc,
+    future::{FutureExt as FRSFutureExt, pending}
+};
 use std::{
     result, mem,
     collections::{HashMap, HashSet},
@@ -74,213 +78,105 @@ impl Stops {
     }
 }
 
-struct ClientInfo {
-    ttl: Duration,
-    stop: Option<oneshot::Sender<()>>,
-}
-
-#[derive(Clone)]
-struct Context {
-    published: Store,
-    clients: Arc<RwLock<HashMap<SocketAddr, ClientInfo>>>,
-    stops: Arc<Mutex<Stops>>,
-    connections: Arc<Mutex<usize>>,
-}
-
-impl Context {
-    fn new() -> Self {
-        Context {
-            published: Store::new(),
-            clients: Arc::new(RwLock::new(HashMap::new())),
-            stops: Arc::new(Mutex::new()),
-            connections: Arc::new(Mutex::new(0))
-        }
-    }
-
-    fn timeout_client(&self, client: &mut ClientInfoInner) {
-        if let Some(s) = mem::replace(&mut client.stop, None) { let _ = s.send(()); }
-        if client.published.len() > 0 {
-            self.published.change(client.published.iter().map(|p| {
-                (p, (Action::Unpublish, client.addr))
-            }))
-        }
-    }
-
-    fn publish(
-        &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
-    ) -> FromResolver {
-        if !paths.iter().all(|p| p.is_absolute()) {
-            return FromResolver::Error("publish relative path".into())
-        }
-        let paths = self.published.change(paths.into_iter().map(|p| {
-            (p, (Action::Publish, client.addr))
-        }));
-        for p in &paths { client.insert(p.clone()); }
-        FromResolver::Published
-    }
-
-    fn unpublish(
-        &self, mut paths: Vec<Path>, client: &mut ClientInfoInner
-    ) -> FromResolver {
-        let paths = self.published.unpublish(paths.into_iter().map(|p| {
-            (p, (Action::Unpublish, client.addr))
-        }));
-        for p in &paths { client.published.remove(p); }
-        FromResolver::Unpublished
-    }
-}
-
-async fn timeout_loop(
-    ctx: Context,
-    client: ClientInfo,
-    init: Duration,
-    msgs: mpsc::UnboundedReceiver<Duration>,
-) {
-    enum M {
-        Stop,
-        Timeout,
-        Activity(Duration),
-    }
-    let mut timeout = init;
-    let (server_stop, cid) = ctx.stops.lock().unwrap().make();
-    let stop = server_stop.map(|_| M::Stop).shared();
-    loop {
-        let timeout = future::ready(M::Timeout).delay(timeout);
-        let activity = msgs.next().map(|v| match v {
-            Err(_) => M::Stop,
-            Ok(v) => M::Activity(v),
-        });
-        match timeout.race(stop.clone()).race(activity).await {
-            M::Stop => break,
-            M::Activity(ttl) => { timeout = ttl; },
-            M::Timeout => {
-                let mut cl = client.0.lock().unwrap();
-                let mut clients = ctx.clients.write().unwrap();
-                ctx.timeout_client(&mut cl);
-                clients.remove(&cl.addr);
-                return Ok(())
-            }
-        }
-    }
-    ctx.stops.lock().unwrap().remove(&cid);
-}
+type ClientInfo = Option<oneshot::Sender<()>>;
 
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>
 ) -> Result<()> {
-    enum M { Stop, Timeout, Msg(ToResolver) }
+    enum M { Stop, Timeout, Msg(Result<ToResolver>) }
     s.set_nodelay(true).await?;
-    let (hello, msgs) =
-        match await!(msgs.into_future()) {
-            Err(..) => return Err(()),
-            Ok((None, _)) => return Err(()),
-            Ok((Some(M::Stop), _)) => return Ok(()),
-            Ok((Some(M::Line(l)), msgs)) =>
-                (serde_json::from_str::<ClientHello>(&l).map_err(|_| ())?, msgs)
-        };
-    let (client, client_stop, mut client_added) = {
-        let (tx_stop, rx_stop) = oneshot::channel();
-        let (client, added, ttl_expired) =
-            match hello {
-                ClientHello::ReadOnly =>
-                    (ClientInfo::new(addr, 120, tx_stop), false, false),
-                ClientHello::ReadWrite {ttl, write_addr} => {
-                    if ttl <= 0 || ttl > 3600 { return Err(()) }
-                    match ctx.clients.read().unwrap().get(&write_addr) {
-                        None => {
-                            let c = ClientInfo::new(
-                                ctx.clone(), write_addr, ttl as u64, tx_stop
-                            );
-                            (c, false, true)
-                        },
-                        Some(client) => {
-                            let mut cl = client.0.lock().unwrap();
-                            cl.ttl = ttl;
-                            cl.timeout.unbounded_send(ttl).map_err(|_| ())?;
-                            if let Some(old_stop) = mem::replace(&mut cl.stop, None) {
-                                let _ = old_stop.send(());
-                            }
-                            cl.stop = Some(tx_stop);
-                            (client.clone(), true, false)
-                        }
+    let mut codec = Framed::new(s, MPCodec::new<'_, ToResolver, FromResolver>());
+    let hello = codec.next().await?;
+    let (tx_stop, rx_stop) = oneshot::channel();
+    let (ttl, ttl_expired, write_addr) = match hello {
+        ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
+        ClientHello::ReadWrite {ttl, write_addr} => {
+            if ttl <= 0 || ttl > 3600 { bail!("invalid ttl") }
+            let mut store = store.write().unwrap();
+            let clinfos = store.clinfos_mut();
+            match clinfos.get_mut(&write_addr) {
+                None => {
+                    clinfos.insert(write_addr, Some(tx_stop));
+                    (Duration::from_secs(ttl), true, Some(write_addr))
+                },
+                Some(cl) => {
+                    if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
+                        let _ = old_stop.send(());
                     }
-                }
-            };
-        tx = await!(send::<ServerHello>(tx, ServerHello { ttl_expired }))?;
-        (client, rx_stop, added)
-    };
-    let maybe_add_client = || {
-        if !client_added {
-            *client_added = true;
-            match hello {
-                ClientHello::ReadOnly => Err(()),
-                ClientHello::ReadWrite {write_addr, ..} => {
-                    let mut c = ctx.clients.write().lock().unwrap();
-                    c.insert(write_addr, client.clone());
-                    Ok(())
+                    (ttl, false, Some(write_addr))
                 }
             }
         }
     };
-    let msgs = msgs.select(client_stop.into_stream().map_err(|_| ()).map(|_| M::Stop));
-    let msgs = batched(msgs, 100000);
-    let mut batch : Vec<ToResolver> = Vec::new();
-    let mut response : Vec<FromResolver> = Vec::new();
-    #[async]
-    for msg in msgs {
-        match msg {
-            BatchItem::InBatch(m) =>
-                match m {
-                    M::Stop => break,
-                    M::Line(l) =>
-                        batch.push(
-                            serde_json::from_str::<ToResolver>(&l).map_err(|_| ())?
-                        )
-                },
-            BatchItem::EndBatch => {
-                let mut ci = client.0.lock().unwrap();
-                let mut store = ctx.store.read();
-                ci.timeout.unbounded_send(ci.ttl).map_err(|_| ())?;
-                for m in batch.drain(0..) {
-                    match m {
-                        ToResolver::Publish(paths) => {
-                            maybe_add_client()?;
-                            response.push(ctx.publish(paths, ci));
-                            store = ctx.store.read();
-                        },
-                        ToResolver::Unpublish(paths) => {
-                            maybe_add_client()?;
-                            response.push(ctx.unpublish(paths, ci));
-                            store = ctx.store.read();
-                        },
-                        ToResolver::Resolve(path) => {
-                            let r = resolver_store::resolve(&store, &path);
-                            response.push(FromResolver::Resolved(r))
-                        },
-                        ToResolver::List(path) => {
-                            let r = resolver_store::list(&store, &path);
-                            response.push(FromResolver::List(r))
+    codec.send(&ServerHello { ttl_expired }).await?;
+    let mut codec = Some(codec);
+    let stop = server_stop.race(rx_stop).map(|m| M::Stop).shared();
+    loop {
+        let msg = match codec {
+            None => future::pending::<M>(),
+            Some(ref mut coded) => codec.next().err_into().map(|m| M::Msg(m))
+        };
+        let timeout = future::ready(M::Timeout).delay(ttl);
+        match msg.race(stop.clone()).race(timeout).await {
+            M::Stop => break Ok(()),
+            M::Msg(Err(_)) => { codec = None; }
+            M::Timeout => {
+                if let Some(write_addr) = write_addr {
+                    let mut store = store.write().unwrap();
+                    if let Some(cl) = store.clinfos_mut().remove(&write_addr) {
+                        if let Some(stop) = mem::replace(cl, None) {
+                            let _ = stop.send(());
                         }
                     }
+                    store.unpublish_addr(write_addr);
                 }
-                while let Some(m) = response.pop() {
-                    tx = await!(send(tx, m)).map_err(|_| ())?;
+                bail!("client timed out");
+            }
+            M::Msg(Ok(m)) => {
+                let response = match m {
+                    ToResolver::Publish(paths) => match write_addr {
+                        None => FromResolver::Error("read only client".into()),
+                        Some(write_addr) => {
+                            if !paths.iter().all(|p| Path::is_absolute()) {
+                                FromResolver::Error("absolute paths required".into())
+                            } else {
+                                let mut store = store.write().unwrap();
+                                for path in paths {
+                                    store.publish(path, write_addr);
+                                }
+                                FromResolver::Published
+                            }
+                        }
+                    },
+                    ToResolver::Unpublish(paths) => match write_addr {
+                        None => FromResolver::Error("read only client".into()),
+                        Some(write_addr) => {
+                            let mut store = store.write().unwrap();
+                            for path in paths {
+                                store.unpublish(path, write_addr);
+                            }
+                            FromResolver::Unpublished
+                        }
+                    },
+                    ToResolver::Resolve(paths) => {
+                        let store = store.read().unwrap();
+                        FromResolver::Resolved(
+                            paths.iter().map(|p| store.resolve(p)).collect()
+                        )
+                    },
+                    ToResolver::List(path) => {
+                        FromResolver::List(store.read().unwrap().list(&path))
+                    }
+                };
+                match codec.unwrap().send(response).await {
+                    Err(_) => { codec = None },
+                    Ok(()) => ()
                 }
             }
         }
     }
-    Ok(())
-}
-
-#[async]
-fn start_client_loop(ctx: Context, s: TcpStream) -> result::Result<(), ()> {
-    let (server_stop, client) = ctx.stops.lock().unwrap().make();
-    let _ = await!(client_loop(ctx.clone(), s, server_stop));
-    *ctx.connections.lock().unwrap() -= 1;
-    ctx.stops.lock().unwrap().remove(&client);
-    Ok(())
 }
 
 async fn server_loop(
