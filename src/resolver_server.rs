@@ -43,49 +43,6 @@ pub enum FromResolver {
     Error(String)
 }
 
-/*
-#[async]
-fn send<T: Serialize + 'static>(
-    w: WriteHalf<TcpStream>, m: T
-) -> result::Result<WriteHalf<TcpStream>, ()> {
-    let m = serde_json::to_vec(&m).map_err(|_| ())?;
-    let w = await!(write_all(w, m)).map_err(|_| ())?.0;
-    Ok(await!(write_all(w, "\n")).map_err(|_| ())?.0)
-}
-*/
-
-struct ClientInfoInner {
-    addr: SocketAddr,
-    ttl: Duration,
-    published: HashSet<Path>,
-    stop: Option<oneshot::Sender<()>>,
-    timeout: mpsc::UnboundedSender<Duration>
-}
-
-#[derive(Clone)]
-struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
-
-impl ClientInfo {
-    fn new(
-        ctx: Context,
-        addr: SocketAddr,
-        ttl: u64,
-        stop: oneshot::Sender<()>
-    ) -> Self {
-        let ttl = Duration::from_secs(ttl);
-        let (tx, rx) = mpsc::unbounded();
-        let inner = ClientInfoInner {
-            addr, ttl,
-            published: HashSet::new(),
-            stop: Some(stop),
-            timeout: tx
-        };
-        let cl = ClientInfo(Arc::new(Mutex::new(inner)));
-        task::spawn(timeout_loop(ctx, cl.clone(), ttl, rx));
-        cl
-    }
-}
-
 struct Stops {
     stops: HashMap<usize, oneshot::Sender<()>>,
     stop_id: usize,
@@ -115,6 +72,35 @@ impl Stops {
     fn stop(&mut self) {
         self.stopped = true;
         for (_, s) in self.stops.drain() { let _ = s.send(()); }
+    }
+}
+
+struct ClientInfoInner {
+    addr: SocketAddr,
+    ttl: Duration,
+    stop: Option<oneshot::Sender<()>>,
+    timeout: mpsc::UnboundedSender<Duration>
+}
+
+#[derive(Clone)]
+struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
+
+impl ClientInfo {
+    fn new(
+        ctx: Context,
+        addr: SocketAddr,
+        ttl: u64,
+        stop: oneshot::Sender<()>
+    ) -> Self {
+        let ttl = Duration::from_secs(ttl);
+        let (tx, rx) = mpsc::unbounded();
+        let cl = ClientInfo(Arc::new(Mutex::new(ClientInfoInner {
+            addr, ttl,
+            stop: Some(stop),
+            timeout: tx
+        })));
+        task::spawn(timeout_loop(ctx, cl.clone(), ttl, rx));
+        cl
     }
 }
 
@@ -242,7 +228,7 @@ fn client_loop(
                             let mut cl = client.0.lock().unwrap();
                             cl.ttl = ttl;
                             cl.timeout.unbounded_send(ttl).map_err(|_| ())?;
-                            let mut old_stop = None;
+                            let old_stop = None;
                             swap(&mut cl.stop, old_stop);
                             if let Some(old_stop) = old_stop {
                                 let _ = old_stop.send(());
@@ -328,15 +314,16 @@ fn start_client_loop(ctx: Context, s: TcpStream) -> result::Result<(), ()> {
     Ok(())
 }
 
-#[async]
-fn accept_loop(
+async fn server_loop(
     addr: SocketAddr,
     max_connections: usize,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<()>,
-) -> result::Result<(), ()> {
-    let t = Context::new();
+) {
     enum M { Stop, Client(TcpStream) }
+    let mut connections = 0;
+    let mut stops = Stops::new();
+    let published = Store::new();
     let msgs =
         TcpListener::bind(&addr).map_err(|_| ())?
         .incoming().map_err(|_| ()).map(|c| M::Client(c))
