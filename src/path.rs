@@ -1,6 +1,6 @@
 use std::{
-    borrow::Borrow, ops::Deref, convert::{AsRef, From}, sync::Arc,
-    cmp::{Ordering, PartialEq, PartialOrd, Eq, Ord}
+    borrow::Borrow, convert::{AsRef, From}, sync::Arc,
+    cmp::{PartialEq, PartialOrd, Eq, Ord}
 };
 
 pub static ESC: char = '\\';
