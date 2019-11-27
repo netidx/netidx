@@ -76,26 +76,34 @@ struct StoreInner {
 }
 
 impl StoreInner {
-    fn remove_parents(&mut self, mut p: &str, mut n: usize) {
-        while n > 1 {
-            p = Path::dirname(p).unwrap();
-            let save = self.by_path.contains_key(p) || self.by_level.get(n).map(|l| {
+    fn remove_parents(&mut self, mut p: &str) {
+        loop {
+            match Path::dirname(p) {
+                None => break,
+                Some(parent) => p = parent,
+            }
+            let n = Path::levels(p) + 1;
+            let save = self.by_path.contains_key(p) || self.by_level.get(&n).map(|l| {
                 let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>(
                     (Included(p), Unbounded)
                 );
                 r.next().map(|o| o.as_ref().starts_with(p)).unwrap_or(false)
             }).unwrap_or(false);
-            n -= 1;
-            if !save {
-                self.by_level.get_mut(n).into_iter().for_each(|l| { l.remove(p); })
+            if save {
+                break
+            } else {
+                self.by_level.get_mut(&n).into_iter().for_each(|l| { l.remove(p); })
             }
         }
     }
 
-    fn add_parents(&mut self, mut p: &str, mut n: usize) {
-        while n > 1 {
-            p = Path::dirname(p).unwrap();
-            n -= 1;
+    fn add_parents(&mut self, mut p: &str) {
+        loop {
+            match Path::dirname(p) {
+                None => break,
+                Some(parent) => p = parent,
+            }
+            let n = Path::levels(p);
             let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
             if !l.contains(p) {
                 l.insert(Path::from(p));
@@ -107,8 +115,8 @@ impl StoreInner {
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
-        let n = Path::levels(path.as_ref());
-        self.add_parents(path.as_ref(), n);
+        self.add_parents(path.as_ref());
+        let n = dbg!(Path::levels(dbg!(path.as_ref())));
         self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
     }
 
@@ -120,11 +128,11 @@ impl StoreInner {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
-                    let n = Path::levels(path);
-                    self.by_level.get_mut(n).into_iter().for_each(|s| {
+                    let n = Path::levels(path.as_ref());
+                    self.by_level.get_mut(&n).into_iter().for_each(|s| {
                         s.remove(&path);
                     });
-                    self.remove_parents(path.as_ref(), n)
+                    self.remove_parents(path.as_ref())
                 }
             }
         }
@@ -145,9 +153,9 @@ impl StoreInner {
     }
 
     fn list(&self, parent: &str) -> Vec<Path> {
-        self.by_level.get(Path::levels(parent) + 1).map(|l| {
+        self.by_level.get(&(Path::levels(parent) + 1)).map(|l| {
             l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                .take_while(|(p, _)| p.as_ref().starts_with(parent))
+                .take_while(|p| p.as_ref().starts_with(parent))
                 .cloned()
                 .collect()
         }).unwrap_or_else(Vec::new)
@@ -160,8 +168,9 @@ pub(crate) struct Store(Arc<RwLock<StoreInner>>);
 impl Store {
     pub(crate) fn new() -> Self {
         Store(Arc::new(RwLock::new(StoreInner {
-            by_path: BTreeMap::new(),
+            by_path: HashMap::new(),
             by_addr: HashMap::new(),
+            by_level: HashMap::new(),
             addrs: HCAddrs::new(),
         })))
     }

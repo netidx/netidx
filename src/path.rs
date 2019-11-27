@@ -130,6 +130,13 @@ impl Path {
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo\\\/bar", "baz"]);
     /// ```
     pub fn parts(s: &str) -> impl Iterator<Item=&str> {
+        let skip = if s == "/" {
+            2
+        } else if s.starts_with("/") {
+            1
+        } else {
+            0
+        };
         s.split({
             let mut esc = false;
             move |c| {
@@ -139,7 +146,7 @@ impl Path {
                     false
                 }
             }
-        })
+        }).skip(skip)
     }
 
     pub fn levels(s: &str) -> usize {
