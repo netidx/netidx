@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr, sync::{Arc, Weak, RwLock},
     collections::{
         Bound, Bound::{Included, Excluded, Unbounded},
-        HashSet, HashMap, BTreeMap
+        HashSet, HashMap, BTreeSet
     },
     ops::{Deref, DerefMut},
 };
@@ -69,53 +69,47 @@ impl HCAddrs {
 
 #[derive(Debug)]
 struct StoreInner {
-    by_path: BTreeMap<Path, Addrs>,
+    by_path: HashMap<Path, Addrs>,
     by_addr: HashMap<SocketAddr, HashSet<Path>>,
+    by_level: HashMap<usize, BTreeSet<Path>>,
     addrs: HCAddrs,
 }
 
 impl StoreInner {
-    fn remove_path(&mut self, mut p: &str) {
-        loop {
-            let mut r = self.by_path.range::<str, (Bound<&str>, Bound<&str>)>(
-                (Included(p), Unbounded)
-            );
-            if let Some((_, pv)) = r.next() {
-                if pv.len() != 0 { break }
-                else {
-                    match r.next() {
-                        Some((sib, _)) if sib.starts_with(p) => break,
-                        None | Some(_) => { self.by_path.remove(p); },
-                    }
-                }
-            }
-            match Path::dirname(p) {
-                Some(parent) => p = parent,
-                None => break
+    fn remove_parents(&mut self, mut p: &str, mut n: usize) {
+        while n > 1 {
+            p = Path::dirname(p).unwrap();
+            let save = self.by_path.contains_key(p) || self.by_level.get(n).map(|l| {
+                let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>(
+                    (Included(p), Unbounded)
+                );
+                r.next().map(|o| o.as_ref().starts_with(p)).unwrap_or(false)
+            }).unwrap_or(false);
+            n -= 1;
+            if !save {
+                self.by_level.get_mut(n).into_iter().for_each(|l| { l.remove(p); })
             }
         }
     }
 
-    fn add_path(&mut self, mut p: &str) {
-        loop {
-            match Path::dirname(p) {
-                None => break,
-                Some(dirname) => match self.by_path.get(dirname) {
-                    Some(_) => break,
-                    None => {
-                        self.by_path.insert(Path::from(dirname), EMPTY.clone());
-                        p = dirname;
-                    }
-                }
+    fn add_parents(&mut self, mut p: &str, mut n: usize) {
+        while n > 1 {
+            p = Path::dirname(p).unwrap();
+            n -= 1;
+            let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
+            if !l.contains(p) {
+                l.insert(Path::from(p));
             }
         }
     }
 
     fn publish(&mut self, path: Path, addr: SocketAddr) {
+        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
-        self.add_path(path.as_ref());
-        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path);
+        let n = Path::levels(path.as_ref());
+        self.add_parents(path.as_ref(), n);
+        self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
     }
 
     fn unpublish(&mut self, path: Path, addr: SocketAddr) {
@@ -126,7 +120,11 @@ impl StoreInner {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
-                    self.remove_path(path.as_ref())
+                    let n = Path::levels(path);
+                    self.by_level.get_mut(n).into_iter().for_each(|s| {
+                        s.remove(&path);
+                    });
+                    self.remove_parents(path.as_ref(), n)
                 }
             }
         }
@@ -147,11 +145,12 @@ impl StoreInner {
     }
 
     fn list(&self, parent: &str) -> Vec<Path> {
-        self.by_path
-            .range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-            .take_while(|(p, _)| parent == Path::dirname(p).unwrap_or("/"))
-            .map(|(p, _)| p.clone())
-            .collect()
+        self.by_level.get(Path::levels(parent) + 1).map(|l| {
+            l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
+                .take_while(|(p, _)| p.as_ref().starts_with(parent))
+                .cloned()
+                .collect()
+        }).unwrap_or_else(Vec::new)
     }
 }
 
@@ -195,7 +194,7 @@ impl Store {
 
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
         let inner = self.0.read().unwrap();
-        inner.list(parent)
+        inner.list(parent.as_ref())
     }
 }
 

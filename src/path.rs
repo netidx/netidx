@@ -1,29 +1,21 @@
 use std::{
     borrow::Borrow, ops::Deref, convert::{AsRef, From}, sync::Arc,
-    cmp::{PartialEq, PartialOrd}
+    cmp::{Ordering, PartialEq, PartialOrd, Eq, Ord}
 };
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
 
 /// A path in the json-pubsub namespace. Paths are immutable and reference counted.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path(Arc<str>);
 
 impl AsRef<str> for Path {
-    fn as_ref(&self) -> &str { &*self }
+    fn as_ref(&self) -> &str { &*self.0 }
 }
 
 impl Borrow<str> for Path {
-    fn borrow(&self) -> &str { &*self }
-}
-
-impl Deref for Path {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &*self.0
-    }
+    fn borrow(&self) -> &str { &*self.0 }
 }
 
 impl From<String> for Path {
@@ -94,7 +86,7 @@ impl Path {
     pub fn root() -> Path { Path::from("/") }
 
     /// returns true if the path starts with /, false otherwise
-    pub fn is_absolute(&self) -> bool { self.starts_with(SEP) }
+    pub fn is_absolute(&self) -> bool { self.as_ref().starts_with(SEP) }
 
     /// return a new path with the specified string appended as a new
     /// part separated by the pathsep char.
@@ -111,8 +103,8 @@ impl Path {
         let other = other.as_ref();
         if other.len() == 0 { self.clone() }
         else {
-            let mut res = String::with_capacity(self.len() + other.len());
-            res.push_str(&self);
+            let mut res = String::with_capacity(self.as_ref().len() + other.len());
+            res.push_str(self.as_ref());
             res.push(SEP);
             res.push_str(other);
             Path::from(res)
@@ -148,6 +140,14 @@ impl Path {
                 }
             }
         })
+    }
+
+    pub fn levels(s: &str) -> usize {
+        let mut p = 0;
+        for _ in Path::parts(s) {
+            p += 1
+        }
+        p
     }
 
     /// return the path without the last part, or return None if the
