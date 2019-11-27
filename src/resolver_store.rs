@@ -1,7 +1,7 @@
 use crate::path::Path;
 use std::{
     iter::{self, FromIterator},
-    net::SocketAddr, sync::{Arc, Weak, Mutex, RwLock},
+    net::SocketAddr, sync::{Arc, Weak, RwLock},
     collections::{
         Bound, Bound::{Included, Excluded, Unbounded},
         HashSet, HashMap, BTreeMap
@@ -9,21 +9,17 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+lazy_static! {
+    static ref EMPTY: Addrs = Arc::new(Vec::new());
+}
+
+type Addrs = Arc<Vec<SocketAddr>>;
+
 // We hashcons the address sets. On average, a publisher should publish many paths.
 // for each published value we only store the path once, since it's an Arc<str>,
 // and a pointer to the set of addresses it is published by. 
-struct HCAddrs(HashMap<Vec<SocketAddr>, Weak<AddrsInner>>);
-
-impl Deref for HCAddrs {
-    type Target = HashMap<Vec<SocketAddr>, Weak<AddrsInner>>;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-// CR estokes: limit the number of publishers that can publish the
-// same path to a reasonable number.
-impl DerefMut for HCAddrs {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
-}
+#[derive(Debug)]
+struct HCAddrs(HashMap<Vec<SocketAddr>, Weak<Vec<SocketAddr>>>);
 
 impl HCAddrs {
     fn new() -> HCAddrs {
@@ -31,20 +27,22 @@ impl HCAddrs {
     }
 
     fn hashcons(&mut self, set: Vec<SocketAddr>) -> Addrs {
-        match self.get(&set).and_then(|v| v.upgrade()) {
+        match self.0.get(&set).and_then(|v| v.upgrade()) {
             Some(addrs) => addrs,
             None => {
-                let addrs = Arc::new(AddrsInner(set.clone()));
-                self.insert(set, Arc::downgrade(&addrs));
+                let addrs = Arc::new(set.clone());
+                self.0.insert(set, Arc::downgrade(&addrs));
                 addrs
             }
         }
     }
 
     fn add_address(&mut self, current: &Addrs, addr: SocketAddr) -> Addrs {
-        let set: HashSet<SocketAddr> =
-            HashSet::from_iter(current.iter().copied().chain(iter::once(addr)));
-        self.hashcons(set.into_iter().collect())
+        let mut set =
+            current.iter().copied().chain(iter::once(addr)).collect::<Vec<_>>();
+        set.sort_by_key(|a| (a.ip(), a.port()));
+        set.dedup();
+        self.hashcons(set)
     }
 
     fn remove_address(&mut self, current: &Addrs, addr: SocketAddr) -> Option<Addrs> {
@@ -55,34 +53,25 @@ impl HCAddrs {
             Some(self.hashcons(s.collect()))
         }
     }
-}
 
-lazy_static! {
-    static ref EMPTY: Addrs = Arc::new(AddrsInner(Vec::new()));
-    static ref ADDRS: Arc<Mutex<HCAddrs>> =
-        Arc::new(Mutex::new(HCAddrs(HashMap::new())));
-}
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-pub(crate) struct AddrsInner(Vec<SocketAddr>);
-
-impl Deref for AddrsInner {
-    type Target = Vec<SocketAddr>;
-    fn deref(&self) -> &Vec<SocketAddr> { &self.0 }
-}
-
-impl Drop for AddrsInner {
-    fn drop(&mut self) {
-        let mut addrs = ADDRS.lock().unwrap();
-        addrs.remove(&self.0);
+    fn gc(&mut self) {
+        let mut dead = Vec::new();
+        for (k, v) in self.0.iter() {
+            if v.upgrade().is_none() {
+                dead.push(k.clone());
+            }
+        }
+        for k in dead {
+            self.0.remove(&k);
+        }
     }
 }
 
-pub(crate) type Addrs = Arc<AddrsInner>;
-
+#[derive(Debug)]
 struct StoreInner {
     by_path: BTreeMap<Path, Addrs>,
     by_addr: HashMap<SocketAddr, HashSet<Path>>,
+    addrs: HCAddrs,
 }
 
 impl StoreInner {
@@ -122,18 +111,18 @@ impl StoreInner {
         }
     }
 
-    fn publish(&mut self, hc: &mut HCAddrs, path: Path, addr: SocketAddr) {
+    fn publish(&mut self, path: Path, addr: SocketAddr) {
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
-        *addrs = hc.add_address(addrs, addr);
+        *addrs = self.addrs.add_address(addrs, addr);
         self.add_path(path.as_ref());
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path);
     }
 
-    fn unpublish(&mut self, hc: &mut HCAddrs, path: Path, addr: SocketAddr) {
+    fn unpublish(&mut self, path: Path, addr: SocketAddr) {
         self.by_addr.get_mut(&addr).into_iter().for_each(|s| { s.remove(&path); });
         match self.by_path.get_mut(&path) {
             None => (),
-            Some(addrs) => match hc.remove_address(addrs, addr) {
+            Some(addrs) => match self.addrs.remove_address(addrs, addr) {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
                     self.by_path.remove(&path);
@@ -143,10 +132,10 @@ impl StoreInner {
         }
     }
 
-    fn unpublish_addr(&mut self, hc: &mut HCAddrs, addr: SocketAddr) {
+    fn unpublish_addr(&mut self, addr: SocketAddr) {
         self.by_addr.remove(&addr).into_iter().for_each(|paths| {
             for path in paths {
-                self.unpublish(hc, path, addr);
+                self.unpublish(path, addr);
             }
         })
     }
@@ -174,29 +163,29 @@ impl Store {
         Store(Arc::new(RwLock::new(StoreInner {
             by_path: BTreeMap::new(),
             by_addr: HashMap::new(),
+            addrs: HCAddrs::new(),
         })))
     }
 
     pub(crate) fn publish(&self, paths: Vec<Path>, addr: SocketAddr) {
         let mut inner = self.0.write().unwrap();
-        let mut hc = ADDRS.lock().unwrap();
         for path in paths {
-            inner.publish(&mut *hc, path, addr);
+            inner.publish(path, addr);
         }
     }
 
     pub(crate) fn unpublish(&self, paths: Vec<Path>, addr: SocketAddr) {
         let mut inner = self.0.write().unwrap();
-        let mut hc = ADDRS.lock().unwrap();
         for path in paths {
-            inner.unpublish(&mut *hc, path, addr);
+            inner.unpublish(path, addr);
         }
+        inner.addrs.gc();
     }
 
     pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
         let mut inner = self.0.write().unwrap();
-        let mut hc = ADDRS.lock().unwrap();
-        inner.unpublish_addr(&mut *hc, addr);
+        inner.unpublish_addr(addr);
+        inner.addrs.gc();
     }
 
     pub(crate) fn resolve(&self, paths: &Vec<Path>) -> Vec<Vec<SocketAddr>> {
@@ -227,53 +216,53 @@ mod tests {
             vec!["127.0.0.1:100".parse::<SocketAddr>().unwrap(),
                  "127.0.0.1:101".parse::<SocketAddr>().unwrap()];
         for (paths, addr) in &apps {
-            let parsed = paths.iter().map(Path::from).collect();
+            let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
             let addr = addr.parse::<SocketAddr>().unwrap();
             store.publish(parsed.clone(), addr);
-            let expected = paths.iter().map(|_| vec![*addr]).collect::<Vec<_>>();
-            if store.resolve(&parsed) != expected {
+            if !store.resolve(&parsed).iter().all(|s| s.contains(&addr)) {
                 panic!()
             }
         }
+        dbg!(store.0.read().unwrap());
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "app");
+        assert_eq!(paths[0].as_ref(), "/app");
         let paths = store.list(&Path::from("/app"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "test");
-        let paths = store.list(&Path::from("/app/test"));
+        assert_eq!(paths[0].as_ref(), "/app/test");
+        let paths = dbg!(store.list(&Path::from("/app/test")));
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], "app0");
-        assert_eq!(paths[1].as_ref(), "app1");
+        assert_eq!(paths[0].as_ref(), "/app/test/app0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1");
         let paths = store.list(&Path::from("/app/test/app0"));
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].as_ref(), "v0");
-        assert_eq!(paths[1].as_ref(), "v1");
+        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
         let paths = store.list(&Path::from("/app/test/app1"));
         assert_eq!(paths.len(), 3);
-        assert_eq!(paths[0].as_ref(), "v2");
-        assert_eq!(paths[1].as_ref(), "v3");
-        assert_eq!(paths[2].as_ref(), "v4");
-        let (paths, addr) = apps[2];
+        assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
+        assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
+        let (ref paths, ref addr) = apps[2];
         let addr = addr.parse::<SocketAddr>().unwrap();
-        let parsed = paths.iter().map(Path::from).collect();
-        store.unpublish(parsed.clone(), *addr);
-        if store.resolve(&parsed) != vec![] { panic!() }
+        let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
+        store.unpublish(parsed.clone(), addr);
+        if store.resolve(&parsed).len() != 0 { panic!() }
         let paths = store.list(&Path::from("/"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "app");
+        assert_eq!(paths[0].as_ref(), "/app");
         let paths = store.list(&Path::from("/app"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "test");
+        assert_eq!(paths[0].as_ref(), "/app/test");
         let paths = store.list(&Path::from("/app/test"));
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[1].as_ref(), "app1");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1");
         let paths = store.list(&Path::from("/app/test/app0"));
         assert_eq!(paths.len(), 0);
         let paths = store.list(&Path::from("/app/test/app1"));
         assert_eq!(paths.len(), 3);
-        assert_eq!(paths[0].as_ref(), "v2");
-        assert_eq!(paths[1].as_ref(), "v3");
-        assert_eq!(paths[2].as_ref(), "v4");
+        assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
+        assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
     }
 }
