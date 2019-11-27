@@ -7,6 +7,7 @@ error_chain! {
     foreign_links {
         MPEncodeError(encode::Error);
         MPDecodeError(decode::Error);
+        MessageTooLarge(std::num::TryFromIntError);
         IOErr(std::io::Error);
         OneshotCanceled(oneshot::Canceled);
         ChannelIO(mpsc::SendError);

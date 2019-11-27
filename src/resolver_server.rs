@@ -1,3 +1,4 @@
+use crate::utils::MPCodec;
 use futures::{sync::oneshot, sync::mpsc, future::FutureExt as FRSFutureExt};
 use std::{
     result, mem,
@@ -9,9 +10,7 @@ use std::{
 };
 use async_std::{prelude::*, task, future};
 use futures_codec::Framed;
-use futures_cbor_codec::Codec;
 use path::Path;
-use utils::MPCodec;
 use serde::Serialize;
 use resolver_store::{Action, Store};
 
@@ -75,33 +74,9 @@ impl Stops {
     }
 }
 
-struct ClientInfoInner {
-    addr: SocketAddr,
+struct ClientInfo {
     ttl: Duration,
     stop: Option<oneshot::Sender<()>>,
-    timeout: mpsc::UnboundedSender<Duration>
-}
-
-#[derive(Clone)]
-struct ClientInfo(Arc<Mutex<ClientInfoInner>>);
-
-impl ClientInfo {
-    fn new(
-        ctx: Context,
-        addr: SocketAddr,
-        ttl: u64,
-        stop: oneshot::Sender<()>
-    ) -> Self {
-        let ttl = Duration::from_secs(ttl);
-        let (tx, rx) = mpsc::unbounded();
-        let cl = ClientInfo(Arc::new(Mutex::new(ClientInfoInner {
-            addr, ttl,
-            stop: Some(stop),
-            timeout: tx
-        })));
-        task::spawn(timeout_loop(ctx, cl.clone(), ttl, rx));
-        cl
-    }
 }
 
 #[derive(Clone)]
@@ -190,17 +165,13 @@ async fn timeout_loop(
     ctx.stops.lock().unwrap().remove(&cid);
 }
 
-#[async]
-fn client_loop(
-    ctx: Context, s: TcpStream, server_stop: oneshot::Receiver<()>
-) -> result::Result<(), ()> {
-    enum M { Stop, Line(String) }
-    let addr = s.peer_addr().map_err(|_| ())?;
-    s.set_nodelay(true).map_err(|_| ())?;
-    let (rx, mut tx) = s.split();
-    let msgs =
-        tokio::io::lines(BufReader::new(rx)).map_err(|_| ()).map(|l| M::Line(l))
-        .select(server_stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
+async fn client_loop(
+    store: Store<ClientInfo>,
+    s: TcpStream,
+    server_stop: oneshot::Receiver<()>
+) -> Result<()> {
+    enum M { Stop, Timeout, Msg(ToResolver) }
+    s.set_nodelay(true).await?;
     let (hello, msgs) =
         match await!(msgs.into_future()) {
             Err(..) => return Err(()),
@@ -228,9 +199,7 @@ fn client_loop(
                             let mut cl = client.0.lock().unwrap();
                             cl.ttl = ttl;
                             cl.timeout.unbounded_send(ttl).map_err(|_| ())?;
-                            let old_stop = None;
-                            swap(&mut cl.stop, old_stop);
-                            if let Some(old_stop) = old_stop {
+                            if let Some(old_stop) = mem::replace(&mut cl.stop, None) {
                                 let _ = old_stop.send(());
                             }
                             cl.stop = Some(tx_stop);

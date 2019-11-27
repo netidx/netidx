@@ -1,20 +1,20 @@
-use futures::prelude::*;
-use async_std::{
-    prelude::*,
-    sync::{Arc, Mutex},
-    pin::Pin,
-    task::{Context, Waker, Poll},
-};
 use bytes::{BytesMut, BigEndian, ByteOrder};
 use futures_codec::{Encoder, Decoder};
-use std::{sync::Arc, mem, marker::PhantomData, io::{self, Write}, result::Result};
+use std::{
+    mem,
+    convert::TryInto,
+    marker::PhantomData,
+    io::{self, Write},
+    result::Result,
+};
 use serde::{Serialize, de::DeserializeOwned};
+use crate::error;
 
 struct BytesWriter<'a>(&'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-	self.bytes.extend(buf);
+	self.0.extend(buf);
 	Ok(buf.len())
     }
 
@@ -25,20 +25,20 @@ impl Write for BytesWriter<'_> {
 
 static U64S: usize = mem::size_of::<u64>();
 
-struct MPEncode<T>(PhantomData<T>);
+struct MPEncode<'a, T: 'a>(PhantomData<&'a T>);
 
-impl<'a, T: Serialize + 'a> Encoder for MPEncode<T> {
+impl<'a, T: Serialize + 'a> Encoder for MPEncode<'a, T> {
     type Item = &'a T;
-    type Error = rmp_serde::encode::Error;
+    type Error = error::Error;
 
     fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         if dst.capacity() < U64S {
             dst.reserve(U64S * 20);
         }
-        let mut header = dst.split_to(U64SZ);
-        rmp_serde::encode::write_named(BytesWriter(dst), src)?;
-        BigEndian::write_u64(&mut header, dst.len());
-        Ok(())
+        let mut header = dst.split_to(U64S);
+        let res = rmp_serde::encode::write_named(&mut BytesWriter(dst), src);
+        BigEndian::write_u64(&mut header, dst.len() as u64);
+        Ok(res?)
     }
 }
 
@@ -46,29 +46,29 @@ struct MPDecode<T>(PhantomData<T>);
 
 impl<T: DeserializeOwned> Decoder for MPDecode<T> {
     type Item = T;
-    type Error = rmp_serde::decode::Error;
+    type Error = error::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < U64S {
             Ok(None)
         } else {
-            let len = BigEndian::read_u64(src);
+            let len: usize = BigEndian::read_u64(src).try_into()?;
             if src.len() - U64S < len {
                 Ok(None)
             } else {
                 src.advance(U64S);
-                let res = rmp_serde::decode::from_read(src);
+                let res = rmp_serde::decode::from_read(src.as_ref());
                 src.advance(len);
-                res
+                Ok(Some(res?))
             }
         }
     }
 }
 
-pub struct MPCodec<T, F>(MPEncode<T>, MPDecode<F>);
+pub struct MPCodec<'a, T, F>(MPEncode<'a, T>, MPDecode<F>);
 
-impl<T: Serialize, F: DeserializeOwned> MPCodec<T, F> {
-    fn new() -> MPCodec<T, F> {
+impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
+    fn new() -> MPCodec<'a, T, F> {
         MPCodec(MPEncode(PhantomData), MPDecode(PhantomData))
     }
 }
