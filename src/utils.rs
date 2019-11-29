@@ -6,9 +6,9 @@ use std::{
     marker::PhantomData,
     io::{self, Write},
     result::Result,
+    error::Error,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use crate::error;
 
 struct BytesWriter<'a>(&'a mut BytesMut);
 
@@ -25,9 +25,9 @@ impl Write for BytesWriter<'_> {
 
 static U64S: usize = mem::size_of::<u64>();
 
-pub struct MPCodec<'a, T, F>(PhantomData<&'a T>, PhantomData<T>);
+pub struct MPCodec<'a, T, F>(PhantomData<&'a T>, PhantomData<F>);
 
-impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
+impl<'a, T, F> MPCodec<'a, T, F> {
     pub fn new() -> MPCodec<'a, T, F> {
         MPCodec(PhantomData, PhantomData)
     }
@@ -35,7 +35,7 @@ impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
 
 impl<'a, T: Serialize + 'a, F: DeserializeOwned> Encoder for MPCodec<'a, T, F> {
     type Item = &'a T;
-    type Error = String;
+    type Error = Box<dyn Error>;
 
     fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         if dst.capacity() < U64S {
@@ -44,27 +44,27 @@ impl<'a, T: Serialize + 'a, F: DeserializeOwned> Encoder for MPCodec<'a, T, F> {
         let mut header = dst.split_to(U64S);
         let res = rmp_serde::encode::write_named(&mut BytesWriter(dst), src);
         BigEndian::write_u64(&mut header, dst.len() as u64);
-        Ok(res.map_err(|e| e.to_string())?)
+        Ok(res?)
     }
 }
 
 impl<'a, T: Serialize + 'a, F: DeserializeOwned> Decoder for MPCodec<'a, T, F> {
     type Item = F;
-    type Error = String;
+    type Error = Box<dyn Error>;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < U64S {
             Ok(None)
         } else {
             let len: usize =
-                BigEndian::read_u64(src).try_into().map_err(|e| e.to_string())?;
+                BigEndian::read_u64(src).try_into()?;
             if src.len() - U64S < len {
                 Ok(None)
             } else {
                 src.advance(U64S);
                 let res = rmp_serde::decode::from_read(src.as_ref());
                 src.advance(len);
-                Ok(Some(res.map_err(|e| e.to_string())?))
+                Ok(Some(res?))
             }
         }
     }

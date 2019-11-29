@@ -1,6 +1,5 @@
 use crate::{
     utils::MPCodec,
-    error::*,
     path::Path,
     resolver_store::Store,
 };
@@ -10,7 +9,7 @@ use futures::{
     future::{FutureExt as FRSFutureExt, pending, TryFutureExt}
 };
 use std::{
-    result, mem, error,
+    result, mem, error::Error,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Mutex, atomic::{AtomicUsize, Ordering}},
     time::{Instant, Duration},
@@ -121,7 +120,7 @@ async fn client_loop(
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) {
     #[derive(Clone)]
-    enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, String>>) }
+    enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, Box<dyn Error>>>) }
     try_log!("can't set nodelay", s.set_nodelay(true));
     let mut codec = Framed::new(s, MPCodec::<'_, ServerHello, ClientHello>::new());
     let hello = match codec.next().await {
@@ -239,11 +238,11 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(addr: SocketAddr, max_connections: usize) -> Result<Server> {
+    pub async fn new(addr: SocketAddr, max_connections: usize) -> Server {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
             .race(recv_ready.map(|_| ())).await;
-        Ok(Server(Some(send_stop)))
+        Server(Some(send_stop))
     }
 }

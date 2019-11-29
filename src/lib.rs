@@ -94,10 +94,8 @@
 //! gigabits per second of JSON on a single 8550U cpu core.
 
 #[macro_use] extern crate serde_derive;
-#[macro_use] extern crate error_chain;
-#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate failure;
 
-//mod utils;
 mod resolver_store;
 pub mod error;
 pub mod path;

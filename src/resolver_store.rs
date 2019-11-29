@@ -9,9 +9,13 @@ use std::{
     },
 };
 
+static EMPTY: Addrs = Arc::new(Vec::new());
+
+/*
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
 }
+*/
 
 type Addrs = Arc<Vec<SocketAddr>>;
 
