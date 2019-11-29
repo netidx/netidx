@@ -47,44 +47,50 @@ pub enum FromResolver {
     Error(String)
 }
 
-struct Stops {
-    stops: HashMap<usize, oneshot::Sender<()>>,
-    stop_id: usize,
-    stopped: bool
-}
+type ClientInfo = Option<oneshot::Sender<()>>;
 
-impl Stops {
-    fn new() -> Self {
-        Stops {
-            stops: HashMap::new(),
-            stop_id: 0,
-            stopped: false
+fn handle_msg(store: &Store<ClientInfo>, m: ToResolver) -> FromResolver {
+    match m {
+        ToResolver::Publish(paths) => match write_addr {
+            None => FromResolver::Error("read only client".into()),
+            Some(write_addr) => {
+                if !paths.iter().all(|p| Path::is_absolute()) {
+                    FromResolver::Error("absolute paths required".into())
+                } else {
+                    let mut store = store.write().unwrap();
+                    for path in paths {
+                        store.publish(path, write_addr);
+                    }
+                    FromResolver::Published
+                }
+            }
+        },
+        ToResolver::Unpublish(paths) => match write_addr {
+            None => FromResolver::Error("read only client".into()),
+            Some(write_addr) => {
+                let mut store = store.write().unwrap();
+                for path in paths {
+                    store.unpublish(path, write_addr);
+                }
+                FromResolver::Unpublished
+            }
+        },
+        ToResolver::Resolve(paths) => {
+            let store = store.read().unwrap();
+            FromResolver::Resolved(
+                paths.iter().map(|p| store.resolve(p)).collect()
+            )
+        },
+        ToResolver::List(path) => {
+            FromResolver::List(store.read().unwrap().list(&path))
         }
     }
-
-    fn make(&mut self) -> (oneshot::Receiver<()>, usize) {
-        let (tx, rx) = oneshot::channel();
-        let id = self.stop_id;
-        self.stops.insert(id, tx);
-        self.stop_id += 1;
-        if self.stopped { let _ = tx.send(()); }
-        (rx, id)
-    }
-
-    fn remove(&mut self, id: &usize) { self.stops.remove(id); }
-
-    fn stop(&mut self) {
-        self.stopped = true;
-        for (_, s) in self.stops.drain() { let _ = s.send(()); }
-    }
 }
-
-type ClientInfo = Option<oneshot::Sender<()>>;
 
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
-    server_stop: oneshot::Receiver<()>
+    server_stop: impl Future<Output = ()>,
 ) -> Result<()> {
     enum M { Stop, Timeout, Msg(Result<ToResolver>) }
     s.set_nodelay(true).await?;
@@ -136,42 +142,7 @@ async fn client_loop(
                 bail!("client timed out");
             }
             M::Msg(Ok(m)) => {
-                let response = match m {
-                    ToResolver::Publish(paths) => match write_addr {
-                        None => FromResolver::Error("read only client".into()),
-                        Some(write_addr) => {
-                            if !paths.iter().all(|p| Path::is_absolute()) {
-                                FromResolver::Error("absolute paths required".into())
-                            } else {
-                                let mut store = store.write().unwrap();
-                                for path in paths {
-                                    store.publish(path, write_addr);
-                                }
-                                FromResolver::Published
-                            }
-                        }
-                    },
-                    ToResolver::Unpublish(paths) => match write_addr {
-                        None => FromResolver::Error("read only client".into()),
-                        Some(write_addr) => {
-                            let mut store = store.write().unwrap();
-                            for path in paths {
-                                store.unpublish(path, write_addr);
-                            }
-                            FromResolver::Unpublished
-                        }
-                    },
-                    ToResolver::Resolve(paths) => {
-                        let store = store.read().unwrap();
-                        FromResolver::Resolved(
-                            paths.iter().map(|p| store.resolve(p)).collect()
-                        )
-                    },
-                    ToResolver::List(path) => {
-                        FromResolver::List(store.read().unwrap().list(&path))
-                    }
-                };
-                match codec.unwrap().send(response).await {
+                match codec.unwrap().send(handle_msg(&store, m)).await {
                     Err(_) => { codec = None },
                     Ok(()) => ()
                 }
@@ -204,7 +175,7 @@ async fn server_loop(
                     let connections = connections.clone();
                     task::spawn(async move {
                         // CR estokes: log errors
-                        let _ task.await;
+                        let _ = task.await;
                         connections.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
