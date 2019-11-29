@@ -1,7 +1,8 @@
 use crate::path::Path;
 use fxhash::FxBuildHasher;
 use std::{
-    iter, net::SocketAddr, sync::{Arc, Weak, RwLock}, convert::AsRef, ops::Deref,
+    iter, net::SocketAddr, sync::{Arc, Weak, RwLock},
+    convert::AsRef, ops::Deref, clone::Clone,
     collections::{
         Bound, Bound::{Included, Excluded, Unbounded},
         HashSet, HashMap, BTreeSet
@@ -182,8 +183,13 @@ impl<T> StoreInner<T> {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct Store<T>(Arc<RwLock<StoreInner<T>>>);
+
+impl<T> Clone for Store<T> {
+    fn clone(&self) -> Self {
+        Store(Arc::clone(self.0))
+    }
+}
 
 impl<T> Deref for Store<T> {
     type Target = RwLock<StoreInner<T>>;

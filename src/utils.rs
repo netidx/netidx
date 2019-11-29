@@ -35,7 +35,7 @@ impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
 
 impl<'a, T: Serialize + 'a, F: DeserializeOwned> Encoder for MPCodec<'a, T, F> {
     type Item = &'a T;
-    type Error = error::Error;
+    type Error = String;
 
     fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         if dst.capacity() < U64S {
@@ -44,26 +44,27 @@ impl<'a, T: Serialize + 'a, F: DeserializeOwned> Encoder for MPCodec<'a, T, F> {
         let mut header = dst.split_to(U64S);
         let res = rmp_serde::encode::write_named(&mut BytesWriter(dst), src);
         BigEndian::write_u64(&mut header, dst.len() as u64);
-        Ok(res?)
+        Ok(res.map_err(|e| e.to_string())?)
     }
 }
 
 impl<'a, T: Serialize + 'a, F: DeserializeOwned> Decoder for MPCodec<'a, T, F> {
     type Item = F;
-    type Error = error::Error;
+    type Error = String;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < U64S {
             Ok(None)
         } else {
-            let len: usize = BigEndian::read_u64(src).try_into()?;
+            let len: usize =
+                BigEndian::read_u64(src).try_into().map_err(|e| e.to_string())?;
             if src.len() - U64S < len {
                 Ok(None)
             } else {
                 src.advance(U64S);
                 let res = rmp_serde::decode::from_read(src.as_ref());
                 src.advance(len);
-                Ok(Some(res?))
+                Ok(Some(res.map_err(|e| e.to_string())?))
             }
         }
     }

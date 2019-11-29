@@ -6,10 +6,11 @@ use crate::{
 };
 use futures::{
     channel::{oneshot, mpsc},
-    future::{FutureExt as FRSFutureExt, pending}
+    sink::{Sink, SinkExt},
+    future::{FutureExt as FRSFutureExt, pending, TryFutureExt}
 };
 use std::{
-    result, mem,
+    result, mem, error,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Mutex, atomic::{AtomicUsize, Ordering}},
     time::{Instant, Duration},
@@ -20,6 +21,7 @@ use async_std::{
     prelude::*,
     task,
     future,
+    stream::StreamExt,
     net::{TcpStream, TcpListener},
 };
 use futures_codec::Framed;
@@ -93,26 +95,51 @@ fn handle_msg(store: &Store<ClientInfo>, m: ToResolver, wa: Option<SocketAddr>) 
     }
 }
 
+macro_rules! try_log {
+    ($m:expr, $e:expr) => {
+        match $e {
+            Ok(r) => r,
+            Err(e) => {
+                // CR estokes: use a better method
+                println!("{}: {}", $m, e);
+                return
+            }
+        }
+    }
+}
+
+macro_rules! log_ret {
+    ($m:expr) => { {
+        println!("{}", $m);
+        return
+    } }
+}
+
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
-    server_stop: impl Future<Output = ()>,
-) -> Result<()> {
-    enum M { Stop, Timeout, Msg(Result<ToResolver>) }
-    s.set_nodelay(true)?;
-    let mut codec = Framed::new(s, MPCodec::<'_, ToResolver, FromResolver>::new());
-    let hello = codec.next().await?;
+    server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
+) {
+    #[derive(Clone)]
+    enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, String>>) }
+    try_log!("can't set nodelay", s.set_nodelay(true));
+    let mut codec = Framed::new(s, MPCodec::<'_, ServerHello, ClientHello>::new());
+    let hello = match codec.next().await {
+        None => log_ret!("no hello from client"),
+        Some(h) => try_log!("error reading hello", h)
+    };
     let (tx_stop, rx_stop) = oneshot::channel();
     let (ttl, ttl_expired, write_addr) = match hello {
         ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
         ClientHello::ReadWrite {ttl, write_addr} => {
-            if ttl <= 0 || ttl > 3600 { bail!("invalid ttl") }
+            if ttl <= 0 || ttl > 3600 { log_ret!("invalid ttl") }
             let mut store = store.write().unwrap();
-            let clinfos = store.clinfos_mut();
+            let clinfos = store.clinfo_mut();
+            let ttl = Duration::from_secs(ttl);
             match clinfos.get_mut(&write_addr) {
                 None => {
                     clinfos.insert(write_addr, Some(tx_stop));
-                    (Duration::from_secs(ttl), true, Some(write_addr))
+                    (ttl, true, Some(write_addr))
                 },
                 Some(cl) => {
                     if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
@@ -123,35 +150,42 @@ async fn client_loop(
             }
         }
     };
-    codec.send(&ServerHello { ttl_expired }).await?;
-    let mut codec = Some(codec);
-    let stop = server_stop.race(rx_stop).map(|m| M::Stop).shared();
+    try_log!("couldn't send hello", codec.send(&ServerHello { ttl_expired }).await);
+    let mut codec = Some(Framed::new(
+        codec.release().0,
+        MPCodec::<'_, FromResolver, ToResolver>::new()
+    ));
+    let stop = server_stop.map(|_| M::Stop).race(rx_stop.map(|_| M::Stop)).shared();
     loop {
         let msg = match codec {
-            None => future::pending::<M>(),
-            Some(ref mut coded) => codec.next().err_into().map(|m| M::Msg(m))
+            None => future::pending::<M>().left_future(),
+            Some(ref mut codec) => codec.next().map(|m| M::Msg(m)).right_future()
         };
         let timeout = future::ready(M::Timeout).delay(ttl);
         match msg.race(stop.clone()).race(timeout).await {
-            M::Stop => break Ok(()),
-            M::Msg(Err(_)) => { codec = None; }
+            M::Stop => break,
+            M::Msg(None) => { codec = None; }
+            M::Msg(Some(Err(e))) => {
+                codec = None;
+                println!("error reading message: {}", e)
+            },
+            M::Msg(Some(Ok(m))) => {
+                match codec.unwrap().send(&handle_msg(&store, m, write_addr)).await {
+                    Err(_) => { codec = None }, // CR estokes: Log this
+                    Ok(()) => ()
+                }
+            }
             M::Timeout => {
                 if let Some(write_addr) = write_addr {
                     let mut store = store.write().unwrap();
-                    if let Some(cl) = store.clinfos_mut().remove(&write_addr) {
+                    if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
                         if let Some(stop) = mem::replace(cl, None) {
                             let _ = stop.send(());
                         }
                     }
                     store.unpublish_addr(write_addr);
                 }
-                bail!("client timed out");
-            }
-            M::Msg(Ok(m)) => {
-                match codec.unwrap().send(handle_msg(&store, m, write_addr)).await {
-                    Err(_) => { codec = None },
-                    Ok(()) => ()
-                }
+                log_ret!("client timed out");
             }
         }
     }
@@ -161,26 +195,31 @@ async fn server_loop(
     addr: SocketAddr,
     max_connections: usize,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<Result<()>>,
-) -> Result<()> {
-    enum M { Stop, Client(Result<TcpStream>) }
+    ready: oneshot::Sender<()>,
+) {
+    #[derive(Clone)]
+    enum M { Stop, Drop, Client(TcpStream) }
     let connections = Arc::new(AtomicUsize::new(0));
-    let published = Store::new();
-    let listener = TcpListener::bind(&addr).await?;
-    let stop = stop.map(|()| M::Stop).shared();
-    ready.send(Ok(()))?;
+    let published: Store<ClientInfo> = Store::new();
+    let listener = try_log!("TcpListener::bind", TcpListener::bind(addr).await);
+    let stop = stop.shared();
+    ready.send(());
     loop {
-        let client = listener.accept().err_into().map(|c| M::Client(c));
-        match stop.clone().race(client).await {
-            M::Stop => break,
-            M::Client(Err(_)) => (), // CR estokes: log this error
-            M::Client(Ok(client)) => {
+        let client = listener.accept().map(|c| match c {
+            Ok((c, _)) => M::Client(c),
+            Err(_) => M::Drop, // CR estokes: maybe log this?
+        });
+        let should_stop = stop.clone().map(|_| M::Stop);
+        match should_stop.race(client).await {
+            M::Stop => return,
+            M::Drop => (),
+            M::Client(client) => {
                 if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
                     let published = published.clone();
                     let stop = stop.clone();
                     task::spawn(async move {
                         // CR estokes: log any errors
-                        let _ = task::spawn(client_loop(published, client, stop)).await;
+                        task::spawn(client_loop(published, client, stop)).await;
                         connections.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
@@ -204,7 +243,7 @@ impl Server {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
-            .race(recv_ready).await?;
+            .race(recv_ready.map(|_| ())).await;
         Ok(Server(Some(send_stop)))
     }
 }
