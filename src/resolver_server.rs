@@ -1,23 +1,29 @@
-use crate::utils::MPCodec;
+use crate::{
+    utils::MPCodec,
+    error::*,
+    path::Path,
+    resolver_store::Store,
+};
 use futures::{
-    sync::oneshot,
-    sync::mpsc,
+    channel::{oneshot, mpsc},
     future::{FutureExt as FRSFutureExt, pending}
 };
 use std::{
     result, mem,
-    atomic::{AtomicUsize, Ordering},
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock, Mutex}
+    sync::{Arc, RwLock, Mutex, atomic::{AtomicUsize, Ordering}},
     time::{Instant, Duration},
     io::BufReader,
     net::SocketAddr,
 };
-use async_std::{prelude::*, task, future};
+use async_std::{
+    prelude::*,
+    task,
+    future,
+    net::{TcpStream, TcpListener},
+};
 use futures_codec::Framed;
-use path::Path;
 use serde::Serialize;
-use resolver_store::{Action, Store};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ClientHello {
@@ -49,9 +55,9 @@ pub enum FromResolver {
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_msg(store: &Store<ClientInfo>, m: ToResolver) -> FromResolver {
+fn handle_msg(store: &Store<ClientInfo>, m: ToResolver, wa: Option<SocketAddr>) -> FromResolver {
     match m {
-        ToResolver::Publish(paths) => match write_addr {
+        ToResolver::Publish(paths) => match wa {
             None => FromResolver::Error("read only client".into()),
             Some(write_addr) => {
                 if !paths.iter().all(|p| Path::is_absolute()) {
@@ -65,7 +71,7 @@ fn handle_msg(store: &Store<ClientInfo>, m: ToResolver) -> FromResolver {
                 }
             }
         },
-        ToResolver::Unpublish(paths) => match write_addr {
+        ToResolver::Unpublish(paths) => match wa {
             None => FromResolver::Error("read only client".into()),
             Some(write_addr) => {
                 let mut store = store.write().unwrap();
@@ -93,8 +99,8 @@ async fn client_loop(
     server_stop: impl Future<Output = ()>,
 ) -> Result<()> {
     enum M { Stop, Timeout, Msg(Result<ToResolver>) }
-    s.set_nodelay(true).await?;
-    let mut codec = Framed::new(s, MPCodec::new<'_, ToResolver, FromResolver>());
+    s.set_nodelay(true)?;
+    let mut codec = Framed::new(s, MPCodec::<'_, ToResolver, FromResolver>::new());
     let hello = codec.next().await?;
     let (tx_stop, rx_stop) = oneshot::channel();
     let (ttl, ttl_expired, write_addr) = match hello {
@@ -142,7 +148,7 @@ async fn client_loop(
                 bail!("client timed out");
             }
             M::Msg(Ok(m)) => {
-                match codec.unwrap().send(handle_msg(&store, m)).await {
+                match codec.unwrap().send(handle_msg(&store, m, write_addr)).await {
                     Err(_) => { codec = None },
                     Ok(()) => ()
                 }
@@ -155,27 +161,26 @@ async fn server_loop(
     addr: SocketAddr,
     max_connections: usize,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<()>,
-) {
+    ready: oneshot::Sender<Result<()>>,
+) -> Result<()> {
     enum M { Stop, Client(Result<TcpStream>) }
     let connections = Arc::new(AtomicUsize::new(0));
     let published = Store::new();
     let listener = TcpListener::bind(&addr).await?;
     let stop = stop.map(|()| M::Stop).shared();
+    ready.send(Ok(()))?;
     loop {
         let client = listener.accept().err_into().map(|c| M::Client(c));
         match stop.clone().race(client).await {
             M::Stop => break,
-            M::Client(Err(_)) => (),
+            M::Client(Err(_)) => (), // CR estokes: log this error
             M::Client(Ok(client)) => {
                 if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
-                    let task = task::spawn(
-                        client_loop(published.clone(), client, stop.clone())
-                    );
-                    let connections = connections.clone();
+                    let published = published.clone();
+                    let stop = stop.clone();
                     task::spawn(async move {
-                        // CR estokes: log errors
-                        let _ = task.await;
+                        // CR estokes: log any errors
+                        let _ = task::spawn(client_loop(published, client, stop)).await;
                         connections.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
@@ -188,21 +193,18 @@ pub struct Server(Option<oneshot::Sender<()>>);
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let mut stop = None;
-        ::std::mem::swap(&mut stop, &mut self.0);
-        if let Some(stop) = stop { let _ = stop.send(()); }
+        if let Some(stop) = mem::replace(&mut self.0, None) {
+            let _ = stop.send(());
+        }
     }
 }
 
-use error::*;
-
 impl Server {
-    #[async]
-    pub fn new(addr: SocketAddr, max_connections: usize) -> Result<Server> {
+    pub async fn new(addr: SocketAddr, max_connections: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        spawn(accept_loop(addr, max_connections, recv_stop, send_ready));
-        await!(recv_ready).map_err(|_| Error::from("ipc error"))?;
+        task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
+            .race(recv_ready).await?;
         Ok(Server(Some(send_stop)))
     }
 }

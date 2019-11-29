@@ -25,9 +25,15 @@ impl Write for BytesWriter<'_> {
 
 static U64S: usize = mem::size_of::<u64>();
 
-struct MPEncode<'a, T: 'a>(PhantomData<&'a T>);
+pub struct MPCodec<'a, T, F>(PhantomData<&'a T>, PhantomData<T>);
 
-impl<'a, T: Serialize + 'a> Encoder for MPEncode<'a, T> {
+impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
+    pub fn new() -> MPCodec<'a, T, F> {
+        MPCodec(PhantomData, PhantomData)
+    }
+}
+
+impl<'a, T: Serialize + 'a, F: DeserializeOwned> Encoder for MPCodec<'a, T, F> {
     type Item = &'a T;
     type Error = error::Error;
 
@@ -42,10 +48,8 @@ impl<'a, T: Serialize + 'a> Encoder for MPEncode<'a, T> {
     }
 }
 
-struct MPDecode<T>(PhantomData<T>);
-
-impl<T: DeserializeOwned> Decoder for MPDecode<T> {
-    type Item = T;
+impl<'a, T: Serialize + 'a, F: DeserializeOwned> Decoder for MPCodec<'a, T, F> {
+    type Item = F;
     type Error = error::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -62,14 +66,6 @@ impl<T: DeserializeOwned> Decoder for MPDecode<T> {
                 Ok(Some(res?))
             }
         }
-    }
-}
-
-pub struct MPCodec<'a, T, F>(MPEncode<'a, T>, MPDecode<F>);
-
-impl<'a, T: Serialize, F: DeserializeOwned> MPCodec<'a, T, F> {
-    fn new() -> MPCodec<'a, T, F> {
-        MPCodec(MPEncode(PhantomData), MPDecode(PhantomData))
     }
 }
 
