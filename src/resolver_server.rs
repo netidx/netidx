@@ -6,6 +6,7 @@ use futures::{
 };
 use std::{
     result, mem,
+    atomic::{AtomicUsize, Ordering},
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Mutex}
     time::{Instant, Duration},
@@ -185,30 +186,31 @@ async fn server_loop(
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<()>,
 ) {
-    enum M { Stop, Client(TcpStream) }
-    let mut connections = 0;
-    let mut stops = Stops::new();
+    enum M { Stop, Client(Result<TcpStream>) }
+    let connections = Arc::new(AtomicUsize::new(0));
     let published = Store::new();
-    let msgs =
-        TcpListener::bind(&addr).map_err(|_| ())?
-        .incoming().map_err(|_| ()).map(|c| M::Client(c))
-        .select(stop.into_stream().map_err(|_| ()).map(|()| M::Stop));
-    let _ = ready.send(());
-    #[async]
-    for msg in msgs {
-        match msg {
-            M::Client(client) => {
-                let mut connections = t.connections.lock().unwrap();
-                *connections += 1;
-                if *connections < max_connections {
-                    spawn(start_client_loop(t.clone(), client));
+    let listener = TcpListener::bind(&addr).await?;
+    let stop = stop.map(|()| M::Stop).shared();
+    loop {
+        let client = listener.accept().err_into().map(|c| M::Client(c));
+        match stop.clone().race(client).await {
+            M::Stop => break,
+            M::Client(Err(_)) => (),
+            M::Client(Ok(client)) => {
+                if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
+                    let task = task::spawn(
+                        client_loop(published.clone(), client, stop.clone())
+                    );
+                    let connections = connections.clone();
+                    task::spawn(async move {
+                        // CR estokes: log errors
+                        let _ task.await;
+                        connections.fetch_sub(1, Ordering::Relaxed);
+                    });
                 }
             },
-            M::Stop => break,
         }
     }
-    t.stops.lock().unwrap().stop();
-    Ok(())
 }
 
 pub struct Server(Option<oneshot::Sender<()>>);
