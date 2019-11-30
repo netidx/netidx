@@ -55,7 +55,11 @@ pub enum FromResolver {
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_msg(store: &Store<ClientInfo>, m: ToResolver, wa: Option<SocketAddr>) -> FromResolver {
+fn handle_msg(
+    store: &Store<ClientInfo>,
+    m: ToResolver,
+    wa: Option<SocketAddr>
+) -> FromResolver {
     match m {
         ToResolver::Publish(paths) => match wa {
             None => FromResolver::Error("read only".into()),
@@ -86,6 +90,7 @@ fn handle_msg(store: &Store<ClientInfo>, m: ToResolver, wa: Option<SocketAddr>) 
             Some(write_addr) => {
                 let mut store = store.write().unwrap();
                 store.unpublish_addr(write_addr);
+                store.gc();
                 FromResolver::Unpublished
             }
         }
@@ -197,6 +202,7 @@ async fn client_loop(
                         }
                     }
                     store.unpublish_addr(write_addr);
+                    store.gc();
                 }
                 log_ret!("client timed out");
             }
@@ -215,7 +221,7 @@ async fn server_loop(
     let published: Store<ClientInfo> = Store::new();
     let listener = try_log!("TcpListener::bind", TcpListener::bind(addr).await);
     let stop = stop.shared();
-    ready.send(());
+    let _ = ready.send(());
     loop {
         let client = listener.accept().map(|c| match c {
             Ok((c, _)) => M::Client(c),
