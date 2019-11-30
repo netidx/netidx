@@ -16,5 +16,6 @@ rmpv = "0.4"
 rmp-serde = "0.14"
 rand = "0.7"
 uuid = { version = "0.8", features = ["v4", "serde"] }
+lazy_static = "1.4"
 bytes = "0.4"
 failure = "0.1"

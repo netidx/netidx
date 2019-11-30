@@ -9,13 +9,9 @@ use std::{
     },
 };
 
-static EMPTY: Addrs = Arc::new(Vec::new());
-
-/*
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
 }
-*/
 
 type Addrs = Arc<Vec<SocketAddr>>;
 
@@ -191,7 +187,7 @@ pub(crate) struct Store<T>(Arc<RwLock<StoreInner<T>>>);
 
 impl<T> Clone for Store<T> {
     fn clone(&self) -> Self {
-        Store(Arc::clone(self.0))
+        Store(Arc::clone(&self.0))
     }
 }
 

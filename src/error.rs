@@ -13,8 +13,10 @@ enum Error {
     MessageTooLarge(#[fail(cause)] std::num::TryFromIntError),
     #[fail(display = "io error {}", _0)]
     IOErr(#[fail(cause)] std::io::Error),
-    OneshotCanceled(oneshot::Canceled),
-    ChannelIO(mpsc::SendError),
+    #[fail(display = "oneshot channel canceled")]
+    OneshotCanceled(#[fail(cause)] oneshot::Canceled),
+    #[fail(display = "mpsc receiver dropped")]
+    ChannelIO(#[fail(cause)] mpsc::SendError),
     
     Unsubscribed {
         description("the publisher canceled the subscription"),

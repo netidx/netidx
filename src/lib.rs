@@ -93,11 +93,12 @@
 //! one might imagine, because `serde_json` is capable of producing
 //! gigabits per second of JSON on a single 8550U cpu core.
 
+#[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
 
 mod resolver_store;
-pub mod error;
+//pub mod error;
 pub mod path;
 mod utils;
 //pub mod resolver;
