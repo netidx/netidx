@@ -4,16 +4,14 @@ use crate::{
     resolver_store::Store,
 };
 use futures::{
-    channel::{oneshot, mpsc},
-    sink::{Sink, SinkExt},
-    future::{FutureExt as FRSFutureExt, pending, TryFutureExt}
+    channel::oneshot,
+    sink::SinkExt,
+    future::{FutureExt as FRSFutureExt}
 };
 use std::{
     result, mem,
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock, Mutex, atomic::{AtomicUsize, Ordering}},
-    time::{Instant, Duration},
-    io::BufReader,
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    time::Duration,
     net::SocketAddr,
 };
 use async_std::{
