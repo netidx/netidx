@@ -101,7 +101,7 @@ mod resolver_store;
 //pub mod error;
 pub mod path;
 mod utils;
-//pub mod resolver;
+pub mod resolver;
 pub mod resolver_server;
 //pub mod publisher;
 //pub mod subscriber;
