@@ -97,8 +97,13 @@ fn handle_msg(
         ToResolver::Resolve(paths) => {
             use rayon::prelude::*;
             FromResolver::Resolved(
-                paths.par_iter().map_init(|| store.read().unwrap(), |s, p| s.resolve(p))
-                    .collect()
+                if paths.len() < rayon::current_num_threads() * 4 {
+                    let s = store.read().unwrap();
+                    paths.iter().map(|p| s.resolve(p)).collect()
+                } else {
+                    paths.par_iter().map_init(|| store.read().unwrap(), |s, p| s.resolve(p))
+                        .collect()
+                }
             )
         },
         ToResolver::List(path) => {
