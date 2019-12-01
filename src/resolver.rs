@@ -193,9 +193,9 @@ async fn connection(
                             None | Some(Err(_)) => { con = None; }
                             Some(Ok(FromResolver::Published)) => {
                                 published.extend(match m_r {
-                                    ToResolver::Publish(p) => p.clone(),
-                                    _ => Vec::new()
-                                }.into_iter());
+                                    ToResolver::Publish(p) => p.iter().cloned(),
+                                    _ => break FromResolver::Published,
+                                });
                                 break FromResolver::Published
                             }
                             Some(Ok(r)) => break r
