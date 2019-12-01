@@ -159,17 +159,11 @@ async fn connection(
     resolver: SocketAddr,
     publisher: Option<SocketAddr>
 ) {
-    enum M {
-        TimeToHB,
-        TimeToDC,
-        Msg(ToCon),
-        Stop,
-    }
+    enum M { TimeToHB, TimeToDC, Msg(ToCon), Stop }
     let mut published = HashSet::new();
     let mut con: Option<Con> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
-
     loop {
         let hb = future::ready(M::TimeToHB).delay(ttl);
         let dc = future::ready(M::TimeToDC).delay(linger);
