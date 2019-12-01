@@ -193,16 +193,15 @@ async fn connection(
                             con.as_mut().unwrap()
                         }
                     };
-                    let new_published = match m_r {
-                        ToResolver::Publish(p) => p.clone(),
-                        _ => Vec::new()
-                    };
                     match c.send(m_r.clone()).await {
                         Err(_) => { con = None; }
                         Ok(()) => match c.next().await {
                             None | Some(Err(_)) => { con = None; }
                             Some(Ok(FromResolver::Published)) => {
-                                published.extend(new_published.into_iter());
+                                published.extend(match m_r {
+                                    ToResolver::Publish(p) => p.clone(),
+                                    _ => Vec::new()
+                                }.into_iter());
                                 break FromResolver::Published
                             }
                             Some(Ok(r)) => break r
