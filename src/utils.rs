@@ -71,7 +71,7 @@ impl<T: Serialize, F: DeserializeOwned> Decoder for MPCodec<T, F> {
 }
 
 use async_std::prelude::*;
-use futures::task::{Poll, Context};
+use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
 
 pub(crate) fn batched<S: Stream>(stream: S, max: usize) -> Batched<S> {
@@ -95,23 +95,35 @@ pub(crate) struct Batched<S: Stream> {
     current: usize,
 }
 
+impl<S: Stream> Batched<S> {
+    // this is safe because,
+    // - Batched doesn't implement Drop
+    // - Batched doesn't implement Unpin
+    // - Batched isn't #[repr(packed)]
+    unsafe_pinned!(stream: S);
+
+    // these are safe because both types are copy
+    unsafe_unpinned!(ended: bool);
+    unsafe_unpinned!(current: usize);
+}
+
 impl<S: Stream> Stream for Batched<S> {
     type Item = BatchItem<<S as Stream>::Item>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if self.ended {
             Poll::Ready(None)
         } else if self.current >= self.max {
-            self.current = 0;
+            *self.current() = 0;
             Poll::Ready(Some(BatchItem::EndBatch))
         } else {
-            match self.stream.poll_next(cx) {
+            match self.as_mut().stream().poll_next(cx) {
                 Poll::Ready(Some(v)) => {
-                    self.current += 1;
+                    *self.as_mut().current() += 1;
                     Poll::Ready(Some(BatchItem::InBatch(v)))
                 },
                 Poll::Ready(None) => {
-                    self.ended = true;
+                    *self.as_mut().ended() = true;
                     if self.current == 0 {
                         Poll::Ready(None)
                     } else {
@@ -127,5 +139,38 @@ impl<S: Stream> Stream for Batched<S> {
                 }
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
+}
+
+impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
+    type Error = <S as Sink<Item>>::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>, 
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_ready(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        self.stream().start_send(item)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>, 
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>, 
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        self.stream().poll_close(cx)
     }
 }
