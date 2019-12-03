@@ -1,5 +1,5 @@
 use crate::{
-    utils::MPCodec,
+    utils::{MPCodec, Batched, BatchItem},
     path::Path,
     resolver_store::Store,
 };
@@ -132,7 +132,7 @@ async fn client_loop(
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) {
-    enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, Error>>) }
+    enum M { Stop, Timeout, Msg(Option<BatchItem<result::Result<ToResolver, Error>>>) }
     try_log!("can't set nodelay", s.set_nodelay(true));
     let mut codec = Framed::new(s, MPCodec::<ServerHello, ClientHello>::new());
     let hello = match codec.next().await {
@@ -162,12 +162,13 @@ async fn client_loop(
         }
     };
     try_log!("couldn't send hello", codec.send(ServerHello { ttl_expired }).await);
-    let mut codec = Some(Framed::new(
+    let mut codec = Some(Batched::new(Framed::new(
         codec.release().0,
         MPCodec::<FromResolver, ToResolver>::new()
-    ));
+    ), 100000));
     let server_stop = server_stop.shared();
     let rx_stop = rx_stop.shared();
+    let mut batch = Vec::new();
     loop {
         let msg = match codec {
             None => future::pending::<M>().left_future(),
@@ -180,11 +181,12 @@ async fn client_loop(
         match msg.race(stop).race(timeout).await {
             M::Stop => break,
             M::Msg(None) => { codec = None; }
-            M::Msg(Some(Err(e))) => {
+            M::Msg(Some(BatchItem::InBatch(Err(e)))) => {
                 codec = None;
                 println!("error reading message: {}", e)
             },
-            M::Msg(Some(Ok(m))) => {
+            M::Msg(Some(BatchItem::InBatch(Ok(m)))) => batch.push(m),
+            M::Msg(Some(BatchItem::EndBatch)) => {
                 match codec {
                     None => (),
                     Some(ref mut c) =>

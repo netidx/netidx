@@ -74,14 +74,6 @@ use async_std::prelude::*;
 use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
 
-pub(crate) fn batched<S: Stream>(stream: S, max: usize) -> Batched<S> {
-    Batched {
-        stream, max,
-        ended: false,
-        current: 0
-    }
-}
-
 pub enum BatchItem<T> {
     InBatch(T),
     EndBatch
@@ -105,6 +97,14 @@ impl<S: Stream> Batched<S> {
     // these are safe because both types are copy
     unsafe_unpinned!(ended: bool);
     unsafe_unpinned!(current: usize);
+
+    pub(crate) fn new(stream: S, max: usize) -> Batched<S> {
+        Batched {
+            stream, max,
+            ended: false,
+            current: 0
+        }
+    }
 }
 
 impl<S: Stream> Stream for Batched<S> {
