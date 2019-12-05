@@ -3,7 +3,7 @@ use std::{
     result::Result,
     marker::PhantomData,
     convert::AsRef,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddrV4, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, RwLock, Mutex},
     default::Default,
@@ -20,7 +20,6 @@ use serde_json;
 use path::Path;
 use resolver::{Resolver, ReadWrite};
 use line_writer::LineWriter;
-use utils::Encoded;
 use failure::Error;
 use crossbeam::queue::SeqQueue;
 
@@ -147,10 +146,15 @@ struct PublishedUntyped {
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
 }
 
+struct Client {
+    to_client: Sender<ToClient>,
+    subscribed: HashSet<Id, FxBuildHasher>,
+}
+
 struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
-    clients: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
+    clients: HashMap<SocketAddr, Client, FxBuildHasher>,
     next_id: Id,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
@@ -362,15 +366,13 @@ fn get_published(t: &PublisherWeak, path: &Path) -> Option<PublishedUntyped> {
     })
 }
 
-#[async]
-fn client_loop<S>(
+async fn client_loop<S>(
     t: PublisherWeak,
     addr: SocketAddr,
-    msgs: S,
-    writer: LineWriter<Encoded, TcpStream>
-) -> Result<()>
-where S: Stream<Item=String, Error=Error> + 'static {
-    enum C { Msg(String), Stop };
+    msgs: Receiver<ToClient>,
+    s: TcpStream,
+) {
+    enum M { FromCl(String), ToCl(ToClient), Stop };
     let stop = writer.clone().on_shutdown().into_stream().then(|_| Ok(C::Stop));
     let msgs = msgs.map(|m| C::Msg(m));
     let mut wait_set: Option<Path> = None;
@@ -428,68 +430,48 @@ where S: Stream<Item=String, Error=Error> + 'static {
     Ok(())
 }
 
-#[async]
-fn start_client(
-    t: PublisherWeak,
-    reader: ReadHalf<TcpStream>,
-    writer: LineWriter<Encoded, TcpStream>,
-    addr: SocketAddr
-) -> result::Result<(), ()> {
-    let msgs = tokio::io::lines(BufReader::new(reader)).then(|l| Ok(l?));
-    // CR estokes: Do something with this error
-    let _ = await!(client_loop(t.clone(), addr, msgs, writer.clone()));
-    writer.shutdown();
-    if let Some(t) = t.upgrade() {
-        let mut pb = t.0.write().unwrap();
-        pb.clients.remove(&addr);
-        let published = pb.published.clone();
-        drop(pb);
-        for (_, pv) in published.into_iter() {
-            if let Some(pv) = pv.upgrade() {
-                let mut inner = pv.0.lock().unwrap();
-                inner.subscribed.remove(&addr);
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn accept_loop(
     t: PublisherWeak,
     serv: TcpListener,
     stop: oneshot::Receiver<()>,
-) -> Result<(), Error> {
-    enum M { Client(Result<TcpStream, ), Stop };
-    let accepted =
-        serv.incoming().map(|x| Combined::Client(x)).map_err(|e| Error::from(e));
-    let stop = stop.map(|_| Combined::Stop).map_err(|()| Error::from("ipc error"));
-    #[async]
-    for msg in accepted.select(stop) {
-        let t =
-            match t.upgrade() {
-                None => return Ok(()),
-                Some(t) => t
-            };
-        match msg {
-            Combined::Stop => break,
-            Combined::Client(cl) => {
+) {
+    enum M { Client(Result<TcpStream, io::Error>), Stop };
+    let stop = stop.map(|_| M::Stop).shared();
+    loop {
+        let client = serv.accept().map(|r| M::Client(r));
+        match stop.clone().race(client) {
+            M::Stop => break,
+            M::Client(Err(_)) => (), // CR estokes: log this? exit the loop?
+            M::Client(Ok((s, addr))) => {
+                let t_weak = t.clone();
+                let t = match t.upgrade() {
+                    None => return Ok(()),
+                    Some(t) => t
+                };
                 let mut pb = t.0.write().unwrap();
                 if pb.clients.len() < MAX_CLIENTS {
-                    match cl.peer_addr() {
-                        Err(_) => (),
-                        Ok(addr) => {
-                            cl.set_nodelay(true).unwrap_or(());
-                            let (read, write) = cl.split();
-                            let writer = LineWriter::new(write);
-                            pb.clients.insert(addr, writer.clone());
-                            for s in pb.wait_clients.drain(0..) { let _ = s.send(()); }
-                            drop(pb);
-                            spawn(start_client(t.downgrade(), read, writer, addr));
+                    try_cont!("nodelay", cl.nodelay(true));
+                    let (tx, rx) = channel(100);
+                    pb.clients.insert(addr, Client {
+                        to_client: tx,
+                        subscribed: HashSet::with_hasher(FxBuildHasher::default()),
+                    });
+                    drop(pb);
+                    task::spawn(async move {
+                        client_loop(t_weak.clone(), addr, rx, s).await;
+                        if let Some(t) = t_weak.upgrade() {
+                            let mut pb = t.0.write().unwrap();
+                            if let Some(cl) = pb.clients.remove(&addr) {
+                                for id in cl.subscribed {
+                                    if let Some(ut) = pb.by_id.get_mut(&id) {
+                                        ut.subscribed.remove(&id);
+                                    }
+                                }
+                            }
                         }
-                    }
+                    });
                 }
             }
         }
     }
-    Ok(())
 }
