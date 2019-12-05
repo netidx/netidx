@@ -98,10 +98,10 @@
 #[macro_use] extern crate failure;
 #[macro_use] extern crate pin_utils;
 
+#[macro_use] mod utils;
 mod resolver_store;
 //pub mod error;
 pub mod path;
-mod utils;
 pub mod resolver;
 pub mod resolver_server;
 //pub mod publisher;

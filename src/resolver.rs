@@ -106,15 +106,6 @@ impl <R: Writeable> Resolver<R> {
 
 type Con = Framed<TcpStream, MPCodec<ToResolver, FromResolver>>;
 
-macro_rules! or_continue {
-    ($e:expr) => {
-        match $e {
-            Err(_) => continue,
-            Ok(x) => x
-        }
-    }
-}
-
 async fn connect(
     addr: SocketAddr,
     publisher: Option<SocketAddr>,
@@ -126,9 +117,9 @@ async fn connect(
             task::sleep(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con = or_continue!(TcpStream::connect(&addr).await);
+        let con = try_cont!("connect", TcpStream::connect(&addr).await);
         let mut con = Framed::new(con, MPCodec::<ClientHello, ServerHello>::new());
-        or_continue!(con.send(match publisher {
+        try_cont!("hello", con.send(match publisher {
             None => ClientHello::ReadOnly,
             Some(write_addr) => ClientHello::ReadWrite {ttl: TTL, write_addr},
         }).await);
@@ -143,7 +134,7 @@ async fn connect(
                     break con
                 } else {
                     let paths = published.iter().cloned().collect();
-                    or_continue!(con.send(ToResolver::Publish(paths)).await);
+                    try_cont!("republish", con.send(ToResolver::Publish(paths)).await);
                     match con.next().await {
                         Some(Ok(FromResolver::Published)) => break con,
                         _ => ()

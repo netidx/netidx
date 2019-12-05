@@ -1,19 +1,28 @@
 use std::{
-    self, result, marker::PhantomData, io::BufReader, convert::AsRef,
-    collections::HashMap, net::{Ipv4Addr, SocketAddrV4, SocketAddr},
+    self, io,
+    result::Result,
+    marker::PhantomData,
+    convert::AsRef,
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddrV4, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, RwLock, Mutex},
+    default::Default,
 };
+use async_std::{
+    prelude::*,
+    net::{TcpStream, TcpListener},
+}
+use fxhash::FxBuildHasher;
 use rand::{self, distributions::IndependentSample};
-use futures::{prelude::*, sync::{oneshot, mpsc::{channel, Receiver, Sender}}};
+use futures::{channel::{oneshot, mpsc::{channel, Receiver, Sender}}};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
-use tokio::{self, prelude::*, spawn, net::{TcpListener, TcpStream}};
-use tokio_io::io::ReadHalf;
 use path::Path;
-use resolver::Resolver;
+use resolver::{Resolver, ReadWrite};
 use line_writer::LineWriter;
 use utils::Encoded;
-use error::*;
+use failure::Error;
+use crossbeam::queue::SeqQueue;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -26,9 +35,6 @@ pub enum ToPublisher {
     /// Subscribe to the specified value, if it is not available the
     /// result will be NoSuchValue
     Subscribe(Path),
-    /// Write to the specified value, the payload must be the next
-    /// line after this message
-    Set(Path),
     /// Unsubscribe from the specified value, this will always result
     /// in an Unsubscibed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
@@ -50,15 +56,7 @@ pub enum FromPublisher {
     Message(Path)
 }
 
-struct PublishedUntypedInner {
-    publisher: Publisher,
-    path: Path,
-    message_header: Encoded,
-    current: Encoded,
-    on_write: Option<Box<FnMut(String) -> () + Send + Sync>>,
-    subscribed: HashMap<SocketAddr, LineWriter<Encoded, TcpStream>>,
-}
-
+/*
 impl Drop for PublishedUntypedInner {
     fn drop(&mut self) {
         let mut t = self.publisher.0.write().unwrap();
@@ -78,92 +76,100 @@ impl Drop for PublishedUntypedInner {
         }
     }
 }
+*/
 
-#[derive(Clone)]
-struct PublishedUntypedWeak(Weak<Mutex<PublishedUntypedInner>>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Id(u64);
 
-impl PublishedUntypedWeak {
-    fn upgrade(&self) -> Option<PublishedUntyped> {
-        Weak::upgrade(&self.0).map(|r| PublishedUntyped(r))
+impl Id {
+    fn zero() -> Self {
+        Id(0)
+    }
+
+    fn succ(&self) -> Self {
+        Id(self.0 + 1)
     }
 }
 
-#[derive(Clone)]
-struct PublishedUntyped(Arc<Mutex<PublishedUntypedInner>>);
+struct PublishedInner<T> {
+    id: Id,
+    publisher: PublisherWeak,
+    updates: Arc<SeqQueue<(Id, Arc<[u8]>)>>,
+    typ: PhantomData<T>,
+}
 
-impl PublishedUntyped {
-    fn downgrade(&self) -> PublishedUntypedWeak {
-        PublishedUntypedWeak(Arc::downgrade(&self.0))
+impl<T> Drop for PublisherInner<T> {
+    fn drop(&mut self) {
+        if let Some(p) = self.publisher.upgrade() {
+            task::spawn(async move { p.unpublish(self.id) });
+        }
     }
 }
 
 // Err(Dead) should contain the last published value
 /// This represents a published value. Internally it is wrapped in an
 /// Arc, so cloning it is essentially free. When all references to a
-/// given published value have been dropped it will be unpublished
-/// from the resolver, subscribers will be notified that no further
-/// updates will happen (the updates stream will end, and is_dead will
-/// return true), and subsuquent subscriptions will fail.
+/// given published value have been dropped it will be unpublished.
 #[derive(Clone)]
-pub struct Published<T>(PublishedUntyped, PhantomData<T>);
+pub struct Published<T>(Arc<PublishedInner<T>>);
 
 impl<T: Serialize> Published<T> {
-    /// Update the published value. For existing subscribers this only
-    /// queues the update, it will not be sent out until you call
-    /// `flush` on the publisher. This gives you control of batching
-    /// multiple updates into as few syscalls as is possible, which can
-    /// be important for throughput.
+    /// Queue an update to the published value, it will not be sent
+    /// out until you call `flush` on the publisher. New subscribers
+    /// will not see the new value until you have called
+    /// `flush`. Multiple updates can be queued before flush is
+    /// called, in which case after `flush` is called new subscribers
+    /// will see the last value, and existing subscribers will receive
+    /// all the queued values in order. If updates are queued on
+    /// multiple different published values before `flush` is called,
+    /// they will all be sent out as a batch in the order that update
+    /// is called.
     ///
-    /// New subscribers will see the latest value immediatly,
-    /// reguardless of whether you've flushed it or not.
-    pub fn update(&self, v: &T) -> Result<()> {
-        let mut t = (self.0).0.lock().unwrap();
-        let c = t.message_header.clone();
-        let v = Encoded::new(serde_json::to_vec(v)?);
-        t.current = v.clone();
-        for (_, cl) in t.subscribed.iter() { cl.write_two(c.clone(), v.clone()) }
+    /// The thread calling update pays the serialization cost. No
+    /// locking occurs during update, just a push to a concurrent
+    /// queue (assuming your platform supports the necessary atomic
+    /// operations).
+    pub fn update(&self, v: &T) -> Result<(), Error> {
+        let id = self.0.id;
+        self.0.updates.push(Arc::from(rmp_serde::encode::to_vec_named((id, v))?));
         Ok(())
-    }
-
-    /// EXPERIMENTAL Register `f` to be called when the subscriber calls
-    /// `write` on a value. Sadly, you may not call `update` from this
-    /// closure, since you hold the `Published` lock. This shortcoming
-    /// may be addressed in the future, or this api may be completely
-    /// changed or just removed.
-    pub fn on_write<U: DeserializeOwned + 'static>(
-        &self,
-        mut f: Box<FnMut(result::Result<U, serde_json::Error>) -> () + Send + Sync>
-    ) {
-        let f = Box::new(move |s: String| (f)(serde_json::from_str::<U>(s.as_ref())));
-        (self.0).0.lock().unwrap().on_write = Some(f);
     }
 }
 
+struct ToClient {
+    msgs: Vec<Arc<[u8]>>,
+    done: oneshot::Sender<()>
+}
+
+struct PublishedUntyped {
+    header: Arc<[u8]>,
+    current: Arc<[u8]>,
+    subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
+}
+
 struct PublisherInner {
-    dead: bool,
     addr: SocketAddr,
-    stop_accept: Sender<()>,
-    clients: HashMap<SocketAddr, LineWriter<Encoded, TcpStream>>,
-    wait_clients: Vec<oneshot::Sender<()>>,
-    published: HashMap<Path, PublishedUntypedWeak>,
-    resolver: Resolver
+    stop: Option<oneshot::Sender<()>>,
+    clients: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
+    next_id: Id,
+    by_path: HashMap<Path, Id>,
+    by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
+    updates: Arc<SeqQueue<(Id, Arc<[u8]>)>>,
+    resolver: Resolver<ReadWrite>
 }
 
 impl PublisherInner {
     fn shutdown(&mut self) {
-        if !self.dead {
-            self.dead = true;
-            let published = self.published.clone();
-            let addr = self.addr;
-            let r = self.resolver.clone();
-            let stop = self.stop_accept.clone();
-            for (_, c) in self.clients.iter() { c.shutdown() }
-            spawn(async_block! {
-                let _ = await!(stop.send(()));
-                for (s, _) in published.into_iter() {
-                    let _ = await!(r.clone().unpublish(s, addr));
-                }
-                Ok(())
+        if let Some(stop) = mem::replace(&mut self.stop, None) {
+            let _ = stop.send(());
+            self.clients.clear();
+            self.by_id.clear();
+            while let Ok(_) = self.updates.pop() {}
+            let paths = mem::replace(&mut self.by_path, HashMap::new());
+            let resolver = self.resolver.clone();
+            task::spawn(async move {
+                let paths = paths.into_iter().map(|(p, _)| p).collect();
+                let _ = resolver.unpublish(paths).await
             });
         }
     }
@@ -193,8 +199,17 @@ pub enum BindCfg {
     Local,
     /// Bind to `0.0.0.0`, automatically pick an unused port as in `Local`.
     Any,
+    /// Bind to the specified address, but automatically pick an
+    /// unused port as in `Local`.
+    Addr(IpAddr),
     /// Bind to the specifed `SocketAddr`, error if it is in use.
     Exact(SocketAddr)
+}
+
+impl Default for BindCfg {
+    fn default() -> Self {
+        BindCfg::Any
+    }
 }
 
 /// Publisher allows to publish values, and gives central control of
@@ -210,52 +225,59 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    // CR estokes: shouldn't this be async? if for no other reason than
-    // to signal that the listener is ready to receive subscribers ...
     /// Create a new publisher, and start the listener.
-    pub fn new(
-        resolver: Resolver,
+    pub async fn new<T: ToSocketAddrs>(
+        resolver: T,
         bind_cfg: BindCfg
-    ) -> Result<Publisher> {
-        let (addr, listener) =
-            match bind_cfg {
-                BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr)?),
-                BindCfg::Local | BindCfg::Any => {
-                    let mut rng = rand::thread_rng();
-                    let range = rand::distributions::Range::new(0u16, 10u16);
-                    let ip = match bind_cfg {
-                        BindCfg::Exact(_) => unreachable!(),
-                        BindCfg::Local => Ipv4Addr::new(127, 0, 0, 1),
-                        BindCfg::Any => Ipv4Addr::new(0, 0, 0, 0)
-                    };
-                    let mut port = 5000;
-                    let mut listener = None;
-                    let mut addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-                    while listener.is_none() && port < 32768 {
-                        port += range.ind_sample(&mut rng);
-                        addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-                        match TcpListener::bind(&addr) {
-                            Ok(l) => listener = Some(l),
-                            Err(e) =>
-                                if e.kind() != std::io::ErrorKind::AddrInUse { bail!(e) }
+    ) -> Result<Publisher, Error> {
+        let (addr, listener) = match bind_cfg {
+            BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
+            BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
+                let range = rand::distributions::Range::new(0u16, 10u16);
+                let ip = match bind_cfg {
+                    BindCfg::Exact(_) => unreachable!(),
+                    BindCfg::Local => IpAddr::from(Ipv4Addr::new(127, 0, 0, 1)),
+                    BindCfg::Any => IpAddr::from(Ipv4Addr::new(0, 0, 0, 0)),
+                    BindCfg::Addr(addr) => addr,
+                };
+                let mut rng = rand::thread_rng();
+                let mut port = 5000;
+                let mut addr = (ip, port).to_socket_addrs().next().unwrap();
+                loop {
+                    if port >= 32768 { bail!("couldn't allocate a port"); }
+                    port += range.ind_sample(&mut rng);
+                    addr = (ip, port).to_socket_addrs().next().unwrap();
+                    match TcpListener::bind(&addr).await {
+                        Ok(l) => break (addr, l),
+                        Err(e) => if e.kind() != std::io::ErrorKind::AddrInUse {
+                            bail!(e)
                         }
                     }
-                    (addr, listener.ok_or_else(|| {
-                        Error::from("could not find an open port")
-                    })?)
                 }
-            };
-        let (send, stop) = channel(1000);
-        let pb = PublisherInner {
-            addr, resolver,
-            dead: false,
-            stop_accept: send,
-            clients: HashMap::new(),
-            published: HashMap::new(),
-            wait_clients: Vec::new(),
+            }
         };
-        let pb = Publisher(Arc::new(RwLock::new(pb)));
-        spawn(start_accept(pb.downgrade(), listener, stop));
+        let resolver = Resolver::new_rw(resolver, addr)?;
+        let (stop, receive_stop) = oneshot::channel();
+        let pb = Publisher(Arc::new(RwLock::new(PublisherInner {
+            addr,
+            stop: Some(stop),
+            clients: HashMap::with_hasher(FxBuildHasher::default()),
+            next_id: Id::zero(),
+            by_path: HashMap::new(),
+            by_id: HashMap::with_hasher(FxBuildHasher::default()),
+            updates: SeqQueue::new(),
+            resolver
+        })));
+        task::spawn({
+            let pb_weak = pb.downgrade();
+            async move {
+                // CR estokes: log the error?
+                accept_loop(pb_weak.clone(), listener, receive_stop).await;
+                if let Some(pb) = pb_weak.upgrade() {
+                    pb.write().unwrap().shutdown();
+                }
+            }
+        });
         Ok(pb)
     }
 
@@ -284,8 +306,9 @@ impl Publisher {
         let ut = PublishedUntyped(Arc::new(Mutex::new(inner)));
         let (addr, resolver) = {
             let mut t = self.0.write().unwrap();
-            if t.published.contains_key(&path) { bail!(ErrorKind::AlreadyPublished(path)) }
-            else {
+            if t.published.contains_key(&path) {
+                bail!(ErrorKind::AlreadyPublished(path))
+            } else {
                 t.published.insert(path.clone(), ut.downgrade());
                 (t.addr, t.resolver.clone())
             }
@@ -431,13 +454,12 @@ fn start_client(
     Ok(())
 }
 
-#[async]
-fn accept_loop(
+async fn accept_loop(
     t: PublisherWeak,
     serv: TcpListener,
-    stop: Receiver<()>
-) -> Result<()> {
-    enum Combined { Client(TcpStream), Stop };
+    stop: oneshot::Receiver<()>,
+) -> Result<(), Error> {
+    enum M { Client(Result<TcpStream, ), Stop };
     let accepted =
         serv.incoming().map(|x| Combined::Client(x)).map_err(|e| Error::from(e));
     let stop = stop.map(|_| Combined::Stop).map_err(|()| Error::from("ipc error"));
@@ -469,17 +491,5 @@ fn accept_loop(
             }
         }
     }
-    Ok(())
-}
-
-#[async]
-fn start_accept(
-    t: PublisherWeak,
-    serv: TcpListener,
-    stop: Receiver<()>
-) -> result::Result<(), ()> {
-    // CR estokes: Do something with this error
-    let _ = await!(accept_loop(t.clone(), serv, stop));
-    if let Some(t) = t.upgrade() { t.0.write().unwrap().shutdown() }
     Ok(())
 }

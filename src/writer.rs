@@ -5,10 +5,13 @@ use std::{
     sync::{Arc, Weak, Mutex},
     convert::AsRef
 };
-use futures::{prelude::*, sync::{mpsc::{channel, Receiver, Sender}, oneshot}};
-use tokio::{self, spawn, io::{AsyncWrite, Write}};
-use tokio_io::io::{WriteHalf, write_all};
-use error::*;
+use futures::{
+    io::WriteHalf,
+    channel::{mpsc::{channel, Receiver, Sender}, oneshot}
+};
+use async_std::prelude::*
+use failure::Error;
+use crossbeam::queue::SeqQueue;
 
 enum Msg<T> {
     Stop,
@@ -16,7 +19,7 @@ enum Msg<T> {
     Write(T)
 }
 
-struct LineWriterInner<T, K> {
+struct WriterInner<T, K> {
     sender: Sender<Vec<Msg<T>>>,
     queued: Vec<Msg<T>>,
     flushes: Vec<oneshot::Sender<()>>,
@@ -25,29 +28,29 @@ struct LineWriterInner<T, K> {
     kind: PhantomData<K>
 }
 
-struct LineWriterWeak<T, K>(Weak<Mutex<LineWriterInner<T, K>>>);
+struct WriterWeak<T, K>(Weak<Mutex<WriterInner<T, K>>>);
 
 impl<T,K> Clone for LineWriterWeak<T,K> {
-    fn clone(&self) -> Self { LineWriterWeak(Weak::clone(&self.0)) }
+    fn clone(&self) -> Self { WriterWeak(Weak::clone(&self.0)) }
 }
 
-impl<T,K> LineWriterWeak<T,K> {
-    fn upgrade(&self) -> Option<LineWriter<T,K>> {
-        Weak::upgrade(&self.0).map(|r| LineWriter(r))
+impl<T,K> WriterWeak<T,K> {
+    fn upgrade(&self) -> Option<Writer<T,K>> {
+        Weak::upgrade(&self.0).map(|r| Writer(r))
     }
 }
 
-pub struct LineWriter<T, K>(Arc<Mutex<LineWriterInner<T, K>>>);
+pub struct Writer<T, K>(Arc<Mutex<WriterInner<T, K>>>);
 
-impl<T, K> Clone for LineWriter<T, K> {
-    fn clone(&self) -> Self { LineWriter(Arc::clone(&self.0)) }
+impl<T, K> Clone for Writer<T, K> {
+    fn clone(&self) -> Self { Writer(Arc::clone(&self.0)) }
 }
 
 impl<T: AsRef<[u8]> + Send + Sync + 'static,
-     K: AsyncWrite + Write + Send + Sync + 'static> LineWriter<T, K> {
+     K: AsyncWrite + Write + Send + Sync + 'static> Writer<T, K> {
     pub fn new(chan: WriteHalf<K>) -> Self {
         let (sender, receiver) = channel(10);
-        let inner = LineWriterInner {
+        let inner = WriterInner {
             sender,
             queued: Vec::new(),
             flushes: Vec::new(),
@@ -55,13 +58,13 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
             dead: false,
             kind: PhantomData
         };
-        let t = LineWriter(Arc::new(Mutex::new(inner)));
+        let t = Writer(Arc::new(Mutex::new(inner)));
         spawn(start_inner_loop(t.downgrade(), receiver, chan));
         t
     }
 
-    fn downgrade(&self) -> LineWriterWeak<T,K> {
-        LineWriterWeak(Arc::downgrade(&self.0))
+    fn downgrade(&self) -> WriterWeak<T,K> {
+        WriterWeak(Arc::downgrade(&self.0))
     }
 
     #[async]
@@ -153,7 +156,7 @@ impl<T: AsRef<[u8]> + Send + Sync + 'static,
 
 #[async]
 fn inner_loop<T, K>(
-    t: LineWriterWeak<T, K>,
+    t: WriterWeak<T, K>,
     receiver: Receiver<Vec<Msg<T>>>,
     mut chan: WriteHalf<K>
 ) -> Result<()>
@@ -205,7 +208,7 @@ where T: AsRef<[u8]> + Send + Sync + 'static,
 
 #[async]
 fn start_inner_loop<T, K>(
-    t: LineWriterWeak<T, K>,
+    t: WriterWeak<T, K>,
     receiver: Receiver<Vec<Msg<T>>>,
     chan: WriteHalf<K>
 ) -> result::Result<(), ()>

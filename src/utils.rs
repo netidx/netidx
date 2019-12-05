@@ -10,6 +10,41 @@ use std::{
 use serde::{Serialize, de::DeserializeOwned};
 use failure::Error;
 
+#[macro_export]
+macro_rules! try_cont {
+    ($m:expr, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                println!("{}: {}", $m, e);
+                continue
+            }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! try_ret {
+    ($m:expr, $e:expr) => {
+        match $e {
+            Ok(r) => r,
+            Err(e) => {
+                // CR estokes: use a better method
+                println!("{}: {}", $m, e);
+                return
+            }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! ret {
+    ($m:expr) => { {
+        println!("{}", $m);
+        return
+    } }
+}
+
 struct BytesWriter<'a>(&'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {

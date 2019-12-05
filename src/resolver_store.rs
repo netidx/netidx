@@ -1,13 +1,14 @@
 use crate::path::Path;
 use fxhash::FxBuildHasher;
 use std::{
-    iter, net::SocketAddr, sync::{Arc, Weak, RwLock},
+    iter, net::SocketAddr, sync::{Arc, Weak},
     convert::AsRef, ops::Deref, clone::Clone,
     collections::{
         Bound, Bound::{Included, Excluded, Unbounded},
         HashSet, HashMap, BTreeSet
     },
 };
+use crossbeam::sync::ShardedLock;
 
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
@@ -179,7 +180,7 @@ impl<T> StoreInner<T> {
     }
 }
 
-pub(crate) struct Store<T>(Arc<RwLock<StoreInner<T>>>);
+pub(crate) struct Store<T>(Arc<ShardedLock<StoreInner<T>>>);
 
 impl<T> Clone for Store<T> {
     fn clone(&self) -> Self {
@@ -188,7 +189,7 @@ impl<T> Clone for Store<T> {
 }
 
 impl<T> Deref for Store<T> {
-    type Target = RwLock<StoreInner<T>>;
+    type Target = ShardedLock<StoreInner<T>>;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
@@ -197,7 +198,7 @@ impl<T> Deref for Store<T> {
 
 impl<T> Store<T> {
     pub(crate) fn new() -> Self {
-        Store(Arc::new(RwLock::new(StoreInner {
+        Store(Arc::new(ShardedLock::new(StoreInner {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),

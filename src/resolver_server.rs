@@ -107,43 +107,23 @@ fn handle_msg(
     }
 }
 
-macro_rules! try_log {
-    ($m:expr, $e:expr) => {
-        match $e {
-            Ok(r) => r,
-            Err(e) => {
-                // CR estokes: use a better method
-                println!("{}: {}", $m, e);
-                return
-            }
-        }
-    }
-}
-
-macro_rules! log_ret {
-    ($m:expr) => { {
-        println!("{}", $m);
-        return
-    } }
-}
-
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) {
     enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, Error>>) }
-    try_log!("can't set nodelay", s.set_nodelay(true));
+    try_ret!("can't set nodelay", s.set_nodelay(true));
     let mut codec = Framed::new(s, MPCodec::<ServerHello, ClientHello>::new());
     let hello = match codec.next().await {
-        None => log_ret!("no hello from client"),
-        Some(h) => try_log!("error reading hello", h)
+        None => ret!("no hello from client"),
+        Some(h) => try_ret!("error reading hello", h)
     };
     let (tx_stop, rx_stop) = oneshot::channel();
     let (ttl, ttl_expired, write_addr) = match hello {
         ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
         ClientHello::ReadWrite {ttl, write_addr} => {
-            if ttl <= 0 || ttl > 3600 { log_ret!("invalid ttl") }
+            if ttl <= 0 || ttl > 3600 { ret!("invalid ttl") }
             let mut store = store.write().unwrap();
             let clinfos = store.clinfo_mut();
             let ttl = Duration::from_secs(ttl);
@@ -161,7 +141,7 @@ async fn client_loop(
             }
         }
     };
-    try_log!("couldn't send hello", codec.send(ServerHello { ttl_expired }).await);
+    try_ret!("couldn't send hello", codec.send(ServerHello { ttl_expired }).await);
     let mut codec = Some(Framed::new(
         codec.release().0,
         MPCodec::<FromResolver, ToResolver>::new()
@@ -182,6 +162,7 @@ async fn client_loop(
             M::Msg(None) => { codec = None; }
             M::Msg(Some(Err(e))) => {
                 codec = None;
+                // CR estokes: use proper log module
                 println!("error reading message: {}", e)
             },
             M::Msg(Some(Ok(m))) => {
@@ -205,7 +186,7 @@ async fn client_loop(
                     store.unpublish_addr(write_addr);
                     store.gc();
                 }
-                log_ret!("client timed out");
+                ret!("client timed out");
             }
         }
     }
@@ -220,7 +201,7 @@ async fn server_loop(
     enum M { Stop, Drop, Client(TcpStream) }
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let listener = try_log!("TcpListener::bind", TcpListener::bind(addr).await);
+    let listener = try_ret!("TcpListener::bind", TcpListener::bind(addr).await);
     let stop = stop.shared();
     let _ = ready.send(());
     loop {
