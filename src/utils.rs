@@ -38,6 +38,16 @@ macro_rules! try_ret {
 }
 
 #[macro_export]
+macro_rules! or_ret {
+    ($e:expr) => {
+        match $e {
+            Some(r) => r,
+            None => return
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! ret {
     ($m:expr) => { {
         println!("{}", $m);

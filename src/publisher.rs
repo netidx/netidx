@@ -5,7 +5,7 @@ use std::{
     convert::AsRef,
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddrV4, SocketAddr, ToSocketAddrs},
-    sync::{Arc, Weak, RwLock, Mutex},
+    sync::{Arc, Weak, Mutex},
     default::Default,
 };
 use async_std::{
@@ -38,7 +38,7 @@ pub enum ToPublisher {
     /// Unsubscribe from the specified value, this will always result
     /// in an Unsubscibed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
-    Unsubscribe(Path)
+    Unsubscribe(Id)
 }
 
 /// This is the set of protocol messages that may come from the publisher
@@ -51,9 +51,16 @@ pub enum FromPublisher {
     /// of an Unsubscribe message, or it may be sent unsolicited, in
     /// the case the value is no longer published, or the publisher is
     /// in the process of shutting down.
-    Unsubscribed(Path),
-    /// The next line contains an updated value for Path
-    Message(Path)
+    Unsubscribed(Id),
+    /// The next message contains an updated value for Id. If you have
+    /// pending subscriptions, then Message(new id) indicates that
+    /// your subscription was succcessful, and that the next message
+    /// contains the current value of the path you subscribed
+    /// to. First messages are sent in the order of subscription, and
+    /// no messages for any other subscribed paths will be sent
+    /// between a subscribe and the first message for that
+    /// subscription.
+    Message(Id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -165,7 +172,7 @@ impl Drop for PublisherInner {
 }
 
 #[derive(Clone)]
-struct PublisherWeak(Weak<RwLock<PublisherInner>>);
+struct PublisherWeak(Weak<Mutex<PublisherInner>>);
 
 impl PublisherWeak {
     fn upgrade(&self) -> Option<Publisher> {
@@ -201,7 +208,7 @@ impl Default for BindCfg {
 /// published values, and all references to publisher have been
 /// dropped the publisher will shutdown the listener.
 #[derive(Clone)]
-pub struct Publisher(Arc<RwLock<PublisherInner>>);
+pub struct Publisher(Arc<Mutex<PublisherInner>>);
 
 impl Publisher {
     fn downgrade(&self) -> PublisherWeak {
@@ -241,7 +248,7 @@ impl Publisher {
         };
         let resolver = Resolver::new_rw(resolver, addr)?;
         let (stop, receive_stop) = oneshot::channel();
-        let pb = Publisher(Arc::new(RwLock::new(PublisherInner {
+        let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
             stop: Some(stop),
             clients: HashMap::with_hasher(FxBuildHasher::default()),
@@ -344,21 +351,41 @@ async fn client_loop<S>(
     mut msgs: Receiver<ToClient>,
     s: TcpStream,
 ) {
-    enum M { FromCl(Bytes), ToCl(ToClient), Stop };
+    enum M { FromCl(Option<Result<Bytes, io::Error>>), ToCl(Option<ToClient>) };
     let mut codec = Framed::new(s, LengthCodec);
     loop {
-        let to_cl = msgs.next().map(|m| m.map(|m| M::ToCl).unwrap_or(M::Stop));
-        let from_cl = codec.next().map(|m| match m {
-            None | Some(Err(_)) => M::Stop,
-            Some(Ok(m)) => M::FromCl(m)
-        });
-        match to_cl.race(from_cl) {
-            M::Stop => break,
-            M::FromCl(b) => {
-                let m = try_ret!(
-                    "decode from client",
-                    rmp_serde::decode::<&[u8], ToPublisher>::from_read(&b)
-                );
+        let to_cl = msgs.next().map(|m| M::ToCl(m));
+        let from_cl = codec.next().map(|m| M::FromCl(m));
+        match to_cl.race(from_cl).await {
+            M::FromCl(None) | M::ToCl(None) => break,
+            M::FromCl(Some(Err(e))) => ret!("error reading client", e),
+            M::FromCl(Some(Ok(b))) => {
+                let r = rmp_serde::decode::<&[u8], ToPublisher>::from_read(&b);
+                let t_st = or_ret!(t.upgrade());
+                let mut pb = t_st.0.lock().unwrap();
+                let (reply, v) = match try_ret!("decode from client", r) {
+                    ToPublisher::Subscribe(path) => {
+                        match pb.by_path.get(&path) {
+                            None => (FromPublisher::NoSuchValue(path), None),
+                            Some(id) => {
+                                let cl = or_ret!(pb.clients.get_mut(&addr));
+                                let ut = or_ret!(pb.by_id.get_mut(id));
+                                cl.subscribed.insert(*id);
+                                ut.subscribed.insert(addr, cl.to_client.clone());
+                                (FromPublisher::Message(*id), Some(ut.current.clone()))
+                            }
+                        }
+                    }
+                    ToPublisher::Unsubscribe(id) => {
+                        if let Some(ut) = pb.by_id.get_mut(id) {
+                            ut.subscribed.remove(&addr);
+                            or_ret!(pb.clients.get_mut(&addr)).subscribed.remove(id);
+                        }
+                        (FromPublisher::Unsubscribed(*id), None)
+                    }
+                };
+                drop(pb);
+                let reply_b = rmp_serde::encode::to_vec_named(&reply).unwrap()
             }
         }
     }
