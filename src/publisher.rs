@@ -15,13 +15,14 @@ use async_std::{
 use fxhash::FxBuildHasher;
 use rand::{self, distributions::IndependentSample};
 use futures::{channel::{oneshot, mpsc::{channel, Receiver, Sender}}};
+use futures_codec::{Framed, LengthCodec};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json;
 use path::Path;
 use resolver::{Resolver, ReadWrite};
 use line_writer::LineWriter;
 use failure::Error;
 use crossbeam::queue::SeqQueue;
+use bytes::Bytes;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -54,28 +55,6 @@ pub enum FromPublisher {
     /// The next line contains an updated value for Path
     Message(Path)
 }
-
-/*
-impl Drop for PublishedUntypedInner {
-    fn drop(&mut self) {
-        let mut t = self.publisher.0.write().unwrap();
-        t.published.remove(&self.path);
-        let r = t.resolver.clone();
-        let addr = t.addr;
-        drop(t);
-        let path = self.path.clone();
-        spawn(async_block! { await!(r.unpublish(path, addr)).map_err(|_| ()) });
-        let msg =
-            serde_json::to_vec(&FromPublisher::Unsubscribed(self.path.clone()))
-            .expect("failed to encode unsubscribed message");
-        let msg = Encoded::new(msg);
-        for (_, c) in self.subscribed.iter() {
-            c.write_one(msg.clone());
-            c.flush_nowait();
-        }
-    }
-}
-*/
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Id(u64);
@@ -359,75 +338,30 @@ impl Publisher {
     pub fn clients(&self) -> usize { self.0.read().unwrap().clients.len() }
 }
 
-fn get_published(t: &PublisherWeak, path: &Path) -> Option<PublishedUntyped> {
-    t.upgrade().and_then(|t| {
-        let t = t.0.read().unwrap();
-        t.published.get(path).and_then(|p| p.upgrade())
-    })
-}
-
 async fn client_loop<S>(
     t: PublisherWeak,
     addr: SocketAddr,
-    msgs: Receiver<ToClient>,
+    mut msgs: Receiver<ToClient>,
     s: TcpStream,
 ) {
-    enum M { FromCl(String), ToCl(ToClient), Stop };
-    let stop = writer.clone().on_shutdown().into_stream().then(|_| Ok(C::Stop));
-    let msgs = msgs.map(|m| C::Msg(m));
-    let mut wait_set: Option<Path> = None;
-    #[async]
-    for msg in msgs.select(stop) {
-        match msg {
-            C::Stop => break,
-            C::Msg(msg) => {
-                let mut ws = None;
-                std::mem::swap(&mut wait_set, &mut ws);
-                match ws {
-                    Some(path) => {
-                        if let Some(published) = get_published(&t, &path) {
-                            let mut inner = published.0.lock().unwrap();
-                            // CR estokes: this is asking for a deadlock
-                            if let Some(ref mut f) = inner.on_write { (f)(msg) }
-                        }
-                    },
-                    None =>
-                        match serde_json::from_str(&msg)? {
-                            ToPublisher::Set(path) => { wait_set = Some(path); },
-                            ToPublisher::Unsubscribe(s) => {
-                                if let Some(published) = get_published(&t, &s) {
-                                    published.0.lock().unwrap().subscribed.remove(&addr);
-                                }
-                                let resp =
-                                    serde_json::to_vec(&FromPublisher::Unsubscribed(s))?;
-                                writer.write_one(Encoded::new(resp));
-                                writer.flush_nowait();
-                            },
-                            ToPublisher::Subscribe(s) =>
-                                match get_published(&t, &s) {
-                                    None => {
-                                        let v =
-                                            serde_json::to_vec(
-                                                &FromPublisher::NoSuchValue(s)
-                                            )?;
-                                        writer.write_one(Encoded::new(v));
-                                        writer.flush_nowait();
-                                    },
-                                    Some(published) => {
-                                        let mut inner = published.0.lock().unwrap();
-                                        inner.subscribed.insert(addr, writer.clone());
-                                        let c = inner.message_header.clone();
-                                        let v = inner.current.clone();
-                                        writer.write_two(c, v);
-                                        writer.flush_nowait();
-                                    }
-                                },
-                        }
-                }
+    enum M { FromCl(Bytes), ToCl(ToClient), Stop };
+    let mut codec = Framed::new(s, LengthCodec);
+    loop {
+        let to_cl = msgs.next().map(|m| m.map(|m| M::ToCl).unwrap_or(M::Stop));
+        let from_cl = codec.next().map(|m| match m {
+            None | Some(Err(_)) => M::Stop,
+            Some(Ok(m)) => M::FromCl(m)
+        });
+        match to_cl.race(from_cl) {
+            M::Stop => break,
+            M::FromCl(b) => {
+                let m = try_ret!(
+                    "decode from client",
+                    rmp_serde::decode::<&[u8], ToPublisher>::from_read(&b)
+                );
             }
         }
     }
-    Ok(())
 }
 
 async fn accept_loop(
