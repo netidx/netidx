@@ -73,8 +73,10 @@ impl Id {
         Id(0)
     }
 
-    fn succ(&self) -> Self {
-        Id(self.0 + 1)
+    fn take(&mut self) -> Self {
+        let new = *self;
+        self = Id(self.0 + 1);
+        new
     }
 }
 
@@ -157,7 +159,8 @@ struct PublisherInner {
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
     updates: Arc<SeqQueue<(Id, Bytes)>>,
-    resolver: Resolver<ReadWrite>
+    resolver: Resolver<ReadWrite>,
+    to_publish: Vec<Path>,
 }
 
 impl PublisherInner {
@@ -268,7 +271,8 @@ impl Publisher {
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             updates: SeqQueue::new(),
-            resolver
+            resolver,
+            to_publish: Vec::new(),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -284,39 +288,48 @@ impl Publisher {
     }
 
     /// get the `SocketAddr` that publisher is bound to
-    pub fn addr(&self) -> SocketAddr { self.0.read().unwrap().addr }
+    pub fn addr(&self) -> SocketAddr { self.0.lock().unwrap().addr }
 
-    /// Publish `Path` with initial value `init`. Subscribers can
-    /// subscribe to the value as soon as the future returned by this
-    /// function is ready.
+    /// Publish `Path` with initial value `init`. Subscribers will not
+    /// be able to subscribe until you call flush and await the
+    /// returned future.
     ///
     /// Multiple publishers may publish values at the same path. See
     /// `subscriber::Subscriber::subscribe` for details.
-    #[async]
-    pub fn publish<T: Serialize + 'static>(
-        self, path: Path, init: T
-    ) -> Result<Published<T>> {
-        let header_msg = FromPublisher::Message(path.clone());
-        let inner = PublishedUntypedInner {
-            publisher: self.clone(),
-            path: path.clone(),
-            on_write: None,
-            message_header: Encoded::new(serde_json::to_vec(&header_msg)?),
-            current: Encoded::new(serde_json::to_vec(&init)?),
-            subscribed: HashMap::new()
-        };
-        let ut = PublishedUntyped(Arc::new(Mutex::new(inner)));
-        let (addr, resolver) = {
-            let mut t = self.0.write().unwrap();
-            if t.published.contains_key(&path) {
-                bail!(ErrorKind::AlreadyPublished(path))
-            } else {
-                t.published.insert(path.clone(), ut.downgrade());
-                (t.addr, t.resolver.clone())
-            }
-        };
-        await!(resolver.publish(path, addr))?;
-        Ok(Published(ut, PhantomData))
+    pub fn publish<T: Serialize>(
+        &self, path: Path, init: &T
+    ) -> Result<Published<T>, Error> {
+        let current = BUF.with(|buf| {
+            let mut b = buf.borrow_mut();
+            rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), init)?;
+            Ok(buf.take().freeze())
+        })?;
+        let mut pb = self.0.lock().unwrap();
+        if pb.stop.is_none() {
+            Error::from("publisher is dead")
+        } else if pb.by_path.contains_key(&path) {
+            Error::from("already published")
+        } else {
+            let id = pb.next_id.take();
+            let header = BUF.with(|buf| {
+                let mut b = buf.borrow_mut();
+                let m = FromPublisher::Message(id);
+                rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), &m)?;
+                Ok(buf.take().freeze())
+            })?;
+            pb.by_path.insert(path.clone(), id);
+            pb.by_id.insert(id, PublishedUntyped {
+                header, current,
+                subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+            });
+            pb.to_publish.push(path);
+            Ok(Published(Arc::new(PublishedInner {
+                id,
+                publisher: self.downgrade(),
+                updates: pb.updates.clone(),
+                typ: PhantomData,
+            })))
+        }
     }
     
     /// Send all queued updates out to subscribers. When the future
@@ -337,24 +350,8 @@ impl Publisher {
         }
     }
 
-    /// Returns a future that will become ready when there are `n` or
-    /// more subscribers subscribing to at least one value.
-    #[async]
-    pub fn wait_client(self, n: usize) -> Result<()> {
-        let rx = {
-            let mut t = self.0.write().unwrap();
-            if t.clients.len() >= n { return Ok(()) }
-            else {
-                let (tx, rx) = oneshot::channel();
-                t.wait_clients.push(tx);
-                rx
-            }
-        };
-        Ok(await!(rx)?)
-    }
-
     /// Returns the number of subscribers subscribing to at least one value.
-    pub fn clients(&self) -> usize { self.0.read().unwrap().clients.len() }
+    pub fn clients(&self) -> usize { self.0.lock().unwrap().clients.len() }
 }
 
 async fn handle_client_msg(
@@ -399,12 +396,6 @@ async fn handle_client_msg(
             Ok(codec.send_all(&mut s).await?)
         }
     }
-}
-
-async fn flush_to_client(
-    codec: &mut Framed<TcpStream, LengthCodec>,
-    m: ToClient
-) -> Result<(), Error> {
 }
 
 async fn client_loop(
