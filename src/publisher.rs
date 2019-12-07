@@ -8,8 +8,10 @@ use std::{
     sync::{Arc, Weak, Mutex},
     default::Default,
     cell::RefCell,
+    time::Duration,
 };
 use async_std::{
+    future,
     prelude::*,
     net::{TcpStream, TcpListener},
 }
@@ -137,7 +139,8 @@ impl<T: Serialize> Published<T> {
 
 struct ToClient {
     msgs: Vec<Bytes>,
-    done: oneshot::Sender<()>
+    done: oneshot::Sender<()>,
+    timeout: Option<Duration>,
 }
 
 struct PublishedUntyped {
@@ -231,7 +234,7 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    /// Create a new publisher, and start the listener.
+    /// Create a new publisher using the specified resolver and bind config.
     pub async fn new<T: ToSocketAddrs>(
         resolver: T,
         bind_cfg: BindCfg
@@ -348,7 +351,12 @@ impl Publisher {
     /// If you don't want to wait for the future you can just throw it
     /// away, `flush` triggers sending the data whether you await the
     /// future or not.
-    pub async fn flush(&self) -> Result<(), Error> {
+    ///
+    /// If timeout is specified then any client that can't accept the
+    /// update within the timeout duration will be disconnected.
+    /// Otherwise flush will wait as long as necessary to flush the
+    /// update to every client.
+    pub async fn flush(&self, timeout: Option<Duration>) -> Result<(), Error> {
         struct Tc {
             sender: Sender<ToClient>,
             to_client: ToClient,
@@ -379,7 +387,8 @@ impl Publisher {
                                     sender: sender.clone(),
                                     to_client: ToClient {
                                         msgs: vec![ut.header.clone(); m.clone()],
-                                        done: tx
+                                        done: tx,
+                                        timeout
                                     }
                                 });
                             }
@@ -472,7 +481,11 @@ async fn client_loop(
                 handle_client_msg(&t, &addr, &mut codec, &mut buf, b).await?,
             M::ToCl(Some(m)) => {
                 let mut s = stream::iter(m.msgs.into_iter().map(|b| Ok(b)));
-                codec.send_all(&mut s).await?;
+                let f = codec.send_all(&mut s);
+                match m.timeout {
+                    None => f.await?,
+                    Some(d) => future::timeout(d, f).await?
+                }
                 let _ = m.done.send(());
             }
         }
