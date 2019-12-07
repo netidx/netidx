@@ -1,5 +1,5 @@
 use std::{
-    self, io,
+    self, io, iter,
     result::Result,
     marker::PhantomData,
     convert::AsRef,
@@ -7,6 +7,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddrV4, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, Mutex},
     default::Default,
+    cell::RefCell,
 };
 use async_std::{
     prelude::*,
@@ -14,7 +15,7 @@ use async_std::{
 }
 use fxhash::FxBuildHasher;
 use rand::{self, distributions::IndependentSample};
-use futures::{channel::{oneshot, mpsc::{channel, Receiver, Sender}}};
+use futures::{channel::{oneshot, mpsc::{channel, Receiver, Sender}}, stream};
 use futures_codec::{Framed, LengthCodec};
 use serde::{Serialize, de::DeserializeOwned};
 use path::Path;
@@ -22,7 +23,8 @@ use resolver::{Resolver, ReadWrite};
 use line_writer::LineWriter;
 use failure::Error;
 use crossbeam::queue::SeqQueue;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use utils::BytesWriter;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -76,10 +78,14 @@ impl Id {
     }
 }
 
+thread_local! {
+    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
 struct PublishedInner<T> {
     id: Id,
     publisher: PublisherWeak,
-    updates: Arc<SeqQueue<(Id, Arc<[u8]>)>>,
+    updates: Arc<SeqQueue<(Id, Bytes)>>,
     typ: PhantomData<T>,
 }
 
@@ -115,20 +121,26 @@ impl<T: Serialize> Published<T> {
     /// queue (assuming your platform supports the necessary atomic
     /// operations).
     pub fn update(&self, v: &T) -> Result<(), Error> {
-        let id = self.0.id;
-        self.0.updates.push(Arc::from(rmp_serde::encode::to_vec_named((id, v))?));
+        use rmp_serde::encode::write_named;
+        let bytes = BUF.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            write_named(&mut BytesWriter(&mut *buf), v).map(|()| {
+                buf.take().freeze()
+            })
+        })?;
+        self.0.updates.push((self.0.id, bytes));
         Ok(())
     }
 }
 
 struct ToClient {
-    msgs: Vec<Arc<[u8]>>,
+    msgs: Vec<Bytes>,
     done: oneshot::Sender<()>
 }
 
 struct PublishedUntyped {
-    header: Arc<[u8]>,
-    current: Arc<[u8]>,
+    header: Bytes,
+    current: Bytes,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
 }
 
@@ -144,7 +156,7 @@ struct PublisherInner {
     next_id: Id,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
-    updates: Arc<SeqQueue<(Id, Arc<[u8]>)>>,
+    updates: Arc<SeqQueue<(Id, Bytes)>>,
     resolver: Resolver<ReadWrite>
 }
 
@@ -345,47 +357,78 @@ impl Publisher {
     pub fn clients(&self) -> usize { self.0.read().unwrap().clients.len() }
 }
 
-async fn client_loop<S>(
+async fn handle_client_msg(
+    t: &PublisherWeak,
+    addr: &SocketAddr,
+    codec: &mut Framed<TcpStream, LengthCodec>,
+    buf: &mut BytesMut,
+    m: Bytes,
+) -> Result<(), Error> {
+    let msg = from_read::<&[u8], ToPublisher>(&*b)?;
+    let t_st = t.upgrade().ok_or_else(|| Error::from("dead publisher"))?;
+    let mut pb = t_st.0.lock().unwrap();
+    let (reply, v) = match msg {
+        ToPublisher::Subscribe(path) => {
+            match pb.by_path.get(&path) {
+                None => (FromPublisher::NoSuchValue(path), None),
+                Some(id) => {
+                    let cl = pb.clients.get_mut(&addr).unwrap();
+                    let ut = pb.by_id.get_mut(id).unwrap();
+                    cl.subscribed.insert(*id);
+                    ut.subscribed.insert(addr, cl.to_client.clone());
+                    (FromPublisher::Message(*id), Some(ut.current.clone()))
+                }
+            }
+        }
+        ToPublisher::Unsubscribe(id) => {
+            if let Some(ut) = pb.by_id.get_mut(id) {
+                ut.subscribed.remove(&addr);
+                pb.clients.get_mut(&addr).unwrap().subscribed.remove(id);
+            }
+            (FromPublisher::Unsubscribed(*id), None)
+        }
+    };
+    drop(pb);
+    write_named(&mut BytesWriter(&mut buf), &reply)?;
+    match v {
+        None => Ok(codec.send(buf.take().freeze()).await?),
+        Some(v) => {
+            use std::iter::once;
+            let b = buf.take().freeze();
+            let mut s = stream::iter(once(Ok(b)).chain(once(Ok(v))));
+            Ok(codec.send_all(&mut s).await?)
+        }
+    }
+}
+
+async fn flush_to_client(
+    codec: &mut Framed<TcpStream, LengthCodec>,
+    m: ToClient
+) -> Result<(), Error> {
+}
+
+async fn client_loop(
     t: PublisherWeak,
     addr: SocketAddr,
     mut msgs: Receiver<ToClient>,
     s: TcpStream,
-) {
+) -> Result<(), Error> {
+    use rmp_serde::{encode::write_named, decode::from_read};
     enum M { FromCl(Option<Result<Bytes, io::Error>>), ToCl(Option<ToClient>) };
+    let mut buf = BytesMut::with_capacity(512);
     let mut codec = Framed::new(s, LengthCodec);
     loop {
         let to_cl = msgs.next().map(|m| M::ToCl(m));
         let from_cl = codec.next().map(|m| M::FromCl(m));
         match to_cl.race(from_cl).await {
-            M::FromCl(None) | M::ToCl(None) => break,
-            M::FromCl(Some(Err(e))) => ret!("error reading client", e),
-            M::FromCl(Some(Ok(b))) => {
-                let r = rmp_serde::decode::<&[u8], ToPublisher>::from_read(&b);
-                let t_st = or_ret!(t.upgrade());
-                let mut pb = t_st.0.lock().unwrap();
-                let (reply, v) = match try_ret!("decode from client", r) {
-                    ToPublisher::Subscribe(path) => {
-                        match pb.by_path.get(&path) {
-                            None => (FromPublisher::NoSuchValue(path), None),
-                            Some(id) => {
-                                let cl = or_ret!(pb.clients.get_mut(&addr));
-                                let ut = or_ret!(pb.by_id.get_mut(id));
-                                cl.subscribed.insert(*id);
-                                ut.subscribed.insert(addr, cl.to_client.clone());
-                                (FromPublisher::Message(*id), Some(ut.current.clone()))
-                            }
-                        }
-                    }
-                    ToPublisher::Unsubscribe(id) => {
-                        if let Some(ut) = pb.by_id.get_mut(id) {
-                            ut.subscribed.remove(&addr);
-                            or_ret!(pb.clients.get_mut(&addr)).subscribed.remove(id);
-                        }
-                        (FromPublisher::Unsubscribed(*id), None)
-                    }
-                };
-                drop(pb);
-                let reply_b = rmp_serde::encode::to_vec_named(&reply).unwrap()
+            M::FromCl(None) | M::ToCl(None) => break Ok(()),
+            M::FromCl(Some(Err(e))) => return Err(Error::from(e)),
+            M::FromCl(Some(Ok(b))) =>
+                handle_client_msg(&t, &addr, &mut codec, &mut buf, b).await?,
+            M::ToCl(Some(m)) => {
+                let mut s = stream::iter(m.msgs.into_iter().map(|b| Ok(b)));
+                codec.send_all(&mut s).await?;
+                let _ = m.done.send(());
             }
         }
     }
@@ -419,7 +462,7 @@ async fn accept_loop(
                     });
                     drop(pb);
                     task::spawn(async move {
-                        client_loop(t_weak.clone(), addr, rx, s).await;
+                        let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                         if let Some(t) = t_weak.upgrade() {
                             let mut pb = t.0.write().unwrap();
                             if let Some(cl) = pb.clients.remove(&addr) {
