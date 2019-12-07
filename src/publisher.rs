@@ -66,7 +66,7 @@ pub enum FromPublisher {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Id(u64);
+pub struct Id(u64);
 
 impl Id {
     fn zero() -> Self {
@@ -94,7 +94,7 @@ struct PublishedInner<T> {
 impl<T> Drop for PublisherInner<T> {
     fn drop(&mut self) {
         if let Some(p) = self.publisher.upgrade() {
-            task::spawn(async move { p.unpublish(self.id) });
+            p.unpublish(self.id);
         }
     }
 }
@@ -119,9 +119,7 @@ impl<T: Serialize> Published<T> {
     /// is called.
     ///
     /// The thread calling update pays the serialization cost. No
-    /// locking occurs during update, just a push to a concurrent
-    /// queue (assuming your platform supports the necessary atomic
-    /// operations).
+    /// locking occurs during update.
     pub fn update(&self, v: &T) -> Result<(), Error> {
         use rmp_serde::encode::write_named;
         let bytes = BUF.with(|buf| {
@@ -133,6 +131,8 @@ impl<T: Serialize> Published<T> {
         self.0.updates.push((self.0.id, bytes));
         Ok(())
     }
+
+    pub fn id(&self) -> Id { *self.id }
 }
 
 struct ToClient {
@@ -160,7 +160,8 @@ struct PublisherInner {
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
     updates: Arc<SeqQueue<(Id, Bytes)>>,
     resolver: Resolver<ReadWrite>,
-    to_publish: Vec<Path>,
+    to_publish: HashSet<Path>,
+    to_unpublish: HashSet<Path>,
 }
 
 impl PublisherInner {
@@ -272,7 +273,8 @@ impl Publisher {
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             updates: SeqQueue::new(),
             resolver,
-            to_publish: Vec::new(),
+            to_publish: HashSet::new(),
+            to_unpublish: HashSet::new(),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -297,7 +299,9 @@ impl Publisher {
     /// Multiple publishers may publish values at the same path. See
     /// `subscriber::Subscriber::subscribe` for details.
     pub fn publish<T: Serialize>(
-        &self, path: Path, init: &T
+        &self,
+        path: Path,
+        init: &T
     ) -> Result<Published<T>, Error> {
         let current = BUF.with(|buf| {
             let mut b = buf.borrow_mut();
@@ -305,7 +309,9 @@ impl Publisher {
             Ok(buf.take().freeze())
         })?;
         let mut pb = self.0.lock().unwrap();
-        if pb.stop.is_none() {
+        if !Path::is_absolute(path.as_ref()) {
+            Error::from("can't publish to relative path");
+        } else if pb.stop.is_none() {
             Error::from("publisher is dead")
         } else if pb.by_path.contains_key(&path) {
             Error::from("already published")
@@ -322,7 +328,9 @@ impl Publisher {
                 header, current,
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             });
-            pb.to_publish.push(path);
+            if !pb.to_unpublish.remove(&path) {
+                pb.to_publish.insert(path);
+            }
             Ok(Published(Arc::new(PublishedInner {
                 id,
                 publisher: self.downgrade(),
@@ -332,22 +340,68 @@ impl Publisher {
         }
     }
     
-    /// Send all queued updates out to subscribers. When the future
-    /// returned by this function is ready all data has been flushed to
-    /// the underlying OS sockets.
+    /// Send all queued updates out to subscribers, and send all
+    /// queued publish/unpublish operations to the resolver. When the
+    /// future returned by this function is ready all data has been
+    /// flushed to the underlying OS sockets.
     ///
     /// If you don't want to wait for the future you can just throw it
     /// away, `flush` triggers sending the data whether you await the
     /// future or not.
-    pub fn flush(self) -> impl Future<Item=(), Error=Error> {
-        let flushes =
-            self.0.read().unwrap().clients.iter()
-            .map(|(_, c)| c.clone().flush())
-            .collect::<Vec<_>>();
-        async_block! {
-            for flush in flushes.into_iter() { await!(flush)? }
-            Ok(())
+    pub async fn flush(&self) -> Result<(), Error> {
+        struct Tc {
+            sender: Sender<ToClient>,
+            to_client: ToClient,
         }
+        use std::collections::hash_map::Entry;
+        let mut to_clients = HashMap::with_hasher(FxBuildHasher::default());
+        let mut flushes = Vec::new();
+        let mut to_publish = Vec::new();
+        let mut to_unpublish = Vec::new();
+        let mut resolver = {
+            let mut pb = self.0.lock().unwrap();
+            to_publish.extend(pb.to_publish.drain());
+            to_unpublish.extend(pb.to_unpublish.drain());
+            while let Ok((id, m)) = pb.updates.pop() {
+                if let Some(ut) = pb.by_id.get(&id) {
+                    ut.current = m.clone();
+                    for (addr, sender) in ut.subscribed.iter() {
+                        match flushes.entry(*addr) {
+                            Entry::Occupied(e) => {
+                                let v = e.get_mut();
+                                v.to_client.msgs.push(ut.header.clone());
+                                v.to_client.msgs.push(m.clone());
+                            },
+                            Entry::Vacant(e) => {
+                                let (tx, rx) = oneshot::channel();
+                                flushes.push(rx);
+                                e.insert(Tc {
+                                    sender: sender.clone(),
+                                    to_client: ToClient {
+                                        msgs: vec![ut.header.clone(); m.clone()],
+                                        done: tx
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            pb.resolver.clone();
+        }
+        for (_, mut tc) in to_clients {
+            let _ = tc.sender.send(tc.to_client).await;
+        }
+        if to_publish.len() > 0 {
+            resolver.publish(to_publish).await?
+        }
+        if to_unpublish.len() > 0 {
+            resolver.unpublish(to_unpublish).await?
+        }
+        for rx in flushes {
+            let _ = rx.await;
+        }
+        Ok(())
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
