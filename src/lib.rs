@@ -78,20 +78,10 @@
 //! database of `Path -> SocketAddr` mappings, it is quite
 //! lightweight.
 //!
-//! The transport is JSON, facilitated by serde, so any type that
-//! supports Serialize can be sent. If a subscriber doesn't know what
-//! type a publisher will be publishing, it can just elect to receive
-//! `serde_json::Value`, or even look at the raw JSON string.
-//!
-//! The primary reason to choose JSON as the transport is easy interop
-//! with other languages, and especially scripting languages. Besides
-//! the fact that JSON is a very widely supported format, it allows
-//! the wire protocol to be line oriented (the message delimiter is
-//! '\n') which greatly simplifies message handling code.
-//!
-//! The performance implications of JSON transport are not as bad as
-//! one might imagine, because `serde_json` is capable of producing
-//! gigabits per second of JSON on a single 8550U cpu core.
+//! The default transport is messagepack, facilitated by serde, so any
+//! type that supports Serialize can be sent. If a subscriber doesn't
+//! know what type a publisher will be publishing, it can just elect
+//! to receive `rmpv::Value`, or even just the raw bytes.
 
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
@@ -104,7 +94,7 @@ mod resolver_store;
 pub mod path;
 pub mod resolver;
 pub mod resolver_server;
-//pub mod publisher;
+pub mod publisher;
 //pub mod subscriber;
 
 //#[cfg(test)]

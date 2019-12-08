@@ -1,5 +1,5 @@
 use std::{
-    self, io, iter,
+    self, io, iter, mem,
     result::Result,
     marker::PhantomData,
     convert::AsRef,
@@ -11,13 +11,17 @@ use std::{
     time::Duration,
 };
 use async_std::{
-    future,
+    future, task,
     prelude::*,
     net::{TcpStream, TcpListener},
-}
+};
 use fxhash::FxBuildHasher;
-use rand::{self, distributions::IndependentSample};
-use futures::{channel::{oneshot, mpsc::{channel, Receiver, Sender}}, stream};
+use rand::{self, Rng};
+use futures::{
+    stream,
+    channel::{oneshot, mpsc::{channel, Receiver, Sender}},
+    sink::SinkExt as FrsSinkExt,
+};
 use futures_codec::{Framed, LengthCodec};
 use serde::{Serialize, de::DeserializeOwned};
 use path::Path;
@@ -93,7 +97,7 @@ struct PublishedInner<T> {
     typ: PhantomData<T>,
 }
 
-impl<T> Drop for PublisherInner<T> {
+impl<T> Drop for PublishedInner<T> {
     fn drop(&mut self) {
         if let Some(p) = self.publisher.upgrade() {
             p.unpublish(self.id);
@@ -178,7 +182,7 @@ impl PublisherInner {
             let resolver = self.resolver.clone();
             task::spawn(async move {
                 let paths = paths.into_iter().map(|(p, _)| p).collect();
-                let _ = resolver.unpublish(paths).await
+                let _ = resolver.unpublish(paths).await;
             });
         }
     }
@@ -242,7 +246,10 @@ impl Publisher {
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
             BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
-                let range = rand::distributions::Range::new(0u16, 10u16);
+                let mkaddr = |ip: IpAddr, port: u16| {
+                    Ok((ip, port).to_socket_addrs()?.next()
+                       .ok_or_else(|| Error::from("socketaddrs bug".into()))?)
+                };
                 let ip = match bind_cfg {
                     BindCfg::Exact(_) => unreachable!(),
                     BindCfg::Local => IpAddr::from(Ipv4Addr::new(127, 0, 0, 1)),
@@ -251,11 +258,11 @@ impl Publisher {
                 };
                 let mut rng = rand::thread_rng();
                 let mut port = 5000;
-                let mut addr = (ip, port).to_socket_addrs().next().unwrap();
+                let mut addr = mkaddr(ip, port)?;
                 loop {
                     if port >= 32768 { bail!("couldn't allocate a port"); }
-                    port += range.ind_sample(&mut rng);
-                    addr = (ip, port).to_socket_addrs().next().unwrap();
+                    port += rng.gen_range(0u16, 10u16);
+                    addr = mkaddr(ip, port)?;
                     match TcpListener::bind(&addr).await {
                         Ok(l) => break (addr, l),
                         Err(e) => if e.kind() != std::io::ErrorKind::AddrInUse {
@@ -285,7 +292,7 @@ impl Publisher {
                 // CR estokes: log the error?
                 accept_loop(pb_weak.clone(), listener, receive_stop).await;
                 if let Some(pb) = pb_weak.upgrade() {
-                    pb.write().unwrap().shutdown();
+                    pb.0.lock().unwrap().shutdown();
                 }
             }
         });
@@ -362,7 +369,8 @@ impl Publisher {
             to_client: ToClient,
         }
         use std::collections::hash_map::Entry;
-        let mut to_clients = HashMap::with_hasher(FxBuildHasher::default());
+        let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
+            HashMap::with_hasher(FxBuildHasher::default());
         let mut flushes = Vec::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
@@ -374,7 +382,7 @@ impl Publisher {
                 if let Some(ut) = pb.by_id.get(&id) {
                     ut.current = m.clone();
                     for (addr, sender) in ut.subscribed.iter() {
-                        match flushes.entry(*addr) {
+                        match to_clients.entry(*addr) {
                             Entry::Occupied(e) => {
                                 let v = e.get_mut();
                                 v.to_client.msgs.push(ut.header.clone());
@@ -396,8 +404,8 @@ impl Publisher {
                     }
                 }
             }
-            pb.resolver.clone();
-        }
+            pb.resolver.clone()
+        };
         for (_, mut tc) in to_clients {
             let _ = tc.sender.send(tc.to_client).await;
         }
