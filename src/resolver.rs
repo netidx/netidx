@@ -10,7 +10,7 @@ use futures::{
 };
 use std::{
     result,
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     collections::HashSet,
     time::Duration,
     marker::PhantomData,
@@ -31,15 +31,20 @@ type ToCon = (ToResolver, FromCon);
 
 pub trait Readable {}
 pub trait Writeable {}
+pub trait ReadableOrWritable {}
 
+#[derive(Clone)]
 pub struct ReadOnly {}
 
 impl Readable for ReadOnly {}
+impl ReadableOrWritable for ReadOnly {}
 
+#[derive(Clone)]
 pub struct ReadWrite {}
 
 impl Readable for ReadWrite {}
 impl Writeable for ReadWrite {}
+impl ReadableOrWritable for ReadWrite {}
 
 type Result<T> = result::Result<T, Error>;
 
@@ -49,7 +54,7 @@ pub struct Resolver<R> {
     kind: PhantomData<R>
 }
 
-impl<R> Resolver<R> {
+impl<R: ReadableOrWritable> Resolver<R> {
     async fn send(&mut self, m: ToResolver) -> Result<FromResolver> {
         let (tx, rx) = oneshot::channel();
         self.sender.send((m, tx)).await?;
@@ -59,20 +64,26 @@ impl<R> Resolver<R> {
         }
     }
 
-    pub fn new_rw(resolver: SocketAddr, publisher: SocketAddr) -> Resolver<ReadWrite> {
+    pub fn new_rw<T>(resolver: T, publisher: SocketAddr) -> Result<Resolver<ReadWrite>>
+    where T: ToSocketAddrs {
+        let resolver =
+            resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
         let (sender, receiver) = mpsc::unbounded();
         task::spawn(connection(receiver, resolver, Some(publisher)));
-        Resolver { sender, kind: PhantomData }
+        Ok(Resolver { sender, kind: PhantomData })
     }
 
-    pub fn new_ro(resolver: SocketAddr) -> Resolver<ReadOnly> {
+    pub fn new_ro<T>(resolver: T) -> Result<Resolver<ReadOnly>>
+    where T: ToSocketAddrs {
+        let resolver =
+            resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
         let (sender, receiver) = mpsc::unbounded();
         task::spawn(connection(receiver, resolver, None));
-        Resolver { sender, kind: PhantomData }
+        Ok(Resolver { sender, kind: PhantomData })
     }
 }
  
-impl<R: Readable> Resolver<R> {
+impl<R: Readable + ReadableOrWritable> Resolver<R> {
     pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Vec<Vec<SocketAddr>>> {
         match self.send(ToResolver::Resolve(paths)).await? {
             FromResolver::Resolved(ports) => Ok(ports),
@@ -88,7 +99,7 @@ impl<R: Readable> Resolver<R> {
     }
 }
 
-impl <R: Writeable> Resolver<R> {
+impl <R: Writeable + ReadableOrWritable> Resolver<R> {
     pub async fn publish(&mut self, paths: Vec<Path>) -> Result<()> {
         match self.send(ToResolver::Publish(paths)).await? {
             FromResolver::Published => Ok(()),

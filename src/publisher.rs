@@ -1,10 +1,11 @@
+use crate::{utils::BytesWriter, path::Path, resolver::{Resolver, ReadWrite}};
 use std::{
     self, io, iter, mem,
     result::Result,
     marker::PhantomData,
     convert::AsRef,
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddrV4, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, Mutex},
     default::Default,
     cell::RefCell,
@@ -26,13 +27,9 @@ use futures::{
 };
 use futures_codec::{Framed, LengthCodec};
 use serde::{Serialize, de::DeserializeOwned};
-use path::Path;
-use resolver::{Resolver, ReadWrite};
-use line_writer::LineWriter;
 use failure::Error;
-use crossbeam::queue::SeqQueue;
+use crossbeam::queue::SegQueue;
 use bytes::{Bytes, BytesMut};
-use utils::BytesWriter;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -73,7 +70,7 @@ pub enum FromPublisher {
     Message(Id)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(u64);
 
 impl Id {
@@ -83,7 +80,7 @@ impl Id {
 
     fn take(&mut self) -> Self {
         let new = *self;
-        self = Id(self.0 + 1);
+        *self = Id(self.0 + 1);
         new
     }
 }
@@ -95,7 +92,7 @@ thread_local! {
 struct PublishedInner<T> {
     id: Id,
     publisher: PublisherWeak,
-    updates: Arc<SeqQueue<(Id, Bytes)>>,
+    updates: Arc<SegQueue<(Id, Bytes)>>,
     typ: PhantomData<T>,
 }
 
@@ -167,7 +164,7 @@ struct PublisherInner {
     next_id: Id,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
-    updates: Arc<SeqQueue<(Id, Bytes)>>,
+    updates: Arc<SegQueue<(Id, Bytes)>>,
     resolver: Resolver<ReadWrite>,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
@@ -248,9 +245,9 @@ impl Publisher {
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
             BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
-                let mkaddr = |ip: IpAddr, port: u16| {
+                let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr, Error> {
                     Ok((ip, port).to_socket_addrs()?.next()
-                       .ok_or_else(|| Error::from("socketaddrs bug".into()))?)
+                       .ok_or_else(|| format_err!("socketaddrs bug"))?)
                 };
                 let ip = match bind_cfg {
                     BindCfg::Exact(_) => unreachable!(),
@@ -274,7 +271,7 @@ impl Publisher {
                 }
             }
         };
-        let resolver = Resolver::new_rw(resolver, addr)?;
+        let resolver = Resolver::<ReadWrite>::new_rw(resolver, addr)?;
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
@@ -283,7 +280,7 @@ impl Publisher {
             next_id: Id::zero(),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            updates: SeqQueue::new(),
+            updates: Arc::new(SegQueue::new()),
             resolver,
             to_publish: HashSet::new(),
             to_unpublish: HashSet::new(),
@@ -396,7 +393,7 @@ impl Publisher {
                                 e.insert(Tc {
                                     sender: sender.clone(),
                                     to_client: ToClient {
-                                        msgs: vec![ut.header.clone(); m.clone()],
+                                        msgs: vec![ut.header.clone(), m.clone()],
                                         done: tx,
                                         timeout
                                     }
@@ -427,16 +424,15 @@ impl Publisher {
     pub fn clients(&self) -> usize { self.0.lock().unwrap().clients.len() }
 }
 
-async fn handle_client_msg(
+fn handle_client_msg(
     t: &PublisherWeak,
     addr: &SocketAddr,
-    codec: &mut Framed<TcpStream, LengthCodec>,
     buf: &mut BytesMut,
     m: Bytes,
-) -> Result<(), Error> {
+) -> Result<(Bytes, Option<Bytes>), Error> {
     use rmp_serde::{encode::write_named, decode::from_read};
     let msg = from_read::<&[u8], ToPublisher>(&*m)?;
-    let t_st = t.upgrade().ok_or_else(|| Error::from("dead publisher".into()))?;
+    let t_st = t.upgrade().ok_or_else(|| format_err!("dead publisher"))?;
     let mut pb = t_st.0.lock().unwrap();
     let (reply, v) = match msg {
         ToPublisher::Subscribe(path) => {
@@ -461,15 +457,7 @@ async fn handle_client_msg(
     };
     drop(pb);
     write_named(&mut BytesWriter(&mut buf), &reply)?;
-    match v {
-        None => Ok(codec.send(buf.take().freeze()).await?),
-        Some(v) => {
-            use std::iter::once;
-            let b = buf.take().freeze();
-            let mut s = stream::iter(once(Ok(b)).chain(once(Ok(v))));
-            Ok(codec.send_all(&mut s).await?)
-        }
-    }
+    Ok((buf.take().freeze(), v))
 }
 
 async fn client_loop(
@@ -487,8 +475,17 @@ async fn client_loop(
         match to_cl.race(from_cl).await {
             M::FromCl(None) | M::ToCl(None) => break Ok(()),
             M::FromCl(Some(Err(e))) => return Err(Error::from(e)),
-            M::FromCl(Some(Ok(b))) =>
-                handle_client_msg(&t, &addr, &mut codec, &mut buf, b).await?,
+            M::FromCl(Some(Ok(b))) => {
+                let (reply, v) = handle_client_msg(&t, &addr, &mut buf, b)?;
+                match v {
+                    None => codec.send(reply).await?,
+                    Some(v) => {
+                        let mut s =
+                            stream::iter(iter::once(Ok(reply)).chain(iter::once(Ok(v))));
+                        codec.send_all(&mut s).await?
+                    }
+                }
+            },
             M::ToCl(Some(m)) => {
                 let mut s = stream::iter(m.msgs.into_iter().map(|b| Ok(b)));
                 let f = codec.send_all(&mut s);
@@ -522,13 +519,12 @@ async fn accept_loop(
                 };
                 let mut pb = t.0.lock().unwrap();
                 if pb.clients.len() < MAX_CLIENTS {
-                    try_cont!("nodelay", s.set_nodelay(true));
                     let (tx, rx) = channel(100);
+                    try_cont!("nodelay", s.set_nodelay(true));
                     pb.clients.insert(addr, Client {
                         to_client: tx,
                         subscribed: HashSet::with_hasher(FxBuildHasher::default()),
                     });
-                    drop(pb);
                     task::spawn(async move {
                         let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                         if let Some(t) = t_weak.upgrade() {

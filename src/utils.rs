@@ -55,7 +55,7 @@ macro_rules! ret {
     } }
 }
 
-pub(crate) struct BytesWriter<'a>(&'a mut BytesMut);
+pub(crate) struct BytesWriter<'a>(pub(crate) &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
