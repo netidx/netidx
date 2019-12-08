@@ -11,9 +11,10 @@ use std::{
     time::Duration,
 };
 use async_std::{
-    future, task,
+    task, future,
     prelude::*,
     net::{TcpStream, TcpListener},
+    stream::StreamExt,
 };
 use fxhash::FxBuildHasher;
 use rand::{self, Rng};
@@ -21,6 +22,7 @@ use futures::{
     stream,
     channel::{oneshot, mpsc::{channel, Receiver, Sender}},
     sink::SinkExt as FrsSinkExt,
+    future::FutureExt as FrsFutureExt,
 };
 use futures_codec::{Framed, LengthCodec};
 use serde::{Serialize, de::DeserializeOwned};
@@ -432,8 +434,9 @@ async fn handle_client_msg(
     buf: &mut BytesMut,
     m: Bytes,
 ) -> Result<(), Error> {
-    let msg = from_read::<&[u8], ToPublisher>(&*b)?;
-    let t_st = t.upgrade().ok_or_else(|| Error::from("dead publisher"))?;
+    use rmp_serde::{encode::write_named, decode::from_read};
+    let msg = from_read::<&[u8], ToPublisher>(&*m)?;
+    let t_st = t.upgrade().ok_or_else(|| Error::from("dead publisher".into()))?;
     let mut pb = t_st.0.lock().unwrap();
     let (reply, v) = match msg {
         ToPublisher::Subscribe(path) => {
@@ -443,17 +446,17 @@ async fn handle_client_msg(
                     let cl = pb.clients.get_mut(&addr).unwrap();
                     let ut = pb.by_id.get_mut(id).unwrap();
                     cl.subscribed.insert(*id);
-                    ut.subscribed.insert(addr, cl.to_client.clone());
+                    ut.subscribed.insert(*addr, cl.to_client.clone());
                     (FromPublisher::Message(*id), Some(ut.current.clone()))
                 }
             }
         }
         ToPublisher::Unsubscribe(id) => {
-            if let Some(ut) = pb.by_id.get_mut(id) {
+            if let Some(ut) = pb.by_id.get_mut(&id) {
                 ut.subscribed.remove(&addr);
-                pb.clients.get_mut(&addr).unwrap().subscribed.remove(id);
+                pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
             }
-            (FromPublisher::Unsubscribed(*id), None)
+            (FromPublisher::Unsubscribed(id), None)
         }
     };
     drop(pb);
@@ -475,7 +478,6 @@ async fn client_loop(
     mut msgs: Receiver<ToClient>,
     s: TcpStream,
 ) -> Result<(), Error> {
-    use rmp_serde::{encode::write_named, decode::from_read};
     enum M { FromCl(Option<Result<Bytes, io::Error>>), ToCl(Option<ToClient>) };
     let mut buf = BytesMut::with_capacity(512);
     let mut codec = Framed::new(s, LengthCodec);
@@ -492,7 +494,7 @@ async fn client_loop(
                 let f = codec.send_all(&mut s);
                 match m.timeout {
                     None => f.await?,
-                    Some(d) => future::timeout(d, f).await?
+                    Some(d) => future::timeout(d, f).await??
                 }
                 let _ = m.done.send(());
             }
@@ -505,22 +507,22 @@ async fn accept_loop(
     serv: TcpListener,
     stop: oneshot::Receiver<()>,
 ) {
-    enum M { Client(Result<TcpStream, io::Error>), Stop };
-    let stop = stop.map(|_| M::Stop).shared();
+    enum M { Client(Result<(TcpStream, SocketAddr), io::Error>), Stop };
+    let stop = stop.shared();
     loop {
         let client = serv.accept().map(|r| M::Client(r));
-        match stop.clone().race(client) {
+        match stop.clone().map(|_| M::Stop).race(client).await {
             M::Stop => break,
             M::Client(Err(_)) => (), // CR estokes: log this? exit the loop?
             M::Client(Ok((s, addr))) => {
                 let t_weak = t.clone();
                 let t = match t.upgrade() {
-                    None => return Ok(()),
+                    None => return,
                     Some(t) => t
                 };
-                let mut pb = t.0.write().unwrap();
+                let mut pb = t.0.lock().unwrap();
                 if pb.clients.len() < MAX_CLIENTS {
-                    try_cont!("nodelay", cl.nodelay(true));
+                    try_cont!("nodelay", s.set_nodelay(true));
                     let (tx, rx) = channel(100);
                     pb.clients.insert(addr, Client {
                         to_client: tx,
@@ -530,11 +532,11 @@ async fn accept_loop(
                     task::spawn(async move {
                         let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                         if let Some(t) = t_weak.upgrade() {
-                            let mut pb = t.0.write().unwrap();
+                            let mut pb = t.0.lock().unwrap();
                             if let Some(cl) = pb.clients.remove(&addr) {
                                 for id in cl.subscribed {
                                     if let Some(ut) = pb.by_id.get_mut(&id) {
-                                        ut.subscribed.remove(&id);
+                                        ut.subscribed.remove(&addr);
                                     }
                                 }
                             }
