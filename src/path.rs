@@ -1,6 +1,7 @@
 use std::{
     borrow::Borrow, convert::{AsRef, From}, sync::Arc,
-    cmp::{PartialEq, PartialOrd, Eq, Ord}
+    cmp::{PartialEq, PartialOrd, Eq, Ord},
+    ops::Deref,
 };
 
 pub static ESC: char = '\\';
@@ -16,6 +17,14 @@ impl AsRef<str> for Path {
 
 impl Borrow<str> for Path {
     fn borrow(&self) -> &str { &*self.0 }
+}
+
+impl Deref for Path {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl From<String> for Path {

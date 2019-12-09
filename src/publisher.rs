@@ -3,7 +3,6 @@ use std::{
     self, io, iter, mem,
     result::Result,
     marker::PhantomData,
-    convert::AsRef,
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, Mutex},
@@ -26,7 +25,7 @@ use futures::{
     future::FutureExt as FrsFutureExt,
 };
 use futures_codec::{Framed, LengthCodec};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::{Bytes, BytesMut};
@@ -89,6 +88,14 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
+fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
+        Ok(b.take().freeze())
+    })
+}
+
 struct PublishedInner<T> {
     id: Id,
     publisher: PublisherWeak,
@@ -108,6 +115,8 @@ impl<T> Drop for PublishedInner<T> {
 /// This represents a published value. Internally it is wrapped in an
 /// Arc, so cloning it is essentially free. When all references to a
 /// given published value have been dropped it will be unpublished.
+/// However you must call flush before reference to it will be removed
+/// from the resolver server.
 #[derive(Clone)]
 pub struct Published<T>(Arc<PublishedInner<T>>);
 
@@ -126,18 +135,10 @@ impl<T: Serialize> Published<T> {
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
     pub fn update(&self, v: &T) -> Result<(), Error> {
-        use rmp_serde::encode::write_named;
-        let bytes = BUF.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            write_named(&mut BytesWriter(&mut *buf), v).map(|()| {
-                buf.take().freeze()
-            })
-        })?;
-        self.0.updates.push((self.0.id, bytes));
-        Ok(())
+        Ok(self.0.updates.push((self.0.id, mp_encode(v)?)))
     }
 
-    pub fn id(&self) -> Id { *self.id }
+    pub fn id(&self) -> Id { self.0.id }
 }
 
 struct ToClient {
@@ -312,26 +313,17 @@ impl Publisher {
         path: Path,
         init: &T
     ) -> Result<Published<T>, Error> {
-        let current = BUF.with(|buf| {
-            let mut b = buf.borrow_mut();
-            rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), init)?;
-            Ok(buf.take().freeze())
-        })?;
+        let current = mp_encode(init)?;
         let mut pb = self.0.lock().unwrap();
-        if !Path::is_absolute(path.as_ref()) {
-            Error::from("can't publish to relative path");
+        if !Path::is_absolute(&path) {
+            Err(format_err!("can't publish to relative path"))
         } else if pb.stop.is_none() {
-            Error::from("publisher is dead")
+            Err(format_err!("publisher is dead"))
         } else if pb.by_path.contains_key(&path) {
-            Error::from("already published")
+            Err(format_err!("already published"))
         } else {
             let id = pb.next_id.take();
-            let header = BUF.with(|buf| {
-                let mut b = buf.borrow_mut();
-                let m = FromPublisher::Message(id);
-                rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), &m)?;
-                Ok(buf.take().freeze())
-            })?;
+            let header = mp_encode(&FromPublisher::Message(id))?;
             pb.by_path.insert(path.clone(), id);
             pb.by_id.insert(id, PublishedUntyped {
                 header, current,
@@ -346,6 +338,15 @@ impl Publisher {
                 updates: pb.updates.clone(),
                 typ: PhantomData,
             })))
+        }
+    }
+
+    fn unpublish(&self, id: Id) {
+        let mut pb = self.0.lock().unwrap();
+        if let Some(ut) = pb.by_id.get(&id) {
+            for addr in ut.keys() {
+                if let Some(cl) = pb.clients.get_mut()
+            }
         }
     }
     
