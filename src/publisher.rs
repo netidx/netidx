@@ -69,7 +69,10 @@ pub enum FromPublisher {
     Message(Id)
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone,
+    Copy, PartialEq, Eq, PartialOrd, Ord, Hash
+)]
 pub struct Id(u64);
 
 impl Id {
@@ -96,17 +99,29 @@ fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
     })
 }
 
+#[derive(Clone)]
+enum Update {
+    Val(Bytes),
+    Unpublish,
+}
+
 struct PublishedInner<T> {
     id: Id,
+    path: Path,
     publisher: PublisherWeak,
-    updates: Arc<SegQueue<(Id, Bytes)>>,
+    updates: Arc<SegQueue<(Id, Update)>>,
     typ: PhantomData<T>,
 }
 
 impl<T> Drop for PublishedInner<T> {
     fn drop(&mut self) {
-        if let Some(p) = self.publisher.upgrade() {
-            p.unpublish(self.id);
+        self.updates.push((self.id, Update::Unpublish));
+        if let Some(t) = self.publisher.upgrade() {
+            let mut pb = t.0.lock().unwrap();
+            pb.by_path.remove(&self.path);
+            if !pb.to_publish.remove(&self.path) {
+                pb.to_unpublish.insert(self.path.clone());
+            }
         }
     }
 }
@@ -135,10 +150,11 @@ impl<T: Serialize> Published<T> {
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
     pub fn update(&self, v: &T) -> Result<(), Error> {
-        Ok(self.0.updates.push((self.0.id, mp_encode(v)?)))
+        Ok(self.0.updates.push((self.0.id, Update::Val(mp_encode(v)?))))
     }
 
     pub fn id(&self) -> Id { self.0.id }
+    pub fn path(&self) -> &Path { &self.0.path }
 }
 
 struct ToClient {
@@ -150,6 +166,7 @@ struct ToClient {
 struct PublishedUntyped {
     header: Bytes,
     current: Bytes,
+    path: Path,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
 }
 
@@ -165,7 +182,7 @@ struct PublisherInner {
     next_id: Id,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
-    updates: Arc<SegQueue<(Id, Bytes)>>,
+    updates: Arc<SegQueue<(Id, Update)>>,
     resolver: Resolver<ReadWrite>,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
@@ -289,7 +306,6 @@ impl Publisher {
         task::spawn({
             let pb_weak = pb.downgrade();
             async move {
-                // CR estokes: log the error?
                 accept_loop(pb_weak.clone(), listener, receive_stop).await;
                 if let Some(pb) = pb_weak.upgrade() {
                     pb.0.lock().unwrap().shutdown();
@@ -313,7 +329,7 @@ impl Publisher {
         path: Path,
         init: &T
     ) -> Result<Published<T>, Error> {
-        let current = mp_encode(init)?;
+        let init = mp_encode(init)?;
         let mut pb = self.0.lock().unwrap();
         if !Path::is_absolute(&path) {
             Err(format_err!("can't publish to relative path"))
@@ -326,27 +342,20 @@ impl Publisher {
             let header = mp_encode(&FromPublisher::Message(id))?;
             pb.by_path.insert(path.clone(), id);
             pb.by_id.insert(id, PublishedUntyped {
-                header, current,
+                header,
+                current: init,
+                path: path.clone(),
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             });
             if !pb.to_unpublish.remove(&path) {
-                pb.to_publish.insert(path);
+                pb.to_publish.insert(path.clone());
             }
             Ok(Published(Arc::new(PublishedInner {
-                id,
+                id, path,
                 publisher: self.downgrade(),
-                updates: pb.updates.clone(),
+                updates: Arc::clone(&pb.updates),
                 typ: PhantomData,
             })))
-        }
-    }
-
-    fn unpublish(&self, id: Id) {
-        let mut pb = self.0.lock().unwrap();
-        if let Some(ut) = pb.by_id.get(&id) {
-            for addr in ut.keys() {
-                if let Some(cl) = pb.clients.get_mut()
-            }
         }
     }
     
@@ -368,7 +377,22 @@ impl Publisher {
             sender: Sender<ToClient>,
             to_client: ToClient,
         }
-        use std::collections::hash_map::Entry;
+        fn get_tc<'a>(
+            addr: SocketAddr,
+            sender: &Sender<ToClient>,
+            flushes: &mut Vec<oneshot::Receiver<()>>,
+            to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
+            timeout: Option<Duration>,
+        ) -> &'a mut Tc {
+            to_clients.entry(addr).or_insert_with(|| {
+                let (done, rx) = oneshot::channel();
+                flushes.push(rx);
+                Tc {
+                    sender: sender.clone(),
+                    to_client: ToClient {msgs: vec![], done, timeout}
+                }
+            })
+        }
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
         let mut flushes = Vec::new();
@@ -379,26 +403,31 @@ impl Publisher {
             to_publish.extend(pb.to_publish.drain());
             to_unpublish.extend(pb.to_unpublish.drain());
             while let Ok((id, m)) = pb.updates.pop() {
-                if let Some(ut) = pb.by_id.get(&id) {
-                    ut.current = m.clone();
-                    for (addr, sender) in ut.subscribed.iter() {
-                        match to_clients.entry(*addr) {
-                            Entry::Occupied(e) => {
-                                let v = e.get_mut();
-                                v.to_client.msgs.push(ut.header.clone());
-                                v.to_client.msgs.push(m.clone());
-                            },
-                            Entry::Vacant(e) => {
-                                let (tx, rx) = oneshot::channel();
-                                flushes.push(rx);
-                                e.insert(Tc {
-                                    sender: sender.clone(),
-                                    to_client: ToClient {
-                                        msgs: vec![ut.header.clone(), m.clone()],
-                                        done: tx,
+                match m {
+                    Update::Val(m) => {
+                        if let Some(ut) = pb.by_id.get_mut(&id) {
+                            ut.current = m.clone();
+                            for (addr, sender) in ut.subscribed.iter() {
+                                let tc = get_tc(
+                                    *addr, sender, &mut flushes, &mut to_clients, timeout
+                                );
+                                tc.to_client.msgs.push(ut.header.clone());
+                                tc.to_client.msgs.push(m.clone());
+                            }
+                        }
+                    }
+                    Update::Unpublish => {
+                        let m = mp_encode(&FromPublisher::Unsubscribed(id))?;
+                        if let Some(ut) = pb.by_id.remove(&id) {
+                            for (addr, sender) in ut.subscribed {
+                                if let Some(cl) = pb.clients.get_mut(&addr) {
+                                    cl.subscribed.remove(&id);
+                                    let tc = get_tc(
+                                        addr, &sender, &mut flushes, &mut to_clients,
                                         timeout
-                                    }
-                                });
+                                    );
+                                    tc.to_client.msgs.push(m.clone());
+                                }
                             }
                         }
                     }
