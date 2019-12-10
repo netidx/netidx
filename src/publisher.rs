@@ -106,15 +106,14 @@ enum Update {
     Unpublish,
 }
 
-struct PublishedInner<T> {
+struct PublishedInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
     updates: Arc<SegQueue<(Id, Update)>>,
-    typ: PhantomData<T>,
 }
 
-impl<T> Drop for PublishedInner<T> {
+impl Drop for PublishedInner {
     fn drop(&mut self) {
         self.updates.push((self.id, Update::Unpublish));
         if let Some(t) = self.publisher.upgrade() {
@@ -127,14 +126,13 @@ impl<T> Drop for PublishedInner<T> {
     }
 }
 
-// Err(Dead) should contain the last published value
 /// This represents a published value. Internally it is wrapped in an
 /// Arc, so cloning it is essentially free. When all references to a
 /// given published value have been dropped it will be unpublished.
 /// However you must call flush before reference to it will be removed
 /// from the resolver server.
 #[derive(Clone)]
-pub struct Published<T>(Arc<PublishedInner<T>>);
+pub struct Published<T>(Arc<PublishedInner>, PhantomData<T>);
 
 impl<T: Serialize> Published<T> {
     /// Queue an update to the published value, it will not be sent
@@ -152,6 +150,24 @@ impl<T: Serialize> Published<T> {
     /// locking occurs during update.
     pub fn update(&self, v: &T) -> Result<(), Error> {
         Ok(self.0.updates.push((self.0.id, Update::Val(mp_encode(v)?))))
+    }
+
+    pub fn id(&self) -> Id { self.0.id }
+    pub fn path(&self) -> &Path { &self.0.path }
+}
+
+/// Except that you send raw bytes, this is exactly the same as a
+/// `Published`. You can mix `PublishedRaw` and `Published` on the
+/// same publisher. The bytes you send will be received by the
+/// subscriber as a discrete message, so there is no need to handle
+/// multiple messages in a buffer, or partial messages, or length
+/// encoding (the length of the `Bytes` is the length of the message).
+#[derive(Clone)]
+pub struct PublishedRaw(Arc<PublishedInner>);
+
+impl PublishedRaw {
+    pub fn update(&self, v: Bytes) {
+        self.0.updates.push((self.0.id, Update::Val(v)));
     }
 
     pub fn id(&self) -> Id { self.0.id }
@@ -317,18 +333,11 @@ impl Publisher {
     /// get the `SocketAddr` that publisher is bound to
     pub fn addr(&self) -> SocketAddr { self.0.lock().addr }
 
-    /// Publish `Path` with initial value `init`. Subscribers will not
-    /// be able to subscribe until you call flush and await the
-    /// returned future.
-    ///
-    /// Multiple publishers may publish values at the same path. See
-    /// `subscriber::Subscriber::subscribe` for details.
-    pub fn publish<T: Serialize>(
+    fn publish_internal(
         &self,
         path: Path,
-        init: &T
-    ) -> Result<Published<T>, Error> {
-        let init = mp_encode(init)?;
+        init: Bytes
+    ) -> Result<Arc<PublishedInner>, Error> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             Err(format_err!("can't publish to relative path"))
@@ -348,13 +357,37 @@ impl Publisher {
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
-            Ok(Published(Arc::new(PublishedInner {
+            Ok(Arc::new(PublishedInner {
                 id, path,
                 publisher: self.downgrade(),
-                updates: Arc::clone(&pb.updates),
-                typ: PhantomData,
-            })))
+                updates: Arc::clone(&pb.updates)
+            }))
         }
+    }
+
+    /// Publish `Path` with initial value `init`. It is an error for
+    /// the same publisher to publish the same path twice, however
+    /// different publishers may publish a given path as many times as
+    /// they like. Subscribers will then pick randomly among the
+    /// advertised publishers when subscribing. See the `subscriber`
+    /// module for details.
+    pub fn publish<T: Serialize>(
+        &self,
+        path: Path,
+        init: &T
+    ) -> Result<Published<T>, Error> {
+        let init = mp_encode(init)?;
+        Ok(Published(self.publish_internal(path, init)?, PhantomData))
+    }
+
+    /// Publish `Path` with initial raw `Bytes` `init`. This is the
+    /// otherwise exactly the same as publish.
+    pub fn publish_raw(
+        &self,
+        path: Path,
+        init: Bytes,
+    ) -> Result<PublishedRaw, Error> {
+        Ok(PublishedRaw(self.publish_internal(path, init)?))
     }
     
     /// Send all queued updates out to subscribers, and send all
