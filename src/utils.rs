@@ -115,6 +115,7 @@ impl<T: Serialize, F: DeserializeOwned> Decoder for MPCodec<T, F> {
     }
 }
 
+/*
 use async_std::prelude::*;
 use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
@@ -219,3 +220,4 @@ impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
         self.stream().poll_close(cx)
     }
 }
+*/

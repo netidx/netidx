@@ -166,7 +166,6 @@ struct ToClient {
 struct PublishedUntyped {
     header: Bytes,
     current: Bytes,
-    path: Path,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
 }
 
@@ -196,7 +195,7 @@ impl PublisherInner {
             self.by_id.clear();
             while let Ok(_) = self.updates.pop() {}
             let paths = mem::replace(&mut self.by_path, HashMap::new());
-            let resolver = self.resolver.clone();
+            let mut resolver = self.resolver.clone();
             task::spawn(async move {
                 let paths = paths.into_iter().map(|(p, _)| p).collect();
                 let _ = resolver.unpublish(paths).await;
@@ -275,11 +274,10 @@ impl Publisher {
                 };
                 let mut rng = rand::thread_rng();
                 let mut port = 5000;
-                let mut addr = mkaddr(ip, port)?;
                 loop {
                     if port >= 32768 { bail!("couldn't allocate a port"); }
                     port += rng.gen_range(0u16, 10u16);
-                    addr = mkaddr(ip, port)?;
+                    let addr = mkaddr(ip, port)?;
                     match TcpListener::bind(&addr).await {
                         Ok(l) => break (addr, l),
                         Err(e) => if e.kind() != std::io::ErrorKind::AddrInUse {
@@ -344,7 +342,6 @@ impl Publisher {
             pb.by_id.insert(id, PublishedUntyped {
                 header,
                 current: init,
-                path: path.clone(),
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             });
             if !pb.to_unpublish.remove(&path) {
@@ -469,11 +466,13 @@ fn handle_client_msg(
             match pb.by_path.get(&path) {
                 None => (FromPublisher::NoSuchValue(path), None),
                 Some(id) => {
+                    let id = *id;
                     let cl = pb.clients.get_mut(&addr).unwrap();
-                    let ut = pb.by_id.get_mut(id).unwrap();
-                    cl.subscribed.insert(*id);
-                    ut.subscribed.insert(*addr, cl.to_client.clone());
-                    (FromPublisher::Message(*id), Some(ut.current.clone()))
+                    cl.subscribed.insert(id);
+                    let sender = cl.to_client.clone();
+                    let ut = pb.by_id.get_mut(&id).unwrap();
+                    ut.subscribed.insert(*addr, sender);
+                    (FromPublisher::Message(id), Some(ut.current.clone()))
                 }
             }
         }
@@ -486,7 +485,7 @@ fn handle_client_msg(
         }
     };
     drop(pb);
-    write_named(&mut BytesWriter(&mut buf), &reply)?;
+    write_named(&mut BytesWriter(buf), &reply)?;
     Ok((buf.take().freeze(), v))
 }
 

@@ -86,7 +86,7 @@
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
-#[macro_use] extern crate pin_utils;
+//#[macro_use] extern crate pin_utils;
 
 #[macro_use] mod utils;
 mod resolver_store;
