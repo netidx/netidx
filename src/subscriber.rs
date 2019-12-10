@@ -1,26 +1,23 @@
 use std::{
-    result, sync::{Arc, Weak, RwLock}, io::BufReader, convert::AsRef, net::SocketAddr,
+    result, sync::{Arc, Weak}, io::BufReader, convert::AsRef, net::SocketAddr,
     collections::{hash_map::{Entry, OccupiedEntry}, HashMap, VecDeque},
     marker::PhantomData, mem
 };
 use rand;
-use futures::{self, prelude::*, Poll, Async, sync::oneshot};
+use futures::{self, prelude::*, Poll, Async, channel::oneshot};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json;
-use tokio::{self, prelude::*, spawn, net::TcpStream};
-use tokio_io::io::ReadHalf;
-use path::Path;
-use line_writer::LineWriter;
-use publisher::{FromPublisher, ToPublisher};
-use resolver::Resolver;
-use utils::{self, BatchItem};
-use error::*;
+use crate::{
+    path::Path;
+    publisher::{FromPublisher, ToPublisher},
+    resolver::Resolver,
+};
+parking_lot::RwLock;
+use bytes::Bytes;
 
-/// This is only public because of rustc/#50865, it will be private
-/// when that bug is fixed
-pub struct UntypedSubscriptionInner {
+struct UntypedSubscriptionInner {
     path: Path,
-    current: Arc<String>,
+    current: Bytes,
     subscriber: Subscriber,
     connection: Connection,
     streams: Vec<UntypedUpdatesWeak>,
@@ -30,9 +27,7 @@ pub struct UntypedSubscriptionInner {
 }
 
 impl UntypedSubscriptionInner {
-    /// This is only public because of rustc/#50865, it will be private
-    /// when that bug is fixed
-    pub fn unsubscribe(&mut self) {
+    fn unsubscribe(&mut self) {
         if !self.dead {
             self.dead = true;
             self.subscriber.fail_pending(&self.path, "dead");
@@ -72,7 +67,7 @@ struct UntypedSubscription(Arc<RwLock<UntypedSubscriptionInner>>);
 impl UntypedSubscription {
     fn new(
         path: Path,
-        current: Arc<String>,
+        current: Bytes,
         connection: Connection,
         subscriber: Subscriber
     ) -> UntypedSubscription {
@@ -88,9 +83,9 @@ impl UntypedSubscription {
         UntypedSubscriptionWeak(Arc::downgrade(&self.0))
     }
 
-    fn next(self) -> impl Future<Item=(), Error=Error> {
+    async fn next(self) -> Result<(), Error> {
         let rx = {
-            let mut t = self.0.write().unwrap();
+            let mut t = self.0.write();
             let (tx, rx) = oneshot::channel();
             if t.dead {
                 let _ = tx.send(Err(Error::from(ErrorKind::SubscriptionIsDead))); rx
@@ -99,7 +94,7 @@ impl UntypedSubscription {
                 rx
             }
         };
-        async_block! { Ok(await!(rx)??) }
+        Ok(rx.await??)
     }
 
     fn updates(&self, max_q: usize) -> UntypedUpdates {
@@ -110,7 +105,7 @@ impl UntypedSubscription {
             max_q,
         };
         let t = UntypedUpdates(Arc::new(RwLock::new(inner)));
-        self.0.write().unwrap().streams.push(t.downgrade());
+        self.0.write().streams.push(t.downgrade());
         t
     }
 }
@@ -118,7 +113,7 @@ impl UntypedSubscription {
 struct UntypedUpdatesInner {
     notify: Option<Box<Fn() -> () + Send + Sync + 'static>>,
     hold: Option<oneshot::Sender<()>>,
-    ready: VecDeque<Option<Arc<String>>>,
+    ready: VecDeque<Option<Bytes>>,
     max_q: usize,
 }
 
@@ -141,10 +136,9 @@ impl UntypedUpdatesWeak {
 }
 
 impl Stream for UntypedUpdates {
-    type Item = Arc<String>;
-    type Error = Error;
+    type Item = Result<Bytes, Error>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut t = self.0.write().unwrap();
         let res =
             match t.ready.pop_front() {
@@ -196,36 +190,36 @@ impl<T> Subscription<T> where T: DeserializeOwned {
     /// subscription always has a current value. 
     pub fn get(&self) -> Result<T> {
         let cur = {
-            let ut = self.untyped.0.read().unwrap();
-            Arc::clone(&ut.current)
+            let ut = self.untyped.0.read();
+            ut.current.clone()
         };
-        Ok(serde_json::from_str(cur.as_ref())?)
+        Ok(rmp_serde::decode::from_read(&*cur)?)
     }
 
-    /// get the raw JSON string of the current value.
-    pub fn get_raw(&self) -> Arc<String> {
-        let ut = self.untyped.0.read().unwrap();
-        Arc::clone(&ut.current)
+    /// get the raw value.
+    pub fn get_raw(&self) -> Bytes {
+        let ut = self.untyped.0.read();
+        ut.current.clone()
     }
 
     /// return true if the subscription is dead, false otherwise.
     pub fn is_dead(&self) -> bool {
-        let ut = self.untyped.0.read().unwrap();
+        let ut = self.untyped.0.read();
         ut.dead
     }
 
     /// return a future that will become ready if the subscription dies.
-    pub fn dead(&self) -> impl Future<Item = (), Error = Error> {
+    pub fn dead(&self) -> impl Future<Item = Result<(), Error>> {
         let rx = {
-            let mut ut = self.untyped.0.write().unwrap();
             let (tx, rx) = oneshot::channel();
+            let mut ut = self.untyped.0.write();
             if ut.dead { let _ = tx.send(()); rx }
             else {
                 ut.deads.push(tx);
                 rx
             }
         };
-        async_block! { Ok(await!(rx)?) }
+        async move { Ok(rx.await?) }
     }
 
     /// return a future that will become ready when the value is
@@ -273,24 +267,6 @@ impl<T> Subscription<T> where T: DeserializeOwned {
     /// otherwise semantically the same as `updates`.
     pub fn updates_raw(&self, max_q: usize) -> impl Stream<Item=Arc<String>, Error=Error> {
         self.untyped.updates(max_q)
-    }
-
-    /// queue a value to be sent back to the publisher. Each publisher
-    /// will handle this differently, and the default behavior is to
-    /// ignore the value. This feature is experimental and may be
-    /// replaced or removed in the future.
-    pub fn write<U: Serialize>(&self, v: &U) -> Result<()> {
-        let ut = self.untyped.0.read().unwrap();
-        ut.connection.write(&ToPublisher::Set(ut.path.clone()))?;
-        ut.connection.write(v)
-    }
-
-    /// flush queued values back to the publisher, return a future that
-    /// will be ready when the values have been flushed to the unerlying
-    /// OS socket. If you don't want to `await!` the future you can
-    /// safely throw it away, the flush will happen anyway.
-    pub fn flush(&self) -> impl Future<Item = (), Error = Error> {
-        self.untyped.0.read().unwrap().connection.flush()
     }
 }
 
