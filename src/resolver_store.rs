@@ -8,7 +8,7 @@ use std::{
         HashSet, HashMap, BTreeSet
     },
 };
-use crossbeam::sync::ShardedLock;
+use parking_lot::RwLock;
 
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
@@ -180,7 +180,7 @@ impl<T> StoreInner<T> {
     }
 }
 
-pub(crate) struct Store<T>(Arc<ShardedLock<StoreInner<T>>>);
+pub(crate) struct Store<T>(Arc<RwLock<StoreInner<T>>>);
 
 impl<T> Clone for Store<T> {
     fn clone(&self) -> Self {
@@ -189,7 +189,7 @@ impl<T> Clone for Store<T> {
 }
 
 impl<T> Deref for Store<T> {
-    type Target = ShardedLock<StoreInner<T>>;
+    type Target = RwLock<StoreInner<T>>;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
@@ -198,7 +198,7 @@ impl<T> Deref for Store<T> {
 
 impl<T> Store<T> {
     pub(crate) fn new() -> Self {
-        Store(Arc::new(ShardedLock::new(StoreInner {
+        Store(Arc::new(RwLock::new(StoreInner {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),

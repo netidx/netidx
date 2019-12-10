@@ -67,7 +67,7 @@ fn handle_msg(
                 if !paths.iter().all(Path::is_absolute) {
                     FromResolver::Error("absolute paths required".into())
                 } else {
-                    let mut store = store.write().unwrap();
+                    let mut store = store.write();
                     for path in paths {
                         store.publish(path, write_addr);
                     }
@@ -78,7 +78,7 @@ fn handle_msg(
         ToResolver::Unpublish(paths) => match wa {
             None => FromResolver::Error("read only".into()),
             Some(write_addr) => {
-                let mut store = store.write().unwrap();
+                let mut store = store.write();
                 for path in paths {
                     store.unpublish(path, write_addr);
                 }
@@ -88,7 +88,7 @@ fn handle_msg(
         ToResolver::Clear => match wa {
             None => FromResolver::Error("read only".into()),
             Some(write_addr) => {
-                let mut store = store.write().unwrap();
+                let mut store = store.write();
                 store.unpublish_addr(write_addr);
                 store.gc();
                 FromResolver::Unpublished
@@ -97,12 +97,12 @@ fn handle_msg(
         ToResolver::Resolve(paths) => {
             use rayon::prelude::*;
             FromResolver::Resolved(
-                paths.par_iter().map_init(|| store.read().unwrap(), |s, p| s.resolve(p))
+                paths.par_iter().map_init(|| store.read(), |s, p| s.resolve(p))
                     .collect()
             )
         },
         ToResolver::List(path) => {
-            FromResolver::List(store.read().unwrap().list(&path))
+            FromResolver::List(store.read().list(&path))
         }
     }
 }
@@ -124,7 +124,7 @@ async fn client_loop(
         ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
         ClientHello::ReadWrite {ttl, write_addr} => {
             if ttl <= 0 || ttl > 3600 { ret!("invalid ttl") }
-            let mut store = store.write().unwrap();
+            let mut store = store.write();
             let clinfos = store.clinfo_mut();
             let ttl = Duration::from_secs(ttl);
             match clinfos.get_mut(&write_addr) {
@@ -177,7 +177,7 @@ async fn client_loop(
             }
             M::Timeout => {
                 if let Some(write_addr) = write_addr {
-                    let mut store = store.write().unwrap();
+                    let mut store = store.write();
                     if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
                         if let Some(stop) = mem::replace(cl, None) {
                             let _ = stop.send(());

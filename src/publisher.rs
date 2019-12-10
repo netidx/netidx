@@ -5,7 +5,7 @@ use std::{
     marker::PhantomData,
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
-    sync::{Arc, Weak, Mutex},
+    sync::{Arc, Weak},
     default::Default,
     cell::RefCell,
     time::Duration,
@@ -29,6 +29,7 @@ use serde::Serialize;
 use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::{Bytes, BytesMut};
+use parking_lot::Mutex;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -117,7 +118,7 @@ impl<T> Drop for PublishedInner<T> {
     fn drop(&mut self) {
         self.updates.push((self.id, Update::Unpublish));
         if let Some(t) = self.publisher.upgrade() {
-            let mut pb = t.0.lock().unwrap();
+            let mut pb = t.0.lock();
             pb.by_path.remove(&self.path);
             if !pb.to_publish.remove(&self.path) {
                 pb.to_unpublish.insert(self.path.clone());
@@ -306,7 +307,7 @@ impl Publisher {
             async move {
                 accept_loop(pb_weak.clone(), listener, receive_stop).await;
                 if let Some(pb) = pb_weak.upgrade() {
-                    pb.0.lock().unwrap().shutdown();
+                    pb.0.lock().shutdown();
                 }
             }
         });
@@ -314,7 +315,7 @@ impl Publisher {
     }
 
     /// get the `SocketAddr` that publisher is bound to
-    pub fn addr(&self) -> SocketAddr { self.0.lock().unwrap().addr }
+    pub fn addr(&self) -> SocketAddr { self.0.lock().addr }
 
     /// Publish `Path` with initial value `init`. Subscribers will not
     /// be able to subscribe until you call flush and await the
@@ -328,7 +329,7 @@ impl Publisher {
         init: &T
     ) -> Result<Published<T>, Error> {
         let init = mp_encode(init)?;
-        let mut pb = self.0.lock().unwrap();
+        let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             Err(format_err!("can't publish to relative path"))
         } else if pb.stop.is_none() {
@@ -396,7 +397,7 @@ impl Publisher {
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
         let mut resolver = {
-            let mut pb = self.0.lock().unwrap();
+            let mut pb = self.0.lock();
             to_publish.extend(pb.to_publish.drain());
             to_unpublish.extend(pb.to_unpublish.drain());
             while let Ok((id, m)) = pb.updates.pop() {
@@ -448,7 +449,7 @@ impl Publisher {
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
-    pub fn clients(&self) -> usize { self.0.lock().unwrap().clients.len() }
+    pub fn clients(&self) -> usize { self.0.lock().clients.len() }
 }
 
 fn handle_client_msg(
@@ -460,7 +461,7 @@ fn handle_client_msg(
     use rmp_serde::{encode::write_named, decode::from_read};
     let msg = from_read::<&[u8], ToPublisher>(&*m)?;
     let t_st = t.upgrade().ok_or_else(|| format_err!("dead publisher"))?;
-    let mut pb = t_st.0.lock().unwrap();
+    let mut pb = t_st.0.lock();
     let (reply, v) = match msg {
         ToPublisher::Subscribe(path) => {
             match pb.by_path.get(&path) {
@@ -546,7 +547,7 @@ async fn accept_loop(
                     None => return,
                     Some(t) => t
                 };
-                let mut pb = t.0.lock().unwrap();
+                let mut pb = t.0.lock();
                 if pb.clients.len() < MAX_CLIENTS {
                     let (tx, rx) = channel(100);
                     try_cont!("nodelay", s.set_nodelay(true));
@@ -557,7 +558,7 @@ async fn accept_loop(
                     task::spawn(async move {
                         let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                         if let Some(t) = t_weak.upgrade() {
-                            let mut pb = t.0.lock().unwrap();
+                            let mut pb = t.0.lock();
                             if let Some(cl) = pb.clients.remove(&addr) {
                                 for id in cl.subscribed {
                                     if let Some(ut) = pb.by_id.get_mut(&id) {
