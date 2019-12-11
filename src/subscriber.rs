@@ -2,7 +2,7 @@
 enum ToConnection {
     Subscribe {
         path: Path,
-        finished: oneshot::Sender<Result<(Id, Bytes), Error>>,
+        finished: oneshot::Sender<Result<RawSubscription, Error>>,
         timeout: Option<Duration>
     },
     Unsubscribe(Id),
@@ -108,6 +108,11 @@ impl Subscription {
     pub fn updates(&self) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
         self.0.updates().map(|v| rmp_serde::decode::from_read::<T>(&*v))
     }
+}
+
+enum SubStatus {
+    Subscribed(RawSubscriptionWeak),
+    Pending(Vec<oneshot::Sender<Result<RawSubscription, Error>>>),
 }
 
 struct SubscriberInner {
