@@ -73,6 +73,8 @@ impl<R: ReadableOrWritable> Resolver<R> {
         Ok(Resolver { sender, kind: PhantomData })
     }
 
+    // CR estokes: when given more than one socket address the
+    // resolver should make use of all of them.
     pub fn new_ro<T>(resolver: T) -> Result<Resolver<ReadOnly>>
     where T: ToSocketAddrs {
         let resolver =
