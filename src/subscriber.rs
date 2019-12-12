@@ -3,7 +3,8 @@ enum ToConnection {
     Subscribe {
         path: Path,
         finished: oneshot::Sender<Result<RawSubscription, Error>>,
-        timeout: Option<Duration>
+        timeout: Option<Duration>,
+        con: Sender<ToConnection>,
     },
     Unsubscribe(Id),
     Stream(Id, Sender<Bytes>),
@@ -118,7 +119,7 @@ enum SubStatus {
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
     connections: HashMap<SocketAddr, Sender<ToConnection>, FxBuildHasher>,
-    subscribed: HashMap<Path, RawSubscription>,
+    subscribed: HashMap<Path, SubStatus>,
 }
 
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
@@ -137,79 +138,127 @@ impl Subscriber {
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
-        let paths: Vec<Path> = batch.into_iter().collect();
-        let (r, to_resolve) = {
-            let t = self.0.lock();
-            t.resolver.clone();
-            paths.iter().cloned()
-                .filter(|p| !t.subscribed.contains_key(p))
-                .collect::<Vec<_>>()
-        };
-        let mut rng = rand::thread_rng();
-        let addrs = match r.resolve(to_resolve).await {
-            Ok(addrs) => addrs
-            Err(e) => {
-                return paths.iter().map(|p| {
-                    Err(format_err!("resolving path: {} failed: {}", p, e))
-                }).collect::<Vec<_>>()
-            }
-        };
-        let with_con = {
-            let mut t = t.0.lock();
-            paths.into_iter().zip(addrs.into_iter()).map(|(path, addrs)| {
-                if addrs.len() == 0 {
-                    (path, Err(format_error!("path not found")))
-                } else {
-                    let addr = {
-                        if addrs.len() == 1 {
-                            addrs[0];
-                        } else {
-                            addrs[rng.gen_range(0, addrs.len())]
+        use std::collections::hash_map::Entry;
+        enum St {
+            Resolve,
+            Resolved(Vec<SocketAddrs>),
+            Connected(Sender<ToConnection>),
+            Subscribing(Option<oneshot::Receiver<Result<RawSubscription, Error>>>),
+            Subscribed(RawSubscription),
+            Error(Error),
+        }
+        let mut pending: HashMap<Path, St> = HashMap::new();
+        let r = { // Init
+            let mut t = self.0.lock();
+            for p in batch {
+                match t.subscribed.entry(p.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(SubStatus::Pending(vec![]));
+                        pending.insert(p, St::Resolve);
+                        true
+                    }
+                    Entry::Occupied(e) => match e.get_mut() {
+                        SubStatus::Subscribed(r) => {
+                            pending.insert(p, St::Subscribed(r.clone()));
+                            false
+                        },
+                        SubStatus::Pending(ref mut v) => {
+                            let (tx, rx) = oneshot::channel();
+                            v.push(tx);
+                            pending.insert(p, St::Subscribing(Some(rx)));
+                            false
                         }
-                    };
-                    let con = t.connections.entry(addr).or_insert_with(|| {
-                        start_connection(addr)
-                    });
-                    (path, Ok(con.clone()))
+                    }
                 }
-            }).collect::<Vec<_>>()
+            }
+            t.resolver.clone();
         };
-        let mut pending = Vec::with_capacity(with_con.len());
-        for (path, r) in with_con {
-            match r {
-                r@ Err(_) => pending.push(r),
-                Ok(con) => {
-                    let (tx, rx) = oneshot::channel();
-                    pending.push((path.clone(), Ok((c.clone(), rx))));
-                    con.send(ToConnection::Subscribe {
-                        path,
-                        finished: tx,
-                        timeout
-                    }).await;                    
-                }
+        { // Resolve
+            let to_resolve =
+                pending.iter()
+                .filter(|(_, s)| s == St::Resolve)
+                .map(|(p, _)| p.clone())
+                .collect::<Vec<_>>();
+            match r.resolve(to_resolve.clone()).await {
+                Ok(addrs) => 
+                    for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
+                        *(pending.get_mut(&p).unwrap()) = St::Resolved(addrs);
+                    },
+                Err(e) =>
+                    for p in to_resolve {
+                        *(pending.get_mut(&p).unwrap()) = St::Error(
+                            format_err!("resolving path: {} failed: {}", p, e)
+                        );
+                    }
             }
         }
-        let mut result = Vec::with_capacity(pending.len());
-        for (path, r) in pending {
-            match r {
-                r@ Err(_) => result.push((path, r)),
-                Ok((connection, reply)) => {
-                    match reply.await {
-                        Err(_) => result.push(Err(format_err!("connection died"))),
-                        Ok(Err(e)) => result.push((path, Err(e))),
-                        Ok(Ok((id, last))) => {
-                            let r = RawSubscriptionInner { id, last, connection };
-                            let s = RawSubscription(Arc::new(RwLock::new(r)));
-                            result.push((path, Ok(s)))
+        { // Connect
+            let mut rng = rand::thread_rng();
+            let mut t = t.0.lock();
+            for (path, st) in pending.iter_mut() {
+                match st {
+                    St::Resolve
+                        | St::Connected(_)
+                        | St::Subscribing(_)
+                        | St::Subscribed(_)
+                        | St::Error(_) => (),
+                    St::Resolved(addrs) => {
+                        if addrs.len() == 0 {
+                            *st = St::Error(format_error!("path not found"));
+                        } else {
+                            let addr = {
+                                if addrs.len() == 1 {
+                                    addrs[0];
+                                } else {
+                                    addrs[rng.gen_range(0, addrs.len())]
+                                }
+                            };
+                            let con = t.connections.entry(addr).or_insert_with(|| {
+                                start_connection(addr)
+                            });
+                            *st = St::Connected(con.clone());
                         }
                     }
                 }
             }
         }
-        let mut t = self.0.lock();
-        for (path, r) in result.iter() {
-            if let Ok(s) = r {
-                t.subscriptions.insert
+        // Subscribe
+        for (path, st) in pending.iter_mut() {
+            match st {
+                St::Resolve
+                    | St::Resolved(_)
+                    | St::Subscribing(_)
+                    | St::Subscribed(_)
+                    | St::Error(_) => (),
+                St::Connected(con) => {
+                    let con = con.clone();
+                    let (tx, rx) = oneshot::channel();
+                    *st = St::Subscribing(Some(rx));
+                    con.send(ToConnection::Subscribe {
+                        timeout, con,
+                        path: path.clone(),
+                        finished: tx,
+                    }).await;                    
+                }
+            }
+        }
+        // wait
+        for (path, st) in pending.iter_mut() {
+            match st {
+                St::Resolve
+                    | St::Resolved(_)
+                    | St::Connected(_) =>
+                    *st = St::Error(format_err!("bug: invalid state")),
+                St::Subscribed(_) => (),
+                St::Subscribing(wait) => {
+                    if let Some(wait) = mem::replace(wait, None) {
+                        match reply.await {
+                            Err(_) => *st = St::Error(format_err!("connection died")),
+                            Ok(Err(e)) => *st = St::Error(e),
+                            Ok(Ok(raw)) => *st = St::Subscribed(raw),
+                        }
+                    }
+                }
             }
         }
     }
