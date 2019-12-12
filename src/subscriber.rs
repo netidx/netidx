@@ -133,6 +133,30 @@ impl Subscriber {
         })))
     }
 
+    /// Subscribe to the specified set of paths.
+    ///
+    /// Path resolution and subscription are done in parallel, so the
+    /// lowest latency per subscription will be achieved with larger
+    /// batches.
+    ///
+    /// In case you are already subscribed to one or more of the paths
+    /// in the batch, you will receive a reference to the existing
+    /// subscription, no additional messages will be sent.
+    ///
+    /// It is safe to call this function concurrently with the same or
+    /// overlapping sets of paths in the batch, only one subscription
+    /// attempt will be made concurrently, and the result of that one
+    /// attempt will be given to each concurrent caller upon success
+    /// or failure.
+    ///
+    /// `timeout` applies to individual subscriptions. If a
+    /// subscription cannot be completed within `timeout` the result
+    /// of that subscription will a timeout error. Due to the
+    /// complexity of the process, subscriptions might wait up to 3x
+    /// timeout before failing, as the timeout is applied to each of
+    /// the resolve, connect, and subscribe steps. subscribe as a
+    /// whole should finish within 3 x timeout, if timeout is None,
+    /// subscribe may never complete.
     async fn subscribe(
         &self,
         batch: impl IntoIterator<Item = Path>,
@@ -178,7 +202,14 @@ impl Subscriber {
                 .filter(|(_, s)| s == St::Resolve)
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
-            match r.resolve(to_resolve.clone()).await {
+            let r = match timeout {
+                None => r.resolve(to_resolve.clone()).await,
+                Some(d) => {
+                    let f = r.resolve(to_resolve.clone());
+                    futures::timeout(d, f).await.map_err(Error::from)
+                }
+            };
+            match r {
                 Err(e) => for p in to_resolve {
                     *pending.[&p] = St::Error(
                         format_err!("resolving path: {} failed: {}", p, e)
@@ -208,11 +239,9 @@ impl Subscriber {
         // Subscribe
         for (path, st) in pending.iter_mut() {
             match st {
-                St::Resolve
-                    | St::Subscribing(_)
-                    | St::WaitingOther(_)
-                    | St::Subscribed(_)
-                    | St::Error(_) => (),
+                St::Resolve => *st = St::Error(format_err!("resolver protocol error")),
+                St::Subscribing(_) => unreachable!(),
+                St::WaitingOther(_) | St::Subscribed(_) | St::Error(_) => (),
                 St::Connected(con) => {
                     let (tx, rx) = oneshot::channel();
                     let con_ = con.clone();
@@ -225,11 +254,10 @@ impl Subscriber {
                 }
             }
         }
-        // wait
+        // Wait
         for (path, st) in pending.iter_mut() {
             match st {
-                St::Resolve | St::Connected(_) =>
-                    *st = St::Error(format_err!("bug: invalid state")),
+                St::Resolve | St::Connected(_) => unreachable!(),
                 St::Subscribed(_) => (),
                 St::WaitingOther(w) => match w.await {
                     Err(_) => *st = St::Error(format_err!("other side died")),
@@ -245,10 +273,10 @@ impl Subscriber {
                     let mut t = self.0.lock();
                     let sub = t.subscribed.get_mut(&path).unwrap();
                     match t.subscribed.entry(path.clone()) {
-                        Entry::Vacant(_) => panic!("bug"),
+                        Entry::Vacant(_) => unreachable!(),
                         Entry::Occupied(e) => match res {
                             Err(err) => match e.remove() {
-                                SubStatus::Subscribed(_) => panic!("bug"),
+                                SubStatus::Subscribed(_) => unreachable!(),
                                 SubStatus::Pending(waiters) => {
                                     for w in waiters {
                                         let err = Err(format_err!("{}", err));
@@ -263,7 +291,7 @@ impl Subscriber {
                                     SubStatus::Subscribed(raw.clone())
                                 );
                                 match s {
-                                    SubStatus::Subscribed(_) => panic!("bug"),
+                                    SubStatus::Subscribed(_) => unreachable!(),
                                     SubStatus::Pending(waiters) => {
                                         for w in waiters {
                                             let _ = w.send(Ok(raw.clone()));
@@ -278,10 +306,8 @@ impl Subscriber {
             }
         }
         paths.into_iter().map(|p| match pending.remove(&p).unwrap() {
-            St::Resolve
-                | St::Connected(_)
-                | St::Subscribing(_)
-                | St::WaitingOther(_) => panic!("bug"),
+            St::Resolve | St::Connected(_) | St::Subscribing(_)
+                | St::WaitingOther(_) => unreachable!(),
             St::Subscribed(raw) => (p, Ok(raw)),
             St::Error(e) => (p, Err(e))
         }).collect()
