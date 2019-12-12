@@ -118,7 +118,7 @@ enum SubStatus {
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
     connections: HashMap<SocketAddr, Sender<ToConnection>, FxBuildHasher>,
-    subscribed: HashMap<Path, RawSubscriptionWeak>,
+    subscribed: HashMap<Path, RawSubscription>,
 }
 
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
@@ -137,13 +137,16 @@ impl Subscriber {
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
-        let r = {
+        let paths: Vec<Path> = batch.into_iter().collect();
+        let (r, to_resolve) = {
             let t = self.0.lock();
             t.resolver.clone();
-        }
+            paths.iter().cloned()
+                .filter(|p| !t.subscribed.contains_key(p))
+                .collect::<Vec<_>>()
+        };
         let mut rng = rand::thread_rng();
-        let paths: Vec<Path> = batch.into_iter().collect();
-        let addrs = match r.resolve(paths.clone()).await {
+        let addrs = match r.resolve(to_resolve).await {
             Ok(addrs) => addrs
             Err(e) => {
                 return paths.iter().map(|p| {
