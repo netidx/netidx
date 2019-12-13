@@ -1,20 +1,25 @@
 
+struct SubscribeRequest {
+    path: Path,
+    finished: oneshot::Sender<Result<RawSubscription, Error>>,
+    timeout: Option<Duration>,
+    con: Sender<ToConnection>,
+}
+
 enum ToConnection {
-    Subscribe {
-        path: Path,
-        finished: oneshot::Sender<Result<RawSubscription, Error>>,
-        timeout: Option<Duration>,
-        con: Sender<ToConnection>,
-    },
+    Subscribe(SubscribeRequest),
     Unsubscribe(Id),
+    Flush,
     Stream(Id, Sender<Bytes>),
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
 struct RawSubscriptionInner {
     id: Id,
+    addr: SocketAddr,
     last: Arc<RwLock<Bytes>>,
-    connection: Arc<Mutex<Option<Sender<ToConnection>>>>,
+    connection: Sender<ToConnection>,
+    dead: Arc<AtomicBool>,
 }
 
 impl Drop for RawSubscriptionInner {
@@ -170,6 +175,8 @@ impl Subscriber {
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
+        let mut to_flush: HashMap<SocketAddr, Sender<ToConnection>, FxBuildHasher> =
+            HashMap::with_hasher(FxBuildHasher::default());
         let r = { // Init
             let mut t = self.0.lock();
             for p in paths.clone() {
@@ -179,14 +186,18 @@ impl Subscriber {
                         pending.insert(p, St::Resolve);
                     }
                     Entry::Occupied(e) => match e.get_mut() {
-                        SubStatus::Subscribed(r) => {
-                            pending.insert(p, St::Subscribed(r.clone()));
-                        },
                         SubStatus::Pending(ref mut v) => {
                             let (tx, rx) = oneshot::channel();
                             v.push(tx);
                             pending.insert(p, St::WaitingOther(rx));
                         }
+                        SubStatus::Subscribed(r) => match r.upgrade() {
+                            Some(r) => { pending.insert(p, St::Subscribed(r)); }
+                            None => {
+                                e.insert(SubStatus::Pending(vec![]));
+                                pending.insert(p, St::Resolve);
+                            }
+                        },
                     }
                 }
             }
@@ -232,6 +243,7 @@ impl Subscriber {
                                     task::spawn(connection(self.clone(), addr, rx));
                                     tx
                                 });
+                            to_flush.entry(addr).or_insert_with(|| con.clone());
                             *pending[&p] = St::Connected(con.clone());
                         }
                     }
@@ -258,6 +270,10 @@ impl Subscriber {
                     }
                 }
             }
+        }
+        // Flush
+        for (_, con) in to_flush {
+            let _ = con.send(ToConnection::Flush).await;
         }
         // Wait
         for (path, st) in pending.iter_mut() {
@@ -319,62 +335,149 @@ impl Subscriber {
     }
 }
 
+struct Sub {
+    path: Path,
+    last: Arc<RwLock<Bytes>>,
+    streams: SmallVec<[Sender<Bytes>; 4]>,
+    deads: SmallVec<[oneshot::Sender<()>; 4]>,
+    dead: Arc<AtomicBool>,
+}
+
+fn handle_val(
+    pending: &mut HashMap<Path, SubscribeRequest>,
+    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+    next_sub: &mut Option<SubscribeRequest>,
+    id: Id,
+    msg: Bytes,
+) {
+    use std::collections::hash_map::Entry;
+    match subscriptions.entry(id) {
+        Entry::Occupied(e) => {
+            let sub = e.get_mut();
+            let mut i = 0;
+            while i < sub.streams.len() {
+                match sub.streams[i].send(msg.clone()).await {
+                    Ok(()) => { i += 1; }
+                    Err(_) => { sub.streams.remove(i); }
+                }
+            }
+            *sub.last.write() = msg;
+        }
+        Entry::Vacant(e) => if let Some(req) = next_sub.take() {
+            let last = Arc::new(RwLock::new(msg));
+            let dead = Arc::new(AtomicBool::new(false));
+            e.insert(Sub {
+                last: last.clone(),
+                dead: dead.clone(),
+                deads: SmallVec::new();
+                streams: SmallVec::new();
+            });
+            let s = RawSubscriptionInner { id, last, dead, connection: req.con };
+            let _ = req.finished.send(RawSubscription(Arc::new(s)));
+        }
+    }
+}
+
+fn handle_control(
+    addr: &SocketAddr,
+    subscriber: &Subscriber,
+    pending: &mut HashMap<Path, SubscribeRequest>,
+    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+    next_val: &mut Option<Id>,
+    next_sub: &mut Option<SubscribeRequest>,
+    msg: &[u8]
+) -> Result<(), Error> {
+    match rmp_serde::decode::from_read::<FromPublisher>(&*msg) {
+        Err(e) => return Err(Error::from(e)),
+        Ok(Message(id)) => { *next_val = Some(id); }
+        Ok(FromPublisher::NoSuchValue(path)) =>
+            if let Some(r) = pending.remove(&path) {
+                let _ = r.finished.send(Err(format_err!("no such value")));
+            }
+        Ok(FromPublisher::Subscribed(path, id)) => match pending.remove(&path) {
+            None => return Err(format_err!("unsolicited: {}", path)),
+            Some(req) => {
+                *next_id = Some(id);
+                *next_sub = Some(req);
+            }
+        }
+        Ok(FromPublisher::Unsubscribed(id)) =>
+            if let Some(s) = subscriptions.remove(id) {
+                s.dead.store(true, Ordering::Relaxed);
+                let mut t = subscriber.0.lock();
+                match t.subscribed.entry(s.path) {
+                    Entry::Vacant(_) => (),
+                    Entry::Occupied(e) => match e.get() {
+                        SubStatus::Pending(_) => (),
+                        SubStatus::Subscribed(s) => match s.upgrade() {
+                            None => { e.remove(); }
+                            Some(s) => if s.id == id && &s.addr == addr { e.remove(); }
+                        }
+                    }
+                }
+            }
+    }
+    Ok(())
+}
+
+macro_rules! try_brk {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => break Err(Error::from(e))
+        }
+    }
+}
+
 async fn connection(
     subscriber: Subscriber,
     to: SocketAddr,
     mut from_sub: Receiver<ToConnection>
 ) -> Result<(), Error> {
     enum M { FromPub(Option<Result<Bytes, io::Error>>), FromSub(ToConnection) }
-    struct Sub {
-        last: Arc<RwLock<Bytes>>,
-        streams: Vec<Sender<Bytes>>,
-        deads: Vec<oneshot::Sender<()>>,
-    }
-    let mut pending: HashMap<Path, oneshot::Sender<Result<RawSubscription, Error>>> =
-        HashMap::new();
+    let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
-    let mut con = match TcpStream::connect(to).await?;
-    loop {
+    let mut next_sub: Option<SubscribeRequest> = None;
+    let mut con = Framed::new(TcpStream::connect(to).await?, LengthCodec);
+    let mut batched = Vec::new();
+    let mut buf = BytesMut::new();
+    let enc = |buf: &mut BytesMut, m: &ToPublisher| {
+        rmp_serde::encode::write_named(&mut BytesWriter(&mut **buf), m).map(|()| {
+            buf.take().freeze()
+        })
+    };
+    let res = loop {
         let from_pub = con.next().map(|m| M::FromPub(m));
         let from_sub = from_sub.next().map(|m| M::FromSub(m));
         match from_pub.race(from_sub).await {
             M::FromPub(None) => break Err(format_err!("connection closed")),
             M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
-                Some(id) => if let Some(sub) = subscriptions.get_mut(id) {
-                    let mut dead = Vec::new();
-                    for (id, s) in sub.streams.iter_mut() {
-                        if let Err(_) = s.send(msg.clone()).await {
-                            dead.push(id);
-                        }
-                    }
-                    for id in dead {
-                        sub.streams.remove(&id);
-                    }
-                    *sub.last.write() = msg;
+                Some(id) => handle_val(
+                    &mut pending, &mut subscriptions, &mut next_sub, id, msg
+                ),
+                None => try_brk!(handle_control(
+                    &to, &subscriber, &mut pending, &mut subscriptions,
+                    &mut next_id, &mut next_sub, msg
+                ));
+            }
+            M::FromSub(Subscribe(req)) => {
+                let path = req.path.clone();
+                pending.insert(path.clone(), req);
+                batched.push(try_brk!(enc(&mut buf, &ToPublisher::Subscribe(path))));
+            }
+            M::FromSub(Unsubscribe(id)) => {
+                if let Some(sub) = subscriptions.remove(&id) {
+                    sub.dead.store(true, Ordering::Relaxed);
                 }
-                None => match rmp_serde::decode::from_read::<FromPublisher>(&*msg) {
-                    Err(e) => break Err(Error::from(e)),
-                    Ok(Message(id)) => { next_val = Some(id); }
-                    Ok(FromPublisher::Unsubscribed(id)) => { subscriptions.remove(id); }
-                    Ok(FromPublisher::NoSuchValue(path)) => {
-                        if let Some(s) = pending.remove(&path) {
-                            let _ = s.send(Err(format_err!("no such value")));
-                        }
-                    }
-                    Ok(FromPublisher::Subscribed(path, id)) =>
-                        match pending.remove(&path) {
-                            None => break Err(format_err!("unsolicited: {}", path)),
-                            Some(r) => {
-                                
-                            }
-                        }
-                    }
-                }
+                let msg = try_brk!(enc(&mut buf, &ToPublisher::Unsubscribe(id)));
+                try_brk!(con.send(msg).await);
             }
         }
-    }
+    };
+    
+    res
 }
 
