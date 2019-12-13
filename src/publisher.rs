@@ -59,14 +59,12 @@ pub enum FromPublisher {
     /// the case the value is no longer published, or the publisher is
     /// in the process of shutting down.
     Unsubscribed(Id),
-    /// The next message contains an updated value for Id. If you have
-    /// pending subscriptions, then Message(new id) indicates that
-    /// your subscription was succcessful, and that the next message
-    /// contains the current value of the path you subscribed
-    /// to. First messages are sent in the order of subscription, and
-    /// no messages for any other subscribed paths will be sent
-    /// between a subscribe and the first message for that
-    /// subscription.
+    /// You are now subscribed to Path with subscription id `Id`, and
+    /// The next message contains the first value for Id. All further
+    /// communications about this subscription will only refer to the
+    /// Id.
+    Subscribed(Path, Id),
+    /// The next message contains an updated value for Id.
     Message(Id)
 }
 
