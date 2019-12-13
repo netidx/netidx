@@ -2,7 +2,6 @@
 struct SubscribeRequest {
     path: Path,
     finished: oneshot::Sender<Result<RawSubscription, Error>>,
-    timeout: Option<Duration>,
     con: UnboundedSender<ToConnection>,
 }
 
@@ -143,19 +142,8 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    ///
-    /// `timeout` applies to individual subscriptions. If a
-    /// subscription cannot be completed within `timeout` the result
-    /// of that subscription will a timeout error. Due to the
-    /// complexity of the process, subscriptions might wait up to 3x
-    /// timeout before failing, as the timeout is applied to each of
-    /// the resolve, connect, and subscribe steps. subscribe as a
-    /// whole should finish within 3 x timeout, if timeout is None,
-    /// subscribe may never complete.
     async fn subscribe(
-        &self,
-        batch: impl IntoIterator<Item = Path>,
-        timeout: Option<Duration>,
+        &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
         use std::collections::hash_map::Entry;
         enum St {
@@ -200,14 +188,7 @@ impl Subscriber {
                 .filter(|(_, s)| s == St::Resolve)
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
-            let r = match timeout {
-                None => r.resolve(to_resolve.clone()).await,
-                Some(d) => {
-                    let f = r.resolve(to_resolve.clone());
-                    futures::timeout(d, f).await.map_err(Error::from)
-                }
-            };
-            match r {
+            match r.resolve(to_resolve.clone()).await {
                 Err(e) => for p in to_resolve {
                     *pending.[&p] = St::Error(
                         format_err!("resolving path: {} failed: {}", p, e)
@@ -236,7 +217,7 @@ impl Subscriber {
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
                             let r = con.send_unbounded(ToCon::Subscribe {
-                                epoch, timeout, con: con_,
+                                con: con_,
                                 path: p.clone(),
                                 finished: tx,
                             });
