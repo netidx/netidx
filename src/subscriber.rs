@@ -52,8 +52,7 @@ impl RawSubscription {
     }
 
     pub fn is_dead(&self) -> bool {
-        let con = self.0.connection.lock();
-        con.is_none()
+        self.0.dead.load(Ordering::Relaxed)
     }
 
     pub async fn dead(&self) -> Error {
