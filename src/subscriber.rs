@@ -6,10 +6,9 @@ struct SubscribeRequest {
     con: Sender<ToConnection>,
 }
 
-enum ToConnection {
+enum ToCon {
     Subscribe(SubscribeRequest),
     Unsubscribe(Id),
-    Flush,
     Stream(Id, Sender<Bytes>),
     NotifyDead(Id, oneshot::Sender<()>),
 }
@@ -18,7 +17,7 @@ struct RawSubscriptionInner {
     id: Id,
     addr: SocketAddr,
     last: Arc<RwLock<Bytes>>,
-    connection: Sender<ToConnection>,
+    connection: Sender<ToCon>,
     dead: Arc<AtomicBool>,
 }
 
@@ -28,7 +27,7 @@ impl Drop for RawSubscriptionInner {
             task::spawn({
                 let c = c.clone();
                 let id = self.id;
-                async move { let _ = c.send(ToConnection::Unsubscribe(id)).await; }
+                async move { let _ = c.send(ToCon::Unsubscribe(id)).await; }
             });
         }
     }
@@ -72,7 +71,7 @@ impl RawSubscription {
             }
         };
         let (tx, rx) = oneshot::channel();
-        match c.send(ToConnection::OnDead(tx)).await {
+        match c.send(ToCon::OnDead(tx)).await {
             Err(e) => Error::from(e),
             Ok(()) =>
                 rx.await.unwrap_or_else(|| format_err!("connection died"))
@@ -85,7 +84,7 @@ impl RawSubscription {
             let id = t.id;
             let c = c.clone();
             task::spawn(async move {
-                let _ = c.send(ToConnection::Stream(id, tx)).await;
+                let _ = c.send(ToCon::Stream(id, tx)).await;
             });
         }
         rx
@@ -120,7 +119,7 @@ enum SubStatus {
 
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
-    connections: HashMap<SocketAddr, Sender<ToConnection>, FxBuildHasher>,
+    connections: HashMap<SocketAddr, Sender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
 }
 
@@ -167,7 +166,7 @@ impl Subscriber {
         use std::collections::hash_map::Entry;
         enum St {
             Resolve,
-            Connected(Sender<ToConnection>),
+            Connected(Sender<ToCon>),
             Subscribing(oneshot::Receiver<Result<RawSubscription, Error>>),
             WaitingOther(oneshot::Receiver<Result<RawSubscription, Error>>),
             Subscribed(RawSubscription),
@@ -175,8 +174,6 @@ impl Subscriber {
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
-        let mut to_flush: HashMap<SocketAddr, Sender<ToConnection>, FxBuildHasher> =
-            HashMap::with_hasher(FxBuildHasher::default());
         let r = { // Init
             let mut t = self.0.lock();
             for p in paths.clone() {
@@ -243,7 +240,6 @@ impl Subscriber {
                                     task::spawn(connection(self.clone(), addr, rx));
                                     tx
                                 });
-                            to_flush.entry(addr).or_insert_with(|| con.clone());
                             *pending[&p] = St::Connected(con.clone());
                         }
                     }
@@ -259,7 +255,7 @@ impl Subscriber {
                 St::Connected(con) => {
                     let (tx, rx) = oneshot::channel();
                     let con_ = con.clone();
-                    let r = con.send(ToConnection::Subscribe {
+                    let r = con.send(ToCon::Subscribe {
                         timeout, con: con_,
                         path: path.clone(),
                         finished: tx,
@@ -270,10 +266,6 @@ impl Subscriber {
                     }
                 }
             }
-        }
-        // Flush
-        for (_, con) in to_flush {
-            let _ = con.send(ToConnection::Flush).await;
         }
         // Wait
         for (path, st) in pending.iter_mut() {
@@ -378,6 +370,25 @@ fn handle_val(
     }
 }
 
+fn unsubscribe(
+    sub: Sub,
+    id: Id,
+    addr: &SocketAddr,
+    subscribed: &mut HashMap<Path, SubStatus>
+) {
+    sub.dead.store(true, Ordering::Relaxed);
+    match subscribed.entry(sub.path) {
+        Entry::Vacant(_) => (),
+        Entry::Occupied(e) => match e.get() {
+            SubStatus::Pending(_) => (),
+            SubStatus::Subscribed(s) => match s.upgrade() {
+                None => { e.remove(); }
+                Some(s) => if s.id == id && &s.addr == addr { e.remove(); }
+            }
+        }
+    }
+}
+
 fn handle_control(
     addr: &SocketAddr,
     subscriber: &Subscriber,
@@ -403,18 +414,8 @@ fn handle_control(
         }
         Ok(FromPublisher::Unsubscribed(id)) =>
             if let Some(s) = subscriptions.remove(id) {
-                s.dead.store(true, Ordering::Relaxed);
-                let mut t = subscriber.0.lock();
-                match t.subscribed.entry(s.path) {
-                    Entry::Vacant(_) => (),
-                    Entry::Occupied(e) => match e.get() {
-                        SubStatus::Pending(_) => (),
-                        SubStatus::Subscribed(s) => match s.upgrade() {
-                            None => { e.remove(); }
-                            Some(s) => if s.id == id && &s.addr == addr { e.remove(); }
-                        }
-                    }
-                }
+                let mut t = subscriber.lock();
+                unsubscribe(s, id, addr, &mut t.subscribed);
             }
     }
     Ok(())
@@ -432,9 +433,13 @@ macro_rules! try_brk {
 async fn connection(
     subscriber: Subscriber,
     to: SocketAddr,
-    mut from_sub: Receiver<ToConnection>
+    mut from_sub: Receiver<ToCon>
 ) -> Result<(), Error> {
-    enum M { FromPub(Option<Result<Bytes, io::Error>>), FromSub(ToConnection) }
+    enum M {
+        FromPub(Option<Result<Bytes, io::Error>>),
+        FromSub(BatchItem<ToCon>),
+    }
+    let mut from_sub = Batched::new(from_sub);
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
@@ -455,29 +460,44 @@ async fn connection(
             M::FromPub(None) => break Err(format_err!("connection closed")),
             M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
-                Some(id) => handle_val(
-                    &mut pending, &mut subscriptions, &mut next_sub, id, msg
-                ),
-                None => try_brk!(handle_control(
-                    &to, &subscriber, &mut pending, &mut subscriptions,
-                    &mut next_id, &mut next_sub, msg
-                ));
+                Some(id) => {
+                    handle_val(&mut pending, &mut subscriptions, &mut next_sub, id, msg);
+                }
+                None => {
+                    try_brk!(handle_control(
+                        &to, &subscriber, &mut pending, &mut subscriptions,
+                        &mut next_id, &mut next_sub, msg
+                    ));
+                }
             }
-            M::FromSub(Subscribe(req)) => {
+            M::FromSub(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                 let path = req.path.clone();
                 pending.insert(path.clone(), req);
                 batched.push(try_brk!(enc(&mut buf, &ToPublisher::Subscribe(path))));
             }
-            M::FromSub(Unsubscribe(id)) => {
-                if let Some(sub) = subscriptions.remove(&id) {
-                    sub.dead.store(true, Ordering::Relaxed);
+            M::FromSub(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
+                batched.push(try_brk!(enc(&mut buf, &ToPublisher::Unsubscribe(id))));
+            }
+            M::FromSub(BatchItem::InBatch(ToCon::Stream(id, tx))) => {
+                if let Some(sub) = subscriptions.get_mut(&id) {
+                    sub.streams.push(tx);
                 }
-                let msg = try_brk!(enc(&mut buf, &ToPublisher::Unsubscribe(id)));
-                try_brk!(con.send(msg).await);
+            }
+            M::FromSub(BatchItem::InBatch(ToCon::NotifyDead(id, tx))) => {
+                if let Some(sub) = subscriptions.get_mut(&id) {
+                    sub.deads.push(tx);
+                }
+            }
+            M::FromSub(BatchItem::EndBatch) => if batched.len() > 0 {
+                let mut s = stream::iter(batched.drain(..).map(|v| Ok(v)));
+                try_brk!(con.send_all(&mut s).await);
             }
         }
     };
-    
+    let mut t = subscriber.lock();
+    for (id, sub) in subscriptions {
+        unsubscribe(sub, id, &addr, &mut t.subscribed);
+    }
     res
 }
 
