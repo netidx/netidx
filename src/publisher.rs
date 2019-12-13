@@ -504,7 +504,7 @@ fn handle_client_msg(
                     let sender = cl.to_client.clone();
                     let ut = pb.by_id.get_mut(&id).unwrap();
                     ut.subscribed.insert(*addr, sender);
-                    (FromPublisher::Message(id), Some(ut.current.clone()))
+                    (FromPublisher::Subscribed(path, id), Some(ut.current.clone()))
                 }
             }
         }

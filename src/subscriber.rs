@@ -3,7 +3,7 @@ struct SubscribeRequest {
     path: Path,
     finished: oneshot::Sender<Result<RawSubscription, Error>>,
     timeout: Option<Duration>,
-    con: Sender<ToConnection>,
+    con: UnboundedSender<ToConnection>,
 }
 
 enum ToCon {
@@ -17,19 +17,13 @@ struct RawSubscriptionInner {
     id: Id,
     addr: SocketAddr,
     last: Arc<RwLock<Bytes>>,
-    connection: Sender<ToCon>,
     dead: Arc<AtomicBool>,
+    connection: UnboundedSender<ToCon>,
 }
 
 impl Drop for RawSubscriptionInner {
     fn drop(&mut self) {
-        if let Some(c) = self.connection {
-            task::spawn({
-                let c = c.clone();
-                let id = self.id;
-                async move { let _ = c.send(ToCon::Unsubscribe(id)).await; }
-            });
-        }
+        let _ = self.con.unbounded_send(ToCon::Unsubscribe(id));
     }
 }
 
@@ -119,7 +113,7 @@ enum SubStatus {
 
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
-    connections: HashMap<SocketAddr, Sender<ToCon>, FxBuildHasher>,
+    connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
 }
 
@@ -166,7 +160,6 @@ impl Subscriber {
         use std::collections::hash_map::Entry;
         enum St {
             Resolve,
-            Connected(Sender<ToCon>),
             Subscribing(oneshot::Receiver<Result<RawSubscription, Error>>),
             WaitingOther(oneshot::Receiver<Result<RawSubscription, Error>>),
             Subscribed(RawSubscription),
@@ -198,9 +191,9 @@ impl Subscriber {
                     }
                 }
             }
-            t.resolver.clone();
+            t.resolver.clone()
         };
-        { // Resolve & Connect
+        { // Resolve, Connect, Subscribe
             let mut rng = rand::thread_rng();
             let to_resolve =
                 pending.iter()
@@ -236,33 +229,22 @@ impl Subscriber {
                             let con =
                                 t.connections.entry(addr)
                                 .or_insert_with(|| {
-                                    let (tx, rx) = async_std::sync::channel(100);
+                                    let (tx, rx) = mpsc::unbounded();
                                     task::spawn(connection(self.clone(), addr, rx));
                                     tx
                                 });
-                            *pending[&p] = St::Connected(con.clone());
+                            let (tx, rx) = oneshot::channel();
+                            let con_ = con.clone();
+                            let r = con.send_unbounded(ToCon::Subscribe {
+                                epoch, timeout, con: con_,
+                                path: p.clone(),
+                                finished: tx,
+                            });
+                            match r {
+                                Ok(()) => { *pending[&p] = St::Subscribing(rx); }
+                                Err(e) => { *pending[&p] = St::Error(Error::from(e)); }
+                            }
                         }
-                    }
-                }
-            }
-        }
-        // Subscribe
-        for (path, st) in pending.iter_mut() {
-            match st {
-                St::Resolve => *st = St::Error(format_err!("resolver protocol error")),
-                St::Subscribing(_) => unreachable!(),
-                St::WaitingOther(_) | St::Subscribed(_) | St::Error(_) => (),
-                St::Connected(con) => {
-                    let (tx, rx) = oneshot::channel();
-                    let con_ = con.clone();
-                    let r = con.send(ToCon::Subscribe {
-                        timeout, con: con_,
-                        path: path.clone(),
-                        finished: tx,
-                    }).await;
-                    match r {
-                        Ok(()) => { *st = St::Subscribing(rx); }
-                        Err(e) => { *st = St::Error(Error::from(e)); }
                     }
                 }
             }
@@ -270,7 +252,7 @@ impl Subscriber {
         // Wait
         for (path, st) in pending.iter_mut() {
             match st {
-                St::Resolve | St::Connected(_) => unreachable!(),
+                St::Resolve => unreachable!(),
                 St::Subscribed(_) => (),
                 St::WaitingOther(w) => match w.await {
                     Err(_) => *st = St::Error(format_err!("other side died")),
@@ -329,13 +311,13 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    last: Arc<RwLock<Bytes>>,
     streams: SmallVec<[Sender<Bytes>; 4]>,
     deads: SmallVec<[oneshot::Sender<()>; 4]>,
+    last: Arc<RwLock<Bytes>>,
     dead: Arc<AtomicBool>,
 }
 
-fn handle_val(
+async fn handle_val(
     pending: &mut HashMap<Path, SubscribeRequest>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeRequest>,
@@ -461,7 +443,9 @@ async fn connection(
             M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
                 Some(id) => {
-                    handle_val(&mut pending, &mut subscriptions, &mut next_sub, id, msg);
+                    handle_val(
+                        &mut pending, &mut subscriptions, &mut next_sub, id, msg
+                    ).await;
                 }
                 None => {
                     try_brk!(handle_control(
@@ -500,4 +484,3 @@ async fn connection(
     }
     res
 }
-
