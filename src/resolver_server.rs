@@ -95,11 +95,8 @@ fn handle_msg(
             }
         }
         ToResolver::Resolve(paths) => {
-            use rayon::prelude::*;
-            FromResolver::Resolved(
-                paths.par_iter().map_init(|| store.read(), |s, p| s.resolve(p))
-                    .collect()
-            )
+            let s = store.read();
+            FromResolver::Resolved(paths.iter().map(|p| s.resolve(p)).collect())
         },
         ToResolver::List(path) => {
             FromResolver::List(store.read().list(&path))
