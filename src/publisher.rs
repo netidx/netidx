@@ -1,4 +1,4 @@
-use crate::{utils::BytesWriter, path::Path, resolver::{Resolver, ReadWrite}};
+use crate::{utils::BytesWriter, path::Path, resolver::{Resolver, WriteOnly}};
 use std::{
     self, io, iter, mem,
     result::Result,
@@ -197,7 +197,7 @@ struct PublisherInner {
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
     updates: Arc<SegQueue<(Id, Update)>>,
-    resolver: Resolver<ReadWrite>,
+    resolver: Resolver<WriteOnly>,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
 }
@@ -302,7 +302,7 @@ impl Publisher {
                 }
             }
         };
-        let resolver = Resolver::<ReadWrite>::new_rw(resolver, addr)?;
+        let resolver = Resolver::<WriteOnly>::new_w(resolver, addr)?;
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,

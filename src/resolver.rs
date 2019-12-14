@@ -40,11 +40,10 @@ impl Readable for ReadOnly {}
 impl ReadableOrWritable for ReadOnly {}
 
 #[derive(Clone)]
-pub struct ReadWrite {}
+pub struct WriteOnly {}
 
-impl Readable for ReadWrite {}
-impl Writeable for ReadWrite {}
-impl ReadableOrWritable for ReadWrite {}
+impl Writeable for WriteOnly {}
+impl ReadableOrWritable for WriteOnly {}
 
 type Result<T> = result::Result<T, Error>;
 
@@ -64,7 +63,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
         }
     }
 
-    pub fn new_rw<T>(resolver: T, publisher: SocketAddr) -> Result<Resolver<ReadWrite>>
+    pub fn new_w<T>(resolver: T, publisher: SocketAddr) -> Result<Resolver<WriteOnly>>
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
@@ -75,7 +74,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
 
     // CR estokes: when given more than one socket address the
     // resolver should make use of all of them.
-    pub fn new_ro<T>(resolver: T) -> Result<Resolver<ReadOnly>>
+    pub fn new_r<T>(resolver: T) -> Result<Resolver<ReadOnly>>
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
@@ -134,7 +133,7 @@ async fn connect(
         let mut con = Framed::new(con, MPCodec::<ClientHello, ServerHello>::new());
         try_cont!("hello", con.send(match publisher {
             None => ClientHello::ReadOnly,
-            Some(write_addr) => ClientHello::ReadWrite {ttl: TTL, write_addr},
+            Some(write_addr) => ClientHello::WriteOnly {ttl: TTL, write_addr},
         }).await);
         match con.next().await {
             None | Some(Err(_)) => (),

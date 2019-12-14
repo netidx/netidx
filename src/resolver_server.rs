@@ -1,12 +1,13 @@
 use crate::{
-    utils::MPCodec,
+    utils::{MPCodec, Batched, BatchItem},
     path::Path,
     resolver_store::Store,
 };
 use futures::{
     channel::oneshot,
     sink::SinkExt,
-    future::{FutureExt as FRSFutureExt}
+    future::{FutureExt as FRSFutureExt},
+    stream,
 };
 use std::{
     result, mem,
@@ -28,7 +29,7 @@ use failure::Error;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ClientHello {
     ReadOnly,
-    ReadWrite { ttl: u64, write_addr: SocketAddr }
+    WriteOnly { ttl: u64, write_addr: SocketAddr }
 }
  
 
@@ -55,51 +56,53 @@ pub enum FromResolver {
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_msg(
+fn handle_batch(
     store: &Store<ClientInfo>,
-    m: ToResolver,
+    msgs: impl Iterator<Item = ToResolver>,
+    results: &mut Vec<FromResolver>,
     wa: Option<SocketAddr>
-) -> FromResolver {
-    match m {
-        ToResolver::Publish(paths) => match wa {
-            None => FromResolver::Error("read only".into()),
-            Some(write_addr) => {
-                if !paths.iter().all(Path::is_absolute) {
-                    FromResolver::Error("absolute paths required".into())
-                } else {
-                    let mut store = store.write();
-                    for path in paths {
-                        store.publish(path, write_addr);
-                    }
-                    FromResolver::Published
-                }
-            }
-        },
-        ToResolver::Unpublish(paths) => match wa {
-            None => FromResolver::Error("read only".into()),
-            Some(write_addr) => {
-                let mut store = store.write();
-                for path in paths {
-                    store.unpublish(path, write_addr);
-                }
-                FromResolver::Unpublished
-            }
-        },
-        ToResolver::Clear => match wa {
-            None => FromResolver::Error("read only".into()),
-            Some(write_addr) => {
-                let mut store = store.write();
-                store.unpublish_addr(write_addr);
-                store.gc();
-                FromResolver::Unpublished
-            }
-        }
-        ToResolver::Resolve(paths) => {
+) {
+    match wa {
+        None => {
             let s = store.read();
-            FromResolver::Resolved(paths.iter().map(|p| s.resolve(p)).collect())
-        },
-        ToResolver::List(path) => {
-            FromResolver::List(store.read().list(&path))
+            results.extend(msgs.map(move |m| match m {
+                ToResolver::Resolve(paths) => {
+                    FromResolver::Resolved(paths.iter().map(|p| s.resolve(p)).collect())
+                },
+                ToResolver::List(path) => {
+                    FromResolver::List(s.list(&path))
+                }
+                ToResolver::Publish(_) | ToResolver::Unpublish(_) | ToResolver::Clear =>
+                    FromResolver::Error("read only".into()),
+            }))
+        }
+        Some(write_addr) => {
+            let mut s = store.write();
+            results.extend(msgs.map(move |m| match m {
+                ToResolver::Resolve(_) | ToResolver::List(_) =>
+                    FromResolver::Error("write only".into()),
+                ToResolver::Publish(paths) => {
+                    if !paths.iter().all(Path::is_absolute) {
+                        FromResolver::Error("absolute paths required".into())
+                    } else {
+                        for path in paths {
+                            s.publish(path, write_addr);
+                        }
+                        FromResolver::Published
+                    }
+                }
+                ToResolver::Unpublish(paths) => {
+                    for path in paths {
+                        s.unpublish(path, write_addr);
+                    }
+                    FromResolver::Unpublished
+                }
+                ToResolver::Clear => {
+                    s.unpublish_addr(write_addr);
+                    s.gc();
+                    FromResolver::Unpublished
+                }
+            }))
         }
     }
 }
@@ -109,7 +112,11 @@ async fn client_loop(
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) {
-    enum M { Stop, Timeout, Msg(Option<result::Result<ToResolver, Error>>) }
+    enum M {
+        Stop,
+        Timeout,
+        Msg(Option<BatchItem<result::Result<ToResolver, Error>>>)
+    }
     try_ret!("can't set nodelay", s.set_nodelay(true));
     let mut codec = Framed::new(s, MPCodec::<ServerHello, ClientHello>::new());
     let hello = match codec.next().await {
@@ -119,7 +126,7 @@ async fn client_loop(
     let (tx_stop, rx_stop) = oneshot::channel();
     let (ttl, ttl_expired, write_addr) = match hello {
         ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
-        ClientHello::ReadWrite {ttl, write_addr} => {
+        ClientHello::WriteOnly {ttl, write_addr} => {
             if ttl <= 0 || ttl > 3600 { ret!("invalid ttl") }
             let mut store = store.write();
             let clinfos = store.clinfo_mut();
@@ -139,12 +146,17 @@ async fn client_loop(
         }
     };
     try_ret!("couldn't send hello", codec.send(ServerHello { ttl_expired }).await);
-    let mut codec = Some(Framed::new(
-        codec.release().0,
-        MPCodec::<FromResolver, ToResolver>::new()
-    ));
+    let mut codec = {
+        let c = Framed::new(
+            codec.release().0,
+            MPCodec::<FromResolver, ToResolver>::new()
+        );
+        Some(Batched::new(c, 100_000))
+    };
     let server_stop = server_stop.shared();
     let rx_stop = rx_stop.shared();
+    let mut batch = Vec::new();
+    let mut results = Vec::new();
     loop {
         let msg = match codec {
             None => future::pending::<M>().left_future(),
@@ -157,19 +169,21 @@ async fn client_loop(
         match msg.race(stop).race(timeout).await {
             M::Stop => break,
             M::Msg(None) => { codec = None; }
-            M::Msg(Some(Err(e))) => {
+            M::Msg(Some(BatchItem::InBatch(Err(e)))) => {
                 codec = None;
                 // CR estokes: use proper log module
                 println!("error reading message: {}", e)
             },
-            M::Msg(Some(Ok(m))) => {
-                match codec {
-                    None => (),
-                    Some(ref mut c) =>
-                        match c.send(handle_msg(&store, m, write_addr)).await {
-                            Err(_) => { codec = None }, // CR estokes: Log this
-                            Ok(()) => ()
-                        }
+            M::Msg(Some(BatchItem::InBatch(Ok(m)))) => { batch.push(m); }
+            M::Msg(Some(BatchItem::EndBatch)) => match codec {
+                None => { batch.clear(); }
+                Some(ref mut c) => {
+                    handle_batch(&store, batch.drain(..), &mut results, write_addr);
+                    let mut s = stream::iter(results.drain(..).map(|m| Ok(m)));
+                    match c.send_all(&mut s).await {
+                        Err(_) => { codec = None }, // CR estokes: Log this
+                        Ok(()) => ()
+                    }
                 }
             }
             M::Timeout => {
