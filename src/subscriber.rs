@@ -9,25 +9,26 @@ use std::{
     result::Result,
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
 };
 use async_std::{
     prelude::*,
     task,
     net::TcpStream,
-    stream::StreamExt,
 };
 use fxhash::FxBuildHasher;
 use futures::{
     stream,
-    channel::{oneshot, mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender}},
+    channel::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
+    sink::SinkExt as FrsSinkExt,
+    future::{FutureExt as FrsFutureExt},
 };
 use futures_codec::{Framed, LengthCodec};
 use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::{Bytes, BytesMut};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 
 struct SubscribeRequest {
@@ -39,14 +40,18 @@ struct SubscribeRequest {
 enum ToCon {
     Subscribe(SubscribeRequest),
     Unsubscribe(Id),
-    Stream(Id, Sender<Bytes>),
+    Stream {
+        id: Id,
+        tx: Sender<Bytes>,
+        last: bool,
+    },
+    Last(Id, oneshot::Sender<Bytes>),
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
 struct RawSubscriptionInner {
     id: Id,
     addr: SocketAddr,
-    last: Arc<RwLock<Bytes>>,
     dead: Arc<AtomicBool>,
     connection: UnboundedSender<ToCon>,
 }
@@ -78,26 +83,40 @@ impl RawSubscription {
         RawSubscriptionWeak(Arc::downgrade(self.0))
     }
 
-    pub fn last(&self) -> Bytes {
-        self.0.last.read().clone()
+    /// Get the last published value, or None if the subscription is dead.
+    pub async fn last(&self) -> Option<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
+        rx.await.ok()
     }
 
+    /// Return true if the subscription has died.
     pub fn is_dead(&self) -> bool {
         self.0.dead.load(Ordering::Relaxed)
     }
 
+    /// Wait for the subscription to die
     pub async fn dead(&self) {
-        let mut c = self.0.connection.clone();
         let (tx, rx) = oneshot::channel();
-        match c.unbounded_send(ToCon::NotifyDead(self.0.id, tx)) {
+        match self.0.connection.unbounded_send(ToCon::NotifyDead(self.0.id, tx)) {
             Err(_) => (),
             Ok(()) => { let _ = rx.await; },
         }
     }
 
-    pub fn updates(&self) -> impl Stream<Item = Bytes> {
+    /// Get a stream of published values. Values will arrive in the
+    /// order they are published. No value will be omitted. If
+    /// `begin_with_last` is true, then the stream will start with the
+    /// last published value at the time `updates` is called, and will
+    /// then receive any updated values. Otherwise the stream will
+    /// only receive updated values. If you only want the last value,
+    /// it's cheaper to call `last`.
+    ///
+    /// When the subscription dies the stream will end.
+    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
         let (tx, rx) = mpsc::channel(100);
-        let _ = self.0.connection.clone().unbounded_send(ToCon::Stream(self.0.id, tx));
+        let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
+        let _ = self.0.connection.unbounded_send(m);
         rx
     }
 }
@@ -105,9 +124,13 @@ impl RawSubscription {
 #[derive(Clone)]
 pub struct Subscription<T: DeserializeOwned>(RawSubscription, PhantomData<T>);
 
-impl Subscription {
-    pub fn last(&self) -> Result<T, rmp_serde::decode::Error> {
-        rmp_serde::decode::from_read::<T>(&*self.0.last())
+impl<T: DeserializeOwned> Subscription<T> {
+    /// Get and decode the last published value. 
+    pub async fn last(&self) -> Result<T, Error> {
+        match self.0.last().await {
+            None => Err(format_err!("subscription is dead")),
+            Ok(buf) => Ok(rmp_serde::decode::from_read::<T>(&*buf)?),
+        }
     }
 
     pub fn is_dead(&self) -> bool {
@@ -118,8 +141,13 @@ impl Subscription {
         self.0.dead()
     }
 
-    pub fn updates(&self) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
-        self.0.updates().map(|v| rmp_serde::decode::from_read::<T>(&*v))
+    pub fn updates(
+        &self,
+        begin_with_last: bool
+    ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
+        self.0.updates(begin_with_last).map(|v| {
+            rmp_serde::decode::from_read::<T>(&*v)
+        })
     }
 }
 
@@ -212,7 +240,7 @@ impl Subscriber {
                     );
                 }
                 Ok(addrs) => {
-                    let mut t = t.0.lock();
+                    let mut t = self.0.lock();
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
                             *pending[&p] = St::Error(format_err!("path not found"));
@@ -311,7 +339,7 @@ struct Sub {
     path: Path,
     streams: SmallVec<[Sender<Bytes>; 4]>,
     deads: SmallVec<[oneshot::Sender<()>; 4]>,
-    last: Arc<RwLock<Bytes>>,
+    last: Bytes,
     dead: Arc<AtomicBool>,
 }
 
@@ -320,6 +348,7 @@ async fn handle_val(
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeRequest>,
     id: Id,
+    addr: SocketAddr,
     msg: Bytes,
 ) {
     match subscriptions.entry(id) {
@@ -332,19 +361,19 @@ async fn handle_val(
                     Err(_) => { sub.streams.remove(i); }
                 }
             }
-            *sub.last.write() = msg;
+            sub.last = msg;
         }
         Entry::Vacant(e) => if let Some(req) = next_sub.take() {
-            let last = Arc::new(RwLock::new(msg));
             let dead = Arc::new(AtomicBool::new(false));
             e.insert(Sub {
-                last: last.clone(),
+                path: req.path,
+                last: msg,
                 dead: dead.clone(),
                 deads: SmallVec::new(),
                 streams: SmallVec::new(),
             });
-            let s = RawSubscriptionInner { id, last, dead, connection: req.con };
-            let _ = req.finished.send(RawSubscription(Arc::new(s)));
+            let s = RawSubscriptionInner { id, addr, dead, connection: req.con };
+            let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));
         }
     }
 }
@@ -352,7 +381,7 @@ async fn handle_val(
 fn unsubscribe(
     sub: Sub,
     id: Id,
-    addr: &SocketAddr,
+    addr: SocketAddr,
     subscribed: &mut HashMap<Path, SubStatus>
 ) {
     sub.dead.store(true, Ordering::Relaxed);
@@ -362,14 +391,14 @@ fn unsubscribe(
             SubStatus::Pending(_) => (),
             SubStatus::Subscribed(s) => match s.upgrade() {
                 None => { e.remove(); }
-                Some(s) => if s.id == id && &s.addr == addr { e.remove(); }
+                Some(s) => if s.id == id && s.addr == addr { e.remove(); }
             }
         }
     }
 }
 
 fn handle_control(
-    addr: &SocketAddr,
+    addr: SocketAddr,
     subscriber: &Subscriber,
     pending: &mut HashMap<Path, SubscribeRequest>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
@@ -379,7 +408,7 @@ fn handle_control(
 ) -> Result<(), Error> {
     match rmp_serde::decode::from_read::<FromPublisher>(&*msg) {
         Err(e) => return Err(Error::from(e)),
-        Ok(Message(id)) => { *next_val = Some(id); }
+        Ok(FromPublisher::Message(id)) => { *next_val = Some(id); }
         Ok(FromPublisher::NoSuchValue(path)) =>
             if let Some(r) = pending.remove(&path) {
                 let _ = r.finished.send(Err(format_err!("no such value")));
@@ -387,7 +416,7 @@ fn handle_control(
         Ok(FromPublisher::Subscribed(path, id)) => match pending.remove(&path) {
             None => return Err(format_err!("unsolicited: {}", path)),
             Some(req) => {
-                *next_id = Some(id);
+                *next_val = Some(id);
                 *next_sub = Some(req);
             }
         }
@@ -416,9 +445,9 @@ async fn connection(
 ) -> Result<(), Error> {
     enum M {
         FromPub(Option<Result<Bytes, io::Error>>),
-        FromSub(BatchItem<ToCon>),
+        FromSub(Option<BatchItem<ToCon>>),
     }
-    let mut from_sub = Batched::new(from_sub);
+    let mut from_sub = Batched::new(from_sub, 100_000);
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
@@ -428,7 +457,7 @@ async fn connection(
     let mut batched = Vec::new();
     let mut buf = BytesMut::new();
     let enc = |buf: &mut BytesMut, m: &ToPublisher| {
-        rmp_serde::encode::write_named(&mut BytesWriter(&mut **buf), m).map(|()| {
+        rmp_serde::encode::write_named(&mut BytesWriter(&mut buf), m).map(|()| {
             buf.take().freeze()
         })
     };
@@ -441,43 +470,57 @@ async fn connection(
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
                 Some(id) => {
                     handle_val(
-                        &mut pending, &mut subscriptions, &mut next_sub, id, msg
+                        &mut pending, &mut subscriptions, &mut next_sub, id, to, msg
                     ).await;
                 }
                 None => {
                     try_brk!(handle_control(
-                        &to, &subscriber, &mut pending, &mut subscriptions,
-                        &mut next_id, &mut next_sub, msg
+                        to, &subscriber, &mut pending, &mut subscriptions,
+                        &mut next_val, &mut next_sub, &*msg
                     ));
                 }
             }
-            M::FromSub(BatchItem::InBatch(ToCon::Subscribe(req))) => {
+            M::FromSub(None) => break Err(format_err!("dropped")),
+            M::FromSub(Some(BatchItem::InBatch(ToCon::Subscribe(req)))) => {
                 let path = req.path.clone();
                 pending.insert(path.clone(), req);
                 batched.push(try_brk!(enc(&mut buf, &ToPublisher::Subscribe(path))));
             }
-            M::FromSub(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
+            M::FromSub(Some(BatchItem::InBatch(ToCon::Unsubscribe(id)))) => {
                 batched.push(try_brk!(enc(&mut buf, &ToPublisher::Unsubscribe(id))));
             }
-            M::FromSub(BatchItem::InBatch(ToCon::Stream(id, tx))) => {
+            M::FromSub(Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last }))) => {
                 if let Some(sub) = subscriptions.get_mut(&id) {
-                    sub.streams.push(tx);
+                    let mut add = true;
+                    if last {
+                        if let Err(_) = tx.send(sub.last.clone()).await {
+                            add = false;
+                        }
+                    }
+                    if add {
+                        sub.streams.push(tx);
+                    }
                 }
             }
-            M::FromSub(BatchItem::InBatch(ToCon::NotifyDead(id, tx))) => {
+            M::FromSub(Some(BatchItem::InBatch(ToCon::Last(id, tx)))) => {
+                if let Some(sub) = subscriptions.get(&id) {
+                    let _ = tx.send(sub.last.clone());
+                }
+            }
+            M::FromSub(Some(BatchItem::InBatch(ToCon::NotifyDead(id, tx)))) => {
                 if let Some(sub) = subscriptions.get_mut(&id) {
                     sub.deads.push(tx);
                 }
             }
-            M::FromSub(BatchItem::EndBatch) => if batched.len() > 0 {
+            M::FromSub(Some(BatchItem::EndBatch)) => if batched.len() > 0 {
                 let mut s = stream::iter(batched.drain(..).map(|v| Ok(v)));
                 try_brk!(con.send_all(&mut s).await);
             }
         }
     };
-    let mut t = subscriber.lock();
+    let mut t = subscriber.0.lock();
     for (id, sub) in subscriptions {
-        unsubscribe(sub, id, &addr, &mut t.subscribed);
+        unsubscribe(sub, id, &to, &mut t.subscribed);
     }
     res
 }
