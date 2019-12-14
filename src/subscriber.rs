@@ -5,12 +5,13 @@ use crate::{
     resolver::{Resolver, ReadOnly},
 };
 use std::{
+    mem, io,
     result::Result,
     marker::PhantomData,
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
-    sync::{Arc, Weak},
-}
+    sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
+};
 use async_std::{
     prelude::*,
     task,
@@ -20,18 +21,19 @@ use async_std::{
 use fxhash::FxBuildHasher;
 use futures::{
     stream,
-    channel::{oneshot, mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender}},
+    channel::{oneshot, mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender}},
 };
-use futures_coded::{Framed, LengthCodec};
-use serde::DeserializeOwned;
+use futures_codec::{Framed, LengthCodec};
+use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, RwLock};
+use smallvec::SmallVec;
 
 struct SubscribeRequest {
     path: Path,
     finished: oneshot::Sender<Result<RawSubscription, Error>>,
-    con: UnboundedSender<ToConnection>,
+    con: UnboundedSender<ToCon>,
 }
 
 enum ToCon {
@@ -51,7 +53,7 @@ struct RawSubscriptionInner {
 
 impl Drop for RawSubscriptionInner {
     fn drop(&mut self) {
-        let _ = self.con.unbounded_send(ToCon::Unsubscribe(id));
+        let _ = self.con.unbounded_send(ToCon::Unsubscribe(self.id));
     }
 }
 
@@ -68,11 +70,11 @@ impl RawSubscriptionWeak {
 pub struct RawSubscription(Arc<RawSubscriptionInner>);
 
 impl RawSubscription {
-    fn typed<T: DeserializeOwned>(self) -> Subscription {
+    fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
         Subscription(self, PhantomData)
     }
 
-    fn downgrade(&self) -> UntypedSubscriptionWeak {
+    fn downgrade(&self) -> RawSubscriptionWeak {
         RawSubscriptionWeak(Arc::downgrade(self.0))
     }
 
@@ -84,30 +86,18 @@ impl RawSubscription {
         self.0.dead.load(Ordering::Relaxed)
     }
 
-    pub async fn dead(&self) -> Error {
-        let mut c = {
-            match self.0.connection.lock() {
-                None => return format_err!("already dead"),
-                Some(c) => c.clone()
-            }
-        };
+    pub async fn dead(&self) {
+        let mut c = self.0.connection.clone();
         let (tx, rx) = oneshot::channel();
-        match c.send(ToCon::OnDead(tx)).await {
-            Err(e) => Error::from(e),
-            Ok(()) =>
-                rx.await.unwrap_or_else(|| format_err!("connection died"))
+        match c.unbounded_send(ToCon::NotifyDead(self.0.id, tx)) {
+            Err(_) => (),
+            Ok(()) => { let _ = rx.await; },
         }
     }
 
     pub fn updates(&self) -> impl Stream<Item = Bytes> {
-        let (tx, rx) = channel(100);
-        if let Some(c) = &*self.0.connection.lock() {
-            let id = t.id;
-            let c = c.clone();
-            task::spawn(async move {
-                let _ = c.send(ToCon::Stream(id, tx)).await;
-            });
-        }
+        let (tx, rx) = mpsc::channel(100);
+        let _ = self.0.connection.clone().unbounded_send(ToCon::Stream(self.0.id, tx));
         rx
     }
 }
@@ -173,7 +163,6 @@ impl Subscriber {
     async fn subscribe(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
-        use std::collections::hash_map::Entry;
         enum St {
             Resolve,
             Subscribing(oneshot::Receiver<Result<RawSubscription, Error>>),
@@ -218,7 +207,7 @@ impl Subscriber {
                 .collect::<Vec<_>>();
             match r.resolve(to_resolve.clone()).await {
                 Err(e) => for p in to_resolve {
-                    *pending.[&p] = St::Error(
+                    *pending[&p] = St::Error(
                         format_err!("resolving path: {} failed: {}", p, e)
                     );
                 }
@@ -226,7 +215,7 @@ impl Subscriber {
                     let mut t = t.0.lock();
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
-                            *pending[&p] = St::Error(format_error!("path not found"));
+                            *pending[&p] = St::Error(format_err!("path not found"));
                         } else {
                             let addr = {
                                 if addrs.len() == 1 {
@@ -333,7 +322,6 @@ async fn handle_val(
     id: Id,
     msg: Bytes,
 ) {
-    use std::collections::hash_map::Entry;
     match subscriptions.entry(id) {
         Entry::Occupied(e) => {
             let sub = e.get_mut();
@@ -352,8 +340,8 @@ async fn handle_val(
             e.insert(Sub {
                 last: last.clone(),
                 dead: dead.clone(),
-                deads: SmallVec::new();
-                streams: SmallVec::new();
+                deads: SmallVec::new(),
+                streams: SmallVec::new(),
             });
             let s = RawSubscriptionInner { id, last, dead, connection: req.con };
             let _ = req.finished.send(RawSubscription(Arc::new(s)));
@@ -424,7 +412,7 @@ macro_rules! try_brk {
 async fn connection(
     subscriber: Subscriber,
     to: SocketAddr,
-    mut from_sub: Receiver<ToCon>
+    mut from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
     enum M {
         FromPub(Option<Result<Bytes, io::Error>>),
