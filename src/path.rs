@@ -2,6 +2,7 @@ use std::{
     borrow::Borrow, convert::{AsRef, From}, sync::Arc,
     cmp::{PartialEq, PartialOrd, Eq, Ord},
     ops::Deref,
+    fmt
 };
 
 pub static ESC: char = '\\';
@@ -10,6 +11,12 @@ pub static SEP: char = '/';
 /// A path in the json-pubsub namespace. Paths are immutable and reference counted.
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path(Arc<str>);
+
+impl fmt::Display for Path {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl AsRef<str> for Path {
     fn as_ref(&self) -> &str { &*self.0 }

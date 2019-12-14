@@ -24,6 +24,7 @@ use futures::{
     sink::SinkExt as FrsSinkExt,
     future::{FutureExt as FrsFutureExt},
 };
+use rand::Rng;
 use futures_codec::{Framed, LengthCodec};
 use serde::de::DeserializeOwned;
 use failure::Error;
@@ -58,7 +59,7 @@ struct RawSubscriptionInner {
 
 impl Drop for RawSubscriptionInner {
     fn drop(&mut self) {
-        let _ = self.con.unbounded_send(ToCon::Unsubscribe(self.id));
+        let _ = self.connection.unbounded_send(ToCon::Unsubscribe(self.id));
     }
 }
 
@@ -80,7 +81,7 @@ impl RawSubscription {
     }
 
     fn downgrade(&self) -> RawSubscriptionWeak {
-        RawSubscriptionWeak(Arc::downgrade(self.0))
+        RawSubscriptionWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last published value, or None if the subscription is dead.
@@ -129,7 +130,7 @@ impl<T: DeserializeOwned> Subscription<T> {
     pub async fn last(&self) -> Result<T, Error> {
         match self.0.last().await {
             None => Err(format_err!("subscription is dead")),
-            Ok(buf) => Ok(rmp_serde::decode::from_read::<T>(&*buf)?),
+            Some(buf) => Ok(rmp_serde::decode::from_read(&*buf)?),
         }
     }
 
@@ -137,17 +138,15 @@ impl<T: DeserializeOwned> Subscription<T> {
         self.0.is_dead()
     }
 
-    pub async fn dead(&self) -> Error {
-        self.0.dead()
+    pub async fn dead(&self) {
+        self.0.dead().await
     }
 
     pub fn updates(
         &self,
         begin_with_last: bool
     ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
-        self.0.updates(begin_with_last).map(|v| {
-            rmp_serde::decode::from_read::<T>(&*v)
-        })
+        self.0.updates(begin_with_last).map(|v| rmp_serde::decode::from_read(&*v))
     }
 }
 
@@ -162,15 +161,16 @@ struct SubscriberInner {
     subscribed: HashMap<Path, SubStatus>,
 }
 
+#[derive(Clone)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
     fn new<T: ToSocketAddrs>(addrs: T) -> Result<Subscriber, Error> {
-        Ok(Arc::new(Mutex::new(Subscriber {
-            resolver: Resolver::new_ro(addrs)?,
-            connection: HashMap::with_hasher(FxBuildHasher::default()),
+        Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
+            resolver: Resolver::<ReadOnly>::new_r(addrs)?,
+            connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
-        })))
+        }))))
     }
 
     /// Subscribe to the specified set of paths.
@@ -200,7 +200,7 @@ impl Subscriber {
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
-        let r = { // Init
+        let mut r = { // Init
             let mut t = self.0.lock();
             for p in paths.clone() {
                 match t.subscribed.entry(p.clone()) {
@@ -208,7 +208,7 @@ impl Subscriber {
                         e.insert(SubStatus::Pending(vec![]));
                         pending.insert(p, St::Resolve);
                     }
-                    Entry::Occupied(e) => match e.get_mut() {
+                    Entry::Occupied(mut e) => match e.get_mut() {
                         SubStatus::Pending(ref mut v) => {
                             let (tx, rx) = oneshot::channel();
                             v.push(tx);
@@ -230,24 +230,24 @@ impl Subscriber {
             let mut rng = rand::thread_rng();
             let to_resolve =
                 pending.iter()
-                .filter(|(_, s)| s == St::Resolve)
+                .filter(|(_, s)| match s { St::Resolve => true, _ => false })
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
             match r.resolve(to_resolve.clone()).await {
                 Err(e) => for p in to_resolve {
-                    *pending[&p] = St::Error(
+                    pending.insert(p.clone(), St::Error(
                         format_err!("resolving path: {} failed: {}", p, e)
-                    );
+                    ));
                 }
                 Ok(addrs) => {
                     let mut t = self.0.lock();
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
-                            *pending[&p] = St::Error(format_err!("path not found"));
+                            pending.insert(p, St::Error(format_err!("path not found")));
                         } else {
                             let addr = {
                                 if addrs.len() == 1 {
-                                    addrs[0];
+                                    addrs[0]
                                 } else {
                                     addrs[rng.gen_range(0, addrs.len())]
                                 }
@@ -261,14 +261,16 @@ impl Subscriber {
                                 });
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
-                            let r = con.send_unbounded(ToCon::Subscribe {
+                            let r = con.unbounded_send(ToCon::Subscribe(SubscribeRequest {
                                 con: con_,
                                 path: p.clone(),
                                 finished: tx,
-                            });
+                            }));
                             match r {
-                                Ok(()) => { *pending[&p] = St::Subscribing(rx); }
-                                Err(e) => { *pending[&p] = St::Error(Error::from(e)); }
+                                Ok(()) => { pending.insert(p, St::Subscribing(rx)); }
+                                Err(e) => {
+                                    pending.insert(p, St::Error(Error::from(e)));
+                                }
                             }
                         }
                     }
@@ -279,7 +281,7 @@ impl Subscriber {
         for (path, st) in pending.iter_mut() {
             match st {
                 St::Resolve => unreachable!(),
-                St::Subscribed(_) => (),
+                St::Subscribed(_) | St::Error(_) => (),
                 St::WaitingOther(w) => match w.await {
                     Err(_) => *st = St::Error(format_err!("other side died")),
                     Ok(Err(e)) => *st = St::Error(e),
@@ -292,10 +294,10 @@ impl Subscriber {
                         Ok(Ok(raw)) => Ok(raw),
                     };
                     let mut t = self.0.lock();
-                    let sub = t.subscribed.get_mut(&path).unwrap();
+                    let sub = t.subscribed.get_mut(path.as_ref()).unwrap();
                     match t.subscribed.entry(path.clone()) {
                         Entry::Vacant(_) => unreachable!(),
-                        Entry::Occupied(e) => match res {
+                        Entry::Occupied(mut e) => match res {
                             Err(err) => match e.remove() {
                                 SubStatus::Subscribed(_) => unreachable!(),
                                 SubStatus::Pending(waiters) => {
@@ -309,7 +311,7 @@ impl Subscriber {
                             Ok(raw) => {
                                 let s = mem::replace(
                                     e.get_mut(),
-                                    SubStatus::Subscribed(raw.clone())
+                                    SubStatus::Subscribed(raw.downgrade())
                                 );
                                 match s {
                                     SubStatus::Subscribed(_) => unreachable!(),
@@ -327,8 +329,7 @@ impl Subscriber {
             }
         }
         paths.into_iter().map(|p| match pending.remove(&p).unwrap() {
-            St::Resolve | St::Connected(_) | St::Subscribing(_)
-                | St::WaitingOther(_) => unreachable!(),
+            St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
             St::Subscribed(raw) => (p, Ok(raw)),
             St::Error(e) => (p, Err(e))
         }).collect()
@@ -352,7 +353,7 @@ async fn handle_val(
     msg: Bytes,
 ) {
     match subscriptions.entry(id) {
-        Entry::Occupied(e) => {
+        Entry::Occupied(mut e) => {
             let sub = e.get_mut();
             let mut i = 0;
             while i < sub.streams.len() {
@@ -391,7 +392,7 @@ fn unsubscribe(
             SubStatus::Pending(_) => (),
             SubStatus::Subscribed(s) => match s.upgrade() {
                 None => { e.remove(); }
-                Some(s) => if s.id == id && s.addr == addr { e.remove(); }
+                Some(s) => if s.0.id == id && s.0.addr == addr { e.remove(); }
             }
         }
     }
@@ -406,7 +407,7 @@ fn handle_control(
     next_sub: &mut Option<SubscribeRequest>,
     msg: &[u8]
 ) -> Result<(), Error> {
-    match rmp_serde::decode::from_read::<FromPublisher>(&*msg) {
+    match rmp_serde::decode::from_read::<&[u8], FromPublisher>(&*msg) {
         Err(e) => return Err(Error::from(e)),
         Ok(FromPublisher::Message(id)) => { *next_val = Some(id); }
         Ok(FromPublisher::NoSuchValue(path)) =>
@@ -421,8 +422,8 @@ fn handle_control(
             }
         }
         Ok(FromPublisher::Unsubscribed(id)) =>
-            if let Some(s) = subscriptions.remove(id) {
-                let mut t = subscriber.lock();
+            if let Some(s) = subscriptions.remove(&id) {
+                let mut t = subscriber.0.lock();
                 unsubscribe(s, id, addr, &mut t.subscribed);
             }
     }
@@ -457,7 +458,7 @@ async fn connection(
     let mut batched = Vec::new();
     let mut buf = BytesMut::new();
     let enc = |buf: &mut BytesMut, m: &ToPublisher| {
-        rmp_serde::encode::write_named(&mut BytesWriter(&mut buf), m).map(|()| {
+        rmp_serde::encode::write_named(&mut BytesWriter(buf), m).map(|()| {
             buf.take().freeze()
         })
     };
@@ -520,7 +521,7 @@ async fn connection(
     };
     let mut t = subscriber.0.lock();
     for (id, sub) in subscriptions {
-        unsubscribe(sub, id, &to, &mut t.subscribed);
+        unsubscribe(sub, id, to, &mut t.subscribed);
     }
     res
 }
