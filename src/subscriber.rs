@@ -64,10 +64,10 @@ impl Drop for RawSubscriptionInner {
 }
 
 #[derive(Clone)]
-struct RawSubscriptionWeak(Weak<RawSubscriptionInner>);
+pub struct RawSubscriptionWeak(Weak<RawSubscriptionInner>);
 
 impl RawSubscriptionWeak {
-    fn upgrade(&self) -> Option<RawSubscription> {
+    pub fn upgrade(&self) -> Option<RawSubscription> {
         Weak::upgrade(&self.0).map(|r| RawSubscription(r))
     }
 }
@@ -76,11 +76,11 @@ impl RawSubscriptionWeak {
 pub struct RawSubscription(Arc<RawSubscriptionInner>);
 
 impl RawSubscription {
-    fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
+    pub fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
         Subscription(self, PhantomData)
     }
 
-    fn downgrade(&self) -> RawSubscriptionWeak {
+    pub fn downgrade(&self) -> RawSubscriptionWeak {
         RawSubscriptionWeak(Arc::downgrade(&self.0))
     }
 
@@ -110,8 +110,8 @@ impl RawSubscription {
     /// `begin_with_last` is true, then the stream will start with the
     /// last published value at the time `updates` is called, and will
     /// then receive any updated values. Otherwise the stream will
-    /// only receive updated values. If you only want the last value,
-    /// it's cheaper to call `last`.
+    /// only receive updated values. If you only want to get the last
+    /// value one time, it's cheaper to call `last`.
     ///
     /// When the subscription dies the stream will end.
     pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
@@ -122,11 +122,17 @@ impl RawSubscription {
     }
 }
 
+/// A typed version of RawSubscription
 #[derive(Clone)]
 pub struct Subscription<T: DeserializeOwned>(RawSubscription, PhantomData<T>);
 
 impl<T: DeserializeOwned> Subscription<T> {
-    /// Get and decode the last published value. 
+    /// Get the `RawSubscription`
+    pub fn raw(&self) -> RawSubscription {
+        self.0.clone()
+    }
+
+    /// Get and decode the last published value.
     pub async fn last(&self) -> Result<T, Error> {
         match self.0.last().await {
             None => Err(format_err!("subscription is dead")),
@@ -134,14 +140,17 @@ impl<T: DeserializeOwned> Subscription<T> {
         }
     }
 
+    /// See `RawSubscription::is_dead`
     pub fn is_dead(&self) -> bool {
         self.0.is_dead()
     }
 
+    /// See `RawSubscription::dead`
     pub async fn dead(&self) {
         self.0.dead().await
     }
 
+    /// Same as `RawSubscription::updates` but it decodes the value
     pub fn updates(
         &self,
         begin_with_last: bool
@@ -165,7 +174,7 @@ struct SubscriberInner {
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    fn new<T: ToSocketAddrs>(addrs: T) -> Result<Subscriber, Error> {
+    pub fn new<T: ToSocketAddrs>(addrs: T) -> Result<Subscriber, Error> {
         Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
             resolver: Resolver::<ReadOnly>::new_r(addrs)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
@@ -188,7 +197,7 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    async fn subscribe(
+    pub async fn subscribe(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
         enum St {
@@ -294,7 +303,6 @@ impl Subscriber {
                         Ok(Ok(raw)) => Ok(raw),
                     };
                     let mut t = self.0.lock();
-                    let sub = t.subscribed.get_mut(path.as_ref()).unwrap();
                     match t.subscribed.entry(path.clone()) {
                         Entry::Vacant(_) => unreachable!(),
                         Entry::Occupied(mut e) => match res {
@@ -345,7 +353,6 @@ struct Sub {
 }
 
 async fn handle_val(
-    pending: &mut HashMap<Path, SubscribeRequest>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeRequest>,
     id: Id,
@@ -442,7 +449,7 @@ macro_rules! try_brk {
 async fn connection(
     subscriber: Subscriber,
     to: SocketAddr,
-    mut from_sub: UnboundedReceiver<ToCon>
+    from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
     enum M {
         FromPub(Option<Result<Bytes, io::Error>>),
@@ -470,9 +477,7 @@ async fn connection(
             M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
                 Some(id) => {
-                    handle_val(
-                        &mut pending, &mut subscriptions, &mut next_sub, id, to, msg
-                    ).await;
+                    handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
                 }
                 None => {
                     try_brk!(handle_control(
