@@ -466,7 +466,7 @@ async fn connection(
     let mut buf = BytesMut::new();
     let enc = |buf: &mut BytesMut, m: &ToPublisher| {
         rmp_serde::encode::write_named(&mut BytesWriter(buf), m).map(|()| {
-            buf.take().freeze()
+            buf.split_off(0).freeze()
         })
     };
     let res = loop {

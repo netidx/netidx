@@ -94,7 +94,7 @@ fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
-        Ok(b.take().freeze())
+        Ok(b.split_off(0).freeze())
     })
 }
 
@@ -518,7 +518,7 @@ fn handle_client_msg(
     };
     drop(pb);
     write_named(&mut BytesWriter(buf), &reply)?;
-    Ok((buf.take().freeze(), v))
+    Ok((buf.split_off(0).freeze(), v))
 }
 
 async fn client_loop(

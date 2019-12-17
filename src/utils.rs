@@ -1,4 +1,5 @@
-use bytes::{BytesMut, BigEndian, ByteOrder};
+use bytes::{BytesMut, Buf};
+use byteorder::{BigEndian, ByteOrder};
 use futures_codec::{Encoder, Decoder};
 use std::{
     mem,
