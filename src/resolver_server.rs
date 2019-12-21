@@ -259,3 +259,10 @@ impl Server {
         Server(Some(send_stop))
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    
+}
