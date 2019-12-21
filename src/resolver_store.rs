@@ -220,12 +220,9 @@ mod tests {
             (vec!["/app/test/app1/v2", "/app/test/app1/v3", "/app/test/app1/v4"],
              "127.0.0.1:105"),
         ];
-        let mut store = Store::<()>::new();
-        let addrs =
-            vec!["127.0.0.1:100".parse::<SocketAddr>().unwrap(),
-                 "127.0.0.1:101".parse::<SocketAddr>().unwrap()];
+        let store = Store::<()>::new();
         {
-            let mut store = store.write().unwrap();
+            let mut store = store.write();
             for (paths, addr) in &apps {
                 let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
                 let addr = addr.parse::<SocketAddr>().unwrap();
@@ -238,7 +235,7 @@ mod tests {
             }
         }
         {
-            let store = store.read().unwrap();
+            let store = store.read();
             let paths = store.list(&Path::from("/"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app");
@@ -263,14 +260,14 @@ mod tests {
         let addr = addr.parse::<SocketAddr>().unwrap();
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
         {
-            let mut store = store.write().unwrap();
+            let mut store = store.write();
             for path in parsed.clone() {
                 store.unpublish(path.clone(), addr);
                 if store.resolve(&path).contains(&addr) { panic!() }
             }
         }
         {
-            let store = store.read().unwrap();
+            let store = store.read();
             let paths = store.list(&Path::from("/"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app");

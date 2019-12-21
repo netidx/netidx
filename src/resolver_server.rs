@@ -207,14 +207,15 @@ async fn server_loop(
     addr: SocketAddr,
     max_connections: usize,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<()>,
-) {
+    ready: oneshot::Sender<SocketAddr>,
+) -> Result<SocketAddr, Error> {
     enum M { Stop, Drop, Client(TcpStream) }
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let listener = try_ret!("TcpListener::bind", TcpListener::bind(addr).await);
+    let listener = TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
     let stop = stop.shared();
-    let _ = ready.send(());
+    let _ = ready.send(local_addr);
     loop {
         let client = listener.accept().map(|c| match c {
             Ok((c, _)) => M::Client(c),
@@ -222,7 +223,7 @@ async fn server_loop(
         });
         let should_stop = stop.clone().map(|_| M::Stop);
         match should_stop.race(client).await {
-            M::Stop => return,
+            M::Stop => return Ok(local_addr),
             M::Drop => (),
             M::Client(client) => {
                 if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
@@ -240,29 +241,84 @@ async fn server_loop(
     }
 }
 
-pub struct Server(Option<oneshot::Sender<()>>);
+pub struct Server {
+    stop: Option<oneshot::Sender<()>>,
+    local_addr: SocketAddr,
+}
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if let Some(stop) = mem::replace(&mut self.0, None) {
+        if let Some(stop) = mem::replace(&mut self.stop, None) {
             let _ = stop.send(());
         }
     }
 }
 
 impl Server {
-    pub async fn new(addr: SocketAddr, max_connections: usize) -> Server {
+    pub async fn new(addr: SocketAddr, max_connections: usize) -> Result<Server, Error> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
-            .race(recv_ready.map(|_| ())).await;
-        Server(Some(send_stop))
+        let local_addr =
+            task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
+            .race(recv_ready.map(|r| r.map_err(|e| Error::from(e))))
+            .await?;
+        Ok(Server {
+            stop: Some(send_stop),
+            local_addr
+        })
+    }
+
+    pub fn local_addr(&self) -> &SocketAddr {
+        &self.local_addr
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::net::SocketAddr;
+    use crate::resolver::{WriteOnly, ReadOnly, Resolver};
 
-    
+    async fn init_server() -> Server {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        Server::new(addr, 100).await.expect("start server")
+    }
+
+    fn p(p: &str) -> Path {
+        Path::from(p)
+    }
+
+    #[test]
+    fn publish_resolve() {
+        use async_std::task;
+        task::block_on(async {
+            let server = init_server().await;
+            let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+            let mut w = Resolver::<WriteOnly>::new_w(server.local_addr(), paddr).unwrap();
+            let mut r = Resolver::<ReadOnly>::new_r(server.local_addr()).unwrap();
+            let paths = vec![
+                p("/foo/bar"),
+                p("/foo/baz"),
+                p("/app/v0"),
+                p("/app/v1"),
+            ];
+            w.publish(paths.clone()).await.unwrap();
+            for addrs in r.resolve(paths.clone()).await.unwrap() {
+                assert_eq!(addrs.len(), 1);
+                assert_eq!(addrs[0], paddr);
+            }
+            assert_eq!(
+                r.list(p("/")).await.unwrap(),
+                vec![p("/app"), p("/foo")]
+            );
+            assert_eq!(
+                r.list(p("/foo")).await.unwrap(),
+                vec![p("/foo/bar"), p("/foo/baz")]
+            );
+            assert_eq!(
+                r.list(p("/app")).await.unwrap(),
+                vec![p("/app/v0"), p("/app/v1")]
+            );
+        });
+    }
 }
