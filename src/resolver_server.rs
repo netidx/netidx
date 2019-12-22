@@ -112,6 +112,7 @@ async fn client_loop(
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) {
+    #[derive(Debug)]
     enum M {
         Stop,
         Timeout,
@@ -241,6 +242,7 @@ async fn server_loop(
     }
 }
 
+#[derive(Debug)]
 pub struct Server {
     stop: Option<oneshot::Sender<()>>,
     local_addr: SocketAddr,

@@ -69,7 +69,8 @@ impl Write for BytesWriter<'_> {
     }
 }
 
-static U64S: usize = mem::size_of::<u64>();
+const U64S: usize = mem::size_of::<u64>();
+static ZERO: [u8; U64S] = [0; U64S];
 
 pub struct MPCodec<T, F>(PhantomData<T>, PhantomData<F>);
 
@@ -84,12 +85,11 @@ impl<T: Serialize, F: DeserializeOwned> Encoder for MPCodec<T, F> {
     type Error = Error;
 
     fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        if dst.capacity() < U64S {
-            dst.reserve(U64S * 20);
-        }
-        let mut header = dst.split_to(U64S);
-        let res = rmp_serde::encode::write_named(&mut BytesWriter(dst), &src);
-        BigEndian::write_u64(&mut header, dst.len() as u64);
+        dst.extend_from_slice(&ZERO);
+        let mut v = dst.split_off(U64S);
+        let res = rmp_serde::encode::write_named(&mut BytesWriter(&mut v), &src);
+        BigEndian::write_u64(dst, v.len() as u64);
+        dst.unsplit(v);
         Ok(res?)
     }
 }
@@ -100,16 +100,19 @@ impl<T: Serialize, F: DeserializeOwned> Decoder for MPCodec<T, F> {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < U64S {
+            dbg!("no hdr");
             Ok(None)
         } else {
             let len: usize =
-                BigEndian::read_u64(src).try_into()?;
+                dbg!(BigEndian::read_u64(src)).try_into()?;
             if src.len() - U64S < len {
+                dbg!("not enough yet");
                 Ok(None)
             } else {
                 src.advance(U64S);
                 let res = rmp_serde::decode::from_read(src.as_ref());
                 src.advance(len);
+                dbg!("decoded");
                 Ok(Some(res?))
             }
         }
@@ -120,6 +123,7 @@ use async_std::prelude::*;
 use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
 
+#[derive(Debug, Clone)]
 pub enum BatchItem<T> {
     InBatch(T),
     EndBatch

@@ -33,13 +33,13 @@ pub trait Readable {}
 pub trait Writeable {}
 pub trait ReadableOrWritable {}
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ReadOnly {}
 
 impl Readable for ReadOnly {}
 impl ReadableOrWritable for ReadOnly {}
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct WriteOnly {}
 
 impl Writeable for WriteOnly {}
@@ -47,7 +47,7 @@ impl ReadableOrWritable for WriteOnly {}
 
 type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Resolver<R> {
     sender: mpsc::UnboundedSender<ToCon>,
     kind: PhantomData<R>
@@ -210,3 +210,4 @@ async fn connection(
         }
     }
 }
+
