@@ -100,19 +100,16 @@ impl<T: Serialize, F: DeserializeOwned> Decoder for MPCodec<T, F> {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < U64S {
-            dbg!("no hdr");
             Ok(None)
         } else {
             let len: usize =
-                dbg!(BigEndian::read_u64(src)).try_into()?;
+                BigEndian::read_u64(src).try_into()?;
             if src.len() - U64S < len {
-                dbg!("not enough yet");
                 Ok(None)
             } else {
                 src.advance(U64S);
                 let res = rmp_serde::decode::from_read(src.as_ref());
                 src.advance(len);
-                dbg!("decoded");
                 Ok(Some(res?))
             }
         }

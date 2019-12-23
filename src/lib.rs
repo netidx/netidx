@@ -1,64 +1,17 @@
 //! Share values between programs using human readable names,
-//! publish/subscribe semantics, and a simple JSON message format.
+//! publish/subscribe semantics, and a simple msgpack message format.
 //!
 //! json_pubsub consists of three essential parts, a hierarchical
-//! namespace of values (maintained by resolver_server), a publisher,
-//! to provide values, and a subscriber to consume values. Published
-//! values always have a current value. Multiple subscribers may
-//! subscribe to a given value at different times, and each one will
-//! be immediately given the current value. When a value is updated,
-//! every subscriber receives the new value. For example,
+//! namespace of values maintained in the resolver server, a
+//! publisher, and a subscriber. Published values always have a
+//! current value. Multiple subscribers may subscribe to a given value
+//! at different times, and each one will be immediately given the
+//! current value. When a value is updated, every subscriber receives
+//! the new value. For example,
 //!
-//! ```
-//! use resolver::Resolver;
-//! use resolver_server::Server;
-//! use subscriber::Subscriber;
-//! use publisher::{Publisher, BindCfg};
-//! use path::Path;
-//! use futures::prelude::*;
-//! use tokio;
-//!
-//! let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1234);
-//! let server = await!(Server::new(addr)).unwrap();
-//! let resolver = await!(Resolver::new(addr)).unwrap();
-//! let publisher = Publisher::new(resolver.clone(), BindCfg::Any).unwrap();
-//! let subscriber0 = Subscriber::new(resolver.clone());
-//! let subscriber1 = Subscriber::new(resolver.clone());
-//!
-//! let path = Path::from("/n");
-//! let p = await!(publisher.clone().publish::<i64>(path.clone(), 4)).unwrap();
-//! let s0 = await!(subscriber0.clone().subscribe::<i64>(path.clone())).unwrap();
-//! let s1 = await!(subscriber1.clone().subscribe::<i64>(path)).unwrap();
-//!
-//! // note you can call get on a subscription as many times as you like
-//! assert_eq!(s0.get().unwrap(), 4);
-//! assert_eq!(s1.get().unwrap(), 4);
-//!
-//! // register to be notified via a future when the value is updated,
-//! // do the registration before actually updating to avoid a race.
-//! let s0_next = s0.next();
-//! let s1_next = s1.next();
-//!
-//! p.update(5).unwrap();
-//! await!(p.clone().flush()).unwrap();
-//!
-//! await!(s0_next).unwrap();
-//! assert_eq!(s0.get().unwrap(), 5)
-//! await!(s1_next).unwrap();
-//! assert_eq!(s1.get().unwrap(), 5)
-//! ```
 //!
 //! We can also use a subscription as an ordered lossless stream, just
 //! like a tcp socket. Using the above example as a basis,
-//!
-//! ```
-//! // the 10000 is the maximum number of incoming values to queue before pushing back
-//! // on the publisher.
-//! #[async]
-//! for v in s0.updates(10000) {
-//!     process_value(v)
-//! }
-//! ```
 //!
 //! The subscriber will get every value the publisher sends with
 //! `update`, and it will get them in the order publisher called

@@ -8,7 +8,12 @@ use std::{
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
 
-/// A path in the json-pubsub namespace. Paths are immutable and reference counted.
+/// A path in the namespace. Paths are immutable and reference
+/// counted.  Path components are seperated by /, which may be escaped
+/// with \. / and \ are the only special characters in path, any other
+/// unicode character may be used. Path lengths are not limited on the
+/// local machine, but may be restricted by maximum message size on
+/// the wire.
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path(Arc<str>);
 
@@ -109,13 +114,14 @@ impl Path {
     ///
     /// # Examples
     /// ```
+    /// use json_pubsub::path::Path;
     /// let p = Path::root().append("bar").append("baz");
-    /// assert_eq!(&p, "/bar/baz");
+    /// assert_eq!(&*p, "/bar/baz");
     ///
     /// let p = Path::root().append("/bar").append("//baz//////foo/");
-    /// assert_eq!(&p, "/bar/baz/foo");
+    /// assert_eq!(&*p, "/bar/baz/foo");
     /// ```
-    pub fn append<T: AsRef<str>>(&self, other: &T) -> Self {
+    pub fn append<T: AsRef<str>>(&self, other: T) -> Self {
         let other = other.as_ref();
         if other.len() == 0 { self.clone() }
         else {
@@ -133,17 +139,18 @@ impl Path {
     ///
     /// # Examples
     /// ```
+    /// use json_pubsub::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo", "bar", "baz"]);
     ///
-    /// let p = Path::from("/foo\/bar/baz");
-    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo\/bar", "baz"]);
+    /// let p = Path::from(r"/foo\/bar/baz");
+    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec![r"foo\/bar", "baz"]);
     ///
-    /// let p = Path::from("/foo\\/bar/baz");
-    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo\\", "bar", "baz"]);
+    /// let p = Path::from(r"/foo\\/bar/baz");
+    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec![r"foo\\", "bar", "baz"]);
     ///
-    /// let p = Path::from("/foo\\\/bar/baz");
-    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo\\\/bar", "baz"]);
+    /// let p = Path::from(r"/foo\\\/bar/baz");
+    /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec![r"foo\\\/bar", "baz"]);
     /// ```
     pub fn parts(s: &str) -> impl Iterator<Item=&str> {
         let skip = if s == "/" {
@@ -178,6 +185,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
+    /// use json_pubsub::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::dirname(&p), Some("/foo/bar"));
     ///
@@ -199,11 +207,12 @@ impl Path {
     ///
     /// # Examples
     /// ```
+    /// use json_pubsub::path::Path;
     /// let p = Path::from("/foo/bar/baz");
-    /// assert_eq!(Path::basename(&p), Some("foo"));
+    /// assert_eq!(Path::basename(&p), Some("baz"));
     ///
     /// let p = Path::from("foo");
-    /// assert_eq!(Path::basename(&p), Some("foo");
+    /// assert_eq!(Path::basename(&p), Some("foo"));
     ///
     /// let p = Path::from("foo/bar");
     /// assert_eq!(Path::basename(&p), Some("bar"));
@@ -229,6 +238,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
+    /// use json_pubsub::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::rfind_sep(&p), Some(8));
     ///
