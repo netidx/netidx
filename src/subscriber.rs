@@ -548,6 +548,7 @@ mod test {
         time::Duration,
     };
     use async_std::{prelude::*, future, task};
+    use futures::channel::oneshot;
     use crate::{
         resolver_server::Server,
         publisher::{Publisher, BindCfg},
@@ -569,6 +570,7 @@ mod test {
         task::block_on(async {
             let server = init_server().await;
             let addr = *server.local_addr();
+            let (tx, ready) = oneshot::channel();
             task::spawn(async move {
                 let publisher = Publisher::new(addr, BindCfg::Local).await.unwrap();
                 let vp0 = publisher.publish(
@@ -580,6 +582,7 @@ mod test {
                     &V {id: 0, v: "bar".into()}
                 ).unwrap();
                 publisher.flush(None).await.unwrap();
+                tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
                     future::ready(()).delay(Duration::from_millis(100)).await;
@@ -588,9 +591,12 @@ mod test {
                     vp1.update(&V {id: c, v: "bar".into()})
                         .unwrap();
                     publisher.flush(None).await.unwrap();
+                    dbg!(());
                     c += 1
                 }
             });
+            future::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+            dbg!(());
             let subscriber = Subscriber::new(addr).unwrap();
             let vs0 = subscriber.subscribe::<V>("/app/v0".into()).await.unwrap();
             let vs1 = subscriber.subscribe::<V>("/app/v1".into()).await.unwrap();
@@ -599,7 +605,7 @@ mod test {
             let mut vs0s = vs0.updates(true);
             let mut vs1s = vs1.updates(true);
             loop {
-                match vs0s.next().race(vs1s.next()).await {
+                match dbg!(vs0s.next().race(vs1s.next()).await) {
                     None => panic!("publishers died"),
                     Some(Err(e)) => panic!("publisher error: {}", e),
                     Some(Ok(v)) => {
@@ -612,7 +618,7 @@ mod test {
                             None => { *c = Some(v.id); },
                             Some(c_id) => {
                                 assert_eq!(*c_id + 1, v.id);
-                                if *c_id >= 500 {
+                                if *c_id >= 50 {
                                     break;
                                 }
                                 *c = Some(v.id);
