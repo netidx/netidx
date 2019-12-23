@@ -5,7 +5,7 @@ use crate::{
     resolver::{Resolver, ReadOnly},
 };
 use std::{
-    mem, io,
+    mem, io, iter,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
@@ -197,7 +197,7 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    pub async fn subscribe(
+    pub async fn subscribe_raw(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<RawSubscription, Error>)> {
         enum St {
@@ -341,6 +341,16 @@ impl Subscriber {
             St::Subscribed(raw) => (p, Ok(raw)),
             St::Error(e) => (p, Err(e))
         }).collect()
+    }
+
+    /// Subscribe to one path. This is sufficient for a small number
+    /// of paths, but if you need to subscribe to a lot of things use
+    /// `subscribe_raw`
+    pub async fn subscribe<T: DeserializeOwned>(
+        &self,
+        path: Path
+    ) -> Result<Subscription<T>, Error> {
+        self.subscribe_raw(iter::once(path)).await.pop().unwrap().1.map(|v| v.typed())
     }
 }
 
@@ -529,4 +539,89 @@ async fn connection(
         unsubscribe(sub, id, to, &mut t.subscribed);
     }
     res
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        net::SocketAddr,
+        time::Duration,
+    };
+    use async_std::{prelude::*, future, task};
+    use crate::{
+        resolver_server::Server,
+        publisher::{Publisher, BindCfg},
+        subscriber::Subscriber,
+    };
+
+    async fn init_server() -> Server {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        Server::new(addr, 100).await.expect("start server")
+    }
+
+    #[test]
+    fn publish_subscribe() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct V {
+            id: usize,
+            v: String,
+        };
+        task::block_on(async {
+            let server = init_server().await;
+            let addr = *server.local_addr();
+            task::spawn(async move {
+                let publisher = Publisher::new(addr, BindCfg::Local).await.unwrap();
+                let vp0 = publisher.publish(
+                    "/app/v0".into(),
+                    &V {id: 0, v: "foo".into()}
+                ).unwrap();
+                let vp1 = publisher.publish(
+                    "/app/v1".into(),
+                    &V {id: 0, v: "bar".into()}
+                ).unwrap();
+                publisher.flush(None).await.unwrap();
+                let mut c = 1;
+                loop {
+                    future::ready(()).delay(Duration::from_millis(100)).await;
+                    vp0.update(&V {id: c, v: "foo".into()})
+                        .unwrap();
+                    vp1.update(&V {id: c, v: "bar".into()})
+                        .unwrap();
+                    publisher.flush(None).await.unwrap();
+                    c += 1
+                }
+            });
+            let subscriber = Subscriber::new(addr).unwrap();
+            let vs0 = subscriber.subscribe::<V>("/app/v0".into()).await.unwrap();
+            let vs1 = subscriber.subscribe::<V>("/app/v1".into()).await.unwrap();
+            let mut c0: Option<usize> = None;
+            let mut c1: Option<usize> = None;
+            let mut vs0s = vs0.updates(true);
+            let mut vs1s = vs1.updates(true);
+            loop {
+                match vs0s.next().race(vs1s.next()).await {
+                    None => panic!("publishers died"),
+                    Some(Err(e)) => panic!("publisher error: {}", e),
+                    Some(Ok(v)) => {
+                        let c = match &*v.v {
+                            "foo" => &mut c0,
+                            "bar" => &mut c1,
+                            _ => panic!("unexpected v"),
+                        };
+                        match c {
+                            None => { *c = Some(v.id); },
+                            Some(c_id) => {
+                                assert_eq!(*c_id + 1, v.id);
+                                if *c_id >= 500 {
+                                    break;
+                                }
+                                *c = Some(v.id);
+                            }
+                        }
+                    }
+                }
+            }
+            drop(server);
+        });
+    }
 }

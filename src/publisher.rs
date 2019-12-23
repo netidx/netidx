@@ -256,6 +256,11 @@ impl Default for BindCfg {
     }
 }
 
+fn rand_port(current: u16) -> u16 {
+    let mut rng = rand::thread_rng();
+    current + rng.gen_range(0u16, 10u16)
+}
+
 /// Publisher allows to publish values, and gives central control of
 /// flushing queued updates. Publisher is internally wrapped in an
 /// Arc, so cloning it is virtually free. When all references to
@@ -287,11 +292,10 @@ impl Publisher {
                     BindCfg::Any => IpAddr::from(Ipv4Addr::new(0, 0, 0, 0)),
                     BindCfg::Addr(addr) => addr,
                 };
-                let mut rng = rand::thread_rng();
                 let mut port = 5000;
                 loop {
                     if port >= 32768 { bail!("couldn't allocate a port"); }
-                    port += rng.gen_range(0u16, 10u16);
+                    port = rand_port(port);
                     let addr = mkaddr(ip, port)?;
                     match TcpListener::bind(&addr).await {
                         Ok(l) => break (addr, l),

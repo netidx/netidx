@@ -277,9 +277,12 @@ impl Server {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::net::SocketAddr;
-    use crate::resolver::{WriteOnly, ReadOnly, Resolver};
+    use crate::{
+        path::Path,
+        resolver_server::Server,
+        resolver::{WriteOnly, ReadOnly, Resolver},
+    };
 
     async fn init_server() -> Server {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
