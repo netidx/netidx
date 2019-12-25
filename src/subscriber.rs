@@ -32,12 +32,14 @@ use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
+#[derive(Debug)]
 struct SubscribeRequest {
     path: Path,
     finished: oneshot::Sender<Result<RawSubscription, Error>>,
     con: UnboundedSender<ToCon>,
 }
 
+#[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeRequest),
     Unsubscribe(Id),
@@ -50,6 +52,7 @@ enum ToCon {
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
+#[derive(Debug)]
 struct RawSubscriptionInner {
     id: Id,
     addr: SocketAddr,
@@ -63,7 +66,7 @@ impl Drop for RawSubscriptionInner {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RawSubscriptionWeak(Weak<RawSubscriptionInner>);
 
 impl RawSubscriptionWeak {
@@ -72,7 +75,7 @@ impl RawSubscriptionWeak {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RawSubscription(Arc<RawSubscriptionInner>);
 
 impl RawSubscription {
@@ -123,7 +126,7 @@ impl RawSubscription {
 }
 
 /// A typed version of RawSubscription
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Subscription<T: DeserializeOwned>(RawSubscription, PhantomData<T>);
 
 impl<T: DeserializeOwned> Subscription<T> {
@@ -461,6 +464,7 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
+    #[derive(Debug)]
     enum M {
         FromPub(Option<Result<Bytes, io::Error>>),
         FromSub(Option<BatchItem<ToCon>>),
@@ -476,13 +480,13 @@ async fn connection(
     let mut buf = BytesMut::new();
     let enc = |buf: &mut BytesMut, m: &ToPublisher| {
         rmp_serde::encode::write_named(&mut BytesWriter(buf), m).map(|()| {
-            buf.split_off(0).freeze()
+            buf.split().freeze()
         })
     };
     let res = loop {
         let from_pub = con.next().map(|m| M::FromPub(m));
         let from_sub = from_sub.next().map(|m| M::FromSub(m));
-        match from_pub.race(from_sub).await {
+        match dbg!(from_pub.race(from_sub).await) {
             M::FromPub(None) => break Err(format_err!("connection closed")),
             M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
             M::FromPub(Some(Ok(msg))) => match next_val.take() {
@@ -528,9 +532,9 @@ async fn connection(
                     sub.deads.push(tx);
                 }
             }
-            M::FromSub(Some(BatchItem::EndBatch)) => if batched.len() > 0 {
+            M::FromSub(Some(BatchItem::EndBatch)) => if dbg!(batched.len()) > 0 {
                 let mut s = stream::iter(batched.drain(..).map(|v| Ok(v)));
-                try_brk!(con.send_all(&mut s).await);
+                try_brk!(dbg!(con.send_all(&mut s).await));
             }
         }
     };
@@ -538,7 +542,7 @@ async fn connection(
     for (id, sub) in subscriptions {
         unsubscribe(sub, id, to, &mut t.subscribed);
     }
-    res
+    dbg!(res)
 }
 
 #[cfg(test)]
@@ -591,7 +595,6 @@ mod test {
                     vp1.update(&V {id: c, v: "bar".into()})
                         .unwrap();
                     publisher.flush(None).await.unwrap();
-                    dbg!(());
                     c += 1
                 }
             });

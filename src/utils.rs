@@ -1,15 +1,11 @@
-use bytes::{BytesMut, Buf};
-use byteorder::{BigEndian, ByteOrder};
-use futures_codec::{Encoder, Decoder};
+use bytes::BytesMut;
 use std::{
-    mem,
-    convert::TryInto,
-    marker::PhantomData,
     io::{self, Write},
     result::Result,
 };
-use serde::{Serialize, de::DeserializeOwned};
-use failure::Error;
+use async_std::prelude::*;
+use futures::{task::{Poll, Context}, sink::Sink};
+use std::pin::Pin;
 
 #[macro_export]
 macro_rules! try_cont {
@@ -68,57 +64,6 @@ impl Write for BytesWriter<'_> {
 	Ok(())
     }
 }
-
-const U64S: usize = mem::size_of::<u64>();
-static ZERO: [u8; U64S] = [0; U64S];
-
-pub struct MPCodec<T, F>(PhantomData<T>, PhantomData<F>);
-
-impl<T, F> MPCodec<T, F> {
-    pub fn new() -> MPCodec<T, F> {
-        MPCodec(PhantomData, PhantomData)
-    }
-}
-
-impl<T: Serialize, F: DeserializeOwned> Encoder for MPCodec<T, F> {
-    type Item = T;
-    type Error = Error;
-
-    fn encode(&mut self, src: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        dst.extend_from_slice(&ZERO);
-        let mut v = dst.split_off(U64S);
-        let res = rmp_serde::encode::write_named(&mut BytesWriter(&mut v), &src);
-        BigEndian::write_u64(dst, v.len() as u64);
-        dst.unsplit(v);
-        Ok(res?)
-    }
-}
-
-impl<T: Serialize, F: DeserializeOwned> Decoder for MPCodec<T, F> {
-    type Item = F;
-    type Error = Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < U64S {
-            Ok(None)
-        } else {
-            let len: usize =
-                BigEndian::read_u64(src).try_into()?;
-            if src.len() - U64S < len {
-                Ok(None)
-            } else {
-                src.advance(U64S);
-                let res = rmp_serde::decode::from_read(src.as_ref());
-                src.advance(len);
-                Ok(Some(res?))
-            }
-        }
-    }
-}
-
-use async_std::prelude::*;
-use futures::{task::{Poll, Context}, sink::Sink};
-use std::pin::Pin;
 
 #[derive(Debug, Clone)]
 pub enum BatchItem<T> {

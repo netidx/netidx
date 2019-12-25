@@ -172,6 +172,7 @@ impl PublishedRaw {
     pub fn path(&self) -> &Path { &self.0.path }
 }
 
+#[derive(Debug)]
 struct ToClient {
     msgs: Vec<Bytes>,
     done: oneshot::Sender<()>,
@@ -531,13 +532,14 @@ async fn client_loop(
     mut msgs: Receiver<ToClient>,
     s: TcpStream,
 ) -> Result<(), Error> {
+    #[derive(Debug)]
     enum M { FromCl(Option<Result<Bytes, io::Error>>), ToCl(Option<ToClient>) };
     let mut buf = BytesMut::with_capacity(512);
     let mut codec = Framed::new(s, LengthCodec);
     loop {
         let to_cl = msgs.next().map(|m| M::ToCl(m));
         let from_cl = codec.next().map(|m| M::FromCl(m));
-        match to_cl.race(from_cl).await {
+        match dbg!(to_cl.race(from_cl).await) {
             M::FromCl(None) | M::ToCl(None) => break Ok(()),
             M::FromCl(Some(Err(e))) => return Err(Error::from(e)),
             M::FromCl(Some(Ok(b))) => {
@@ -590,8 +592,9 @@ async fn accept_loop(
                         to_client: tx,
                         subscribed: HashSet::with_hasher(FxBuildHasher::default()),
                     });
+                    dbg!(addr);
                     task::spawn(async move {
-                        let _ = client_loop(t_weak.clone(), addr, rx, s).await;
+                        let _ = dbg!(client_loop(t_weak.clone(), addr, rx, s).await);
                         if let Some(t) = t_weak.upgrade() {
                             let mut pb = t.0.lock();
                             if let Some(cl) = pb.clients.remove(&addr) {
