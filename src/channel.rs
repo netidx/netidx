@@ -9,9 +9,9 @@ use std::{
     result::Result,
     io::{IoSlice, Error, ErrorKind},
     iter::FromIterator,
+    marker::PhantomData,
 };
 use smallvec::SmallVec;
-
 
 const MSGS: usize = 64;
 const READ_BUF: usize = 4096;
@@ -30,16 +30,16 @@ fn advance(bufs: &mut SmallVec<[Bytes; MSGS * 2]>, mut len: usize) {
 
 /// RawChannel sends and receives u32 length prefixed messages, which
 /// are otherwise just raw bytes.
-pub(crate) struct RawChannel {
+pub(crate) struct Channel {
     socket: TcpStream,
     outgoing: SmallVec<[Bytes; MSGS * 2]>,
     headers: BytesMut,
     incoming: BytesMut,
 }
 
-impl RawChannel {
-    pub(crate) fn new(socket: TcpStream) -> RawChannel {
-        RawChannel {
+impl Channel {
+    pub(crate) fn new(socket: TcpStream) -> Channel {
+        Channel {
             socket,
             outgoing: SmallVec::new(),
             headers: BytesMut::with_capacity(mem::size_of::<u32>() * MSGS),

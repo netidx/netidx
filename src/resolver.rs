@@ -1,6 +1,6 @@
 use crate::{
-    utils::MPCodec,
     path::Path,
+    channel::Channel,
     resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
 };
 use futures::{
@@ -20,7 +20,6 @@ use async_std::{
     prelude::*,
     net::TcpStream,
 };
-use futures_codec::Framed;
 use failure::Error;
 
 static TTL: u64 = 600;
@@ -116,13 +115,12 @@ impl <R: Writeable + ReadableOrWritable> Resolver<R> {
     }
 }
 
-type Con = Framed<TcpStream, MPCodec<ToResolver, FromResolver>>;
-
 async fn connect(
+    buf: &BytesMut,
     addr: SocketAddr,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
-) -> Con {
+) -> Channel {
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -130,11 +128,12 @@ async fn connect(
         }
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&addr).await);
-        let mut con = Framed::new(con, MPCodec::<ClientHello, ServerHello>::new());
-        try_cont!("hello", con.send(match publisher {
+        let mut con = Channel::new(con);
+        let hello = match publisher {
             None => ClientHello::ReadOnly,
             Some(write_addr) => ClientHello::WriteOnly {ttl: TTL, write_addr},
-        }).await);
+        };
+        try_cont!("hello", con.send().await);
         match con.next().await {
             None | Some(Err(_)) => (),
             Some(Ok(ServerHello { ttl_expired })) => {
