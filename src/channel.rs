@@ -5,7 +5,7 @@ use async_std::{
     net::TcpStream,
 };
 use std::{
-    mem, iter,
+    mem,
     result::Result,
     io::{Error, ErrorKind},
 };
@@ -49,10 +49,6 @@ impl Channel {
         }
     }
 
-    pub(crate) fn into_inner(self) -> TcpStream {
-        self.socket
-    }
-    
     /// Queue an outgoing message. This ONLY queues the message, use
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
@@ -103,13 +99,6 @@ impl Channel {
         let r = self.socket.write_all(&*self.outgoing).await;
         self.outgoing.clear();
         r
-    }
-
-    /// Queue one message and then flush. This is exactly the same as
-    /// called `queue_send_raw` followed by `flush`.
-    pub(crate) async fn send_one_raw(&mut self, msg: Bytes) -> Result<(), Error> {
-        self.queue_send_raw(msg)?;
-        self.flush().await
     }
 
     /// Queue one typed message and then flush.
@@ -178,16 +167,6 @@ impl Channel {
     pub(crate) async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, Error> {
         rmp_serde::decode::from_read(&*self.receive_raw().await?)
             .map_err(|e| Error::new(ErrorKind::InvalidData, e))
-    }
-
-    /// Receive one or more messages.
-    pub(crate) async fn receive_batch_raw(
-        &mut self, batch: &mut Vec<Bytes>
-    ) -> Result<(), Error> {
-        Ok(batch.extend(
-            iter::once(self.receive_raw().await?)
-                .chain(iter::from_fn(|| self.decode_from_buffer()))
-        ))
     }
 
     /// Receive and decode one or more messages. If any messages fails

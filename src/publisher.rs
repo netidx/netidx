@@ -1,11 +1,11 @@
 use crate::{
-    utils::BytesWriter,
+    utils::mp_encode,
     path::Path,
     resolver::{Resolver, WriteOnly},
     channel::Channel,
 };
 use std::{
-    self, io, iter, mem,
+    self, io, mem,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, HashSet},
@@ -23,7 +23,6 @@ use async_std::{
 use fxhash::FxBuildHasher;
 use rand::{self, Rng};
 use futures::{
-    stream,
     channel::{oneshot, mpsc::{channel, Receiver, Sender}},
     sink::SinkExt as FrsSinkExt,
     future::FutureExt as FrsFutureExt,
@@ -31,7 +30,7 @@ use futures::{
 use serde::Serialize;
 use failure::Error;
 use crossbeam::queue::SegQueue;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
@@ -422,8 +421,8 @@ impl Publisher {
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
         let mut flushes = SmallVec::<[oneshot::Receiver<()>; 32]>::new();
-        let mut to_publish = SmallVec::<[_; 32]>::new();
-        let mut to_unpublish = SmallVec::<[_; 32]>::new();
+        let mut to_publish = Vec::new();
+        let mut to_unpublish = Vec::new();
         let mut resolver = {
             let mut pb = self.0.lock();
             to_publish.extend(pb.to_publish.drain());
@@ -492,7 +491,7 @@ fn handle_batch(
         match msg {
             ToPublisher::Subscribe(path) => {
                 match pb.by_path.get(&path) {
-                    None => con.queue_send(FromPublisher::NoSuchValue(path))?,
+                    None => con.queue_send(&FromPublisher::NoSuchValue(path))?,
                     Some(id) => {
                         let id = *id;
                         let cl = pb.clients.get_mut(&addr).unwrap();
@@ -525,12 +524,11 @@ async fn client_loop(
 ) -> Result<(), Error> {
     #[derive(Debug)]
     enum M { FromCl(Result<(), io::Error>), ToCl(Option<ToClient>) };
-    let mut buf = BytesMut::with_capacity(512);
     let mut con = Channel::new(s);
     let mut batch: Vec<ToPublisher> = Vec::new();
     loop {
         let to_cl = msgs.next().map(|m| M::ToCl(m));
-        let from_cl = con.read_batch(&mut batch).map(|r| M::FromCl(r));
+        let from_cl = con.receive_batch(&mut batch).map(|r| M::FromCl(r));
         match dbg!(to_cl.race(from_cl).await) {
             M::ToCl(None) => break Ok(()),
             M::FromCl(Err(e)) => return Err(Error::from(e)),
@@ -542,7 +540,7 @@ async fn client_loop(
                 for msg in m.msgs {
                     con.queue_send_raw(msg)?;
                 }
-                let f = con.flush(&mut s);
+                let f = con.flush();
                 match m.timeout {
                     None => f.await?,
                     Some(d) => future::timeout(d, f).await??

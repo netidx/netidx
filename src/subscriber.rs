@@ -1,6 +1,6 @@
 use crate::{
     path::Path,
-    utils::{BytesWriter, BatchItem, Batched},
+    utils::{BatchItem, Batched},
     publisher::{ToPublisher, FromPublisher, Id},
     resolver::{Resolver, ReadOnly},
     channel::Channel,
@@ -20,7 +20,6 @@ use async_std::{
 };
 use fxhash::FxBuildHasher;
 use futures::{
-    stream,
     channel::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
     sink::SinkExt as FrsSinkExt,
     future::{FutureExt as FrsFutureExt},
@@ -28,7 +27,7 @@ use futures::{
 use rand::Rng;
 use serde::de::DeserializeOwned;
 use failure::Error;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
@@ -477,7 +476,7 @@ async fn connection(
     let mut next_sub: Option<SubscribeRequest> = None;
     let mut con = Channel::new(TcpStream::connect(to).await?);
     let mut batched = Vec::new();
-    let res = loop {
+    let res = 'main: loop {
         let from_pub = con.receive_raw().map(|m| M::FromPub(m));
         let from_sub = from_sub.next().map(|m| M::FromSub(m));
         match from_pub.race(from_sub).await {
@@ -526,8 +525,13 @@ async fn connection(
                 }
             }
             M::FromSub(Some(BatchItem::EndBatch)) => if batched.len() > 0 {
-                for m in batched.drain(..) { try_brk!(con.queue_send(&m)); }
-                try_brk!(con.flush().await());
+                for m in batched.drain(..) {
+                    match con.queue_send(&m) {
+                        Ok(()) => (),
+                        Err(e) => { break 'main Err(Error::from(e)); }
+                    }
+                }
+                try_brk!(con.flush().await);
             }
         }
     };
