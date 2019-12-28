@@ -65,6 +65,18 @@ impl Write for BytesWriter<'_> {
     }
 }
 
+thread_local! {
+    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
+pub(crate) fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
+        Ok(b.split().freeze())
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum BatchItem<T> {
     InBatch(T),

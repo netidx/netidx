@@ -45,8 +45,8 @@
 mod resolver_store;
 pub mod path;
 pub mod channel;
-//pub mod resolver;
-//pub mod resolver_server;
+pub mod resolver;
+pub mod resolver_server;
 //pub mod publisher;
 //pub mod subscriber;
 

@@ -1,5 +1,6 @@
 use crate::{
     utils::{MPCodec, Batched, BatchItem},
+    channel::Channel,
     path::Path,
     resolver_store::Store,
 };
@@ -10,7 +11,7 @@ use futures::{
     stream,
 };
 use std::{
-    result, mem,
+    result, mem, io,
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::Duration,
     net::SocketAddr,
@@ -22,7 +23,6 @@ use async_std::{
     stream::StreamExt,
     net::{TcpStream, TcpListener},
 };
-use futures_codec::Framed;
 use serde::Serialize;
 use failure::Error;
 
@@ -59,50 +59,59 @@ type ClientInfo = Option<oneshot::Sender<()>>;
 fn handle_batch(
     store: &Store<ClientInfo>,
     msgs: impl Iterator<Item = ToResolver>,
-    results: &mut Vec<FromResolver>,
+    con: &mut Channel,
     wa: Option<SocketAddr>
-) {
+) -> Result<(), Error> {
     match wa {
         None => {
             let s = store.read();
-            results.extend(msgs.map(move |m| match m {
-                ToResolver::Resolve(paths) => {
-                    FromResolver::Resolved(paths.iter().map(|p| s.resolve(p)).collect())
-                },
-                ToResolver::List(path) => {
-                    FromResolver::List(s.list(&path))
+            for m in msgs {
+                match m {
+                    ToResolver::Resolve(paths) => {
+                        let res = paths.iter().map(|p| s.resolve(p)).collect();
+                        con.queue_send(&FromResolver::Resolved(res))?
+                    },
+                    ToResolver::List(path) => {
+                        con.queue_send(&FromResolver::List(s.list(&path)))?
+                    }
+                    ToResolver::Publish(_)
+                        | ToResolver::Unpublish(_)
+                        | ToResolver::Clear =>
+                        con.queue_send(&FromResolver::Error("read only".into()))?,
                 }
-                ToResolver::Publish(_) | ToResolver::Unpublish(_) | ToResolver::Clear =>
-                    FromResolver::Error("read only".into()),
-            }))
+            }
         }
         Some(write_addr) => {
             let mut s = store.write();
-            results.extend(msgs.map(move |m| match m {
-                ToResolver::Resolve(_) | ToResolver::List(_) =>
-                    FromResolver::Error("write only".into()),
-                ToResolver::Publish(paths) => {
-                    if !paths.iter().all(Path::is_absolute) {
-                        FromResolver::Error("absolute paths required".into())
-                    } else {
-                        for path in paths {
-                            s.publish(path, write_addr);
+            for m in msgs {
+                match m {
+                    ToResolver::Resolve(_) | ToResolver::List(_) =>
+                        con.queue_send(&FromResolver::Error("write only".into()))?,
+                    ToResolver::Publish(paths) => {
+                        if !paths.iter().all(Path::is_absolute) {
+                            con.queue_send(
+                                &FromResolver::Error("absolute paths required".into())
+                            )?
+                        } else {
+                            for path in paths {
+                                s.publish(path, write_addr);
+                            }
+                            con.queue_send(&FromResolver::Published)?
                         }
-                        FromResolver::Published
+                    }
+                    ToResolver::Unpublish(paths) => {
+                        for path in paths {
+                            s.unpublish(path, write_addr);
+                        }
+                        con.queue_send(&FromResolver::Unpublished)?
+                    }
+                    ToResolver::Clear => {
+                        s.unpublish_addr(write_addr);
+                        s.gc();
+                        con.queue_send(&FromResolver::Unpublished)?
                     }
                 }
-                ToResolver::Unpublish(paths) => {
-                    for path in paths {
-                        s.unpublish(path, write_addr);
-                    }
-                    FromResolver::Unpublished
-                }
-                ToResolver::Clear => {
-                    s.unpublish_addr(write_addr);
-                    s.gc();
-                    FromResolver::Unpublished
-                }
-            }))
+            }
         }
     }
 }
@@ -111,24 +120,21 @@ async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
-) {
+) -> Result<(), Error> {
     #[derive(Debug)]
     enum M {
         Stop,
         Timeout,
-        Msg(Option<BatchItem<result::Result<ToResolver, Error>>>)
+        Msg(result::Result<(), io::Error>)
     }
-    try_ret!("can't set nodelay", s.set_nodelay(true));
-    let mut codec = Framed::new(s, MPCodec::<ServerHello, ClientHello>::new());
-    let hello = match codec.next().await {
-        None => ret!("no hello from client"),
-        Some(h) => try_ret!("error reading hello", h)
-    };
+    s.set_nodelay(true)?;
+    let mut con = Channel::new(s);
+    let hello: ClientHello = con.receive().await?;
     let (tx_stop, rx_stop) = oneshot::channel();
     let (ttl, ttl_expired, write_addr) = match hello {
         ClientHello::ReadOnly => (Duration::from_secs(120), false, None),
         ClientHello::WriteOnly {ttl, write_addr} => {
-            if ttl <= 0 || ttl > 3600 { ret!("invalid ttl") }
+            if ttl <= 0 || ttl > 3600 { bail!("invalid ttl") }
             let mut store = store.write();
             let clinfos = store.clinfo_mut();
             let ttl = Duration::from_secs(ttl);
@@ -146,22 +152,16 @@ async fn client_loop(
             }
         }
     };
-    try_ret!("couldn't send hello", codec.send(ServerHello { ttl_expired }).await);
-    let mut codec = {
-        let c = Framed::new(
-            codec.release().0,
-            MPCodec::<FromResolver, ToResolver>::new()
-        );
-        Some(Batched::new(c, 100_000))
-    };
+    con.send_one(&ServerHello { ttl_expired }).await?;
+    let mut con = Some(con);
     let server_stop = server_stop.shared();
     let rx_stop = rx_stop.shared();
     let mut batch = Vec::new();
-    let mut results = Vec::new();
     loop {
-        let msg = match codec {
+        let msg = match con {
             None => future::pending::<M>().left_future(),
-            Some(ref mut codec) => codec.next().map(|m| M::Msg(m)).right_future()
+            Some(ref mut con) =>
+                con.receive_batch(&mut batch).map(|r| M::Msg(r)).right_future()
         };
         let timeout = future::ready(M::Timeout).delay(ttl);
         let stop =
@@ -169,20 +169,18 @@ async fn client_loop(
             .race(rx_stop.clone().map(|_| M::Stop));
         match msg.race(stop).race(timeout).await {
             M::Stop => break,
-            M::Msg(None) => { codec = None; }
-            M::Msg(Some(BatchItem::InBatch(Err(e)))) => {
+            M::Msg(Err(e)) => {
+                batch.clear();
                 codec = None;
                 // CR estokes: use proper log module
                 println!("error reading message: {}", e)
             },
-            M::Msg(Some(BatchItem::InBatch(Ok(m)))) => { batch.push(m); }
-            M::Msg(Some(BatchItem::EndBatch)) => match codec {
+            M::Msg(Ok(())) => match con {
                 None => { batch.clear(); }
                 Some(ref mut c) => {
-                    handle_batch(&store, batch.drain(..), &mut results, write_addr);
-                    let mut s = stream::iter(results.drain(..).map(|m| Ok(m)));
-                    match c.send_all(&mut s).await {
-                        Err(_) => { codec = None }, // CR estokes: Log this
+                    handle_batch(&store, batch.drain(..), c, write_addr);
+                    match c.flush().await {
+                        Err(_) => { con = None }, // CR estokes: Log this
                         Ok(()) => ()
                     }
                 }
@@ -198,7 +196,7 @@ async fn client_loop(
                     store.unpublish_addr(write_addr);
                     store.gc();
                 }
-                ret!("client timed out");
+                bail!("client timed out");
             }
         }
     }
@@ -232,8 +230,7 @@ async fn server_loop(
                     let published = published.clone();
                     let stop = stop.clone();
                     task::spawn(async move {
-                        // CR estokes: log any errors
-                        task::spawn(client_loop(published, client, stop)).await;
+                        let _ = client_loop(published, client, stop).await;
                         connections.fetch_sub(1, Ordering::Relaxed);
                     });
                 }

@@ -1,10 +1,11 @@
+use crate::utils;
 use bytes::{BytesMut, Bytes, Buf, BufMut};
 use async_std::{
     prelude::*,
     net::TcpStream,
 };
 use std::{
-    mem,
+    mem, iter,
     cmp::min,
     result::Result,
     io::{IoSlice, Error, ErrorKind},
@@ -12,6 +13,8 @@ use std::{
     marker::PhantomData,
 };
 use smallvec::SmallVec;
+use serde::{de::DeserializeOwned, Serialize};
+use byteorder::BigEndian;
 
 const MSGS: usize = 64;
 const READ_BUF: usize = 4096;
@@ -47,10 +50,14 @@ impl Channel {
         }
     }
 
+    pub(crate) fn into_inner(self) -> TcpStream {
+        self.socket
+    }
+    
     /// Queue an outgoing message. This ONLY queues the message, use
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
-    pub(crate) fn queue_send(&mut self, msg: Bytes) -> Result<(), Error> {
+    pub(crate) fn queue_send_raw(&mut self, msg: Bytes) -> Result<(), Error> {
         if msg.len() > u32::max_value() as usize {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -65,6 +72,12 @@ impl Channel {
         Ok(self.outgoing.push(msg))
     }
 
+    /// Same as queue_send_raw, but encodes the message using msgpack
+    pub(crate) fn queue_send<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
+        utils::mp_encode(msg).map_error(|e| Error::new(ErrorKind::InvalidData, e))?;
+        self.queue_send_raw(b)
+    }
+    
     /// Initiate sending all outgoing messages and wait for the
     /// process to finish.
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
@@ -86,6 +99,19 @@ impl Channel {
         }
     }
 
+    /// Queue one message and then flush. This is exactly the same as
+    /// called `queue_send_raw` followed by `flush`.
+    pub(crate) async fn send_one_raw(&mut self, msg: Bytes) -> Result<(), Error> {
+        self.queue_send_raw(msg)?;
+        self.flush().await
+    }
+
+    /// Queue one typed message and then flush.
+    pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
+        self.queue_send(msg)?;
+        self.flush().await
+    }
+    
     async fn fill_buffer(&mut self) -> Result<(), Error> {
         if self.incoming.remaining_mut() < READ_BUF {
             self.incoming.reserve(self.incoming.capacity());
@@ -118,22 +144,59 @@ impl Channel {
         Ok(())
     }
 
-    /// Receive one message, potentially waiting for one to arrive if
-    /// none are presently in the buffer.
-    pub(crate) async fn receive(&mut self) -> Result<Bytes, Error> {
-        loop {
-            if self.incoming.remaining() >= mem::size_of::<u32>() {
-                let len = self.incoming.get_u32() as usize;
-                break loop {
-                    if self.incoming.remaining() >= len {
-                        break Ok(self.incoming.split_to(len).freeze());
-                    } else {
-                        self.fill_buffer().await?;
-                    }
-                };
+    async fn decode_from_buffer(&mut self) -> Option<Bytes> {
+        if self.incoming.remaining() < mem::size_of::<u32>() {
+            None
+        } else {
+            let len = BigEndian::read_u32(&*self.incoming) as usize;
+            if self.incoming.remaining() - mem::size_of::<u32>() < len {
+                None
             } else {
-                self.fill_buffer().await?;
+                self.incoming.advance(mem::size_of::<u32>());
+                Some(self.incoming.split_to(len).freeze())
             }
         }
+    }
+
+    /// Receive one message, potentially waiting for one to arrive if
+    /// none are presently in the buffer.
+    pub(crate) async fn receive_raw(&mut self) -> Result<Bytes, Error> {
+        loop {
+            match self.decode_from_buffer() {
+                None => self.fill_buffer().await?,
+                Some(msg) => break Ok(msg)
+            }
+        }
+    }
+    
+    pub(crate) async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, Error> {
+        rmp_serde::decode::from_read(&*self.receive_raw().await?)
+            .map_error(|e| Error::new(ErrorKind::InvalidData, e))
+    }
+
+    /// Receive one or more messages.
+    pub(crate) async fn receive_batch_raw(
+        &mut self, batch: &mut Vec<Bytes>
+    ) -> Result<(), Error> {
+        Ok(batch.extend(
+            iter::once(self.receive_raw().await?)
+                .chain(iter::from_fn(|| self.decode_from_buffer()))
+        ))
+    }
+
+    /// Receive and decode one or more messages. If any messages fails
+    /// to decode, processing will stop and error will be
+    /// returned. Some messages may have already been put in the
+    /// batch.
+    pub(crate) async fn receive_batch<T: DeserializeOwned>(
+        &mut self, batch: &mut Vec<T>
+    ) -> Result<(), Error> {
+        batch.push(self.receive().await?);
+        while let Some(b) = self.decode_from_buffer() {
+            batch.push(rmp_serde::decode::from_read(&*b).map_error(|e| {
+                Error::from(ErrorKind::InvalidData, e)
+            })?)
+        }
+        Ok(())
     }
 }

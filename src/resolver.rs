@@ -1,4 +1,5 @@
 use crate::{
+    utils,
     path::Path,
     channel::Channel,
     resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
@@ -121,6 +122,7 @@ async fn connect(
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
 ) -> Channel {
+    use rmp_serde::decode::from_read;
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -129,28 +131,21 @@ async fn connect(
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&addr).await);
         let mut con = Channel::new(con);
-        let hello = match publisher {
+        // the unwrap can't fail, we can always encode the message,
+        // and it's never bigger then 4 GB.
+        try_cont!("hello", con.send_one(&match publisher {
             None => ClientHello::ReadOnly,
             Some(write_addr) => ClientHello::WriteOnly {ttl: TTL, write_addr},
-        };
-        try_cont!("hello", con.send().await);
-        match con.next().await {
-            None | Some(Err(_)) => (),
-            Some(Ok(ServerHello { ttl_expired })) => {
-                let mut con = Framed::new(
-                    con.release().0,
-                    MPCodec::<ToResolver, FromResolver>::new()
-                );
-                if !ttl_expired {
-                    break con
-                } else {
-                    let paths = published.iter().cloned().collect();
-                    try_cont!("republish", con.send(ToResolver::Publish(paths)).await);
-                    match con.next().await {
-                        Some(Ok(FromResolver::Published)) => break con,
-                        _ => ()
-                    }
-                }
+        }).await);
+        let r: ServerHello = try_cont!("hello reply", con.receive().await);
+        if !r.ttl_expired {
+            break con
+        } else {
+            let m = ToResolver::Publish(published.iter().cloned().collect());
+            try_cont!("republish", con.send_one(&m).await);
+            match try_cont!("replublish reply", con.receive().await) {
+                FromResolver::Published => break con,
+                _ => ()
             }
         }
     }
@@ -189,18 +184,18 @@ async fn connection(
                             con.as_mut().unwrap()
                         }
                     };
-                    match c.send(m_r.clone()).await {
+                    match c.send_one(m_r).await {
                         Err(_) => { con = None; }
-                        Ok(()) => match c.next().await {
-                            None | Some(Err(_)) => { con = None; }
-                            Some(Ok(FromResolver::Published)) => {
+                        Ok(()) => match c.receive().await {
+                            Err(_) => { con = None; }
+                            Ok(FromResolver::Published) => {
                                 published.extend(match m_r {
                                     ToResolver::Publish(p) => p.iter().cloned(),
                                     _ => break FromResolver::Published,
                                 });
                                 break FromResolver::Published
                             }
-                            Some(Ok(r)) => break r
+                            Ok(r) => break r
                         }
                     }
                 };
@@ -209,4 +204,3 @@ async fn connection(
         }
     }
 }
-

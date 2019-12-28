@@ -1,4 +1,9 @@
-use crate::{utils::BytesWriter, path::Path, resolver::{Resolver, WriteOnly}};
+use crate::{
+    utils::BytesWriter,
+    path::Path,
+    resolver::{Resolver, WriteOnly},
+    channel::Channel,
+};
 use std::{
     self, io, iter, mem,
     result::Result,
@@ -24,12 +29,12 @@ use futures::{
     sink::SinkExt as FrsSinkExt,
     future::FutureExt as FrsFutureExt,
 };
-use futures_codec::{Framed, LengthCodec};
 use serde::Serialize;
 use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -84,18 +89,6 @@ impl Id {
         *self = Id(self.0 + 1);
         new
     }
-}
-
-thread_local! {
-    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
-}
-
-fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
-    BUF.with(|buf| {
-        let mut b = buf.borrow_mut();
-        rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
-        Ok(b.split_off(0).freeze())
-    })
 }
 
 #[derive(Clone)]
@@ -174,7 +167,7 @@ impl PublishedRaw {
 
 #[derive(Debug)]
 struct ToClient {
-    msgs: Vec<Bytes>,
+    msgs: SmallVec<[Bytes; 8]>,
     done: oneshot::Sender<()>,
     timeout: Option<Duration>,
 }
@@ -414,7 +407,7 @@ impl Publisher {
         fn get_tc<'a>(
             addr: SocketAddr,
             sender: &Sender<ToClient>,
-            flushes: &mut Vec<oneshot::Receiver<()>>,
+            flushes: &mut SmallVec<[oneshot::Receiver<()>; 32]>,
             to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
             timeout: Option<Duration>,
         ) -> &'a mut Tc {
@@ -423,15 +416,15 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {msgs: vec![], done, timeout}
+                    to_client: ToClient {msgs: SmallVec::new(), done, timeout}
                 }
             })
         }
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut flushes = Vec::new();
-        let mut to_publish = Vec::new();
-        let mut to_unpublish = Vec::new();
+        let mut flushes = SmallVec::<[oneshot::Receiver<()>; 32]>::new();
+        let mut to_publish = SmallVec::<[_; 32]>::new();
+        let mut to_unpublish = SmallVec::<[_; 32]>::new();
         let mut resolver = {
             let mut pb = self.0.lock();
             to_publish.extend(pb.to_publish.drain());
@@ -488,42 +481,41 @@ impl Publisher {
     pub fn clients(&self) -> usize { self.0.lock().clients.len() }
 }
 
-fn handle_client_msg(
+fn handle_batch(
     t: &PublisherWeak,
     addr: &SocketAddr,
-    buf: &mut BytesMut,
-    m: Bytes,
-) -> Result<(Bytes, Option<Bytes>), Error> {
-    use rmp_serde::{encode::write_named, decode::from_read};
-    let msg = from_read::<&[u8], ToPublisher>(&*m)?;
+    msgs: impl Iterator<Item = ToPublisher>,
+    con: &mut Channel,
+) -> Result<(), Error> {
     let t_st = t.upgrade().ok_or_else(|| format_err!("dead publisher"))?;
     let mut pb = t_st.0.lock();
-    let (reply, v) = match msg {
-        ToPublisher::Subscribe(path) => {
-            match pb.by_path.get(&path) {
-                None => (FromPublisher::NoSuchValue(path), None),
-                Some(id) => {
-                    let id = *id;
-                    let cl = pb.clients.get_mut(&addr).unwrap();
-                    cl.subscribed.insert(id);
-                    let sender = cl.to_client.clone();
-                    let ut = pb.by_id.get_mut(&id).unwrap();
-                    ut.subscribed.insert(*addr, sender);
-                    (FromPublisher::Subscribed(path, id), Some(ut.current.clone()))
+    for msg in msgs {
+        match msg {
+            ToPublisher::Subscribe(path) => {
+                match pb.by_path.get(&path) {
+                    None => con.queue_send(FromPublisher::NoSuchValue(path))?,
+                    Some(id) => {
+                        let id = *id;
+                        let cl = pb.clients.get_mut(&addr).unwrap();
+                        cl.subscribed.insert(id);
+                        let sender = cl.to_client.clone();
+                        let ut = pb.by_id.get_mut(&id).unwrap();
+                        ut.subscribed.insert(*addr, sender);
+                        con.queue_send(&FromPublisher::Subscribed(path, id))?;
+                        con.queue_send_raw(ut.current.clone())?;
+                    }
                 }
             }
-        }
-        ToPublisher::Unsubscribe(id) => {
-            if let Some(ut) = pb.by_id.get_mut(&id) {
-                ut.subscribed.remove(&addr);
-                pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
+            ToPublisher::Unsubscribe(id) => {
+                if let Some(ut) = pb.by_id.get_mut(&id) {
+                    ut.subscribed.remove(&addr);
+                    pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
+                }
+                con.queue_send(&FromPublisher::Unsubscribed(id))?;
             }
-            (FromPublisher::Unsubscribed(id), None)
         }
-    };
-    drop(pb);
-    write_named(&mut BytesWriter(buf), &reply)?;
-    Ok((buf.split_off(0).freeze(), v))
+    }
+    Ok(())
 }
 
 async fn client_loop(
@@ -533,29 +525,25 @@ async fn client_loop(
     s: TcpStream,
 ) -> Result<(), Error> {
     #[derive(Debug)]
-    enum M { FromCl(Option<Result<Bytes, io::Error>>), ToCl(Option<ToClient>) };
+    enum M { FromCl(Result<(), io::Error>), ToCl(Option<ToClient>) };
     let mut buf = BytesMut::with_capacity(512);
-    let mut codec = Framed::new(s, LengthCodec);
+    let mut con = Channel::new(s);
+    let mut batch: Vec<ToPublisher> = Vec::new();
     loop {
         let to_cl = msgs.next().map(|m| M::ToCl(m));
-        let from_cl = codec.next().map(|m| M::FromCl(m));
+        let from_cl = con.read_batch(&mut batch).map(|r| M::FromCl(r));
         match dbg!(to_cl.race(from_cl).await) {
-            M::FromCl(None) | M::ToCl(None) => break Ok(()),
-            M::FromCl(Some(Err(e))) => return Err(Error::from(e)),
-            M::FromCl(Some(Ok(b))) => {
-                let (reply, v) = handle_client_msg(&t, &addr, &mut buf, b)?;
-                match v {
-                    None => codec.send(reply).await?,
-                    Some(v) => {
-                        let mut s =
-                            stream::iter(iter::once(Ok(reply)).chain(iter::once(Ok(v))));
-                        codec.send_all(&mut s).await?
-                    }
-                }
+            M::ToCl(None) => break Ok(()),
+            M::FromCl(Err(e)) => return Err(Error::from(e)),
+            M::FromCl(Ok(())) => {
+                handle_batch(&t, &addr, batch.drain(..), &mut con)?;
+                con.flush().await?
             },
             M::ToCl(Some(m)) => {
-                let mut s = stream::iter(m.msgs.into_iter().map(|b| Ok(b)));
-                let f = codec.send_all(&mut s);
+                for msg in m.msgs {
+                    con.queue_send_raw(msg)?;
+                }
+                let f = con.flush(&mut s);
                 match m.timeout {
                     None => f.await?,
                     Some(d) => future::timeout(d, f).await??

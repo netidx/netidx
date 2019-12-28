@@ -3,6 +3,7 @@ use crate::{
     utils::{BytesWriter, BatchItem, Batched},
     publisher::{ToPublisher, FromPublisher, Id},
     resolver::{Resolver, ReadOnly},
+    channel::Channel,
 };
 use std::{
     mem, io, iter,
@@ -25,7 +26,6 @@ use futures::{
     future::{FutureExt as FrsFutureExt},
 };
 use rand::Rng;
-use futures_codec::{Framed, LengthCodec};
 use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::{Bytes, BytesMut};
@@ -466,7 +466,7 @@ async fn connection(
 ) -> Result<(), Error> {
     #[derive(Debug)]
     enum M {
-        FromPub(Option<Result<Bytes, io::Error>>),
+        FromPub(Result<Bytes, io::Error>),
         FromSub(Option<BatchItem<ToCon>>),
     }
     let mut from_sub = Batched::new(from_sub, 100_000);
@@ -475,21 +475,14 @@ async fn connection(
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
     let mut next_sub: Option<SubscribeRequest> = None;
-    let mut con = Framed::new(TcpStream::connect(to).await?, LengthCodec);
+    let mut con = Channel::new(TcpStream::connect(to).await?);
     let mut batched = Vec::new();
-    let mut buf = BytesMut::new();
-    let enc = |buf: &mut BytesMut, m: &ToPublisher| {
-        rmp_serde::encode::write_named(&mut BytesWriter(buf), m).map(|()| {
-            buf.split().freeze()
-        })
-    };
     let res = loop {
-        let from_pub = con.next().map(|m| M::FromPub(m));
+        let from_pub = con.receive_raw().map(|m| M::FromPub(m));
         let from_sub = from_sub.next().map(|m| M::FromSub(m));
-        match dbg!(from_pub.race(from_sub).await) {
-            M::FromPub(None) => break Err(format_err!("connection closed")),
-            M::FromPub(Some(Err(e))) => break Err(Error::from(e)),
-            M::FromPub(Some(Ok(msg))) => match next_val.take() {
+        match from_pub.race(from_sub).await {
+            M::FromPub(Err(e)) => break Err(Error::from(e)),
+            M::FromPub(Ok(msg)) => match next_val.take() {
                 Some(id) => {
                     handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
                 }
@@ -504,10 +497,10 @@ async fn connection(
             M::FromSub(Some(BatchItem::InBatch(ToCon::Subscribe(req)))) => {
                 let path = req.path.clone();
                 pending.insert(path.clone(), req);
-                batched.push(try_brk!(enc(&mut buf, &ToPublisher::Subscribe(path))));
+                batched.push(ToPublisher::Subscribe(path));
             }
             M::FromSub(Some(BatchItem::InBatch(ToCon::Unsubscribe(id)))) => {
-                batched.push(try_brk!(enc(&mut buf, &ToPublisher::Unsubscribe(id))));
+                batched.push(ToPublisher::Unsubscribe(id));
             }
             M::FromSub(Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last }))) => {
                 if let Some(sub) = subscriptions.get_mut(&id) {
@@ -532,9 +525,9 @@ async fn connection(
                     sub.deads.push(tx);
                 }
             }
-            M::FromSub(Some(BatchItem::EndBatch)) => if dbg!(batched.len()) > 0 {
-                let mut s = stream::iter(batched.drain(..).map(|v| Ok(v)));
-                try_brk!(dbg!(con.send_all(&mut s).await));
+            M::FromSub(Some(BatchItem::EndBatch)) => if batched.len() > 0 {
+                for m in batched.drain(..) { try_brk!(con.queue_send(&m)); }
+                try_brk!(con.flush().await());
             }
         }
     };
@@ -542,7 +535,7 @@ async fn connection(
     for (id, sub) in subscriptions {
         unsubscribe(sub, id, to, &mut t.subscribed);
     }
-    dbg!(res)
+    res
 }
 
 #[cfg(test)]
