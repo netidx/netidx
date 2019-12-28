@@ -1,11 +1,13 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use std::{
     io::{self, Write},
     result::Result,
+    cell::RefCell,
 };
 use async_std::prelude::*;
 use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
+use serde::Serialize;
 
 #[macro_export]
 macro_rules! try_cont {
@@ -69,7 +71,7 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub(crate) fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, Error> {
+pub(crate) fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, failure::Error> {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;

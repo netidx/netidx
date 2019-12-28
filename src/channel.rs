@@ -1,4 +1,4 @@
-use crate::utils;
+use crate::utils::BytesWriter;
 use bytes::{BytesMut, Bytes, Buf, BufMut};
 use async_std::{
     prelude::*,
@@ -6,18 +6,18 @@ use async_std::{
 };
 use std::{
     mem, iter,
-    cmp::min,
     result::Result,
-    io::{IoSlice, Error, ErrorKind},
-    iter::FromIterator,
-    marker::PhantomData,
+    io::{Error, ErrorKind},
 };
-use smallvec::SmallVec;
 use serde::{de::DeserializeOwned, Serialize};
-use byteorder::BigEndian;
+use byteorder::{BigEndian, ByteOrder};
 
-const MSGS: usize = 64;
-const READ_BUF: usize = 4096;
+const BUF: usize = 4096;
+
+/*
+if we can figure out how to use writev then we can avoid copying all
+messages into the outgoing buffer. Sadly, IoSlice is !Send, which
+means we can't use writev in a task, and that's hard blocker.
 
 fn advance(bufs: &mut SmallVec<[Bytes; MSGS * 2]>, mut len: usize) {
     let mut i = 0;
@@ -30,13 +30,13 @@ fn advance(bufs: &mut SmallVec<[Bytes; MSGS * 2]>, mut len: usize) {
     }
     bufs.retain(|b| b.remaining() > 0);
 }
+*/
 
 /// RawChannel sends and receives u32 length prefixed messages, which
 /// are otherwise just raw bytes.
 pub(crate) struct Channel {
     socket: TcpStream,
-    outgoing: SmallVec<[Bytes; MSGS * 2]>,
-    headers: BytesMut,
+    outgoing: BytesMut,
     incoming: BytesMut,
 }
 
@@ -44,9 +44,8 @@ impl Channel {
     pub(crate) fn new(socket: TcpStream) -> Channel {
         Channel {
             socket,
-            outgoing: SmallVec::new(),
-            headers: BytesMut::with_capacity(mem::size_of::<u32>() * MSGS),
-            incoming: BytesMut::with_capacity(READ_BUF),
+            outgoing: BytesMut::with_capacity(BUF),
+            incoming: BytesMut::with_capacity(BUF),
         }
     }
 
@@ -64,39 +63,46 @@ impl Channel {
                 format!("message too large {} > {}", msg.len(), u32::max_value())
             ));
         }
-        if self.headers.remaining_mut() < mem::size_of::<u32>() {
-            self.headers.reserve(self.headers.capacity());
+        if self.outgoing.remaining_mut() < mem::size_of::<u32>() {
+            self.outgoing.reserve(self.outgoing.capacity());
         }
-        self.headers.put_u32(msg.len() as u32);
-        self.outgoing.push(self.headers.split().freeze());
-        Ok(self.outgoing.push(msg))
+        self.outgoing.put_u32(msg.len() as u32);
+        Ok(self.outgoing.extend_from_slice(&*msg))
     }
 
     /// Same as queue_send_raw, but encodes the message using msgpack
     pub(crate) fn queue_send<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
-        utils::mp_encode(msg).map_error(|e| Error::new(ErrorKind::InvalidData, e))?;
-        self.queue_send_raw(b)
+        if self.outgoing.remaining_mut() < mem::size_of::<u32>() {
+            self.outgoing.reserve(self.outgoing.capacity());
+        }
+        let mut msgbuf = self.outgoing.split_off(self.outgoing.len());
+        msgbuf.put_u32(0);
+        let mut header = msgbuf.split_to(msgbuf.len());
+        header.clear();
+        let r =
+            rmp_serde::encode::write_named(&mut BytesWriter(&mut msgbuf), msg)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e));
+        match r {
+            Ok(()) => {
+                header.put_u32(msgbuf.len() as u32);
+                header.unsplit(msgbuf);
+                Ok(self.outgoing.unsplit(header))
+            }
+            Err(e) => {
+                msgbuf.clear();
+                header.unsplit(msgbuf);
+                self.outgoing.unsplit(header);
+                Err(e)
+            }
+        }
     }
     
     /// Initiate sending all outgoing messages and wait for the
     /// process to finish.
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
-        match self.outgoing.len() {
-            0 => Ok(()),
-            1 => {
-                let v = self.outgoing.pop().unwrap();
-                self.socket.write_all(&*v).await
-            },
-            _ => loop {
-                let n = {
-                    let bufs = self.outgoing.iter().map(|b| IoSlice::new(b.as_ref()));
-                    let iovecs = SmallVec::<[IoSlice; MSGS * 2]>::from_iter(bufs);
-                    self.socket.write_vectored(iovecs.as_slice()).await?
-                };
-                advance(&mut self.outgoing, n);
-                if self.outgoing.len() == 0 { break Ok(()); }
-            }
-        }
+        let r = self.socket.write_all(&*self.outgoing).await;
+        self.outgoing.clear();
+        r
     }
 
     /// Queue one message and then flush. This is exactly the same as
@@ -113,7 +119,7 @@ impl Channel {
     }
     
     async fn fill_buffer(&mut self) -> Result<(), Error> {
-        if self.incoming.remaining_mut() < READ_BUF {
+        if self.incoming.remaining_mut() < BUF {
             self.incoming.reserve(self.incoming.capacity());
         }
         let n = {
@@ -144,7 +150,7 @@ impl Channel {
         Ok(())
     }
 
-    async fn decode_from_buffer(&mut self) -> Option<Bytes> {
+    fn decode_from_buffer(&mut self) -> Option<Bytes> {
         if self.incoming.remaining() < mem::size_of::<u32>() {
             None
         } else {
@@ -163,15 +169,15 @@ impl Channel {
     pub(crate) async fn receive_raw(&mut self) -> Result<Bytes, Error> {
         loop {
             match self.decode_from_buffer() {
-                None => self.fill_buffer().await?,
-                Some(msg) => break Ok(msg)
+                Some(msg) => break Ok(msg),
+                None => { self.fill_buffer().await?; },
             }
         }
     }
     
     pub(crate) async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, Error> {
         rmp_serde::decode::from_read(&*self.receive_raw().await?)
-            .map_error(|e| Error::new(ErrorKind::InvalidData, e))
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
 
     /// Receive one or more messages.
@@ -193,8 +199,8 @@ impl Channel {
     ) -> Result<(), Error> {
         batch.push(self.receive().await?);
         while let Some(b) = self.decode_from_buffer() {
-            batch.push(rmp_serde::decode::from_read(&*b).map_error(|e| {
-                Error::from(ErrorKind::InvalidData, e)
+            batch.push(rmp_serde::decode::from_read(&*b).map_err(|e| {
+                Error::new(ErrorKind::InvalidData, e)
             })?)
         }
         Ok(())

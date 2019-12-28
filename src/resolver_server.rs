@@ -1,14 +1,11 @@
 use crate::{
-    utils::{MPCodec, Batched, BatchItem},
     channel::Channel,
     path::Path,
     resolver_store::Store,
 };
 use futures::{
     channel::oneshot,
-    sink::SinkExt,
     future::{FutureExt as FRSFutureExt},
-    stream,
 };
 use std::{
     result, mem, io,
@@ -20,7 +17,6 @@ use async_std::{
     prelude::*,
     task,
     future,
-    stream::StreamExt,
     net::{TcpStream, TcpListener},
 };
 use serde::Serialize;
@@ -114,6 +110,7 @@ fn handle_batch(
             }
         }
     }
+    Ok(())
 }
 
 async fn client_loop(
@@ -168,20 +165,22 @@ async fn client_loop(
             server_stop.clone().map(|_| M::Stop)
             .race(rx_stop.clone().map(|_| M::Stop));
         match msg.race(stop).race(timeout).await {
-            M::Stop => break,
+            M::Stop => break Ok(()),
             M::Msg(Err(e)) => {
                 batch.clear();
-                codec = None;
+                con = None;
                 // CR estokes: use proper log module
                 println!("error reading message: {}", e)
             },
             M::Msg(Ok(())) => match con {
                 None => { batch.clear(); }
                 Some(ref mut c) => {
-                    handle_batch(&store, batch.drain(..), c, write_addr);
-                    match c.flush().await {
-                        Err(_) => { con = None }, // CR estokes: Log this
-                        Ok(()) => ()
+                    match handle_batch(&store, batch.drain(..), c, write_addr) {
+                        Err(_) => { con = None },
+                        Ok(()) => match c.flush().await {
+                            Err(_) => { con = None }, // CR estokes: Log this
+                            Ok(()) => ()
+                        }
                     }
                 }
             }

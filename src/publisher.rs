@@ -12,7 +12,6 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak},
     default::Default,
-    cell::RefCell,
     time::Duration,
 };
 use async_std::{

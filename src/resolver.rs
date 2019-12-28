@@ -1,5 +1,4 @@
 use crate::{
-    utils,
     path::Path,
     channel::Channel,
     resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
@@ -117,12 +116,10 @@ impl <R: Writeable + ReadableOrWritable> Resolver<R> {
 }
 
 async fn connect(
-    buf: &BytesMut,
     addr: SocketAddr,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
 ) -> Channel {
-    use rmp_serde::decode::from_read;
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -158,7 +155,7 @@ async fn connection(
 ) {
     enum M { TimeToHB, TimeToDC, Msg(ToCon), Stop }
     let mut published = HashSet::new();
-    let mut con: Option<Con> = None;
+    let mut con: Option<Channel> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
     loop {
