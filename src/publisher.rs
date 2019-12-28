@@ -529,7 +529,7 @@ async fn client_loop(
     loop {
         let to_cl = msgs.next().map(|m| M::ToCl(m));
         let from_cl = con.receive_batch(&mut batch).map(|r| M::FromCl(r));
-        match dbg!(to_cl.race(from_cl).await) {
+        match to_cl.race(from_cl).await {
             M::ToCl(None) => break Ok(()),
             M::FromCl(Err(e)) => return Err(Error::from(e)),
             M::FromCl(Ok(())) => {
@@ -577,9 +577,8 @@ async fn accept_loop(
                         to_client: tx,
                         subscribed: HashSet::with_hasher(FxBuildHasher::default()),
                     });
-                    dbg!(addr);
                     task::spawn(async move {
-                        let _ = dbg!(client_loop(t_weak.clone(), addr, rx, s).await);
+                        let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                         if let Some(t) = t_weak.upgrade() {
                             let mut pb = t.0.lock();
                             if let Some(cl) = pb.clients.remove(&addr) {

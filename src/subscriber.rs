@@ -596,7 +596,6 @@ mod test {
                 }
             });
             future::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            dbg!(());
             let subscriber = Subscriber::new(addr).unwrap();
             let vs0 = subscriber.subscribe::<V>("/app/v0".into()).await.unwrap();
             let vs1 = subscriber.subscribe::<V>("/app/v1".into()).await.unwrap();
@@ -605,7 +604,7 @@ mod test {
             let mut vs0s = vs0.updates(true);
             let mut vs1s = vs1.updates(true);
             loop {
-                match dbg!(vs0s.next().race(vs1s.next()).await) {
+                match vs0s.next().race(vs1s.next()).await {
                     None => panic!("publishers died"),
                     Some(Err(e)) => panic!("publisher error: {}", e),
                     Some(Ok(v)) => {
