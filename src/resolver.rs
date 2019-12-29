@@ -4,6 +4,8 @@ use crate::{
     resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
 };
 use futures::{
+    prelude::*,
+    select,
     future::FutureExt as FRSFutureExt,
     sink::SinkExt,
     channel::{mpsc, oneshot},
@@ -15,10 +17,9 @@ use std::{
     time::Duration,
     marker::PhantomData,
 };
-use async_std::{
-    task, future,
-    prelude::*,
-    net::TcpStream,
+use tokio::{
+    task, time,
+    net::TcpStream
 };
 use failure::Error;
 
@@ -123,7 +124,7 @@ async fn connect(
     let mut backoff = 0;
     loop {
         if backoff > 0 {
-            task::sleep(Duration::from_secs(backoff)).await;
+            time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&addr).await);
@@ -153,50 +154,45 @@ async fn connection(
     resolver: SocketAddr,
     publisher: Option<SocketAddr>
 ) {
-    enum M { TimeToHB, TimeToDC, Msg(ToCon), Stop }
     let mut published = HashSet::new();
     let mut con: Option<Channel> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
     loop {
-        let hb = future::ready(M::TimeToHB).delay(ttl);
-        let dc = future::ready(M::TimeToDC).delay(linger);
-        let msg = receiver.next().map(|m| match m {
-            None => M::Stop,
-            Some(m) => M::Msg(m)
-        });
-        match hb.race(dc).race(msg).await {
-            M::Stop => break,
-            M::TimeToDC => { con = None; }
-            M::TimeToHB => {
+        select! {
+            _ = time::delay_for(linger).fuse() => { con = None; },
+            _ = time::delay_for(ttl).fuse() => {
                 con = Some(connect(resolver, publisher, &published).await);
-            }
-            M::Msg((m, reply)) => {
-                let m_r = &m;
-                let r = loop {
-                    let c = match con {
-                        Some(ref mut c) => c,
-                        None => {
-                            con = Some(connect(resolver, publisher, &published).await);
-                            con.as_mut().unwrap()
+            },
+            msg = receiver.next() => match msg {
+                None => break,
+                Some((m, reply)) => {
+                    let m_r = &m;
+                    let r = loop {
+                        let c = match con {
+                            Some(ref mut c) => c,
+                            None => {
+                                con = Some(connect(resolver, publisher, &published).await);
+                                con.as_mut().unwrap()
+                            }
+                        };
+                        match c.send_one(m_r).await {
+                            Err(_) => { con = None; }
+                            Ok(()) => match c.receive().await {
+                                Err(_) => { con = None; }
+                                Ok(FromResolver::Published) => {
+                                    published.extend(match m_r {
+                                        ToResolver::Publish(p) => p.iter().cloned(),
+                                        _ => break FromResolver::Published,
+                                    });
+                                    break FromResolver::Published
+                                }
+                                Ok(r) => break r
+                            }
                         }
                     };
-                    match c.send_one(m_r).await {
-                        Err(_) => { con = None; }
-                        Ok(()) => match c.receive().await {
-                            Err(_) => { con = None; }
-                            Ok(FromResolver::Published) => {
-                                published.extend(match m_r {
-                                    ToResolver::Publish(p) => p.iter().cloned(),
-                                    _ => break FromResolver::Published,
-                                });
-                                break FromResolver::Published
-                            }
-                            Ok(r) => break r
-                        }
-                    }
-                };
-                let _ = reply.send(r);
+                    let _ = reply.send(r);
+                }
             }
         }
     }

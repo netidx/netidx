@@ -6,23 +6,21 @@ use crate::{
     channel::Channel,
 };
 use std::{
-    mem, io, iter,
+    mem, iter,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
     net::{SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
 };
-use async_std::{
-    prelude::*,
+use tokio::{
     task,
     net::TcpStream,
 };
 use fxhash::FxBuildHasher;
 use futures::{
+    prelude::*, select,
     channel::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
-    sink::SinkExt as FrsSinkExt,
-    future::{FutureExt as FrsFutureExt},
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -463,12 +461,7 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
-    #[derive(Debug)]
-    enum M {
-        FromPub(Result<Bytes, io::Error>),
-        FromSub(Option<BatchItem<ToCon>>),
-    }
-    let mut from_sub = Batched::new(from_sub, 100_000);
+    let mut from_sub = Batched::new(from_sub, 100_000).fuse();
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
@@ -477,61 +470,63 @@ async fn connection(
     let mut con = Channel::new(TcpStream::connect(to).await?);
     let mut batched = Vec::new();
     let res = 'main: loop {
-        let from_pub = con.receive_raw().map(|m| M::FromPub(m));
-        let from_sub = from_sub.next().map(|m| M::FromSub(m));
-        match from_pub.race(from_sub).await {
-            M::FromPub(Err(e)) => break Err(Error::from(e)),
-            M::FromPub(Ok(msg)) => match next_val.take() {
-                Some(id) => {
-                    handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
+        select! {
+            m = con.receive_raw().fuse() => match m {
+                Err(e) => break Err(Error::from(e)),
+                Ok(msg) => match next_val.take() {
+                    Some(id) => {
+                        handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
+                    }
+                    None => {
+                        try_brk!(handle_control(
+                            to, &subscriber, &mut pending, &mut subscriptions,
+                            &mut next_val, &mut next_sub, &*msg
+                        ));
+                    }
                 }
-                None => {
-                    try_brk!(handle_control(
-                        to, &subscriber, &mut pending, &mut subscriptions,
-                        &mut next_val, &mut next_sub, &*msg
-                    ));
-                }
-            }
-            M::FromSub(None) => break Err(format_err!("dropped")),
-            M::FromSub(Some(BatchItem::InBatch(ToCon::Subscribe(req)))) => {
-                let path = req.path.clone();
-                pending.insert(path.clone(), req);
-                batched.push(ToPublisher::Subscribe(path));
-            }
-            M::FromSub(Some(BatchItem::InBatch(ToCon::Unsubscribe(id)))) => {
-                batched.push(ToPublisher::Unsubscribe(id));
-            }
-            M::FromSub(Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last }))) => {
-                if let Some(sub) = subscriptions.get_mut(&id) {
-                    let mut add = true;
-                    if last {
-                        if let Err(_) = tx.send(sub.last.clone()).await {
-                            add = false;
+            },
+            m = from_sub.next() => match m {
+                None => break Err(format_err!("dropped")),
+                Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
+                    let path = req.path.clone();
+                    pending.insert(path.clone(), req);
+                    batched.push(ToPublisher::Subscribe(path));
+                },
+                Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
+                    batched.push(ToPublisher::Unsubscribe(id));
+                },
+                Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
+                    if let Some(sub) = subscriptions.get_mut(&id) {
+                        let mut add = true;
+                        if last {
+                            if let Err(_) = tx.send(sub.last.clone()).await {
+                                add = false;
+                            }
+                        }
+                        if add {
+                            sub.streams.push(tx);
                         }
                     }
-                    if add {
-                        sub.streams.push(tx);
+                },
+                Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
+                    if let Some(sub) = subscriptions.get(&id) {
+                        let _ = tx.send(sub.last.clone());
                     }
-                }
-            }
-            M::FromSub(Some(BatchItem::InBatch(ToCon::Last(id, tx)))) => {
-                if let Some(sub) = subscriptions.get(&id) {
-                    let _ = tx.send(sub.last.clone());
-                }
-            }
-            M::FromSub(Some(BatchItem::InBatch(ToCon::NotifyDead(id, tx)))) => {
-                if let Some(sub) = subscriptions.get_mut(&id) {
-                    sub.deads.push(tx);
-                }
-            }
-            M::FromSub(Some(BatchItem::EndBatch)) => if batched.len() > 0 {
-                for m in batched.drain(..) {
-                    match con.queue_send(&m) {
-                        Ok(()) => (),
-                        Err(e) => { break 'main Err(Error::from(e)); }
+                },
+                Some(BatchItem::InBatch(ToCon::NotifyDead(id, tx))) => {
+                    if let Some(sub) = subscriptions.get_mut(&id) {
+                        sub.deads.push(tx);
                     }
+                },
+                Some(BatchItem::EndBatch) => if batched.len() > 0 {
+                    for m in batched.drain(..) {
+                        match con.queue_send(&m) {
+                            Ok(()) => (),
+                            Err(e) => { break 'main Err(Error::from(e)); }
+                        }
+                    }
+                    try_brk!(con.flush().await);
                 }
-                try_brk!(con.flush().await);
             }
         }
     };
@@ -548,8 +543,8 @@ mod test {
         net::SocketAddr,
         time::Duration,
     };
-    use async_std::{prelude::*, future, task};
-    use futures::channel::oneshot;
+    use tokio::{prelude::*, runtime::Runtime, task, time};
+    use futures::{prelude::*, channel::oneshot};
     use crate::{
         resolver_server::Server,
         publisher::{Publisher, BindCfg},
@@ -568,7 +563,8 @@ mod test {
             id: usize,
             v: String,
         };
-        task::block_on(async {
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async {
             let server = init_server().await;
             let addr = *server.local_addr();
             let (tx, ready) = oneshot::channel();
@@ -586,7 +582,7 @@ mod test {
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
-                    future::ready(()).delay(Duration::from_millis(100)).await;
+                    time::delay_for(Duration::from_millis(100)).await;
                     vp0.update(&V {id: c, v: "foo".into()})
                         .unwrap();
                     vp1.update(&V {id: c, v: "bar".into()})
@@ -595,7 +591,7 @@ mod test {
                     c += 1
                 }
             });
-            future::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(addr).unwrap();
             let vs0 = subscriber.subscribe::<V>("/app/v0".into()).await.unwrap();
             let vs1 = subscriber.subscribe::<V>("/app/v1".into()).await.unwrap();
@@ -604,10 +600,10 @@ mod test {
             let mut vs0s = vs0.updates(true);
             let mut vs1s = vs1.updates(true);
             loop {
-                match vs0s.next().race(vs1s.next()).await {
-                    None => panic!("publishers died"),
-                    Some(Err(e)) => panic!("publisher error: {}", e),
-                    Some(Ok(v)) => {
+                match future::select(vs0s.next(), vs1s.next()).await.factor_first() {
+                    (None, _) => panic!("publishers died"),
+                    (Some(Err(e)), _) => panic!("publisher error: {}", e),
+                    (Some(Ok(v)), _) => {
                         let c = match &*v.v {
                             "foo" => &mut c0,
                             "bar" => &mut c1,
