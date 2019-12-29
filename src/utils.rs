@@ -4,7 +4,8 @@ use std::{
     result::Result,
     cell::RefCell,
 };
-use futures::{prelude::*, task::{Poll, Context}, sink::Sink};
+use async_std::prelude::*;
+use futures::{task::{Poll, Context}, sink::Sink};
 use std::pin::Pin;
 use serde::Serialize;
 

@@ -36,7 +36,6 @@
 //! know what type a publisher will be publishing, it can just elect
 //! to receive `rmpv::Value`, or even just the raw bytes.
 
-#![recursion_limit="1024"]
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;

@@ -5,7 +5,7 @@ use crate::{
     channel::Channel,
 };
 use std::{
-    mem,
+    self, io, mem,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, HashSet},
@@ -14,16 +14,18 @@ use std::{
     default::Default,
     time::Duration,
 };
-use tokio::{
-    task, time,
+use async_std::{
+    task, future,
+    prelude::*,
     net::{TcpStream, TcpListener},
+    stream::StreamExt,
 };
 use fxhash::FxBuildHasher;
 use rand::{self, Rng};
 use futures::{
-    select,
-    prelude::*,
     channel::{oneshot, mpsc::{channel, Receiver, Sender}},
+    sink::SinkExt as FrsSinkExt,
+    future::FutureExt as FrsFutureExt,
 };
 use serde::Serialize;
 use failure::Error;
@@ -520,30 +522,30 @@ async fn client_loop(
     mut msgs: Receiver<ToClient>,
     s: TcpStream,
 ) -> Result<(), Error> {
+    #[derive(Debug)]
+    enum M { FromCl(Result<(), io::Error>), ToCl(Option<ToClient>) };
     let mut con = Channel::new(s);
     let mut batch: Vec<ToPublisher> = Vec::new();
     loop {
-        select! {
-            m = msgs.next() => match m {
-                None => break Ok(()),
-                Some(m) => {
-                    for msg in m.msgs {
-                        con.queue_send_raw(msg)?;
-                    }
-                    let f = con.flush();
-                    match m.timeout {
-                        None => f.await?,
-                        Some(d) => time::timeout(d, f).await??
-                    }
-                    let _ = m.done.send(());
-                }
+        let to_cl = msgs.next().map(|m| M::ToCl(m));
+        let from_cl = con.receive_batch(&mut batch).map(|r| M::FromCl(r));
+        match to_cl.race(from_cl).await {
+            M::ToCl(None) => break Ok(()),
+            M::FromCl(Err(e)) => return Err(Error::from(e)),
+            M::FromCl(Ok(())) => {
+                handle_batch(&t, &addr, batch.drain(..), &mut con)?;
+                con.flush().await?
             },
-            m = con.receive_batch(&mut batch).fuse() => match m {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    handle_batch(&t, &addr, batch.drain(..), &mut con)?;
-                    con.flush().await?
+            M::ToCl(Some(m)) => {
+                for msg in m.msgs {
+                    con.queue_send_raw(msg)?;
                 }
+                let f = con.flush();
+                match m.timeout {
+                    None => f.await?,
+                    Some(d) => future::timeout(d, f).await??
+                }
+                let _ = m.done.send(());
             }
         }
     }
@@ -551,43 +553,43 @@ async fn client_loop(
 
 async fn accept_loop(
     t: PublisherWeak,
-    mut serv: TcpListener,
+    serv: TcpListener,
     stop: oneshot::Receiver<()>,
 ) {
-    let mut stop = stop.fuse();
+    enum M { Client(Result<(TcpStream, SocketAddr), io::Error>), Stop };
+    let stop = stop.shared();
     loop {
-        select! {
-            _ = stop => break,
-            r = serv.accept().fuse() => match r {
-                Err(_) => (),
-                Ok((s, addr)) => {
-                    let t_weak = t.clone();
-                    let t = match t.upgrade() {
-                        None => return,
-                        Some(t) => t
-                    };
-                    let mut pb = t.0.lock();
-                    if pb.clients.len() < MAX_CLIENTS {
-                        let (tx, rx) = channel(100);
-                        try_cont!("nodelay", s.set_nodelay(true));
-                        pb.clients.insert(addr, Client {
-                            to_client: tx,
-                            subscribed: HashSet::with_hasher(FxBuildHasher::default()),
-                        });
-                        task::spawn(async move {
-                            let _ = client_loop(t_weak.clone(), addr, rx, s).await;
-                            if let Some(t) = t_weak.upgrade() {
-                                let mut pb = t.0.lock();
-                                if let Some(cl) = pb.clients.remove(&addr) {
-                                    for id in cl.subscribed {
-                                        if let Some(ut) = pb.by_id.get_mut(&id) {
-                                            ut.subscribed.remove(&addr);
-                                        }
+        let client = serv.accept().map(|r| M::Client(r));
+        match stop.clone().map(|_| M::Stop).race(client).await {
+            M::Stop => break,
+            M::Client(Err(_)) => (), // CR estokes: log this? exit the loop?
+            M::Client(Ok((s, addr))) => {
+                let t_weak = t.clone();
+                let t = match t.upgrade() {
+                    None => return,
+                    Some(t) => t
+                };
+                let mut pb = t.0.lock();
+                if pb.clients.len() < MAX_CLIENTS {
+                    let (tx, rx) = channel(100);
+                    try_cont!("nodelay", s.set_nodelay(true));
+                    pb.clients.insert(addr, Client {
+                        to_client: tx,
+                        subscribed: HashSet::with_hasher(FxBuildHasher::default()),
+                    });
+                    task::spawn(async move {
+                        let _ = client_loop(t_weak.clone(), addr, rx, s).await;
+                        if let Some(t) = t_weak.upgrade() {
+                            let mut pb = t.0.lock();
+                            if let Some(cl) = pb.clients.remove(&addr) {
+                                for id in cl.subscribed {
+                                    if let Some(ut) = pb.by_id.get_mut(&id) {
+                                        ut.subscribed.remove(&addr);
                                     }
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
             }
         }

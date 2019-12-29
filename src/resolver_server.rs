@@ -4,8 +4,6 @@ use crate::{
     resolver_store::Store,
 };
 use futures::{
-    prelude::*,
-    select,
     channel::oneshot,
     future::{FutureExt as FRSFutureExt},
 };
@@ -15,7 +13,12 @@ use std::{
     time::Duration,
     net::SocketAddr,
 };
-use tokio::{ task, time,  net::{TcpStream, TcpListener} };
+use async_std::{
+    prelude::*,
+    task,
+    future,
+    net::{TcpStream, TcpListener},
+};
 use serde::Serialize;
 use failure::Error;
 
@@ -115,6 +118,12 @@ async fn client_loop(
     s: TcpStream,
     server_stop: impl Future<Output = result::Result<(), oneshot::Canceled>>,
 ) -> Result<(), Error> {
+    #[derive(Debug)]
+    enum M {
+        Stop,
+        Timeout,
+        Msg(result::Result<(), io::Error>)
+    }
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let hello: ClientHello = con.receive().await?;
@@ -142,23 +151,40 @@ async fn client_loop(
     };
     con.send_one(&ServerHello { ttl_expired }).await?;
     let mut con = Some(con);
-    let mut server_stop = server_stop.shared();
-    let mut rx_stop = rx_stop.shared();
-    let mut batch: Vec<ToResolver> = Vec::new();
-    async fn maybe_receive(
-        con: &mut Option<Channel>,
-        batch: &mut Vec<ToResolver>
-    ) -> Result<(), io::Error> {
-        match con {
-            Some(ref mut con) => con.receive_batch(batch).await,
-            None => future::pending().await,
-        }
-    }
+    let server_stop = server_stop.shared();
+    let rx_stop = rx_stop.shared();
+    let mut batch = Vec::new();
     loop {
-        select! {
-            _ = server_stop => break Ok(()),
-            _ = rx_stop => break Ok(()),
-            _ = time::delay_for(ttl).fuse() => {
+        let msg = match con {
+            None => future::pending::<M>().left_future(),
+            Some(ref mut con) =>
+                con.receive_batch(&mut batch).map(|r| M::Msg(r)).right_future()
+        };
+        let timeout = future::ready(M::Timeout).delay(ttl);
+        let stop =
+            server_stop.clone().map(|_| M::Stop)
+            .race(rx_stop.clone().map(|_| M::Stop));
+        match msg.race(stop).race(timeout).await {
+            M::Stop => break Ok(()),
+            M::Msg(Err(e)) => {
+                batch.clear();
+                con = None;
+                // CR estokes: use proper log module
+                println!("error reading message: {}", e)
+            },
+            M::Msg(Ok(())) => match con {
+                None => { batch.clear(); }
+                Some(ref mut c) => {
+                    match handle_batch(&store, batch.drain(..), c, write_addr) {
+                        Err(_) => { con = None },
+                        Ok(()) => match c.flush().await {
+                            Err(_) => { con = None }, // CR estokes: Log this
+                            Ok(()) => ()
+                        }
+                    }
+                }
+            }
+            M::Timeout => {
                 if let Some(write_addr) = write_addr {
                     let mut store = store.write();
                     if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
@@ -170,27 +196,7 @@ async fn client_loop(
                     store.gc();
                 }
                 bail!("client timed out");
-            },
-            m = maybe_receive(&mut con, &mut batch).fuse() => match m {
-                Err(e) => {
-                    batch.clear();
-                    con = None;
-                    // CR estokes: use proper log module
-                    println!("error reading message: {}", e)
-                }
-                Ok(()) => match con {
-                    None => { batch.clear(); }
-                    Some(ref mut c) => {
-                        match handle_batch(&store, batch.drain(..), c, write_addr) {
-                            Err(_) => { con = None },
-                            Ok(()) => match c.flush().await {
-                                Err(_) => { con = None }, // CR estokes: Log this
-                                Ok(()) => ()
-                            }
-                        }
-                    }
-                }
-            },
+            }
         }
     }
 }
@@ -201,27 +207,31 @@ async fn server_loop(
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr, Error> {
+    enum M { Stop, Drop, Client(TcpStream) }
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let mut listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let mut stop = stop.shared();
+    let stop = stop.shared();
     let _ = ready.send(local_addr);
     loop {
-        select! {
-            _ = stop => return Ok(local_addr),
-            client = listener.accept().fuse() => match client {
-                Err(_) => (),
-                Ok((client, _)) => {
-                    if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
-                        let connections = connections.clone();
-                        let published = published.clone();
-                        let stop = stop.clone();
-                        task::spawn(async move {
-                            let _ = client_loop(published, client, stop).await;
-                            connections.fetch_sub(1, Ordering::Relaxed);
-                        });
-                    }
+        let client = listener.accept().map(|c| match c {
+            Ok((c, _)) => M::Client(c),
+            Err(_) => M::Drop, // CR estokes: maybe log this?
+        });
+        let should_stop = stop.clone().map(|_| M::Stop);
+        match should_stop.race(client).await {
+            M::Stop => return Ok(local_addr),
+            M::Drop => (),
+            M::Client(client) => {
+                if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
+                    let connections = connections.clone();
+                    let published = published.clone();
+                    let stop = stop.clone();
+                    task::spawn(async move {
+                        let _ = client_loop(published, client, stop).await;
+                        connections.fetch_sub(1, Ordering::Relaxed);
+                    });
                 }
             },
         }
@@ -246,11 +256,10 @@ impl Server {
     pub async fn new(addr: SocketAddr, max_connections: usize) -> Result<Server, Error> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let done = task::spawn(server_loop(addr, max_connections, recv_stop, send_ready));
-        let local_addr = select! {
-            r = done.fuse() => r??,
-            r = recv_ready.fuse() => r?,
-        };
+        let local_addr =
+            task::spawn(server_loop(addr, max_connections, recv_stop, send_ready))
+            .race(recv_ready.map(|r| r.map_err(|e| Error::from(e))))
+            .await?;
         Ok(Server {
             stop: Some(send_stop),
             local_addr
@@ -282,9 +291,8 @@ mod test {
 
     #[test]
     fn publish_resolve() {
-        use tokio::runtime::Runtime;
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
+        use async_std::task;
+        task::block_on(async {
             let server = init_server().await;
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let mut w = Resolver::<WriteOnly>::new_w(server.local_addr(), paddr).unwrap();

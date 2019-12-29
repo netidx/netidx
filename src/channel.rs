@@ -1,6 +1,6 @@
 use crate::utils::BytesWriter;
 use bytes::{BytesMut, Bytes, Buf, BufMut};
-use tokio::{
+use async_std::{
     prelude::*,
     net::TcpStream,
 };
@@ -13,6 +13,24 @@ use serde::{de::DeserializeOwned, Serialize};
 use byteorder::{BigEndian, ByteOrder};
 
 const BUF: usize = 4096;
+
+/*
+if we can figure out how to use writev then we can avoid copying all
+messages into the outgoing buffer. Sadly, IoSlice is !Send, which
+means we can't use writev in a task, and that's hard blocker.
+
+fn advance(bufs: &mut SmallVec<[Bytes; MSGS * 2]>, mut len: usize) {
+    let mut i = 0;
+    while len > 0 && i < bufs.len() {
+        let b = &mut bufs[i];
+        let n = min(b.remaining(), len);
+        b.advance(n);
+        if b.remaining() == 0 { i += 1; }
+        len -= n;
+    }
+    bufs.retain(|b| b.remaining() > 0);
+}
+*/
 
 /// RawChannel sends and receives u32 length prefixed messages, which
 /// are otherwise just raw bytes.
