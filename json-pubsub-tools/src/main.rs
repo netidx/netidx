@@ -1,7 +1,8 @@
-#[macro_use]
-extern crate serde_derive;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate structopt;
 use json_pubsub::path::Path;
-use std::{fs::read, time::Duration, path::PathBuf, net::SocketAddr};
+use std::{fs::read, path::PathBuf, net::SocketAddr};
+use structopt::StructOpt;
 
 mod resolver_server;
 
@@ -16,17 +17,18 @@ struct ResolverConfig {
 #[structopt(name = "json-pubsub")]
 enum Opt {
     #[structopt(name = "resolver-server", about = "Run a resolver server")]
-    Resolver_server {
+    ResolverServer {
         #[structopt(short = "c", long = "config",
                     help = "override the default config file",
+                    default_value = "./resolver.conf",
                     parse(from_os_str))]
-        config: Option<PathBuf>,
+        config: PathBuf,
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool
     },
+    /*
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver(Resolver),
-    /*
     #[structopt(name = "publisher", about = "publish lines for stdin or a file")]
     Publisher {
         #[structopt(short = "f", long = "file", help = "publish the contents of file",
@@ -54,6 +56,7 @@ enum Opt {
      */
 }
 
+/*
 #[derive(StructOpt, Debug)]
 struct Resolver {
     #[structopt(short = "c", long = "config", help = "override the default config file",
@@ -79,17 +82,18 @@ enum ResolverCmd {
     Add {
         #[structopt(name = "path")]
         path: Path,
-        #[structopt(name = "socketaddr")],
+        #[structopt(name = "socketaddr")]
         socketaddr: SocketAddr
     },
     #[structopt(name = "remove", about = "remove an entry")]
     Remove {
         #[structopt(name = "path")]
         path: Path,
-        #[structopt(name = "socketaddr")],
+        #[structopt(name = "socketaddr")]
         socketaddr: SocketAddr
     }
 }
+*/
 
 /*
 #[derive(StructOpt, Bench)]
@@ -103,11 +107,11 @@ enum Stress {
 
 fn main() {
     match Opt::from_args() {
-        Resolver_server {config, foreground} => {
-            let config: ResolverConfig =
-                serde_json::from_slice(read(config)).expect("reading config");
+        Opt::ResolverServer {config, foreground} => {
+            let config: ResolverConfig = serde_json::from_slice(
+                &*read(config).expect("reading config")
+            ).expect("parsing config");
             resolver_server::run(config, !foreground)
         }
-        Resolver(_) => unimplemented!(),
     }
 }
