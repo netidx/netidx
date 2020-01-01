@@ -126,18 +126,18 @@ impl Channel {
             };
             self.socket.read(buf).await?
         };
-        // This is safe because we are advancing by the number of
-        // bytes the OS read into the buffer. Those bytes are now
-        // properly initialized, and can be safely read. This is
-        // *slightly* silly, because u8s are just numbers, and are
-        // thus always "properly initialized". The other side of the
-        // connection could send us absolutely anything and it would
-        // still be valid u8s, but we're certifying that these bytes
-        // came from the socket and not from random junk sitting in
-        // memory.
         if n == 0 {
             Err(Error::new(ErrorKind::UnexpectedEof, "end of file"))
         } else {
+            // This is safe because we are advancing by the number of
+            // bytes the OS read into the buffer. Those bytes are now
+            // properly initialized, and can be safely read. This is
+            // *slightly* silly, because u8s are just numbers, and are
+            // thus always "properly initialized". The other side of the
+            // connection could send us absolutely anything and it would
+            // still be valid u8s, but we're certifying that these bytes
+            // came from the socket and not from random junk sitting in
+            // memory.
             unsafe { self.incoming.advance_mut(n); }
             Ok(())
         }
