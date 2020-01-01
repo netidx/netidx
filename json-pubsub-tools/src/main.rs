@@ -5,6 +5,7 @@ use std::{fs::read, path::PathBuf, net::SocketAddr};
 use structopt::StructOpt;
 
 mod resolver_server;
+mod resolver;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResolverConfig {
@@ -26,9 +27,9 @@ enum Opt {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool
     },
-    /*
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver(Resolver),
+    /*
     #[structopt(name = "publisher", about = "publish lines for stdin or a file")]
     Publisher {
         #[structopt(short = "f", long = "file", help = "publish the contents of file",
@@ -56,12 +57,13 @@ enum Opt {
      */
 }
 
-/*
 #[derive(StructOpt, Debug)]
 struct Resolver {
-    #[structopt(short = "c", long = "config", help = "override the default config file",
+    #[structopt(short = "c", long = "config",
+                help = "override the default config file",
+                default_value = "./resolver.conf",
                 parse(from_os_str))]
-    config: Option<PathBuf>,
+    config: PathBuf,
     #[structopt(subcommand)]
     cmd: ResolverCmd
 }
@@ -93,7 +95,6 @@ enum ResolverCmd {
         socketaddr: SocketAddr
     }
 }
-*/
 
 /*
 #[derive(StructOpt, Bench)]

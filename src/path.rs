@@ -2,6 +2,7 @@ use std::{
     borrow::Borrow, convert::{AsRef, From}, sync::Arc,
     cmp::{PartialEq, PartialOrd, Eq, Ord},
     ops::Deref,
+    str::FromStr,
     fmt
 };
 
@@ -66,6 +67,14 @@ impl<'a> From<&'a String> for Path {
         } else {
             Path(Arc::from(canonize(s.as_str()).as_str()))
         }
+    }
+}
+
+impl FromStr for Path {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Path::from(s))
     }
 }
 
