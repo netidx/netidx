@@ -67,13 +67,12 @@ enum Opt {
 
 #[derive(StructOpt, Debug)]
 enum ResolverCmd {
+    #[structopt(name = "resolve", about = "resolve an in the resolver server")]
+    Resolve {
+        path: Path,
+    },
     #[structopt(name = "list", about = "list entries in the resolver server")]
     List {
-        #[structopt(short = "r", long = "recursive", help = "recurse to children")]
-        recursive: bool,
-        #[structopt(short = "l", long = "long",
-                    help = "long form, return additional info")]
-        long: bool,
         #[structopt(name = "path")]
         path: Option<Path>
     },

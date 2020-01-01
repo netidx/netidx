@@ -135,8 +135,12 @@ impl Channel {
         // still be valid u8s, but we're certifying that these bytes
         // came from the socket and not from random junk sitting in
         // memory.
-        unsafe { self.incoming.advance_mut(n); }
-        Ok(())
+        if n == 0 {
+            Err(Error::new(ErrorKind::UnexpectedEof, "end of file"))
+        } else {
+            unsafe { self.incoming.advance_mut(n); }
+            Ok(())
+        }
     }
 
     fn decode_from_buffer(&mut self) -> Option<Bytes> {

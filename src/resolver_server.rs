@@ -164,7 +164,7 @@ async fn client_loop(
         let stop =
             server_stop.clone().map(|_| M::Stop)
             .race(rx_stop.clone().map(|_| M::Stop));
-        match msg.race(stop).race(timeout).await {
+        match dbg!(msg.race(stop).race(timeout).await) {
             M::Stop => break Ok(()),
             M::Msg(Err(e)) => {
                 batch.clear();
