@@ -71,7 +71,7 @@ impl<'a> From<&'a String> for Path {
 }
 
 impl FromStr for Path {
-    type Err = ();
+    type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Path::from(s))

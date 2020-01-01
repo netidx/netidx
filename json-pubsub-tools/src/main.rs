@@ -28,7 +28,15 @@ enum Opt {
         foreground: bool
     },
     #[structopt(name = "resolver", about = "Query a resolver server")]
-    Resolver(Resolver),
+    Resolver {
+        #[structopt(short = "c", long = "config",
+                    help = "override the default config file",
+                    default_value = "./resolver.conf",
+                    parse(from_os_str))]
+        config: PathBuf,
+        #[structopt(subcommand)]
+        cmd: ResolverCmd
+    },
     /*
     #[structopt(name = "publisher", about = "publish lines for stdin or a file")]
     Publisher {
@@ -55,17 +63,6 @@ enum Opt {
         cmd: Stress
     },
      */
-}
-
-#[derive(StructOpt, Debug)]
-struct Resolver {
-    #[structopt(short = "c", long = "config",
-                help = "override the default config file",
-                default_value = "./resolver.conf",
-                parse(from_os_str))]
-    config: PathBuf,
-    #[structopt(subcommand)]
-    cmd: ResolverCmd
 }
 
 #[derive(StructOpt, Debug)]
@@ -107,12 +104,14 @@ enum Stress {
  */
 
 fn main() {
+    let get_cfg = |path| -> ResolverConfig {
+        serde_json::from_slice(&*read(path).expect("reading config"))
+            .expect("parsing config")
+    };
     match Opt::from_args() {
-        Opt::ResolverServer {config, foreground} => {
-            let config: ResolverConfig = serde_json::from_slice(
-                &*read(config).expect("reading config")
-            ).expect("parsing config");
-            resolver_server::run(config, !foreground)
-        }
+        Opt::ResolverServer {config, foreground} =>
+            resolver_server::run(get_cfg(config), !foreground),
+        Opt::Resolver {config, cmd} =>
+            resolver::run(get_cfg(config), cmd),
     }
 }
