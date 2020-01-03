@@ -23,6 +23,19 @@ macro_rules! try_cont {
 }
 
 #[macro_export]
+macro_rules! try_brk {
+    ($m:expr, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("{}: {}", $m, e);
+                break;
+            }
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! try_ret {
     ($m:expr, $e:expr) => {
         match $e {
@@ -55,7 +68,7 @@ macro_rules! ret {
 }
 
 pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
-    if c == sep { !esc }
+    if c == sep { !*esc }
     else {
         *esc = c == escape && !*esc;
         false
@@ -67,8 +80,8 @@ pub fn splitn_escaped(
     n: usize,
     escape: char,
     sep: char
-) {
-    s.splitn({
+) -> impl Iterator<Item=&str> {
+    s.splitn(n, {
         let mut esc = false;
         move |c| is_sep(&mut esc, c, escape, sep)
     })

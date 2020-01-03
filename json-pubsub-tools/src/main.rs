@@ -1,6 +1,7 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate structopt;
 #[macro_use] extern crate json_pubsub;
+#[macro_use] extern crate failure;
 use json_pubsub::path::Path;
 use std::{fs::read, path::PathBuf, net::SocketAddr};
 use structopt::StructOpt;
@@ -115,7 +116,7 @@ fn main() {
             resolver_server::run(get_cfg(config), !foreground),
         Opt::Resolver {config, cmd} =>
             resolver::run(get_cfg(config), cmd),
-        Opt::Publisher {config, json, path} =>
-            publisher::run(get_cfg(config), json, path),
+        Opt::Publisher {config, json} =>
+            publisher::run(get_cfg(config), json),
     }
 }

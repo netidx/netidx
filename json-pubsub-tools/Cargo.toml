@@ -20,3 +20,4 @@ json-pubsub = {path = ".."}
 structopt = "0.3"
 daemonize = "0.4"
 failure = "0.1"
+bytes = "0.5"
