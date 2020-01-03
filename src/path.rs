@@ -169,16 +169,7 @@ impl Path {
         } else {
             0
         };
-        s.split({
-            let mut esc = false;
-            move |c| {
-                if c == SEP { !esc }
-                else {
-                    esc = c == ESC && !esc;
-                    false
-                }
-            }
-        }).skip(skip)
+        utils::split_escaped(s, ESC, SEP).skip(skip)
     }
 
     pub fn levels(s: &str) -> usize {

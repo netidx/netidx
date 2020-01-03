@@ -15,7 +15,7 @@ macro_rules! try_cont {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                println!("{}: {}", $m, e);
+                eprintln!("{}: {}", $m, e);
                 continue
             }
         }
@@ -29,7 +29,7 @@ macro_rules! try_ret {
             Ok(r) => r,
             Err(e) => {
                 // CR estokes: use a better method
-                println!("{}: {}", $m, e);
+                eprintln!("{}: {}", $m, e);
                 return
             }
         }
@@ -49,9 +49,40 @@ macro_rules! or_ret {
 #[macro_export]
 macro_rules! ret {
     ($m:expr) => { {
-        println!("{}", $m);
+        eprintln!("{}", $m);
         return
     } }
+}
+
+pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
+    if c == sep { !esc }
+    else {
+        *esc = c == escape && !*esc;
+        false
+    }
+}
+
+pub fn splitn_escaped(
+    s: &str,
+    n: usize,
+    escape: char,
+    sep: char
+) {
+    s.splitn({
+        let mut esc = false;
+        move |c| is_sep(&mut esc, c, escape, sep)
+    })
+}
+
+pub fn split_escaped(
+    s: &str,
+    escape: char,
+    sep: char
+) -> impl Iterator<Item=&str> {
+    s.split({
+        let mut esc = false;
+        move |c| is_sep(&mut esc, c, escape, sep)
+    })
 }
 
 pub(crate) struct BytesWriter<'a>(pub(crate) &'a mut BytesMut);
@@ -71,11 +102,27 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub(crate) fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, failure::Error> {
+pub fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, failure::Error> {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
         Ok(b.split().freeze())
+    })
+}
+
+pub fn rmpv_encode(t: &rmpv::Value) -> Result<Bytes, failure::Error> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        rmpv::encode::write_value(&mut BytesWriter(&mut *b), t)?;
+        Ok(b.split().freeze())
+    })
+}
+
+pub fn str_encode(t: &str) -> Bytes {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        b.extend_from_slice(t.as_bytes());
+        b.split().freeze()
     })
 }
 
@@ -86,7 +133,7 @@ pub enum BatchItem<T> {
 }
 
 #[must_use = "streams do nothing unless polled"]
-pub(crate) struct Batched<S: Stream> {
+pub struct Batched<S: Stream> {
     stream: S,
     ended: bool,
     max: usize,
@@ -104,7 +151,7 @@ impl<S: Stream> Batched<S> {
     unsafe_unpinned!(ended: bool);
     unsafe_unpinned!(current: usize);
 
-    pub(crate) fn new(stream: S, max: usize) -> Batched<S> {
+    pub fn new(stream: S, max: usize) -> Batched<S> {
         Batched {
             stream, max,
             ended: false,

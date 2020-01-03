@@ -41,7 +41,7 @@
 #[macro_use] extern crate failure;
 #[macro_use] extern crate pin_utils;
 
-#[macro_use] mod utils;
+#[macro_use] pub mod utils;
 mod resolver_store;
 pub mod path;
 pub mod channel;
