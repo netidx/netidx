@@ -11,7 +11,7 @@ use async_std::{
     io::{stdin, BufReader},
 };
 use super::ResolverConfig;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use failure::Error;
 
 fn jsonv_to_rmpv(v: serde_json::Value) -> rmpv::Value {
@@ -43,8 +43,11 @@ fn from_json(s: &str) -> Result<Bytes, Error> {
     utils::rmpv_encode(&jsonv_to_rmpv(serde_json::from_str(s)?))
 }
 
-pub(crate) fn run(config: ResolverConfig, json: bool) {
+fn e() -> Error { format_err!("") }
+
+pub(crate) fn run(config: ResolverConfig, json: bool, timeout: Option<u64>) {
     task::block_on(async {
+        let timeout = timeout.map(Duration::from_secs);
         let mut published: HashMap<Path, PublishedRaw> = HashMap::new();
         let publisher = Publisher::new(config.bind, BindCfg::Any).await
             .expect("creating publisher");
@@ -56,21 +59,9 @@ pub(crate) fn run(config: ResolverConfig, json: bool) {
                 BatchItem::EndBatch => {
                     for line in batch.drain(..) {
                         let mut m = utils::splitn_escaped(&*line, 2, '\\', '|');
-                        let path = match m.next() {
-                            Some(path) => path,
-                            None => {
-                                eprintln!("missing path");
-                                continue
-                            }
-                        };
+                        let path = try_cont!("missing path", m.next().ok_or_else(e));
                         let val = {
-                            let v = match m.next() {
-                                Some(val) => val,
-                                None => {
-                                    eprintln!("missing value");
-                                    continue
-                                }
-                            };
+                            let v = try_cont!("missing value", m.next().ok_or_else(e));
                             if json {
                                 try_cont!("invalid json", from_json(v))
                             } else {
@@ -89,7 +80,7 @@ pub(crate) fn run(config: ResolverConfig, json: bool) {
                             }
                         }
                     }
-                    try_cont!("flush failed", publisher.flush(None).await);
+                    try_cont!("flush failed", publisher.flush(timeout).await);
                 }
             }
         }

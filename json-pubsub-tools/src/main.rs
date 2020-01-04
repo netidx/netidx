@@ -40,7 +40,8 @@ enum Opt {
         #[structopt(subcommand)]
         cmd: ResolverCmd
     },
-    #[structopt(name = "publisher", about = "publish (path,data) lines or (path,json) lines from stdin")]
+    #[structopt(name = "publisher",
+                about = "publish path|data lines from stdin")]
     Publisher {
         #[structopt(short = "c",
                     long = "config",
@@ -48,8 +49,13 @@ enum Opt {
                     default_value = "./resolver.conf",
                     parse(from_os_str))]
         config: PathBuf,
-        #[structopt(short = "j", long = "json", help = "parse input as json")]
+        #[structopt(short = "j", long = "json", help = "interpret data as json")]
         json: bool,
+        #[structopt(
+            short = "t", long = "timeout",
+            help = "require subscribers to consume values before timeout seconds"
+        )]
+        timeout: Option<u64>,
     },
     /*
     #[structopt(name = "subscriber", about = "subscribe and print json values")]
@@ -116,7 +122,7 @@ fn main() {
             resolver_server::run(get_cfg(config), !foreground),
         Opt::Resolver {config, cmd} =>
             resolver::run(get_cfg(config), cmd),
-        Opt::Publisher {config, json} =>
-            publisher::run(get_cfg(config), json),
+        Opt::Publisher {config, json, timeout} =>
+            publisher::run(get_cfg(config), json, timeout),
     }
 }
