@@ -2,10 +2,7 @@ use json_pubsub::{
     path::Path,
     resolver::{Resolver, ReadOnly, WriteOnly},
 };
-use async_std::{
-    prelude::*,
-    task,
-};
+use async_std::task;
 use super::{ResolverConfig, ResolverCmd};
 
 pub(crate) fn run(config: ResolverConfig, cmd: ResolverCmd) {

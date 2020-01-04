@@ -1,10 +1,6 @@
 use json_pubsub::resolver_server::Server;
-use std::net::SocketAddr;
 use futures::future;
-use async_std::{
-    prelude::*,
-    task,
-};
+use async_std::task;
 use daemonize::Daemonize;
 use super::ResolverConfig;
 

@@ -1,5 +1,4 @@
 #[macro_use] extern crate serde_derive;
-#[macro_use] extern crate structopt;
 #[macro_use] extern crate json_pubsub;
 #[macro_use] extern crate failure;
 use json_pubsub::path::Path;
@@ -9,6 +8,7 @@ use structopt::StructOpt;
 mod resolver_server;
 mod resolver;
 mod publisher;
+mod subscriber;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResolverConfig {
@@ -19,36 +19,31 @@ struct ResolverConfig {
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
-enum Opt {
+struct Opt {
+    #[structopt(short = "c", long = "config",
+                help = "override the default config file",
+                default_value = "./resolver.conf",
+                parse(from_os_str))]
+    config: PathBuf,
+    #[structopt(subcommand)]
+    cmd: Sub,
+}
+
+#[derive(StructOpt, Debug)]
+enum Sub {
     #[structopt(name = "resolver-server", about = "Run a resolver server")]
     ResolverServer {
-        #[structopt(short = "c", long = "config",
-                    help = "override the default config file",
-                    default_value = "./resolver.conf",
-                    parse(from_os_str))]
-        config: PathBuf,
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool
     },
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver {
-        #[structopt(short = "c", long = "config",
-                    help = "override the default config file",
-                    default_value = "./resolver.conf",
-                    parse(from_os_str))]
-        config: PathBuf,
         #[structopt(subcommand)]
         cmd: ResolverCmd
     },
     #[structopt(name = "publisher",
                 about = "publish path|data lines from stdin")]
     Publisher {
-        #[structopt(short = "c",
-                    long = "config",
-                    help = "override the default config file",
-                    default_value = "./resolver.conf",
-                    parse(from_os_str))]
-        config: PathBuf,
         #[structopt(short = "j", long = "json", help = "interpret data as json")]
         json: bool,
         #[structopt(
@@ -57,14 +52,12 @@ enum Opt {
         )]
         timeout: Option<u64>,
     },
-    /*
-    #[structopt(name = "subscriber", about = "subscribe and print json values")]
+    #[structopt(name = "subscriber", about = "subscribe and print values")]
     Subscriber {
-        #[structopt(short = "f", long = "file", help = "subscribe to all paths in file")]
-        file: Option<PathBuf>,
         #[structopt(name = "path")]
         paths: Vec<Path>
     },
+    /*
     #[structopt(name = "stress", about = "stress test")]
     Stress {
         #[structopt(short = "c", long = "config", help = "override default config")]
@@ -113,16 +106,14 @@ enum Stress {
  */
 
 fn main() {
-    let get_cfg = |path| -> ResolverConfig {
-        serde_json::from_slice(&*read(path).expect("reading config"))
-            .expect("parsing config")
-    };
-    match Opt::from_args() {
-        Opt::ResolverServer {config, foreground} =>
-            resolver_server::run(get_cfg(config), !foreground),
-        Opt::Resolver {config, cmd} =>
-            resolver::run(get_cfg(config), cmd),
-        Opt::Publisher {config, json, timeout} =>
-            publisher::run(get_cfg(config), json, timeout),
+    let opt = Opt::from_args();
+    let cfg =
+        serde_json::from_slice(&*read(opt.config).expect("reading config"))
+        .expect("parsing config");
+    match opt.cmd {
+        Sub::ResolverServer {foreground} => resolver_server::run(cfg, !foreground),
+        Sub::Resolver {cmd} => resolver::run(cfg, cmd),
+        Sub::Publisher {json, timeout} => publisher::run(cfg, json, timeout),
+        Sub::Subscriber {paths} => subscriber::run(cfg, paths),
     }
 }
