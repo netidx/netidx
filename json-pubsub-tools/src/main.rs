@@ -55,7 +55,7 @@ enum Sub {
     #[structopt(name = "subscriber", about = "subscribe and print values")]
     Subscriber {
         #[structopt(name = "path")]
-        paths: Vec<Path>
+        paths: Vec<String>
     },
     /*
     #[structopt(name = "stress", about = "stress test")]

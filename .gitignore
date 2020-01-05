@@ -61,8 +61,6 @@ __pycache__/
 .settings/
 .valgrindrc
 .vscode/
-/*-*-*-*/
-/*-*-*/
 /Makefile
 /build
 /config.toml
@@ -104,5 +102,4 @@ version.texi
 .cargo
 !src/vendor/**
 /src/target/
-
 no_llvm_build
