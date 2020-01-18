@@ -1,13 +1,16 @@
 use bytes::{Bytes, BytesMut};
+use futures::{
+    prelude::*,
+    sink::Sink,
+    task::{Context, Poll},
+};
+use serde::Serialize;
+use std::pin::Pin;
 use std::{
+    cell::RefCell,
     io::{self, Write},
     result::Result,
-    cell::RefCell,
 };
-use async_std::prelude::*;
-use futures::{task::{Poll, Context}, sink::Sink};
-use std::pin::Pin;
-use serde::Serialize;
 
 #[macro_export]
 macro_rules! try_cont {
@@ -16,10 +19,10 @@ macro_rules! try_cont {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("{}: {}", $m, e);
-                continue
+                continue;
             }
         }
-    }
+    };
 }
 
 #[macro_export]
@@ -32,7 +35,7 @@ macro_rules! try_brk {
                 break;
             }
         }
-    }
+    };
 }
 
 #[macro_export]
@@ -43,10 +46,10 @@ macro_rules! try_ret {
             Err(e) => {
                 // CR estokes: use a better method
                 eprintln!("{}: {}", $m, e);
-                return
+                return;
             }
         }
-    }
+    };
 }
 
 #[macro_export]
@@ -54,22 +57,23 @@ macro_rules! or_ret {
     ($e:expr) => {
         match $e {
             Some(r) => r,
-            None => return
+            None => return,
         }
-    }
+    };
 }
 
 #[macro_export]
 macro_rules! ret {
-    ($m:expr) => { {
+    ($m:expr) => {{
         eprintln!("{}", $m);
-        return
-    } }
+        return;
+    }};
 }
 
 pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
-    if c == sep { !*esc }
-    else {
+    if c == sep {
+        !*esc
+    } else {
         *esc = c == escape && !*esc;
         false
     }
@@ -79,19 +83,15 @@ pub fn splitn_escaped(
     s: &str,
     n: usize,
     escape: char,
-    sep: char
-) -> impl Iterator<Item=&str> {
+    sep: char,
+) -> impl Iterator<Item = &str> {
     s.splitn(n, {
         let mut esc = false;
         move |c| is_sep(&mut esc, c, escape, sep)
     })
 }
 
-pub fn split_escaped(
-    s: &str,
-    escape: char,
-    sep: char
-) -> impl Iterator<Item=&str> {
+pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &str> {
     s.split({
         let mut esc = false;
         move |c| is_sep(&mut esc, c, escape, sep)
@@ -102,12 +102,12 @@ pub(crate) struct BytesWriter<'a>(pub(crate) &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-	self.0.extend(buf);
-	Ok(buf.len())
+        self.0.extend(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-	Ok(())
+        Ok(())
     }
 }
 
@@ -142,7 +142,7 @@ pub fn str_encode(t: &str) -> Bytes {
 #[derive(Debug, Clone)]
 pub enum BatchItem<T> {
     InBatch(T),
-    EndBatch
+    EndBatch,
 }
 
 #[must_use = "streams do nothing unless polled"]
@@ -166,9 +166,10 @@ impl<S: Stream> Batched<S> {
 
     pub fn new(stream: S, max: usize) -> Batched<S> {
         Batched {
-            stream, max,
+            stream,
+            max,
             ended: false,
-            current: 0
+            current: 0,
         }
     }
 }
@@ -187,7 +188,7 @@ impl<S: Stream> Stream for Batched<S> {
                 Poll::Ready(Some(v)) => {
                     *self.as_mut().current() += 1;
                     Poll::Ready(Some(BatchItem::InBatch(v)))
-                },
+                }
                 Poll::Ready(None) => {
                     *self.as_mut().ended() = true;
                     if self.current == 0 {
@@ -195,7 +196,7 @@ impl<S: Stream> Stream for Batched<S> {
                     } else {
                         Poll::Ready(Some(BatchItem::EndBatch))
                     }
-                },
+                }
                 Poll::Pending => {
                     if self.current == 0 {
                         Poll::Pending
@@ -216,8 +217,8 @@ impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
     type Error = <S as Sink<Item>>::Error;
 
     fn poll_ready(
-        self: Pin<&mut Self>, 
-        cx: &mut Context
+        self: Pin<&mut Self>,
+        cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
         self.stream().poll_ready(cx)
     }
@@ -227,15 +228,15 @@ impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
     }
 
     fn poll_flush(
-        self: Pin<&mut Self>, 
-        cx: &mut Context
+        self: Pin<&mut Self>,
+        cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
         self.stream().poll_flush(cx)
     }
 
     fn poll_close(
-        self: Pin<&mut Self>, 
-        cx: &mut Context
+        self: Pin<&mut Self>,
+        cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
         self.stream().poll_close(cx)
     }
