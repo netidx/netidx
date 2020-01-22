@@ -35,7 +35,8 @@ pub enum ToResolver {
     List(Path),
     Publish(Vec<Path>),
     Unpublish(Vec<Path>),
-    Clear
+    Clear,
+    Heartbeat
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -60,6 +61,7 @@ fn handle_batch(
             let s = store.read();
             for m in msgs {
                 match m {
+                    ToResolver::Heartbeat => (),
                     ToResolver::Resolve(paths) => {
                         let res = paths.iter().map(|p| s.resolve(p)).collect();
                         con.queue_send(&FromResolver::Resolved(res))?
@@ -78,6 +80,7 @@ fn handle_batch(
             let mut s = store.write();
             for m in msgs {
                 match m {
+                    ToResolver::Heartbeat => (),
                     ToResolver::Resolve(_) | ToResolver::List(_) =>
                         con.queue_send(&FromResolver::Error("write only".into()))?,
                     ToResolver::Publish(paths) => {

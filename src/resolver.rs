@@ -3,11 +3,6 @@ use crate::{
     channel::Channel,
     resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
 };
-use futures::{
-    future::FutureExt as FRSFutureExt,
-    sink::SinkExt,
-    channel::{mpsc, oneshot},
-};
 use std::{
     result,
     net::{SocketAddr, ToSocketAddrs},
@@ -15,9 +10,14 @@ use std::{
     time::Duration,
     marker::PhantomData,
 };
-use async_std::{
-    task, future,
-    prelude::*,
+use futures::{
+    select,
+    prelude::*
+};
+use tokio::{
+    task,
+    time::{self, Instant},
+    sync::{oneshot, mpsc},
     net::TcpStream,
 };
 use failure::Error;
@@ -55,7 +55,7 @@ pub struct Resolver<R> {
 impl<R: ReadableOrWritable> Resolver<R> {
     async fn send(&mut self, m: ToResolver) -> Result<FromResolver> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send((m, tx)).await?;
+        self.sender.send((m, tx))?;
         match rx.await? {
             FromResolver::Error(s) => bail!(s),
             m => Ok(m)
@@ -66,7 +66,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(connection(receiver, resolver, Some(publisher)));
         Ok(Resolver { sender, kind: PhantomData })
     }
@@ -77,7 +77,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(connection(receiver, resolver, None));
         Ok(Resolver { sender, kind: PhantomData })
     }
@@ -123,7 +123,7 @@ async fn connect(
     let mut backoff = 0;
     loop {
         if backoff > 0 {
-            task::sleep(Duration::from_secs(backoff)).await;
+            time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&addr).await);
@@ -149,54 +149,73 @@ async fn connect(
 }
 
 async fn connection(
-    mut receiver: mpsc::UnboundedReceiver<ToCon>,
+    receiver: mpsc::UnboundedReceiver<ToCon>,
     resolver: SocketAddr,
     publisher: Option<SocketAddr>
 ) {
-    enum M { TimeToHB, TimeToDC, Msg(ToCon), Stop }
     let mut published = HashSet::new();
     let mut con: Option<Channel> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
+    let now = Instant::now();
+    let mut act = false;
+    let mut receiver = receiver.fuse();
+    let mut hb = time::interval_at(now + ttl, ttl).fuse();
+    let mut dc = time::interval_at(now + linger, linger).fuse();
     loop {
-        let hb = future::ready(M::TimeToHB).delay(ttl);
-        let dc = future::ready(M::TimeToDC).delay(linger);
-        let msg = receiver.next().map(|m| match m {
-            None => M::Stop,
-            Some(m) => M::Msg(m)
-        });
-        match hb.race(dc).race(msg).await {
-            M::Stop => break,
-            M::TimeToDC => { con = None; }
-            M::TimeToHB => {
-                con = Some(connect(resolver, publisher, &published).await);
-            }
-            M::Msg((m, reply)) => {
-                let m_r = &m;
-                let r = loop {
-                    let c = match con {
-                        Some(ref mut c) => c,
+        select! {
+            _ = dc.next() => {
+                if act {
+                   act = false; 
+                } else {
+                    con = None;
+                }
+            },
+            _ = hb.next() => loop {
+                if act {
+                    break;
+                } else {
+                    match con {
                         None => {
                             con = Some(connect(resolver, publisher, &published).await);
-                            con.as_mut().unwrap()
-                        }
-                    };
-                    match c.send_one(m_r).await {
-                        Err(_) => { con = None; }
-                        Ok(()) => match c.receive().await {
+                            break;
+                        },
+                        Some(ref mut c) => match c.send_one(&ToResolver::Heartbeat).await {
+                            Ok(()) => break,
                             Err(_) => { con = None; }
-                            Ok(FromResolver::Published) => {
-                                published.extend(match m_r {
-                                    ToResolver::Publish(p) => p.iter().cloned(),
-                                    _ => break FromResolver::Published,
-                                });
-                                break FromResolver::Published
-                            }
-                            Ok(r) => break r
                         }
                     }
-                };
-                let _ = reply.send(r);
+                }
+            },
+            m = receiver.next() => match m {
+                None => break,
+                Some((m, reply)) => {
+                    act = true;
+                    let m_r = &m;
+                    let r = loop {
+                        let c = match con {
+                            Some(ref mut c) => c,
+                            None => {
+                                con = Some(connect(resolver, publisher, &published).await);
+                                con.as_mut().unwrap()
+                            }
+                        };
+                        match c.send_one(m_r).await {
+                            Err(_) => { con = None; }
+                            Ok(()) => match c.receive().await {
+                                Err(_) => { con = None; }
+                                Ok(r) => break r,
+                                Ok(FromResolver::Published) => {
+                                    if let ToResolver::Publish(p) = m_r {
+                                        published.extend(p.iter().cloned());
+                                    }
+                                    break FromResolver::Published
+                                }
+                            }
+                        }
+                    };
+                    let _ = reply.send(r);
+                }
             }
         }
     }
