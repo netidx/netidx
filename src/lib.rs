@@ -35,7 +35,7 @@
 //! type that supports Serialize can be sent. If a subscriber doesn't
 //! know what type a publisher will be publishing, it can just elect
 //! to receive `rmpv::Value`, or even just the raw bytes.
-
+#![recursion_limit="1024"]
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
@@ -46,7 +46,7 @@ mod resolver_store;
 pub mod path;
 pub mod channel;
 //pub mod resolver;
-//pub mod resolver_server;
+pub mod resolver_server;
 //pub mod publisher;
 //pub mod subscriber;
 

@@ -1,8 +1,7 @@
-use crate::utils::{BytesWriter, mp_encode};
+use crate::utils::mp_encode;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::prelude::*;
-use futures::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     io::{Error, ErrorKind, IoSlice},
@@ -124,8 +123,7 @@ impl Channel {
         if self.incoming.remaining_mut() < BUF {
             self.incoming.reserve(self.incoming.capacity());
         }
-        let n = self.socket.read_buf(&mut self.incoming).await?;
-        if n == 0 {
+        if self.socket.read_buf(&mut self.incoming).await? == 0 {
             Err(Error::new(ErrorKind::UnexpectedEof, "end of file"))
         } else {
             Ok(())
@@ -152,9 +150,7 @@ impl Channel {
         loop {
             match self.decode_from_buffer() {
                 Some(msg) => break Ok(msg),
-                None => {
-                    self.fill_buffer().await?;
-                }
+                None => { self.fill_buffer().await?; }
             }
         }
     }
