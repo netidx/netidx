@@ -301,8 +301,9 @@ mod test {
 
     #[test]
     fn publish_resolve() {
-        use async_std::task;
-        task::block_on(async {
+        use tokio::runtime::Runtime;
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async {
             let server = init_server().await;
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let mut w = Resolver::<WriteOnly>::new_w(server.local_addr(), paddr).unwrap();

@@ -29,8 +29,7 @@ impl Buf for BytesDeque {
         }
     }
     
-    fn advance(&mut self, cnt: usize) {
-        let mut cnt = cnt;
+    fn advance(&mut self, mut cnt: usize) {
         while cnt > 0 && self.0.len() > 0 {
             let b = &mut self.0[0];
             let n = min(cnt, b.remaining());
@@ -47,14 +46,11 @@ impl Buf for BytesDeque {
 
     fn bytes_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         let mut i = 0;
-        let mut len = 0;
         while i < self.0.len() && i < dst.len() {
-            let b = self.0[i].bytes();
-            dst[i] = IoSlice::new(b);
-            len += b.len();
+            dst[i] = IoSlice::new(&self.0[i].bytes());
             i += 1;
         }
-        len
+        i
     }
 }
 
