@@ -4,7 +4,7 @@ use crate::{
     resolver_store::Store,
 };
 use tokio::{
-    task, time, sync::oneshot,
+    task, time::{self, Instant}, sync::oneshot,
     net::{TcpStream, TcpListener}
 };
 use futures::{
@@ -149,6 +149,8 @@ async fn client_loop(
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
     let mut batch = Vec::new();
+    let mut act = false;
+    let mut timeout = time::interval_at(Instant::now() + ttl, ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel>,
         batch: &mut Vec<ToResolver>
@@ -170,6 +172,7 @@ async fn client_loop(
                     println!("error reading message: {}", e)
                 },
                 Ok(()) => {
+                    act = true;
                     let c = con.as_mut().unwrap();
                     match handle_batch(&store, batch.drain(..), c, write_addr) {
                         Err(_) => { con = None },
@@ -180,18 +183,22 @@ async fn client_loop(
                     }
                 }
             },
-            _ = time::delay_for(ttl).fuse() => {
-                if let Some(write_addr) = write_addr {
-                    let mut store = store.write();
-                    if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
-                        if let Some(stop) = mem::replace(cl, None) {
-                            let _ = stop.send(());
+            _ = timeout.next() => {
+                if act {
+                    act = false;
+                } else {
+                    if let Some(write_addr) = write_addr {
+                        let mut store = store.write();
+                        if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
+                            if let Some(stop) = mem::replace(cl, None) {
+                                let _ = stop.send(());
+                            }
                         }
+                        store.unpublish_addr(write_addr);
+                        store.gc();
                     }
-                    store.unpublish_addr(write_addr);
-                    store.gc();
+                    bail!("client timed out");
                 }
-                bail!("client timed out");
             },
         }
     }
