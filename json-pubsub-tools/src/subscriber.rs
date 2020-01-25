@@ -46,9 +46,9 @@ fn mpv_to_json(v: rmpv::Value) -> serde_json::Value {
         Rv::F32(f) => cvt_float(f as f64),
         Rv::F64(f) => cvt_float(f),
         Rv::String(s) => Jv::String(cvt_str(s)),
-        Rv::Binary(_) => Jv::String("<binary>".into()),
+        Rv::Binary(b) => Jv::String(format!("{:?}", b)),
         Rv::Array(a) => Jv::Array(a.into_iter().map(mpv_to_json).collect()),
-        Rv::Ext(u, _) => Jv::String(format!("extension: {} val: <binary>", u)),
+        Rv::Ext(u, b) => Jv::String(format!("extension: {} val: {:?}", u, b)),
         Rv::Integer(i) => {
             if let Some(i) = i.as_i64() {
                 Jv::Number(Number::from(i))
