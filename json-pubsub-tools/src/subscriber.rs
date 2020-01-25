@@ -4,15 +4,13 @@ use json_pubsub::{
     utils::{Batched, BatchItem},
 };
 use futures::{
-    stream, future,
-    future::FutureExt as FrsFutureExt,
-    sink::SinkExt as FrsSinkExt,
-    channel::{oneshot, mpsc}
-};
-use async_std::{
     prelude::*,
-    task,
-    io::{self, BufReader},
+    select,
+};
+use tokio::{
+    task, runtime::Runtime,
+    io::{self, BufReader, AsyncWriteExt, AsyncBufReadExt},
+    sync::{oneshot, mpsc},
 };
 use std::{
     mem,
@@ -85,36 +83,43 @@ async fn run_subscription(
     stop: oneshot::Receiver<()>,
     mut out: mpsc::Sender<(Path, String)>,
 ) {
-    enum M { Update(Option<Bytes>), Stop };
     let path = Path::from(path.replace('|', r"\|"));
-    let mut updates = sub.updates(true);
-    let stop = stop.shared();
+    let mut updates = sub.updates(true).fuse();
+    let mut stop = stop.fuse();
     loop {
-        let update = updates.next().map(|m| M::Update(m));
-        let stop = stop.clone().map(|_| M::Stop);
-        match update.race(stop).await {
-            M::Stop | M::Update(None) => { break; },
-            M::Update(Some(m)) => {
-                let v = match rmpv::decode::value::read_value(&mut &*m) {
-                    Err(_) => String::from(String::from_utf8_lossy(&*m)),
-                    Ok(v) => try_brk!("json", serde_json::to_string(&mpv_to_json(v))),
-                };
-                try_brk!("subscription ended", out.send((path.clone(), v)).await);
+        select! {
+            _ = stop => break,
+            m = updates.next() => match m {
+                None => break,
+                Some(m) => {
+                    let v = match rmpv::decode::value::read_value(&mut &*m) {
+                        Err(_) => String::from(String::from_utf8_lossy(&*m)),
+                        Ok(v) => try_brk!("json", serde_json::to_string(&mpv_to_json(v))),
+                    };
+                    try_brk!("subscription ended", out.send((path.clone(), v)).await);
+                }
             }
         }
     }
 }
 
-async fn output_vals(mut msgs: mpsc::Receiver<(Path, String)>) {
-    let stdout = io::stdout();
-    let mut w = stdout.lock().await;
+async fn output_vals(msgs: mpsc::Receiver<(Path, String)>) {
+    let mut msgs = Batched::new(msgs, 10000);
+    let mut stdout = io::stdout();
     let mut buf = String::new();
-    while let Some((path, v)) = msgs.next().await {
-        buf.push_str(&*path);
-        buf.push('|');
-        buf.push_str(&*v);
-        try_brk!("write", w.write_all(buf.as_bytes()).await);
-        buf.clear();
+    while let Some(m) = msgs.next().await {
+        match m {
+            BatchItem::InBatch((path, v)) => {
+                buf.push_str(&*path);
+                buf.push('|');
+                buf.push_str(&*v);
+                buf.push('\n');
+            },
+            BatchItem::EndBatch => {
+                try_brk!("write", stdout.write_all(buf.as_bytes()).await);
+                buf.clear();
+            }
+        }
     }
 }
 
@@ -141,7 +146,8 @@ impl FromStr for Req {
 }
 
 pub(crate) fn run(cfg: ResolverConfig, paths: Vec<String>) {
-    task::block_on(async {
+    let mut rt = Runtime::new().expect("failed to init runtime");
+    rt.block_on(async {
         let mut subscriptions: HashMap::<Path, oneshot::Sender<()>> = HashMap::new();
         let subscriber = Subscriber::new(cfg.bind).expect("create subscriber");
         let (out_tx, out_rx) = mpsc::channel(100);

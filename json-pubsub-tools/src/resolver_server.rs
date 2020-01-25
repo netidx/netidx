@@ -1,6 +1,6 @@
 use json_pubsub::resolver_server::Server;
 use futures::future;
-use async_std::task;
+use tokio::runtime::Runtime;
 use daemonize::Daemonize;
 use super::ResolverConfig;
 
@@ -11,7 +11,8 @@ pub(crate) fn run(config: ResolverConfig, daemonize: bool) {
             .start()
             .expect("failed to daemonize");
     }
-    task::block_on(async {
+    let mut rt = Runtime::new().expect("failed to init runtime");
+    rt.block_on(async {
         let server =
             Server::new(config.bind, config.max_clients).await
             .expect("starting server");

@@ -2,11 +2,12 @@ use json_pubsub::{
     path::Path,
     resolver::{Resolver, ReadOnly, WriteOnly},
 };
-use async_std::task;
+use tokio::runtime::Runtime;
 use super::{ResolverConfig, ResolverCmd};
 
 pub(crate) fn run(config: ResolverConfig, cmd: ResolverCmd) {
-    task::block_on(async {
+    let mut rt = Runtime::new().expect("failed to init runtime");
+    rt.block_on(async {
         match cmd {
             ResolverCmd::Resolve { path } => {
                 let mut resolver = Resolver::<ReadOnly>::new_r(config.bind).unwrap();

@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use futures::{
     prelude::*,
     sink::Sink,
@@ -8,8 +8,11 @@ use serde::Serialize;
 use std::pin::Pin;
 use std::{
     cell::RefCell,
-    io::{self, Write},
+    io::{self, Write, IoSlice},
     result::Result,
+    ops::{Deref, DerefMut},
+    collections::VecDeque,
+    cmp::min,
 };
 
 #[macro_export]
@@ -137,6 +140,70 @@ pub fn str_encode(t: &str) -> Bytes {
         b.extend_from_slice(t.as_bytes());
         b.split().freeze()
     })
+}
+
+pub struct BytesDeque(VecDeque<Bytes>);
+
+impl BytesDeque {
+    pub fn new() -> Self {
+        BytesDeque(VecDeque::new())
+    }
+
+    pub fn with_capacity(c: usize) -> Self {
+        BytesDeque(VecDeque::with_capacity(c))
+    }
+}
+
+impl Deref for BytesDeque {
+    type Target = VecDeque<Bytes>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for BytesDeque {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Buf for BytesDeque {
+    fn remaining(&self) -> usize {
+        self.0.iter().fold(0, |s, b| s + b.remaining())
+    }
+
+    fn bytes(&self) -> &[u8] {
+        if self.0.len() == 0 {
+            &[]
+        } else {
+            self.0[0].bytes()
+        }
+    }
+    
+    fn advance(&mut self, mut cnt: usize) {
+        while cnt > 0 && self.0.len() > 0 {
+            let b = &mut self.0[0];
+            let n = min(cnt, b.remaining());
+            b.advance(n);
+            cnt -= n;
+            if b.remaining() == 0 {
+                self.0.pop_front();
+            }
+        }
+        if cnt > 0 {
+            panic!("Buf::advance called with cnt - remaining = {} ", cnt);
+        }
+    }
+
+    fn bytes_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        let mut i = 0;
+        while i < self.0.len() && i < dst.len() {
+            dst[i] = IoSlice::new(&self.0[i].bytes());
+            i += 1;
+        }
+        i
+    }
 }
 
 #[derive(Debug, Clone)]

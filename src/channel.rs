@@ -1,58 +1,16 @@
-use crate::utils::mp_encode;
+use crate::utils::{mp_encode, BytesDeque};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    io::{Error, ErrorKind, IoSlice},
+    io::{Error, ErrorKind},
     mem,
     result::Result,
-    collections::VecDeque,
-    cmp::min,
 };
 use tokio::net::TcpStream;
 
 const BUF: usize = 4096;
-
-struct BytesDeque(VecDeque<Bytes>);
-
-impl Buf for BytesDeque {
-    fn remaining(&self) -> usize {
-        self.0.iter().fold(0, |s, b| s + b.remaining())
-    }
-
-    fn bytes(&self) -> &[u8] {
-        if self.0.len() == 0 {
-            &[]
-        } else {
-            self.0[0].bytes()
-        }
-    }
-    
-    fn advance(&mut self, mut cnt: usize) {
-        while cnt > 0 && self.0.len() > 0 {
-            let b = &mut self.0[0];
-            let n = min(cnt, b.remaining());
-            b.advance(n);
-            cnt -= n;
-            if b.remaining() == 0 {
-                self.0.pop_front();
-            }
-        }
-        if cnt > 0 {
-            panic!("Buf::advance called with cnt - remaining = {} ", cnt);
-        }
-    }
-
-    fn bytes_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
-        let mut i = 0;
-        while i < self.0.len() && i < dst.len() {
-            dst[i] = IoSlice::new(&self.0[i].bytes());
-            i += 1;
-        }
-        i
-    }
-}
 
 /// RawChannel sends and receives u32 length prefixed messages, which
 /// are otherwise just raw bytes.
@@ -68,7 +26,7 @@ impl Channel {
         Channel {
             socket,
             header: BytesMut::with_capacity(BUF),
-            outgoing: BytesDeque(VecDeque::new()),
+            outgoing: BytesDeque::new(),
             incoming: BytesMut::with_capacity(BUF),
         }
     }
@@ -87,8 +45,8 @@ impl Channel {
             self.header.reserve(self.header.capacity());
         }
         self.header.put_u32(msg.len() as u32);
-        self.outgoing.0.push_back(self.header.split().freeze());
-        Ok(self.outgoing.0.push_back(msg))
+        self.outgoing.push_back(self.header.split().freeze());
+        Ok(self.outgoing.push_back(msg))
     }
 
     /// Same as queue_send_raw, but encodes the message using msgpack
@@ -103,7 +61,7 @@ impl Channel {
     /// Initiate sending all outgoing messages and wait for the
     /// process to finish.
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
-        while self.outgoing.0.len() > 0 {
+        while self.outgoing.len() > 0 {
             self.socket.write_buf(&mut self.outgoing).await?;
         }
         Ok(())
