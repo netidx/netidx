@@ -46,7 +46,6 @@ enum ToCon {
         tx: Sender<Bytes>,
         last: bool,
     },
-    Last(Id, oneshot::Sender<Bytes>),
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
@@ -56,6 +55,7 @@ struct RawSubscriptionInner {
     addr: SocketAddr,
     dead: Arc<AtomicBool>,
     connection: UnboundedSender<ToCon>,
+    last: Arc<Mutex<Bytes>>,
 }
 
 impl Drop for RawSubscriptionInner {
@@ -85,11 +85,9 @@ impl RawSubscription {
         RawSubscriptionWeak(Arc::downgrade(&self.0))
     }
 
-    /// Get the last published value, or None if the subscription is dead.
-    pub async fn last(&self) -> Option<Bytes> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.0.connection.send(ToCon::Last(self.0.id, tx));
-        rx.await.ok()
+    /// Get the last published value.
+    pub fn last(&self) -> Bytes {
+        self.0.last.lock().clone()
     }
 
     /// Return true if the subscription has died.
@@ -134,11 +132,8 @@ impl<T: DeserializeOwned> Subscription<T> {
     }
 
     /// Get and decode the last published value.
-    pub async fn last(&self) -> Result<T, Error> {
-        match self.0.last().await {
-            None => Err(format_err!("subscription is dead")),
-            Some(buf) => Ok(rmp_serde::decode::from_read(&*buf)?),
-        }
+    pub fn last(&self) -> Result<T, Error> {
+        Ok(rmp_serde::decode::from_read(&*self.0.last())?)
     }
 
     /// See `RawSubscription::is_dead`
@@ -359,7 +354,7 @@ struct Sub {
     path: Path,
     streams: SmallVec<[Sender<Bytes>; 4]>,
     deads: SmallVec<[oneshot::Sender<()>; 4]>,
-    last: Bytes,
+    last: Arc<Mutex<Bytes>>,
     dead: Arc<AtomicBool>,
 }
 
@@ -380,18 +375,19 @@ async fn handle_val(
                     Err(_) => { sub.streams.remove(i); }
                 }
             }
-            sub.last = msg;
+            *sub.last.lock() = msg;
         }
         Entry::Vacant(e) => if let Some(req) = next_sub.take() {
             let dead = Arc::new(AtomicBool::new(false));
+            let last = Arc::new(Mutex::new(msg));
             e.insert(Sub {
                 path: req.path,
-                last: msg,
+                last: last.clone(),
                 dead: dead.clone(),
                 deads: SmallVec::new(),
                 streams: SmallVec::new(),
             });
-            let s = RawSubscriptionInner { id, addr, dead, connection: req.con };
+            let s = RawSubscriptionInner { id, addr, dead, connection: req.con, last };
             let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));
         }
     }
@@ -500,18 +496,14 @@ async fn connection(
                     if let Some(sub) = subscriptions.get_mut(&id) {
                         let mut add = true;
                         if last {
-                            if let Err(_) = tx.send(sub.last.clone()).await {
+                            let last = sub.last.lock().clone();
+                            if let Err(_) = tx.send(last).await {
                                 add = false;
                             }
                         }
                         if add {
                             sub.streams.push(tx);
                         }
-                    }
-                }
-                Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
-                    if let Some(sub) = subscriptions.get(&id) {
-                        let _ = tx.send(sub.last.clone());
                     }
                 }
                 Some(BatchItem::InBatch(ToCon::NotifyDead(id, tx))) => {
