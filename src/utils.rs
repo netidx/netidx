@@ -194,6 +194,7 @@ impl<S: Stream> Stream for Batched<S> {
                     if self.current == 0 {
                         Poll::Ready(None)
                     } else {
+                        *self.current() = 0;
                         Poll::Ready(Some(BatchItem::EndBatch))
                     }
                 }
@@ -201,6 +202,7 @@ impl<S: Stream> Stream for Batched<S> {
                     if self.current == 0 {
                         Poll::Pending
                     } else {
+                        *self.current() = 0;
                         Poll::Ready(Some(BatchItem::EndBatch))
                     }
                 }

@@ -468,7 +468,7 @@ async fn connection(
     let mut batched = Vec::new();
     let res = 'main: loop {
         select! {
-            msg = con.receive_raw().fuse() => match msg {
+            msg = con.receive_raw().fuse() => match dbg!(msg) {
                 Err(e) => break Err(Error::from(e)),
                 Ok(msg) => match next_val.take() {
                     Some(id) => {
@@ -482,7 +482,7 @@ async fn connection(
                     }
                 }
             },
-            msg = from_sub.next() => match msg {
+            msg = from_sub.next() => match dbg!(msg) {
                 None => break Err(format_err!("dropped")),
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
@@ -511,7 +511,7 @@ async fn connection(
                         sub.deads.push(tx);
                     }
                 }
-                Some(BatchItem::EndBatch) => if batched.len() > 0 {
+                Some(BatchItem::EndBatch) => if dbg!(batched.len()) > 0 {
                     for m in batched.drain(..) {
                         match con.queue_send(&m) {
                             Ok(()) => (),
@@ -575,7 +575,7 @@ mod test {
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
-                    time::delay_for(Duration::from_millis(100)).await;
+                    time::delay_for(Duration::from_millis(1000)).await;
                     vp0.update(&V {id: c, v: "foo".into()})
                         .unwrap();
                     vp1.update(&V {id: c, v: "bar".into()})
@@ -597,6 +597,7 @@ mod test {
                     None => panic!("publishers died"),
                     Some(Err(e)) => panic!("publisher error: {}", e),
                     Some(Ok(v)) => {
+                        dbg!(&v);
                         let c = match &*v.v {
                             "foo" => &mut c0,
                             "bar" => &mut c1,
