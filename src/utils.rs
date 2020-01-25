@@ -101,7 +101,7 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
-pub(crate) struct BytesWriter<'a>(pub(crate) &'a mut BytesMut);
+pub struct BytesWriter<'a>(pub &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

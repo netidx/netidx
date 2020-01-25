@@ -1,7 +1,7 @@
 use json_pubsub::{
     path::Path,
     subscriber::{Subscriber, RawSubscription},
-    utils::{Batched, BatchItem},
+    utils::{Batched, BatchItem, BytesDeque, BytesWriter},
 };
 use futures::{
     prelude::*,
@@ -15,10 +15,11 @@ use tokio::{
 use std::{
     mem,
     collections::{HashMap, HashSet},
-    str::FromStr,
-    result::Result
+    str::{FromStr, from_utf8},
+    result::Result,
+    cell::RefCell,
 };
-use bytes::Bytes;
+use bytes::{BytesMut, Bytes};
 use super::ResolverConfig;
 
 fn mpv_to_json(v: rmpv::Value) -> serde_json::Value {
@@ -77,13 +78,33 @@ fn mpv_to_json(v: rmpv::Value) -> serde_json::Value {
     }
 }
 
+thread_local! {
+    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
+fn json_encode(v: &serde_json::Value) -> Result<Bytes, serde_json::Error> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        serde_json::to_writer(&mut BytesWriter(&mut *b), &v)?;
+        Ok(b.split().freeze())
+    })
+}
+
+pub fn str_encode(t: &str) -> Bytes {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        b.extend_from_slice(t.as_bytes());
+        b.split().freeze()
+    })
+}
+
 async fn run_subscription(
     path: Path,
     sub: RawSubscription,
     stop: oneshot::Receiver<()>,
-    mut out: mpsc::Sender<(Path, String)>,
+    mut out: mpsc::Sender<(Bytes, Bytes)>,
 ) {
-    let path = Path::from(path.replace('|', r"\|"));
+    let path = str_encode(path.replace('|', r"\|").as_str());
     let mut updates = sub.updates(true).fuse();
     let mut stop = stop.fuse();
     loop {
@@ -93,8 +114,11 @@ async fn run_subscription(
                 None => break,
                 Some(m) => {
                     let v = match rmpv::decode::value::read_value(&mut &*m) {
-                        Err(_) => String::from(String::from_utf8_lossy(&*m)),
-                        Ok(v) => try_brk!("json", serde_json::to_string(&mpv_to_json(v))),
+                        Ok(v) => try_brk!("json", json_encode(&mpv_to_json(v))),
+                        Err(_) => match from_utf8(&*m) {
+                            Ok(_) => m,
+                            Err(_) => str_encode(format!("{:?}", m).as_str()),
+                        }
                     };
                     try_brk!("subscription ended", out.send((path.clone(), v)).await);
                 }
@@ -103,21 +127,28 @@ async fn run_subscription(
     }
 }
 
-async fn output_vals(msgs: mpsc::Receiver<(Path, String)>) {
+async fn output_vals(msgs: mpsc::Receiver<(Bytes, Bytes)>) {
+    let fsep = str_encode("|");
+    let rsep = str_encode("\n");
     let mut msgs = Batched::new(msgs, 10000);
     let mut stdout = io::stdout();
-    let mut buf = String::new();
-    while let Some(m) = msgs.next().await {
+    let mut buf = BytesDeque::new();
+    'main: while let Some(m) = msgs.next().await {
         match m {
             BatchItem::InBatch((path, v)) => {
-                buf.push_str(&*path);
-                buf.push('|');
-                buf.push_str(&*v);
-                buf.push('\n');
+                buf.push_back(path);
+                buf.push_back(fsep.clone());
+                buf.push_back(v);
+                buf.push_back(rsep.clone());
             },
-            BatchItem::EndBatch => {
-                try_brk!("write", stdout.write_all(buf.as_bytes()).await);
-                buf.clear();
+            BatchItem::EndBatch => while buf.len() > 0 {
+                match stdout.write_buf(&mut buf).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("error writing to stdout: {}", e);
+                        break 'main
+                    }
+                }
             }
         }
     }
