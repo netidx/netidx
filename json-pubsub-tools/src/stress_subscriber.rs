@@ -21,44 +21,19 @@ pub(crate) fn run(config: ResolverConfig) {
             .into_iter()
             .map(|(_, s)| s)
             .collect::<Result<Vec<Subscription<Data>>, _>>()
-            .expect("subscribe")
-            .into_iter()
-            .map(|s| s.updates(true));
-        let mut subs = stream::select_all(subs).fuse();
+            .expect("subscribe");
+        let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true))).fuse();
         let mut stat = time::interval(Duration::from_secs(1)).fuse();
         let mut count: usize = 0;
-        let mut last: Option<Data> = None;
         loop {
             select! {
                 _ = stat.next() => {
                     println!("rx: {}", count);
                     count = 0;
                 },
-                v = subs.next() => match v {
-                    None => break,
-                    Some(Err(e)) => panic!("recv err: {}", e),
-                    Some(Ok(v)) => {
-                        match last {
-                            None => { last = Some(v); },
-                            Some(ref mut last) => {
-                                if last.len() != v.len() {
-                                    panic!("length mismatch {}, vs {}",
-                                           last.len(), v.len());
-                                }
-                                for i in 0..last.len() {
-                                    if v[i] != last[i] && v[i] != last[i] + 1 {
-                                        panic!("no monotonic last {}, new {}",
-                                               last[i], v[i]);
-                                    }
-                                }
-                                if last[0] != v[0] {
-                                    *last = v;
-                                }
-                            }
-                        }
-                        count += 1;
-                    }
-                }
+                _ = vals.next() => {
+                    count += 1;
+                },
             }
         }
     });

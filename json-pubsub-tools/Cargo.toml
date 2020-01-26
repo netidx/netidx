@@ -5,6 +5,7 @@ authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 
 [profile.release]
+codegen-units = 1
 lto = true
 
 [dependencies]

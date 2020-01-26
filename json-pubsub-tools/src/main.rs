@@ -102,8 +102,6 @@ enum Stress {
         nvals: usize,
         #[structopt(name = "vsize", default_value = "1")]
         vsize: usize,
-        #[structopt(name = "ntasks", default_value = "1")]
-        ntasks: usize
     },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
     Subscriber
@@ -121,8 +119,8 @@ fn main() {
         Sub::Subscriber {paths} => subscriber::run(cfg, paths),
         Sub::Stress {cmd} => match cmd {
             Stress::Subscriber => stress_subscriber::run(cfg),
-            Stress::Publisher {nvals, vsize, ntasks} =>
-                stress_publisher::run(cfg, nvals, vsize, ntasks),
+            Stress::Publisher {nvals, vsize} =>
+                stress_publisher::run(cfg, nvals, vsize),
         }
     }
 }
