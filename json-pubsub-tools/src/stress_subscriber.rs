@@ -51,7 +51,9 @@ pub(crate) fn run(config: ResolverConfig) {
                                                last[i], v[i]);
                                     }
                                 }
-                                *last = v;
+                                if last[0] != v[0] {
+                                    *last = v;
+                                }
                             }
                         }
                         count += 1;
