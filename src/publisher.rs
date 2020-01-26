@@ -522,11 +522,11 @@ fn handle_batch(
                         let sender = cl.to_client.clone();
                         let ut = pb.by_id.get_mut(&id).unwrap();
                         ut.subscribed.insert(*addr, sender);
+                        con.queue_send(&FromPublisher::Subscribed(path, id))?;
+                        con.queue_send_raw(ut.current.clone())?;
                         for tx in ut.wait_client.drain(..) {
                             let _ = tx.send(());
                         }
-                        con.queue_send(&FromPublisher::Subscribed(path, id))?;
-                        con.queue_send_raw(ut.current.clone())?;
                     }
                 }
             }

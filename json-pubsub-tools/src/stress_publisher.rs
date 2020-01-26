@@ -11,8 +11,28 @@ use tokio::{
     runtime::Runtime,
     sync::mpsc,
 };
-use std::time::Duration;
+use std::{
+    time::Duration,
+    ops::{Deref, DerefMut},
+};
 use super::ResolverConfig;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct Data(pub(crate) Vec<usize>);
+
+impl Deref for Data {
+    type Target = Vec<usize>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Data {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 async fn run_group(
     publisher: Publisher,
@@ -21,7 +41,7 @@ async fn run_group(
     vsize: usize,
     tick: mpsc::UnboundedSender<()>,
 ) {
-    let mut vals = (0..vsize).into_iter().collect::<Vec<_>>();
+    let mut vals = Data((0..vsize).into_iter().collect::<Vec<_>>());
     let published = (i..n).into_iter().map(|i| {
         let path = Path::from(format!("/bench/{}", i));
         publisher.publish(path, &vals).expect("encode")

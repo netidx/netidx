@@ -1,3 +1,4 @@
+#![recursion_limit="1024"]
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate json_pubsub;
 #[macro_use] extern crate failure;
@@ -10,6 +11,7 @@ mod resolver;
 mod publisher;
 mod subscriber;
 mod stress_publisher;
+mod stress_subscriber;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResolverConfig {
@@ -118,9 +120,9 @@ fn main() {
         Sub::Publisher {json, timeout} => publisher::run(cfg, json, timeout),
         Sub::Subscriber {paths} => subscriber::run(cfg, paths),
         Sub::Stress {cmd} => match cmd {
+            Stress::Subscriber => stress_subscriber::run(cfg),
             Stress::Publisher {nvals, vsize, ntasks} =>
                 stress_publisher::run(cfg, nvals, vsize, ntasks),
-            Stress::Subscriber => (),
         }
     }
 }

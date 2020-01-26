@@ -339,10 +339,18 @@ impl Subscriber {
         }).collect()
     }
 
+    pub async fn subscribe<T: DeserializeOwned>(
+        &self, batch: impl IntoIterator<Item = Path>,
+    ) -> Vec<(Path, Result<Subscription<T>, Error>)> {
+        self.subscribe_raw(batch).await.into_iter().map(|(p, r)| {
+            (p, r.map(|r| r.typed()))
+        }).collect()
+    }
+
     /// Subscribe to one path. This is sufficient for a small number
     /// of paths, but if you need to subscribe to a lot of things use
-    /// `subscribe_raw`
-    pub async fn subscribe<T: DeserializeOwned>(
+    /// `subscribe`
+    pub async fn subscribe_one<T: DeserializeOwned>(
         &self,
         path: Path
     ) -> Result<Subscription<T>, Error> {
@@ -586,14 +594,17 @@ mod test {
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(addr).unwrap();
-            let vs0 = subscriber.subscribe::<V>("/app/v0".into()).await.unwrap();
-            let vs1 = subscriber.subscribe::<V>("/app/v1".into()).await.unwrap();
+            let vs0 = subscriber.subscribe_one::<V>("/app/v0".into()).await.unwrap();
+            let vs1 = subscriber.subscribe_one::<V>("/app/v1".into()).await.unwrap();
             let mut c0: Option<usize> = None;
             let mut c1: Option<usize> = None;
             let mut vs0s = vs0.updates(true);
             let mut vs1s = vs1.updates(true);
             loop {
-                match Either::factor_first(future::select(vs0s.next(), vs1s.next()).await).0 {
+                let r = Either::factor_first(
+                    future::select(vs0s.next(), vs1s.next()).await
+                ).0;
+                match r {
                     None => panic!("publishers died"),
                     Some(Err(e)) => panic!("publisher error: {}", e),
                     Some(Ok(v)) => {
