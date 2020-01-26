@@ -9,6 +9,7 @@ mod resolver_server;
 mod resolver;
 mod publisher;
 mod subscriber;
+mod stress_publisher;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResolverConfig {
@@ -57,15 +58,11 @@ enum Sub {
         #[structopt(name = "path")]
         paths: Vec<String>
     },
-    /*
     #[structopt(name = "stress", about = "stress test")]
     Stress {
-        #[structopt(short = "c", long = "config", help = "override default config")]
-        config: Option<PathBuf>,
         #[structopt(subcommand)]
         cmd: Stress
     },
-     */
 }
 
 #[derive(StructOpt, Debug)]
@@ -95,15 +92,20 @@ enum ResolverCmd {
     }
 }
 
-/*
-#[derive(StructOpt, Bench)]
+#[derive(StructOpt, Debug)]
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
-    Publisher,
+    Publisher {
+        #[structopt(name = "nvals", default_value = "100")]
+        nvals: usize,
+        #[structopt(name = "vsize", default_value = "1")]
+        vsize: usize,
+        #[structopt(name = "ntasks", default_value = "1")]
+        ntasks: usize
+    },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
     Subscriber
 }
- */
 
 fn main() {
     let opt = Opt::from_args();
@@ -115,5 +117,10 @@ fn main() {
         Sub::Resolver {cmd} => resolver::run(cfg, cmd),
         Sub::Publisher {json, timeout} => publisher::run(cfg, json, timeout),
         Sub::Subscriber {paths} => subscriber::run(cfg, paths),
+        Sub::Stress {cmd} => match cmd {
+            Stress::Publisher {nvals, vsize, ntasks} =>
+                stress_publisher::run(cfg, nvals, vsize, ntasks),
+            Stress::Subscriber => (),
+        }
     }
 }
