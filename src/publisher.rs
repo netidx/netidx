@@ -173,6 +173,7 @@ struct PublishedUntyped {
     header: Bytes,
     current: Bytes,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
+    wait_client: Vec<oneshot::Sender<()>>,
 }
 
 struct Client {
@@ -476,6 +477,28 @@ impl Publisher {
 
     /// Returns the number of subscribers subscribing to at least one value.
     pub fn clients(&self) -> usize { self.0.lock().clients.len() }
+
+    /// Wait for at least one client to subscribe to the specified
+    /// published value. Returns immediatly if there is a client, or
+    /// if the published value is dead.
+    pub async fn wait_client<I: IntoIterator<Item = Id>>(&self, id: I) {
+        let wait = {
+            let inner = self.0.lock();
+            match inner.by_id.get_mut(id) {
+                None => return,
+                Some(ut) => {
+                    if ut.subscribed.len() > 0 {
+                        return;
+                    } else {
+                        let (tx, rx) = oneshot::channel();
+                        ut.wait_client.push(tx);
+                        rx
+                    }
+                }
+            }
+        };
+        let _ = wait.await;
+    }
 }
 
 fn handle_batch(
