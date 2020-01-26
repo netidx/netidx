@@ -347,6 +347,7 @@ impl Publisher {
                 header,
                 current: init,
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+                wait_client: Vec::new(),
             });
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
@@ -481,10 +482,10 @@ impl Publisher {
     /// Wait for at least one client to subscribe to the specified
     /// published value. Returns immediatly if there is a client, or
     /// if the published value is dead.
-    pub async fn wait_client<I: IntoIterator<Item = Id>>(&self, id: I) {
+    pub async fn wait_client(&self, id: Id) {
         let wait = {
-            let inner = self.0.lock();
-            match inner.by_id.get_mut(id) {
+            let mut inner = self.0.lock();
+            match inner.by_id.get_mut(&id) {
                 None => return,
                 Some(ut) => {
                     if ut.subscribed.len() > 0 {
@@ -521,6 +522,9 @@ fn handle_batch(
                         let sender = cl.to_client.clone();
                         let ut = pb.by_id.get_mut(&id).unwrap();
                         ut.subscribed.insert(*addr, sender);
+                        for tx in ut.wait_client.drain(..) {
+                            let _ = tx.send(());
+                        }
                         con.queue_send(&FromPublisher::Subscribed(path, id))?;
                         con.queue_send_raw(ut.current.clone())?;
                     }

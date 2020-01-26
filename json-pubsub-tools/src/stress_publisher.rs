@@ -28,6 +28,7 @@ async fn run_group(
     }).collect::<Vec<_>>();
     publisher.flush(None).await.expect("publish");
     loop {
+        publisher.wait_client(published[0].id()).await;
         for i in 0..vals.len() {
             vals[i] += 1;
         }
