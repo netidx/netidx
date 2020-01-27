@@ -203,6 +203,7 @@ impl Subscriber {
             Subscribed(RawSubscription),
             Error(Error),
         }
+        dbg!(());
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
         let mut r = { // Init
@@ -231,6 +232,7 @@ impl Subscriber {
             }
             t.resolver.clone()
         };
+        dbg!(());
         { // Resolve, Connect, Subscribe
             let mut rng = rand::thread_rng();
             let to_resolve =
@@ -282,6 +284,7 @@ impl Subscriber {
                 }
             }
         }
+        dbg!(());
         // Wait
         for (path, st) in pending.iter_mut() {
             match st {
@@ -332,6 +335,7 @@ impl Subscriber {
                 }
             }
         }
+        dbg!(());
         paths.into_iter().map(|p| match pending.remove(&p).unwrap() {
             St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
             St::Subscribed(raw) => (p, Ok(raw)),
@@ -472,33 +476,43 @@ async fn connection(
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
     let mut next_sub: Option<SubscribeRequest> = None;
+    let mut batch: Vec<Bytes> = Vec::new();
     let mut con = Channel::new(TcpStream::connect(to).await?);
-    let mut batched = Vec::new();
     let res = 'main: loop {
         select! {
-            msg = con.receive_raw().fuse() => match msg {
+            r = con.receive_batch_raw(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
-                Ok(msg) => match next_val.take() {
-                    Some(id) => {
-                        handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
-                    }
-                    None => {
-                        try_brk!(handle_control(
-                            to, &subscriber, &mut pending, &mut subscriptions,
-                            &mut next_val, &mut next_sub, &*msg
-                        ));
+                Ok(()) => for msg in batch.drain(..) {
+                    match next_val.take() {
+                        Some(id) => {
+                            handle_val(
+                                &mut subscriptions, &mut next_sub, id, to, msg
+                            ).await;
+                        }
+                        None => {
+                            match handle_control(
+                                to, &subscriber, &mut pending, &mut subscriptions,
+                                &mut next_val, &mut next_sub, &*msg
+                            ) {
+                                Err(e) => break 'main Err(Error::from(e)),
+                                Ok(()) => ()
+                            }
+                        }
                     }
                 }
             },
             msg = from_sub.next() => match msg {
                 None => break Err(format_err!("dropped")),
+                Some(BatchItem::EndBatch) => {
+                    try_brk!(con.flush().await);
+                }
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     pending.insert(path.clone(), req);
-                    batched.push(ToPublisher::Subscribe(path));
+                    try_brk!(con.queue_send(&ToPublisher::Subscribe(path)));
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    batched.push(ToPublisher::Unsubscribe(id));
+                    try_brk!(con.queue_send(&ToPublisher::Unsubscribe(id)));
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
@@ -518,15 +532,6 @@ async fn connection(
                     if let Some(sub) = subscriptions.get_mut(&id) {
                         sub.deads.push(tx);
                     }
-                }
-                Some(BatchItem::EndBatch) => if batched.len() > 0 {
-                    for m in batched.drain(..) {
-                        match con.queue_send(&m) {
-                            Ok(()) => (),
-                            Err(e) => { break 'main Err(Error::from(e)); }
-                        }
-                    }
-                    try_brk!(con.flush().await);
                 }
             },
         }

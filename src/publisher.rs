@@ -553,6 +553,13 @@ async fn client_loop(
     let mut msgs = msgs.fuse();
     loop {
         select! {
+            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
+                Err(e) => return Err(Error::from(e)),
+                Ok(()) => {
+                    handle_batch(&t, &addr, batch.drain(..), &mut con)?;
+                    con.flush().await?
+                }
+            },
             to_cl = msgs.next() => match to_cl {
                 None => break Ok(()),
                 Some(m) => {
@@ -565,13 +572,6 @@ async fn client_loop(
                         Some(d) => time::timeout(d, f).await??
                     }
                     let _ = m.done.send(());
-                }
-            },
-            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    handle_batch(&t, &addr, batch.drain(..), &mut con)?;
-                    con.flush().await?
                 }
             }
         }

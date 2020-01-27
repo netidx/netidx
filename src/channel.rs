@@ -130,10 +130,20 @@ impl Channel {
             .map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
 
+    /// Receive one or more messages.
+    pub(crate) async fn receive_batch_raw(
+        &mut self, batch: &mut Vec<Bytes>
+    ) -> Result<(), Error> {
+        batch.push(self.receive_raw().await?);
+        while let Some(b) = self.decode_from_buffer() {
+            batch.push(b);
+        }
+        Ok(())
+    }
+    
     /// Receive and decode one or more messages. If any messages fails
-    /// to decode, processing will stop and error will be
-    /// returned. Some messages may have already been put in the
-    /// batch.
+    /// to decode, processing will stop and error will be returned,
+    /// however some messages may have already been put in the batch.
     pub(crate) async fn receive_batch<T: DeserializeOwned>(
         &mut self, batch: &mut Vec<T>
     ) -> Result<(), Error> {
