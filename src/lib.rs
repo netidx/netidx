@@ -35,6 +35,7 @@
 //! type that supports Serialize can be sent. If a subscriber doesn't
 //! know what type a publisher will be publishing, it can just elect
 //! to receive `rmpv::Value`, or even just the raw bytes.
+#![forbid(unsafe_code)]
 #![recursion_limit="1024"]
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;

@@ -12,12 +12,11 @@ use std::{
 };
 use futures::{
     select,
-    prelude::*
+    channel::{oneshot, mpsc},
 };
-use tokio::{
+use async_std::{
+    prelude::*
     task,
-    time::{self, Instant},
-    sync::{oneshot, mpsc},
     net::TcpStream,
 };
 use failure::Error;
@@ -123,7 +122,7 @@ async fn connect(
     let mut backoff = 0;
     loop {
         if backoff > 0 {
-            time::delay_for(Duration::from_secs(backoff)).await;
+            future::ready(()).delay(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&addr).await);
@@ -157,21 +156,21 @@ async fn connection(
     let mut con: Option<Channel> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
+    let hb = stream::interval(ttl).fuse();
+    let dc = stream::interval(linger).fuse();
     let now = Instant::now();
     let mut act = false;
     let mut receiver = receiver.fuse();
-    let mut hb = time::interval_at(now + ttl, ttl).fuse();
-    let mut dc = time::interval_at(now + linger, linger).fuse();
     loop {
         select! {
-            _ = dc.next() => {
+            _ = hb.next() => {
                 if act {
                    act = false; 
                 } else {
                     con = None;
                 }
             },
-            _ = hb.next() => loop {
+            _ = dc.next() => loop {
                 if act {
                     break;
                 } else {

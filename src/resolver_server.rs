@@ -3,13 +3,13 @@ use crate::{
     path::Path,
     resolver_store::Store,
 };
-use tokio::{
-    task, time::{self, Instant}, sync::oneshot,
+use async_std::{
+    prelude::*,
+    task,
     net::{TcpStream, TcpListener}
 };
 use futures::{
-    select,
-    prelude::*,
+    channel::oneshot, select,
 };
 use std::{
     mem, io,
@@ -125,7 +125,7 @@ async fn client_loop(
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
-    let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
+    let hello: ClientHello = future::timeout(HELLO_TIMEOUT, con.receive()).await??;
     let (ttl, ttl_expired, write_addr) = match hello {
         ClientHello::ReadOnly => (READER_TTL, false, None),
         ClientHello::WriteOnly {ttl, write_addr} => {
@@ -147,13 +147,13 @@ async fn client_loop(
             }
         }
     };
-    time::timeout(HELLO_TIMEOUT, con.send_one(&ServerHello { ttl_expired })).await??;
+    future::timeout(HELLO_TIMEOUT, con.send_one(&ServerHello { ttl_expired })).await??;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
     let mut batch = Vec::new();
     let mut act = false;
-    let mut timeout = time::interval_at(Instant::now() + ttl, ttl).fuse();
+    let mut timeout = stream::interval(ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel>,
         batch: &mut Vec<ToResolver>
@@ -301,9 +301,8 @@ mod test {
 
     #[test]
     fn publish_resolve() {
-        use tokio::runtime::Runtime;
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
+        use async_std::task;
+        task::block_on(async {
             let server = init_server().await;
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let mut w = Resolver::<WriteOnly>::new_w(server.local_addr(), paddr).unwrap();

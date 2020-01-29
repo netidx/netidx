@@ -14,14 +14,14 @@ use std::{
     sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
     cmp::min,
 };
-use tokio::{
+use async_std::{
+    prelude::*,
     task,
-    sync::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
     net::TcpStream,
 };
 use fxhash::FxBuildHasher;
 use futures::{
-    prelude::*,
+    channel::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
     select,
 };
 use rand::Rng;
@@ -29,7 +29,6 @@ use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 const BATCH: usize = 100_000;
 
@@ -363,8 +362,8 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    streams: SmallVec<[Sender<Bytes>; 4]>,
-    deads: SmallVec<[oneshot::Sender<()>; 4]>,
+    streams: Vec<Sender<Bytes>>,
+    deads: Vec<oneshot::Sender<()>>,
     last: Arc<Mutex<Bytes>>,
     dead: Arc<AtomicBool>,
 }
@@ -395,8 +394,8 @@ async fn handle_val(
                 path: req.path,
                 last: last.clone(),
                 dead: dead.clone(),
-                deads: SmallVec::new(),
-                streams: SmallVec::new(),
+                deads: Vec::new(),
+                streams: Vec::new(),
             });
             let s = RawSubscriptionInner { id, addr, dead, connection: req.con, last };
             let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));
@@ -576,8 +575,8 @@ mod test {
         net::SocketAddr,
         time::Duration,
     };
-    use tokio::{task, time, sync::oneshot, runtime::Runtime};
-    use futures::{prelude::*, future::{self, Either}};
+    use async_std::{task, time};
+    use futures::{prelude::*, future::{self, Either}, channel::oneshot};
     use crate::{
         resolver_server::Server,
         publisher::{Publisher, BindCfg},
@@ -596,8 +595,7 @@ mod test {
             id: usize,
             v: String,
         };
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
+        task::block_on(async {
             let server = init_server().await;
             let addr = *server.local_addr();
             let (tx, ready) = oneshot::channel();
@@ -615,7 +613,7 @@ mod test {
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
-                    time::delay_for(Duration::from_millis(100)).await;
+                    future::ready(()).delay(Duration::from_millis(100)).await;
                     vp0.update(&V {id: c, v: "foo".into()})
                         .unwrap();
                     vp1.update(&V {id: c, v: "bar".into()})
@@ -624,7 +622,7 @@ mod test {
                     c += 1
                 }
             });
-            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+            future::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(addr).unwrap();
             let vs0 = subscriber.subscribe_one::<V>("/app/v0".into()).await.unwrap();
             let vs1 = subscriber.subscribe_one::<V>("/app/v1".into()).await.unwrap();

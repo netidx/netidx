@@ -1,6 +1,6 @@
 use crate::utils::BytesWriter;
 use bytes::{BytesMut, Bytes, Buf, BufMut};
-use tokio::{
+use async_std::{
     net::TcpStream,
     io::{AsyncReadExt, AsyncWriteExt},
 };

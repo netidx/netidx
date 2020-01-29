@@ -15,14 +15,13 @@ use std::{
     time::Duration,
 };
 use futures::{
-    prelude::*,
     select,
+    channel::{oneshot, mpsc::{channel, Receiver, Sender}},
 };
-use tokio::{
+use async_std::{
+    prelude::*,
     task,
-    sync::{oneshot, mpsc::{channel, Receiver, Sender}},
     net::{TcpStream, TcpListener},
-    time,
 };
 use fxhash::FxBuildHasher;
 use rand::{self, Rng};
@@ -31,7 +30,6 @@ use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -164,7 +162,7 @@ impl PublishedRaw {
 
 #[derive(Debug)]
 struct ToClient {
-    msgs: SmallVec<[Bytes; 8]>,
+    msgs: Vec<Bytes>,
     done: oneshot::Sender<()>,
     timeout: Option<Duration>,
 }
@@ -406,7 +404,7 @@ impl Publisher {
         fn get_tc<'a>(
             addr: SocketAddr,
             sender: &Sender<ToClient>,
-            flushes: &mut SmallVec<[oneshot::Receiver<()>; 32]>,
+            flushes: &mut Vec<oneshot::Receiver<()>>,
             to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
             timeout: Option<Duration>,
         ) -> &'a mut Tc {
@@ -415,13 +413,13 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {msgs: SmallVec::new(), done, timeout}
+                    to_client: ToClient {msgs: Vec::new(), done, timeout}
                 }
             })
         }
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut flushes = SmallVec::<[oneshot::Receiver<()>; 32]>::new();
+        let mut flushes = Vec::<oneshot::Receiver<()>>::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
         let mut resolver = {
@@ -569,7 +567,7 @@ async fn client_loop(
                     let f = con.flush();
                     match m.timeout {
                         None => f.await?,
-                        Some(d) => time::timeout(d, f).await??
+                        Some(d) => future::ready(()).delay(d, f).await??
                     }
                     let _ = m.done.send(());
                 }
