@@ -31,7 +31,6 @@ use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
@@ -164,7 +163,7 @@ impl PublishedRaw {
 
 #[derive(Debug)]
 struct ToClient {
-    msgs: SmallVec<[Bytes; 8]>,
+    msgs: Vec<Bytes>,
     done: oneshot::Sender<()>,
     timeout: Option<Duration>,
 }
@@ -406,7 +405,7 @@ impl Publisher {
         fn get_tc<'a>(
             addr: SocketAddr,
             sender: &Sender<ToClient>,
-            flushes: &mut SmallVec<[oneshot::Receiver<()>; 32]>,
+            flushes: &mut Vec<oneshot::Receiver<()>>,
             to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
             timeout: Option<Duration>,
         ) -> &'a mut Tc {
@@ -415,13 +414,13 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {msgs: SmallVec::new(), done, timeout}
+                    to_client: ToClient {msgs: Vec::new(), done, timeout}
                 }
             })
         }
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut flushes = SmallVec::<[oneshot::Receiver<()>; 32]>::new();
+        let mut flushes = Vec::<oneshot::Receiver<()>>::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
         let mut resolver = {

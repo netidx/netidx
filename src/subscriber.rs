@@ -29,7 +29,6 @@ use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 const BATCH: usize = 100_000;
 
@@ -363,8 +362,8 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    streams: SmallVec<[Sender<Bytes>; 4]>,
-    deads: SmallVec<[oneshot::Sender<()>; 4]>,
+    streams: Vec<Sender<Bytes>>,
+    deads: Vec<oneshot::Sender<()>>,
     last: Arc<Mutex<Bytes>>,
     dead: Arc<AtomicBool>,
 }
@@ -395,8 +394,8 @@ async fn handle_val(
                 path: req.path,
                 last: last.clone(),
                 dead: dead.clone(),
-                deads: SmallVec::new(),
-                streams: SmallVec::new(),
+                deads: Vec::new(),
+                streams: Vec::new(),
             });
             let s = RawSubscriptionInner { id, addr, dead, connection: req.con, last };
             let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));

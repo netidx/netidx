@@ -17,7 +17,6 @@ use std::{
     time::Duration,
     net::SocketAddr,
 };
-use serde::Serialize;
 use failure::Error;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
