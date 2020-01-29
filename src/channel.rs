@@ -1,8 +1,8 @@
 use crate::utils::BytesWriter;
 use bytes::{BytesMut, Bytes, Buf, BufMut};
 use async_std::{
+    prelude::*,
     net::TcpStream,
-    io::{AsyncReadExt, AsyncWriteExt},
 };
 use std::{
     mem,
@@ -90,13 +90,14 @@ impl Channel {
     }
     
     async fn fill_buffer(&mut self) -> Result<(), Error> {
-        if self.incoming.remaining_mut() < BUF {
-            self.incoming.reserve(self.incoming.capacity());
-        }
-        if self.socket.read_buf(&mut self.incoming).await? == 0 {
+        // it would be nice if we could read directly into the buf,
+        // but we can't do that without unsafe code.
+        let mut buf = [0; BUF];
+        let n = self.socket.read(&mut buf).await?;
+        if n <= 0 {
             Err(Error::new(ErrorKind::UnexpectedEof, "end of file"))
         } else {
-            Ok(())
+            Ok(self.incoming.extend_from_slice(&buf[0..n]))
         }
     }
 

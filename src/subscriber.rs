@@ -262,7 +262,7 @@ impl Subscriber {
                             let con =
                                 t.connections.entry(addr)
                                 .or_insert_with(|| {
-                                    let (tx, rx) = mpsc::unbounded_channel();
+                                    let (tx, rx) = mpsc::unbounded();
                                     task::spawn(connection(self.clone(), addr, rx));
                                     tx
                                 });

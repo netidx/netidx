@@ -11,12 +11,12 @@ use std::{
     marker::PhantomData,
 };
 use futures::{
-    select,
-    channel::{oneshot, mpsc},
+    sink::SinkExt as _,
+    channel::{oneshot, mpsc}
 };
 use async_std::{
-    prelude::*
-    task,
+    prelude::*,
+    task, future, stream,
     net::TcpStream,
 };
 use failure::Error;
@@ -54,7 +54,7 @@ pub struct Resolver<R> {
 impl<R: ReadableOrWritable> Resolver<R> {
     async fn send(&mut self, m: ToResolver) -> Result<FromResolver> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send((m, tx))?;
+        self.sender.unbounded_send((m, tx))?;
         match rx.await? {
             FromResolver::Error(s) => bail!(s),
             m => Ok(m)
@@ -65,7 +65,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded();
         task::spawn(connection(receiver, resolver, Some(publisher)));
         Ok(Resolver { sender, kind: PhantomData })
     }
@@ -76,7 +76,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     where T: ToSocketAddrs {
         let resolver =
             resolver.to_socket_addrs()?.next().ok_or_else(|| format_err!("no address"))?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded();
         task::spawn(connection(receiver, resolver, None));
         Ok(Resolver { sender, kind: PhantomData })
     }
@@ -152,25 +152,26 @@ async fn connection(
     resolver: SocketAddr,
     publisher: Option<SocketAddr>
 ) {
+    enum M { Hb, Dc, M(ToCon) }
     let mut published = HashSet::new();
     let mut con: Option<Channel> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
-    let hb = stream::interval(ttl).fuse();
-    let dc = stream::interval(linger).fuse();
-    let now = Instant::now();
+    let hb = stream::interval(ttl).map(|_| M::Hb);
+    let dc = stream::interval(linger).map(|_| M::Dc);
+    let receiver = receiver.map(|m| M::M(m));
+    let mut evt = receiver.merge(hb).merge(dc);
     let mut act = false;
-    let mut receiver = receiver.fuse();
-    loop {
-        select! {
-            _ = hb.next() => {
+    while let Some(e) = evt.next().await {
+        match e {
+            M::Dc => {
                 if act {
                    act = false; 
                 } else {
                     con = None;
                 }
             },
-            _ = dc.next() => loop {
+            M::Hb => loop {
                 if act {
                     break;
                 } else {
@@ -186,35 +187,32 @@ async fn connection(
                     }
                 }
             },
-            m = receiver.next() => match m {
-                None => break,
-                Some((m, reply)) => {
-                    act = true;
-                    let m_r = &m;
-                    let r = loop {
-                        let c = match con {
-                            Some(ref mut c) => c,
-                            None => {
-                                con = Some(connect(resolver, publisher, &published).await);
-                                con.as_mut().unwrap()
-                            }
-                        };
-                        match c.send_one(m_r).await {
-                            Err(_) => { con = None; }
-                            Ok(()) => match c.receive().await {
-                                Err(_) => { con = None; }
-                                Ok(r) => break r,
-                                Ok(FromResolver::Published) => {
-                                    if let ToResolver::Publish(p) = m_r {
-                                        published.extend(p.iter().cloned());
-                                    }
-                                    break FromResolver::Published
-                                }
-                            }
+            M::M((m, reply)) => {
+                act = true;
+                let m_r = &m;
+                let r = loop {
+                    let c = match con {
+                        Some(ref mut c) => c,
+                        None => {
+                            con = Some(connect(resolver, publisher, &published).await);
+                            con.as_mut().unwrap()
                         }
                     };
-                    let _ = reply.send(r);
-                }
+                    match c.send_one(m_r).await {
+                        Err(_) => { con = None; }
+                        Ok(()) => match c.receive().await {
+                            Err(_) => { con = None; }
+                            Ok(r) => break r,
+                            Ok(FromResolver::Published) => {
+                                if let ToResolver::Publish(p) = m_r {
+                                    published.extend(p.iter().cloned());
+                                }
+                                break FromResolver::Published
+                            }
+                        }
+                    }
+                };
+                let _ = reply.send(r);
             }
         }
     }
