@@ -12,6 +12,7 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     net::{SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
+    cmp::min,
 };
 use tokio::{
     task,
@@ -29,6 +30,8 @@ use failure::Error;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
+
+const BATCH: usize = 100_000;
 
 #[derive(Debug)]
 struct SubscribeRequest {
@@ -114,7 +117,7 @@ impl RawSubscription {
     ///
     /// When the subscription dies the stream will end.
     pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(10);
         let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
         let _ = self.0.connection.send(m);
         rx
@@ -424,6 +427,7 @@ fn handle_control(
     addr: SocketAddr,
     subscriber: &Subscriber,
     pending: &mut HashMap<Path, SubscribeRequest>,
+    outstanding: &mut Vec<ToPublisher>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_val: &mut Option<Id>,
     next_sub: &mut Option<SubscribeRequest>,
@@ -432,22 +436,29 @@ fn handle_control(
     match rmp_serde::decode::from_read::<&[u8], FromPublisher>(&*msg) {
         Err(e) => return Err(Error::from(e)),
         Ok(FromPublisher::Message(id)) => { *next_val = Some(id); }
-        Ok(FromPublisher::NoSuchValue(path)) =>
+        Ok(FromPublisher::NoSuchValue(path)) => {
+            outstanding.pop();
             if let Some(r) = pending.remove(&path) {
                 let _ = r.finished.send(Err(format_err!("no such value")));
             }
-        Ok(FromPublisher::Subscribed(path, id)) => match pending.remove(&path) {
-            None => return Err(format_err!("unsolicited: {}", path)),
-            Some(req) => {
-                *next_val = Some(id);
-                *next_sub = Some(req);
+        }
+        Ok(FromPublisher::Subscribed(path, id)) => {
+            outstanding.pop();
+            match pending.remove(&path) {
+                None => return Err(format_err!("unsolicited: {}", path)),
+                Some(req) => {
+                    *next_val = Some(id);
+                    *next_sub = Some(req);
+                }
             }
         }
-        Ok(FromPublisher::Unsubscribed(id)) =>
+        Ok(FromPublisher::Unsubscribed(id)) => {
+            outstanding.pop();
             if let Some(s) = subscriptions.remove(&id) {
                 let mut t = subscriber.0.lock();
                 unsubscribe(s, id, addr, &mut t.subscribed);
             }
+        }
     }
     Ok(())
 }
@@ -466,39 +477,69 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
-    let mut from_sub = Batched::new(from_sub, 100_000).fuse();
+    let mut from_sub = Batched::new(from_sub, BATCH).fuse();
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
     let mut next_sub: Option<SubscribeRequest> = None;
     let mut con = Channel::new(TcpStream::connect(to).await?);
-    let mut batched = Vec::new();
+    let mut batch: Vec<Bytes> = Vec::new();
+    let mut outstanding: Vec<ToPublisher> = Vec::new();
+    let mut queued: Vec<ToPublisher> = Vec::new();
+    async fn flush(
+        outstanding: &mut Vec<ToPublisher>,
+        queued: &mut Vec<ToPublisher>,
+        con: &mut Channel,
+    ) -> Result<(), Error> {
+        if outstanding.len() == 0 && queued.len() > 0 {
+            outstanding.extend(queued.drain(0..min(BATCH, queued.len())));
+            for m in outstanding.iter() {
+                con.queue_send(m)?
+            }
+            con.flush().await?;
+        }
+        Ok(())
+    }
     let res = 'main: loop {
         select! {
-            msg = con.receive_raw().fuse() => match msg {
+            r = con.receive_batch_raw(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
-                Ok(msg) => match next_val.take() {
-                    Some(id) => {
-                        handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
+                Ok(()) => {
+                    for msg in batch.drain(..) {
+                        match next_val.take() {
+                            Some(id) => {
+                                handle_val(
+                                    &mut subscriptions, &mut next_sub, id, to, msg
+                                ).await;
+                            }
+                            None => {
+                                match handle_control(
+                                    to, &subscriber, &mut pending, &mut outstanding,
+                                    &mut subscriptions, &mut next_val, &mut next_sub,
+                                    &*msg
+                                ) {
+                                    Ok(()) => (),
+                                    Err(e) => break 'main Err(Error::from(e)),
+                                }
+                            }
+                        }
                     }
-                    None => {
-                        try_brk!(handle_control(
-                            to, &subscriber, &mut pending, &mut subscriptions,
-                            &mut next_val, &mut next_sub, &*msg
-                        ));
-                    }
+                    try_brk!(flush(&mut outstanding, &mut queued, &mut con).await);
                 }
             },
             msg = from_sub.next() => match msg {
                 None => break Err(format_err!("dropped")),
+                Some(BatchItem::EndBatch) => {
+                    try_brk!(flush(&mut outstanding, &mut queued, &mut con).await);
+                }
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     pending.insert(path.clone(), req);
-                    batched.push(ToPublisher::Subscribe(path));
+                    queued.push(ToPublisher::Subscribe(path));
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    batched.push(ToPublisher::Unsubscribe(id));
+                    queued.push(ToPublisher::Unsubscribe(id));
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
@@ -518,15 +559,6 @@ async fn connection(
                     if let Some(sub) = subscriptions.get_mut(&id) {
                         sub.deads.push(tx);
                     }
-                }
-                Some(BatchItem::EndBatch) => if batched.len() > 0 {
-                    for m in batched.drain(..) {
-                        match con.queue_send(&m) {
-                            Ok(()) => (),
-                            Err(e) => { break 'main Err(Error::from(e)); }
-                        }
-                    }
-                    try_brk!(con.flush().await);
                 }
             },
         }
