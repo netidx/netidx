@@ -42,7 +42,7 @@ struct SubscribeRequest {
 #[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeRequest),
-    Unsubscribe(Id),
+    Drop(Id),
     Stream {
         id: Id,
         tx: Sender<Bytes>,
@@ -51,18 +51,34 @@ enum ToCon {
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
+enum RawSubscriptionStatus {
+    Dead,
+    Resubscribing(Vec<(bool, Sender<Bytes>)>),
+    Subscribed {
+        id: Id,
+        addr: SocketAddr,
+        connection: UnboundedSender<ToCon>,
+    },
+}
+
 #[derive(Debug)]
 struct RawSubscriptionInner {
-    id: Id,
-    addr: SocketAddr,
-    dead: Arc<AtomicBool>,
-    connection: UnboundedSender<ToCon>,
+    status: Arc<Mutex<RawSubscriptionStatus>>,
     last: Arc<Mutex<Bytes>>,
 }
 
 impl Drop for RawSubscriptionInner {
     fn drop(&mut self) {
-        let _ = self.connection.send(ToCon::Unsubscribe(self.id));
+        let mut st = self.status.lock();
+        match st {
+            RawSubscriptionStatus::Dead => (),
+            RawSubscriptionStatus::Resubscribing {..} => {
+                *st = RawSubscriptionStatus::Dead;
+            },
+            RawSubscriptionStatus::Subscribed {id, connection, ..} => {
+                let _ = self.connection.send(ToCon::Drop(id));
+            },
+        }
     }
 }
 
@@ -73,6 +89,13 @@ impl RawSubscriptionWeak {
     pub fn upgrade(&self) -> Option<RawSubscription> {
         Weak::upgrade(&self.0).map(|r| RawSubscription(r))
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum Update<T> {
+    Update(T),
+    Unsubscribed,
+    Resubscribed,
 }
 
 #[derive(Debug, Clone)]
@@ -92,20 +115,6 @@ impl RawSubscription {
         self.0.last.lock().clone()
     }
 
-    /// Return true if the subscription has died.
-    pub fn is_dead(&self) -> bool {
-        self.0.dead.load(Ordering::Relaxed)
-    }
-
-    /// Wait for the subscription to die
-    pub async fn dead(&self) {
-        let (tx, rx) = oneshot::channel();
-        match self.0.connection.send(ToCon::NotifyDead(self.0.id, tx)) {
-            Err(_) => (),
-            Ok(()) => { let _ = rx.await; },
-        }
-    }
-
     /// Get a stream of published values. Values will arrive in the
     /// order they are published. No value will be omitted. If
     /// `begin_with_last` is true, then the stream will start with the
@@ -115,10 +124,18 @@ impl RawSubscription {
     /// value one time, it's cheaper to call `last`.
     ///
     /// When the subscription dies the stream will end.
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
+    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Update<Bytes>> {
         let (tx, rx) = mpsc::channel(10);
-        let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
-        let _ = self.0.connection.send(m);
+        match *self.0.status.lock() {
+            RawSubscriptionStatus::Dead => (),
+            RawSubscriptionStatus::Resubscribing(ref mut q) => {
+                q.push((begin_with_last, tx));
+            },
+            RawSubscriptionStatus::Subscribed { ref mut connection, id, ..} => {
+                let m = ToCon::Stream { tx, last: begin_with_last, id };
+                let _ = connection.send(m);
+            },
+        }
         rx
     }
 }
