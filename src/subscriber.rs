@@ -13,6 +13,7 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
     cmp::min,
+    time::{Instant, Duration},
 };
 use tokio::{
     task,
@@ -42,7 +43,7 @@ struct SubscribeRequest {
 #[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeRequest),
-    Drop(Id),
+    Unsubscribe(Id),
     Stream {
         id: Id,
         tx: Sender<Bytes>,
@@ -51,68 +52,75 @@ enum ToCon {
     NotifyDead(Id, oneshot::Sender<()>),
 }
 
-enum RawSubscriptionStatus {
-    Dead,
-    Resubscribing(Vec<(bool, Sender<Bytes>)>),
+#[derive(Debug)]
+enum RawSubIntInner {
+    Dropped,
+    Subscribing {
+        queued: Vec<(bool, Sender<Bytes>)>,
+        tries: usize,
+        next: Instant,
+    },
     Subscribed {
+        path: Path,
         id: Id,
         addr: SocketAddr,
         connection: UnboundedSender<ToCon>,
+        last: Bytes,
     },
-}
-
-#[derive(Debug)]
-struct RawSubscriptionInner {
-    status: Arc<Mutex<RawSubscriptionStatus>>,
-    last: Arc<Mutex<Bytes>>,
-}
-
-impl Drop for RawSubscriptionInner {
-    fn drop(&mut self) {
-        let mut st = self.status.lock();
-        match st {
-            RawSubscriptionStatus::Dead => (),
-            RawSubscriptionStatus::Resubscribing {..} => {
-                *st = RawSubscriptionStatus::Dead;
-            },
-            RawSubscriptionStatus::Subscribed {id, connection, ..} => {
-                let _ = self.connection.send(ToCon::Drop(id));
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RawSubscriptionWeak(Weak<RawSubscriptionInner>);
-
-impl RawSubscriptionWeak {
-    pub fn upgrade(&self) -> Option<RawSubscription> {
-        Weak::upgrade(&self.0).map(|r| RawSubscription(r))
-    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Update<T> {
     Update(T),
-    Unsubscribed,
-    Resubscribed,
+    Failed(Option<Error>),
 }
 
 #[derive(Debug, Clone)]
-pub struct RawSubscription(Arc<RawSubscriptionInner>);
+struct RawSubInt(Arc<Mutex<RawSubIntInner>>);
 
-impl RawSubscription {
-    pub fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
-        Subscription(self, PhantomData)
+struct RawSubInner(RawSubInt);
+
+impl Drop for RawSubInner {
+    fn drop(&mut self) {
+        let mut s = self.0.lock();
+        match s {
+            RawSubIntInner::Dropped | RawSubIntInner::Subscribing {..} => (),
+            RawSubIntInner::Subscribed {id, connection, ..} => {
+                let _ = connection.send(ToCon::Unsubscribe(id));
+            },
+        }
+        *s = RawSubIntInner::Dropped;
+        // CR add cleanup task
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawSubWeak(Weak<RawSubInner>);
+
+impl RawSubWeak {
+    fn upgrade(&self) -> Option<RawSub> {
+        Arc::upgrade(&self.0).map(|s| RawSub(s))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawSub(Arc<RawSubInner>);
+
+impl RawSub {
+    pub fn typed<T: DeserializeOwned>(self) -> Sub<T> {
+        Sub(self, PhantomData)
     }
 
     pub fn downgrade(&self) -> RawSubscriptionWeak {
-        RawSubscriptionWeak(Arc::downgrade(&self.0))
+        RawSubWeak(Arc::downgrade(&self.0))
     }
 
-    /// Get the last published value.
-    pub fn last(&self) -> Bytes {
-        self.0.last.lock().clone()
+    /// Get the last published value if there is one.
+    pub fn last(&self) -> Option<Bytes> {
+        match self.0.0.lock() {
+            RawSubIntInner::Subscribed {last, ..} => Some(last.clone()),
+            RawSubIntInner::Subscribing {..} | RawSubIntInner::Dropped => None,
+        }
     }
 
     /// Get a stream of published values. Values will arrive in the
@@ -126,12 +134,12 @@ impl RawSubscription {
     /// When the subscription dies the stream will end.
     pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Update<Bytes>> {
         let (tx, rx) = mpsc::channel(10);
-        match *self.0.status.lock() {
-            RawSubscriptionStatus::Dead => (),
-            RawSubscriptionStatus::Resubscribing(ref mut q) => {
-                q.push((begin_with_last, tx));
+        match *self.0.0.lock() {
+            RawSubIntInner::Dropped => unreachable!(),
+            RawSubIntInner::Subscribing {ref mut queued, ..} => {
+                queued.push((begin_with_last, tx));
             },
-            RawSubscriptionStatus::Subscribed { ref mut connection, id, ..} => {
+            RawSubIntInner::Subscribed { ref mut connection, id, ..} => {
                 let m = ToCon::Stream { tx, last: begin_with_last, id };
                 let _ = connection.send(m);
             },
@@ -140,49 +148,38 @@ impl RawSubscription {
     }
 }
 
-/// A typed version of RawSubscription
+/// A typed version of RawSub
 #[derive(Debug, Clone)]
-pub struct Subscription<T: DeserializeOwned>(RawSubscription, PhantomData<T>);
+pub struct Sub<T: DeserializeOwned>(RawSub, PhantomData<T>);
 
-impl<T: DeserializeOwned> Subscription<T> {
-    /// Get the `RawSubscription`
-    pub fn raw(&self) -> RawSubscription {
-        self.0.clone()
+impl<T: DeserializeOwned> Sub<T> {
+    /// Get the `RawSub`
+    pub fn raw(self) -> RawSub {
+        self.0
     }
 
     /// Get and decode the last published value.
-    pub fn last(&self) -> Result<T, Error> {
-        Ok(rmp_serde::decode::from_read(&*self.0.last())?)
-    }
-
-    /// See `RawSubscription::is_dead`
-    pub fn is_dead(&self) -> bool {
-        self.0.is_dead()
-    }
-
-    /// See `RawSubscription::dead`
-    pub async fn dead(&self) {
-        self.0.dead().await
+    pub fn last(&self) -> Option<Result<T, Error>> {
+        self.0.last().map(|b| Ok(rmp_serde::decode::from_read(&*b)?))
     }
 
     /// Same as `RawSubscription::updates` but it decodes the value
     pub fn updates(
         &self,
         begin_with_last: bool
-    ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
-        self.0.updates(begin_with_last).map(|v| rmp_serde::decode::from_read(&*v))
+    ) -> impl Stream<Item = Update<Result<T, rmp_serde::decode::Error>>> {
+        self.0.updates(begin_with_last).map(|u| match u {
+            Update::Update(v) => Update::Update(rmp_serde::decode::from_read(&*v)),
+            Update::Failed(e) => Update::Failed(e),
+        })
     }
-}
-
-enum SubStatus {
-    Subscribed(RawSubscriptionWeak),
-    Pending(Vec<oneshot::Sender<Result<RawSubscription, Error>>>),
 }
 
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
-    subscribed: HashMap<Path, SubStatus>,
+    subscribed: HashMap<Path, RawSubInt>,
+    dirty: HashMap<Path, RawSubInt>,
 }
 
 #[derive(Clone)]
@@ -194,7 +191,108 @@ impl Subscriber {
             resolver: Resolver::<ReadOnly>::new_r(addrs)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
+            dirty: HashMap::new(),
         }))))
+    }
+
+    async fn subscribe_and_cleanup(&self, now: Instant) {
+        let (to_resolve, mut r) = {
+            let mut to_resolve = Vec::new();
+            let mut t = self.0.lock();
+            t.dirty.retain(|p, s| match *s.0.lock() {
+                RawSubIntInner::Subscribed {..} => false,
+                RawSubIntInner::Dropped => { t.subscribed.remove(p); false }
+                RawSubIntInner::Subscribing {queued, next, ..} => {
+                    if next > now {
+                        true
+                    } else {
+                        to_resolve.push(p);
+                        false
+                    }
+                }
+            });
+            (to_resolve, t.resolver.clone())
+        };
+        async fn reset_on_error(
+            sub: &Subscriber,
+            paths: Vec<(Path, Error)>,
+            now: Instant
+        ) {
+            let notify = Vec::new();
+            {
+                let mut t = sub.0.lock();
+                for (p, e) in paths {
+                    let sub = t.subscribed[&p];
+                    match *sub.0.lock() {
+                        RawSubIntInner::Subscribed {..} => unreachable!(),
+                        RawSubIntInner::Dropped => { t.subscribed.remove(&p); }
+                        RawSubIntInner::Subscribing {
+                            ref queued, ref mut next, ref mut tries
+                        } => {
+                            notify.push((queued.clone(), e));
+                            *tries += 1;
+                            *next = now + Duration::from_secs(*tries as u64);
+                            t.dirty.insert(p, sub.clone());
+                        }
+                    }
+                }
+            }
+            for (q, e) in notify {
+                for (_, mut s) in q {
+                    let m = Update::Failed(Some(format_err!("{}", e)));
+                    let _ = s.send(m).await;
+                }
+            }
+        }
+        let mut rng = rand::thread_rng();
+        match r.resolve(to_resolve.clone()).await {
+            Err(e) => {
+                let paths =
+                    to_resolve.into_iter()
+                    .map(|p| (p, format_err!("{}", e)))
+                    .collect::<Vec<_>>();
+                reset_on_error(self, paths).await;
+            }
+            Ok(addrs) => {
+                let mut errors = Vec::new();
+                {
+                    let mut t = self.0.lock();
+                    for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
+                        if addrs.len() == 0 {
+                            errors.push((p, format_err!("path not found")));
+                        } else {
+                            let addr = {
+                                if addrs.len() == 1 {
+                                    addrs[0]
+                                } else {
+                                    addrs[rng.gen_range(0, addrs.len())]
+                                }
+                            };
+                            let con =
+                                t.connections.entry(addr)
+                                .or_insert_with(|| {
+                                    let (tx, rx) = mpsc::unbounded_channel();
+                                    task::spawn(connection(self.clone(), addr, rx));
+                                    tx
+                                });
+                            let con_ = con.clone();
+                            let r = con.send(ToCon::Subscribe(SubscribeRequest {
+                                con: con_,
+                                path: p.clone(),
+                                finished: tx,
+                            }));
+                            match r {
+                                Ok(()) => (),
+                                Err(e) => { errors.push((p, Error::from(e))); }
+                            }
+                        }
+                    }
+                }
+                if errors.len() > 0 {
+                    reset_on_error(self, errors).await;
+                }
+            }
+        }
     }
 
     /// Subscribe to the specified set of paths.
@@ -212,152 +310,6 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    pub async fn subscribe_raw(
-        &self, batch: impl IntoIterator<Item = Path>,
-    ) -> Vec<(Path, Result<RawSubscription, Error>)> {
-        enum St {
-            Resolve,
-            Subscribing(oneshot::Receiver<Result<RawSubscription, Error>>),
-            WaitingOther(oneshot::Receiver<Result<RawSubscription, Error>>),
-            Subscribed(RawSubscription),
-            Error(Error),
-        }
-        let paths = batch.into_iter().collect::<Vec<_>>();
-        let mut pending: HashMap<Path, St> = HashMap::new();
-        let mut r = { // Init
-            let mut t = self.0.lock();
-            for p in paths.clone() {
-                match t.subscribed.entry(p.clone()) {
-                    Entry::Vacant(e) => {
-                        e.insert(SubStatus::Pending(vec![]));
-                        pending.insert(p, St::Resolve);
-                    }
-                    Entry::Occupied(mut e) => match e.get_mut() {
-                        SubStatus::Pending(ref mut v) => {
-                            let (tx, rx) = oneshot::channel();
-                            v.push(tx);
-                            pending.insert(p, St::WaitingOther(rx));
-                        }
-                        SubStatus::Subscribed(r) => match r.upgrade() {
-                            Some(r) => { pending.insert(p, St::Subscribed(r)); }
-                            None => {
-                                e.insert(SubStatus::Pending(vec![]));
-                                pending.insert(p, St::Resolve);
-                            }
-                        },
-                    }
-                }
-            }
-            t.resolver.clone()
-        };
-        { // Resolve, Connect, Subscribe
-            let mut rng = rand::thread_rng();
-            let to_resolve =
-                pending.iter()
-                .filter(|(_, s)| match s { St::Resolve => true, _ => false })
-                .map(|(p, _)| p.clone())
-                .collect::<Vec<_>>();
-            match r.resolve(to_resolve.clone()).await {
-                Err(e) => for p in to_resolve {
-                    pending.insert(p.clone(), St::Error(
-                        format_err!("resolving path: {} failed: {}", p, e)
-                    ));
-                }
-                Ok(addrs) => {
-                    let mut t = self.0.lock();
-                    for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
-                        if addrs.len() == 0 {
-                            pending.insert(p, St::Error(format_err!("path not found")));
-                        } else {
-                            let addr = {
-                                if addrs.len() == 1 {
-                                    addrs[0]
-                                } else {
-                                    addrs[rng.gen_range(0, addrs.len())]
-                                }
-                            };
-                            let con =
-                                t.connections.entry(addr)
-                                .or_insert_with(|| {
-                                    let (tx, rx) = mpsc::unbounded_channel();
-                                    task::spawn(connection(self.clone(), addr, rx));
-                                    tx
-                                });
-                            let (tx, rx) = oneshot::channel();
-                            let con_ = con.clone();
-                            let r = con.send(ToCon::Subscribe(SubscribeRequest {
-                                con: con_,
-                                path: p.clone(),
-                                finished: tx,
-                            }));
-                            match r {
-                                Ok(()) => { pending.insert(p, St::Subscribing(rx)); }
-                                Err(e) => {
-                                    pending.insert(p, St::Error(Error::from(e)));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Wait
-        for (path, st) in pending.iter_mut() {
-            match st {
-                St::Resolve => unreachable!(),
-                St::Subscribed(_) | St::Error(_) => (),
-                St::WaitingOther(w) => match w.await {
-                    Err(_) => *st = St::Error(format_err!("other side died")),
-                    Ok(Err(e)) => *st = St::Error(e),
-                    Ok(Ok(raw)) => *st = St::Subscribed(raw),
-                }
-                St::Subscribing(w) => {
-                    let res = match w.await {
-                        Err(_) => Err(format_err!("connection died")),
-                        Ok(Err(e)) => Err(e),
-                        Ok(Ok(raw)) => Ok(raw),
-                    };
-                    let mut t = self.0.lock();
-                    match t.subscribed.entry(path.clone()) {
-                        Entry::Vacant(_) => unreachable!(),
-                        Entry::Occupied(mut e) => match res {
-                            Err(err) => match e.remove() {
-                                SubStatus::Subscribed(_) => unreachable!(),
-                                SubStatus::Pending(waiters) => {
-                                    for w in waiters {
-                                        let err = Err(format_err!("{}", err));
-                                        let _ = w.send(err);
-                                    }
-                                    *st = St::Error(err);
-                                }
-                            }
-                            Ok(raw) => {
-                                let s = mem::replace(
-                                    e.get_mut(),
-                                    SubStatus::Subscribed(raw.downgrade())
-                                );
-                                match s {
-                                    SubStatus::Subscribed(_) => unreachable!(),
-                                    SubStatus::Pending(waiters) => {
-                                        for w in waiters {
-                                            let _ = w.send(Ok(raw.clone()));
-                                        }
-                                        *st = St::Subscribed(raw);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        paths.into_iter().map(|p| match pending.remove(&p).unwrap() {
-            St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
-            St::Subscribed(raw) => (p, Ok(raw)),
-            St::Error(e) => (p, Err(e))
-        }).collect()
-    }
-
     pub async fn subscribe<T: DeserializeOwned>(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<Subscription<T>, Error>)> {
@@ -375,14 +327,6 @@ impl Subscriber {
     ) -> Result<Subscription<T>, Error> {
         self.subscribe_raw(iter::once(path)).await.pop().unwrap().1.map(|v| v.typed())
     }
-}
-
-struct Sub {
-    path: Path,
-    streams: Vec<Sender<Bytes>>,
-    deads: Vec<oneshot::Sender<()>>,
-    last: Arc<Mutex<Bytes>>,
-    dead: Arc<AtomicBool>,
 }
 
 async fn handle_val(
