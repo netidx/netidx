@@ -260,6 +260,7 @@ mod test {
         path::Path,
         resolver_server::Server,
         resolver::{WriteOnly, ReadOnly, Resolver},
+        config,
     };
 
     async fn init_server() -> Server {
@@ -278,8 +279,9 @@ mod test {
         rt.block_on(async {
             let server = init_server().await;
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let mut w = Resolver::<WriteOnly>::new_w(server.local_addr(), paddr).unwrap();
-            let mut r = Resolver::<ReadOnly>::new_r(server.local_addr()).unwrap();
+            let cfg = config::Resolver { addr: *server.local_addr() };
+            let mut w = Resolver::<WriteOnly>::new_w(cfg, paddr).unwrap();
+            let mut r = Resolver::<ReadOnly>::new_r(cfg).unwrap();
             let paths = vec![
                 p("/foo/bar"),
                 p("/foo/baz"),

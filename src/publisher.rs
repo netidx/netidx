@@ -4,6 +4,7 @@ use crate::{
     resolver::{Resolver, WriteOnly},
     channel::Channel,
     protocol::publisher::*,
+    config,
 };
 use std::{
     mem,
@@ -217,8 +218,8 @@ impl Publisher {
     }
 
     /// Create a new publisher using the specified resolver and bind config.
-    pub async fn new<T: ToSocketAddrs>(
-        resolver: T,
+    pub async fn new(
+        resolver: config::Resolver,
         bind_cfg: BindCfg
     ) -> Result<Publisher, Error> {
         let (addr, listener) = match bind_cfg {

@@ -4,13 +4,14 @@ use crate::{
     resolver::{Resolver, ReadOnly},
     channel::Channel,
     protocol::publisher::*,
+    config,
 };
 use std::{
     mem, iter,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     sync::{Arc, Weak},
     cmp::min,
 };
@@ -154,9 +155,9 @@ struct SubscriberInner {
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    pub fn new<T: ToSocketAddrs>(addrs: T) -> Result<Subscriber, Error> {
+    pub fn new(resolver: config::Resolver) -> Result<Subscriber, Error> {
         Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
-            resolver: Resolver::<ReadOnly>::new_r(addrs)?,
+            resolver: Resolver::<ReadOnly>::new_r(resolver)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
         }))))
@@ -552,6 +553,7 @@ mod test {
         resolver_server::Server,
         publisher::{Publisher, BindCfg},
         subscriber::Subscriber,
+        config,
     };
 
     async fn init_server() -> Server {
@@ -569,10 +571,10 @@ mod test {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
             let server = init_server().await;
-            let addr = *server.local_addr();
+            let cfg = config::Resolver { addr: *server.local_addr()};
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
-                let publisher = Publisher::new(addr, BindCfg::Local).await.unwrap();
+                let publisher = Publisher::new(cfg, BindCfg::Local).await.unwrap();
                 let vp0 = publisher.publish(
                     "/app/v0".into(),
                     &V {id: 0, v: "foo".into()}
@@ -595,7 +597,7 @@ mod test {
                 }
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            let subscriber = Subscriber::new(addr).unwrap();
+            let subscriber = Subscriber::new(cfg).unwrap();
             let vs0 = subscriber.subscribe_one::<V>("/app/v0".into()).await.unwrap();
             let vs1 = subscriber.subscribe_one::<V>("/app/v1".into()).await.unwrap();
             let mut c0: Option<usize> = None;

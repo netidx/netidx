@@ -1,20 +1,20 @@
-use super::ResolverConfig;
 use crate::stress_publisher::Data;
 use futures::prelude::*;
 use json_pubsub::{
     path::Path,
     resolver::{ReadOnly, Resolver},
     subscriber::{Subscriber, Subscription},
+    config,
 };
 use std::{result::Result, time::{Instant, Duration}};
 use tokio::{runtime::Runtime};
 
-pub(crate) fn run(config: ResolverConfig) {
+pub(crate) fn run(config: config::Resolver) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
-        let mut r = Resolver::<ReadOnly>::new_r(config.bind).expect("resolver");
+        let mut r = Resolver::<ReadOnly>::new_r(config).expect("resolver");
         let paths = r.list(Path::from("/bench")).await.expect("list");
-        let subscriber = Subscriber::new(config.bind).unwrap();
+        let subscriber = Subscriber::new(config).unwrap();
         let subs = subscriber
             .subscribe(paths)
             .await

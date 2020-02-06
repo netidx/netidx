@@ -2,7 +2,10 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate json_pubsub;
 #[macro_use] extern crate failure;
-use json_pubsub::path::Path;
+use json_pubsub::{
+    path::Path,
+    config,
+};
 use std::{fs::read, path::PathBuf, net::SocketAddr};
 use structopt::StructOpt;
 
@@ -12,13 +15,6 @@ mod publisher;
 mod subscriber;
 mod stress_publisher;
 mod stress_subscriber;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ResolverConfig {
-    bind: SocketAddr,
-    max_clients: usize,
-    pid_file: PathBuf,
-}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
@@ -37,7 +33,12 @@ enum Sub {
     #[structopt(name = "resolver-server", about = "Run a resolver server")]
     ResolverServer {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
-        foreground: bool
+        foreground: bool,
+        #[structopt(short = "c", long = "config",
+                    help = "override the default server config file",
+                    default_value = "./resolver-server.conf",
+                    parse(from_os_str))]
+        config: PathBuf,
     },
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver {
@@ -109,11 +110,12 @@ enum Stress {
 
 fn main() {
     let opt = Opt::from_args();
-    let cfg =
+    let cfg: config::Resolver =
         serde_json::from_slice(&*read(opt.config).expect("reading config"))
         .expect("parsing config");
     match opt.cmd {
-        Sub::ResolverServer {foreground} => resolver_server::run(cfg, !foreground),
+        Sub::ResolverServer {foreground, config} =>
+            resolver_server::run(config, !foreground),
         Sub::Resolver {cmd} => resolver::run(cfg, cmd),
         Sub::Publisher {json, timeout} => publisher::run(cfg, json, timeout),
         Sub::Subscriber {paths} => subscriber::run(cfg, paths),

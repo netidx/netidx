@@ -1,13 +1,13 @@
 use json_pubsub::{
     path::Path,
     publisher::{BindCfg, Publisher},
+    config
 };
 use tokio::runtime::Runtime;
 use std::{
     time::{Duration, Instant},
     ops::{Deref, DerefMut},
 };
-use super::ResolverConfig;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct Data(pub(crate) Vec<usize>);
@@ -26,10 +26,10 @@ impl DerefMut for Data {
     }
 }
 
-pub(crate) fn run(config: ResolverConfig, nvals: usize, vsize: usize) {
+pub(crate) fn run(config: config::Resolver, nvals: usize, vsize: usize) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let publisher = Publisher::new(config.bind, BindCfg::Any).await
+        let publisher = Publisher::new(config, BindCfg::Any).await
             .expect("failed to create publisher");
         let mut sent: usize = 0;
         let mut vals = Data((0..vsize).into_iter().collect::<Vec<_>>());

@@ -86,20 +86,3 @@ pub mod publisher {
     }
 }
 
-mod config {
-    use std::{
-        net::SocketAddr,
-        path::PathBuf,
-    };
-
-    pub struct Resolver {
-        addr: SocketAddr,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ResolverServer {
-        pub bind: SocketAddr,
-        pub max_clients: usize,
-        pub pid_file: PathBuf,
-    }
-}

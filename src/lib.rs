@@ -45,6 +45,7 @@
 mod resolver_store;
 pub mod path;
 pub mod protocol;
+pub mod config;
 pub mod channel;
 pub mod resolver;
 pub mod resolver_server;

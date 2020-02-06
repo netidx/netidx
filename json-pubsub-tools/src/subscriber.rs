@@ -2,6 +2,7 @@ use json_pubsub::{
     path::Path,
     subscriber::{Subscriber, RawSubscription},
     utils::{Batched, BatchItem, BytesDeque, BytesWriter},
+    config,
 };
 use futures::{
     prelude::*,
@@ -20,7 +21,6 @@ use std::{
     cell::RefCell,
 };
 use bytes::{BytesMut, Bytes};
-use super::ResolverConfig;
 
 fn mpv_to_json(v: rmpv::Value) -> serde_json::Value {
     use rmpv::{Value as Rv, Utf8String};
@@ -176,11 +176,11 @@ impl FromStr for Req {
     }
 }
 
-pub(crate) fn run(cfg: ResolverConfig, paths: Vec<String>) {
+pub(crate) fn run(cfg: config::Resolver, paths: Vec<String>) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let mut subscriptions: HashMap::<Path, oneshot::Sender<()>> = HashMap::new();
-        let subscriber = Subscriber::new(cfg.bind).expect("create subscriber");
+        let subscriber = Subscriber::new(cfg).expect("create subscriber");
         let (out_tx, out_rx) = mpsc::channel(100);
         task::spawn(output_vals(out_rx));
         let stdin = BufReader::new(io::stdin()).lines();

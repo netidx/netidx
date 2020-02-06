@@ -3,13 +3,13 @@ use json_pubsub::{
     utils::{self, Batched, BatchItem},
     path::Path,
     publisher::{BindCfg, Publisher, PublishedRaw},
+    config,
 };
 use futures::prelude::*;
 use tokio::{
     runtime::Runtime,
     io::{stdin, BufReader, AsyncBufReadExt},
 };
-use super::ResolverConfig;
 use std::{collections::HashMap, time::Duration};
 use failure::Error;
 
@@ -44,12 +44,12 @@ fn from_json(s: &str) -> Result<Bytes, Error> {
 
 fn e() -> Error { format_err!("") }
 
-pub(crate) fn run(config: ResolverConfig, json: bool, timeout: Option<u64>) {
+pub(crate) fn run(config: config::Resolver, json: bool, timeout: Option<u64>) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
         let mut published: HashMap<Path, PublishedRaw> = HashMap::new();
-        let publisher = Publisher::new(config.bind, BindCfg::Any).await
+        let publisher = Publisher::new(config, BindCfg::Any).await
             .expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
         let mut batch = Vec::new();
