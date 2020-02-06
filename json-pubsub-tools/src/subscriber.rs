@@ -1,6 +1,6 @@
 use json_pubsub::{
     path::Path,
-    subscriber::{Subscriber, RawSubscription},
+    subscriber::Subscriber,
     utils::{Batched, BatchItem, BytesDeque, BytesWriter},
     config,
 };
@@ -9,7 +9,7 @@ use futures::{
     select,
 };
 use tokio::{
-    task, runtime::Runtime,
+    task, time, runtime::Runtime,
     io::{self, BufReader, AsyncWriteExt, AsyncBufReadExt},
     sync::{oneshot, mpsc},
 };
@@ -19,6 +19,7 @@ use std::{
     str::{FromStr, from_utf8},
     result::Result,
     cell::RefCell,
+    time::Duration,
 };
 use bytes::{BytesMut, Bytes};
 
@@ -98,29 +99,57 @@ pub fn str_encode(t: &str) -> Bytes {
     })
 }
 
+macro_rules! ret {
+    ($e:expr) => {
+        match $e {
+            Ok(r) => r,
+            Err(_) => return,
+        }
+    };
+}
+
 async fn run_subscription(
     path: Path,
-    sub: RawSubscription,
+    subscriber: Subscriber,
     stop: oneshot::Receiver<()>,
     mut out: mpsc::Sender<(Bytes, Bytes)>,
 ) {
-    let path = str_encode(path.replace('|', r"\|").as_str());
-    let mut updates = sub.updates(true).fuse();
+    let path_b = str_encode(path.replace('|', r"\|").as_str());
     let mut stop = stop.fuse();
     loop {
-        select! {
-            _ = stop => break,
-            m = updates.next() => match m {
-                None => break,
-                Some(m) => {
-                    let v = match rmpv::decode::value::read_value(&mut &*m) {
-                        Ok(v) => try_brk!("json", json_encode(&mpv_to_json(v))),
-                        Err(_) => match from_utf8(&*m) {
-                            Ok(_) => m,
-                            Err(_) => str_encode(format!("{:?}", m).as_str()),
+        let sub = {
+            let mut tries: u64 = 0;
+            loop {
+                select! {
+                    _ = stop => return,
+                    r = subscriber.subscribe_one_raw(path.clone()).fuse() => match r {
+                        Ok(sub) => break sub,
+                        Err(e) => {
+                            let m = str_encode(&format!("{}", e));
+                            ret!(out.send((path_b.clone(), m)).await);
+                            tries += 1;
+                            time::delay_for(Duration::from_secs(tries)).await;
                         }
-                    };
-                    try_brk!("subscription ended", out.send((path.clone(), v)).await);
+                    }
+                }
+            }
+        };
+        let mut updates = sub.updates(true).fuse();
+        loop {
+            select! {
+                _ = stop => return,
+                m = updates.next() => match m {
+                    None => break,
+                    Some(m) => {
+                        let v = match rmpv::decode::value::read_value(&mut &*m) {
+                            Ok(v) => try_brk!("json", json_encode(&mpv_to_json(v))),
+                            Err(_) => match from_utf8(&*m) {
+                                Ok(_) => m,
+                                Err(_) => str_encode(format!("{:?}", m).as_str()),
+                            }
+                        };
+                        ret!(out.send((path_b.clone(), v)).await);
+                    }
                 }
             }
         }
@@ -210,17 +239,11 @@ pub(crate) fn run(cfg: config::Resolver, paths: Vec<String>) {
                             let _ = s.send(());
                         })
                     }
-                    for (p, r) in subscriber.subscribe_raw(mem::take(&mut add)).await {
-                        match r {
-                            Err(e) => eprintln!("subscription failed: {}, {}", p, e),
-                            Ok(s) => {
-                                let (tx, rx) = oneshot::channel();
-                                task::spawn(run_subscription(
-                                    p.clone(), s, rx, out_tx.clone()
-                                ));
-                                subscriptions.insert(p, tx);
-                            }
-                        }
+                    for p in add.drain() {
+                        let (tx, rx) = oneshot::channel();
+                        subscriptions.insert(p.clone(), tx);
+                        let subscriber = subscriber.clone();
+                        task::spawn(run_subscription(p, subscriber, rx, out_tx.clone()));
                     }
                 }
             }

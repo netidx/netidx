@@ -216,8 +216,11 @@ impl Subscriber {
             }
             t.resolver.clone()
         };
-        { // Resolve, Connect, Subscribe
+        fn pick(n: usize) -> usize {
             let mut rng = rand::thread_rng();
+            rng.gen_range(0, n)
+        }
+        { // Resolve, Connect, Subscribe
             let to_resolve =
                 pending.iter()
                 .filter(|(_, s)| match s { St::Resolve => true, _ => false })
@@ -239,7 +242,7 @@ impl Subscriber {
                                 if addrs.len() == 1 {
                                     addrs[0]
                                 } else {
-                                    addrs[rng.gen_range(0, addrs.len())]
+                                    addrs[pick(addrs.len())]
                                 }
                             };
                             let con =
@@ -332,6 +335,10 @@ impl Subscriber {
         }).collect()
     }
 
+    pub async fn subscribe_one_raw(&self, path: Path) -> Result<RawSubscription, Error> {
+        self.subscribe_raw(iter::once(path)).await.pop().unwrap().1
+    }
+
     /// Subscribe to one path. This is sufficient for a small number
     /// of paths, but if you need to subscribe to a lot of things use
     /// `subscribe`
@@ -339,8 +346,9 @@ impl Subscriber {
         &self,
         path: Path
     ) -> Result<Subscription<T>, Error> {
-        self.subscribe_raw(iter::once(path)).await.pop().unwrap().1.map(|v| v.typed())
+        self.subscribe_one_raw(path).await.map(|v| v.typed())
     }
+
 }
 
 struct Sub {
