@@ -44,6 +44,7 @@
 #[macro_use] pub mod utils;
 mod resolver_store;
 pub mod path;
+pub mod protocol;
 pub mod channel;
 pub mod resolver;
 pub mod resolver_server;

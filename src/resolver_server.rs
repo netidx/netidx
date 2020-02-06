@@ -2,6 +2,7 @@ use crate::{
     channel::Channel,
     path::Path,
     resolver_store::Store,
+    protocol::resolver::*,
 };
 use tokio::{
     task, time::{self, Instant}, sync::oneshot,
@@ -17,36 +18,7 @@ use std::{
     time::Duration,
     net::SocketAddr,
 };
-use serde::Serialize;
 use failure::Error;
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum ClientHello {
-    ReadOnly,
-    WriteOnly { ttl: u64, write_addr: SocketAddr }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ServerHello { pub ttl_expired: bool }
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum ToResolver {
-    Resolve(Vec<Path>),
-    List(Path),
-    Publish(Vec<Path>),
-    Unpublish(Vec<Path>),
-    Clear,
-    Heartbeat
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum FromResolver {
-    Resolved(Vec<Vec<SocketAddr>>),
-    List(Vec<Path>),
-    Published,
-    Unpublished,
-    Error(String)
-}
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 

@@ -1,9 +1,9 @@
 use crate::{
     path::Path,
     utils::{BatchItem, Batched},
-    publisher::{ToPublisher, FromPublisher, Id},
     resolver::{Resolver, ReadOnly},
     channel::Channel,
+    protocol::publisher::*,
 };
 use std::{
     mem, iter,
@@ -11,7 +11,8 @@ use std::{
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
     net::{SocketAddr, ToSocketAddrs},
-    sync::{Arc, Weak, atomic::{Ordering, AtomicBool}},
+    sync::{Arc, Weak},
+    cmp::min,
 };
 use tokio::{
     task,
@@ -28,7 +29,8 @@ use serde::de::DeserializeOwned;
 use failure::Error;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
+
+const BATCH: usize = 100_000;
 
 #[derive(Debug)]
 struct SubscribeRequest {
@@ -41,21 +43,19 @@ struct SubscribeRequest {
 enum ToCon {
     Subscribe(SubscribeRequest),
     Unsubscribe(Id),
+    Last(Id, oneshot::Sender<Bytes>),
     Stream {
         id: Id,
         tx: Sender<Bytes>,
         last: bool,
-    },
-    NotifyDead(Id, oneshot::Sender<()>),
+    }
 }
 
 #[derive(Debug)]
 struct RawSubscriptionInner {
     id: Id,
     addr: SocketAddr,
-    dead: Arc<AtomicBool>,
     connection: UnboundedSender<ToCon>,
-    last: Arc<Mutex<Bytes>>,
 }
 
 impl Drop for RawSubscriptionInner {
@@ -86,21 +86,12 @@ impl RawSubscription {
     }
 
     /// Get the last published value.
-    pub fn last(&self) -> Bytes {
-        self.0.last.lock().clone()
-    }
-
-    /// Return true if the subscription has died.
-    pub fn is_dead(&self) -> bool {
-        self.0.dead.load(Ordering::Relaxed)
-    }
-
-    /// Wait for the subscription to die
-    pub async fn dead(&self) {
+    pub async fn last(&self) -> Option<Bytes> {
         let (tx, rx) = oneshot::channel();
-        match self.0.connection.send(ToCon::NotifyDead(self.0.id, tx)) {
-            Err(_) => (),
-            Ok(()) => { let _ = rx.await; },
+        let _ = self.0.connection.send(ToCon::Last(self.0.id, tx));
+        match rx.await {
+            Ok(b) => Some(b),
+            Err(_) => None
         }
     }
 
@@ -113,8 +104,11 @@ impl RawSubscription {
     /// value one time, it's cheaper to call `last`.
     ///
     /// When the subscription dies the stream will end.
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
-        let (tx, rx) = mpsc::channel(100);
+    pub fn updates(
+        &self,
+        begin_with_last: bool
+    ) -> impl Stream<Item = Bytes> {
+        let (tx, rx) = mpsc::channel(10);
         let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
         let _ = self.0.connection.send(m);
         rx
@@ -132,18 +126,8 @@ impl<T: DeserializeOwned> Subscription<T> {
     }
 
     /// Get and decode the last published value.
-    pub fn last(&self) -> Result<T, Error> {
-        Ok(rmp_serde::decode::from_read(&*self.0.last())?)
-    }
-
-    /// See `RawSubscription::is_dead`
-    pub fn is_dead(&self) -> bool {
-        self.0.is_dead()
-    }
-
-    /// See `RawSubscription::dead`
-    pub async fn dead(&self) {
-        self.0.dead().await
+    pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
+        self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
     }
 
     /// Same as `RawSubscription::updates` but it decodes the value
@@ -360,10 +344,8 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    streams: SmallVec<[Sender<Bytes>; 4]>,
-    deads: SmallVec<[oneshot::Sender<()>; 4]>,
-    last: Arc<Mutex<Bytes>>,
-    dead: Arc<AtomicBool>,
+    streams: Vec<Sender<Bytes>>,
+    last: Bytes,
 }
 
 async fn handle_val(
@@ -383,19 +365,15 @@ async fn handle_val(
                     Err(_) => { sub.streams.remove(i); }
                 }
             }
-            *sub.last.lock() = msg;
+            sub.last = msg;
         }
         Entry::Vacant(e) => if let Some(req) = next_sub.take() {
-            let dead = Arc::new(AtomicBool::new(false));
-            let last = Arc::new(Mutex::new(msg));
             e.insert(Sub {
                 path: req.path,
-                last: last.clone(),
-                dead: dead.clone(),
-                deads: SmallVec::new(),
-                streams: SmallVec::new(),
+                last: msg,
+                streams: Vec::new(),
             });
-            let s = RawSubscriptionInner { id, addr, dead, connection: req.con, last };
+            let s = RawSubscriptionInner { id, addr, connection: req.con };
             let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));
         }
     }
@@ -407,7 +385,6 @@ fn unsubscribe(
     addr: SocketAddr,
     subscribed: &mut HashMap<Path, SubStatus>
 ) {
-    sub.dead.store(true, Ordering::Relaxed);
     match subscribed.entry(sub.path) {
         Entry::Vacant(_) => (),
         Entry::Occupied(e) => match e.get() {
@@ -424,6 +401,7 @@ fn handle_control(
     addr: SocketAddr,
     subscriber: &Subscriber,
     pending: &mut HashMap<Path, SubscribeRequest>,
+    outstanding: &mut Vec<ToPublisher>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_val: &mut Option<Id>,
     next_sub: &mut Option<SubscribeRequest>,
@@ -432,22 +410,30 @@ fn handle_control(
     match rmp_serde::decode::from_read::<&[u8], FromPublisher>(&*msg) {
         Err(e) => return Err(Error::from(e)),
         Ok(FromPublisher::Message(id)) => { *next_val = Some(id); }
-        Ok(FromPublisher::NoSuchValue(path)) =>
+        Ok(FromPublisher::NoSuchValue(path)) => {
+            outstanding.pop();
             if let Some(r) = pending.remove(&path) {
                 let _ = r.finished.send(Err(format_err!("no such value")));
             }
-        Ok(FromPublisher::Subscribed(path, id)) => match pending.remove(&path) {
-            None => return Err(format_err!("unsolicited: {}", path)),
-            Some(req) => {
-                *next_val = Some(id);
-                *next_sub = Some(req);
+        }
+        Ok(FromPublisher::Subscribed(path, id)) => {
+            outstanding.pop();
+            match pending.remove(&path) {
+                None => return Err(format_err!("unsolicited: {}", path)),
+                Some(req) => {
+                    *next_val = Some(id);
+                    *next_sub = Some(req);
+                }
             }
         }
-        Ok(FromPublisher::Unsubscribed(id)) =>
+        Ok(FromPublisher::Unsubscribed(id)) => {
+            // CR estokes: only do this if we asked to unsubscribe
+            outstanding.pop();
             if let Some(s) = subscriptions.remove(&id) {
                 let mut t = subscriber.0.lock();
                 unsubscribe(s, id, addr, &mut t.subscribed);
             }
+        }
     }
     Ok(())
 }
@@ -466,67 +452,83 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
-    let mut from_sub = Batched::new(from_sub, 100_000).fuse();
+    let mut from_sub = Batched::new(from_sub, BATCH).fuse();
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
     let mut next_sub: Option<SubscribeRequest> = None;
     let mut con = Channel::new(TcpStream::connect(to).await?);
-    let mut batched = Vec::new();
+    let mut batch: Vec<Bytes> = Vec::new();
+    let mut outstanding: Vec<ToPublisher> = Vec::new();
+    let mut queued: Vec<ToPublisher> = Vec::new();
+    async fn flush(
+        outstanding: &mut Vec<ToPublisher>,
+        queued: &mut Vec<ToPublisher>,
+        con: &mut Channel,
+    ) -> Result<(), Error> {
+        if outstanding.len() == 0 && queued.len() > 0 {
+            outstanding.extend(queued.drain(0..min(BATCH, queued.len())));
+            for m in outstanding.iter() {
+                con.queue_send(m)?
+            }
+            con.flush().await?;
+        }
+        Ok(())
+    }
     let res = 'main: loop {
         select! {
-            msg = con.receive_raw().fuse() => match msg {
+            r = con.receive_batch_raw(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
-                Ok(msg) => match next_val.take() {
-                    Some(id) => {
-                        handle_val(&mut subscriptions, &mut next_sub, id, to, msg).await;
+                Ok(()) => {
+                    for msg in batch.drain(..) {
+                        match next_val.take() {
+                            Some(id) => {
+                                handle_val(
+                                    &mut subscriptions, &mut next_sub, id, to, msg
+                                ).await;
+                            }
+                            None => {
+                                match handle_control(
+                                    to, &subscriber, &mut pending, &mut outstanding,
+                                    &mut subscriptions, &mut next_val, &mut next_sub,
+                                    &*msg
+                                ) {
+                                    Ok(()) => (),
+                                    Err(e) => break 'main Err(Error::from(e)),
+                                }
+                            }
+                        }
                     }
-                    None => {
-                        try_brk!(handle_control(
-                            to, &subscriber, &mut pending, &mut subscriptions,
-                            &mut next_val, &mut next_sub, &*msg
-                        ));
-                    }
+                    try_brk!(flush(&mut outstanding, &mut queued, &mut con).await);
                 }
             },
             msg = from_sub.next() => match msg {
                 None => break Err(format_err!("dropped")),
+                Some(BatchItem::EndBatch) => {
+                    try_brk!(flush(&mut outstanding, &mut queued, &mut con).await);
+                }
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     pending.insert(path.clone(), req);
-                    batched.push(ToPublisher::Subscribe(path));
+                    queued.push(ToPublisher::Subscribe(path));
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    batched.push(ToPublisher::Unsubscribe(id));
+                    queued.push(ToPublisher::Unsubscribe(id));
+                }
+                Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
+                    if let Some(sub) = subscriptions.get(&id) {
+                        let _ = tx.send(sub.last.clone());
+                    }
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
-                        let mut add = true;
                         if last {
-                            let last = sub.last.lock().clone();
-                            if let Err(_) = tx.send(last).await {
-                                add = false;
-                            }
+                            let last = sub.last.clone();
+                            let _ = tx.send(last).await;
                         }
-                        if add {
-                            sub.streams.push(tx);
-                        }
+                        sub.streams.push(tx);
                     }
-                }
-                Some(BatchItem::InBatch(ToCon::NotifyDead(id, tx))) => {
-                    if let Some(sub) = subscriptions.get_mut(&id) {
-                        sub.deads.push(tx);
-                    }
-                }
-                Some(BatchItem::EndBatch) => if batched.len() > 0 {
-                    for m in batched.drain(..) {
-                        match con.queue_send(&m) {
-                            Ok(()) => (),
-                            Err(e) => { break 'main Err(Error::from(e)); }
-                        }
-                    }
-                    try_brk!(con.flush().await);
                 }
             },
         }

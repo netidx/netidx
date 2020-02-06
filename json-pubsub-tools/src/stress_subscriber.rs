@@ -1,13 +1,13 @@
 use super::ResolverConfig;
 use crate::stress_publisher::Data;
-use futures::{prelude::*, select};
+use futures::prelude::*;
 use json_pubsub::{
     path::Path,
     resolver::{ReadOnly, Resolver},
     subscriber::{Subscriber, Subscription},
 };
-use std::{result::Result, time::Duration};
-use tokio::{runtime::Runtime, time};
+use std::{result::Result, time::{Instant, Duration}};
+use tokio::{runtime::Runtime};
 
 pub(crate) fn run(config: ResolverConfig) {
     let mut rt = Runtime::new().expect("runtime");
@@ -22,19 +22,23 @@ pub(crate) fn run(config: ResolverConfig) {
             .map(|(_, s)| s)
             .collect::<Result<Vec<Subscription<Data>>, _>>()
             .expect("subscribe");
-        let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true))).fuse();
-        let mut stat = time::interval(Duration::from_secs(1)).fuse();
-        let mut count: usize = 0;
-        loop {
-            select! {
-                _ = stat.next() => {
-                    println!("rx: {}", count);
-                    count = 0;
-                },
-                _ = vals.next() => {
-                    count += 1;
-                },
+        let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true)));
+        let one_second = Duration::from_secs(1);
+        let mut last_stat = Instant::now();
+        let mut n = 0;
+        while let Some(_) = vals.next().await {
+            n += 1;
+            if n >= subs.len() {
+                let now = Instant::now();
+                let elapsed = now - last_stat;
+                if elapsed > one_second {
+                    println!("rx: {:.0}", n as f64 / elapsed.as_secs_f64());
+                    n = 0;
+                    last_stat = now;
+                }
             }
         }
+        future::pending::<()>().await;
+        drop(subs);
     });
 }

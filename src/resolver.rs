@@ -1,7 +1,7 @@
 use crate::{
     path::Path,
     channel::Channel,
-    resolver_server::{ToResolver, FromResolver, ClientHello, ServerHello}
+    protocol::resolver::*,
 };
 use std::{
     result,

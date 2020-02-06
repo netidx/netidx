@@ -3,6 +3,7 @@ use crate::{
     path::Path,
     resolver::{Resolver, WriteOnly},
     channel::Channel,
+    protocol::publisher::*,
 };
 use std::{
     mem,
@@ -31,62 +32,11 @@ use failure::Error;
 use crossbeam::queue::SegQueue;
 use bytes::Bytes;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 // TODO
 // * add a handler for lazy publishing (delegated subtrees)
 
 static MAX_CLIENTS: usize = 768;
-
-/// This is the set of protocol messages that may be sent to the publisher
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ToPublisher {
-    /// Subscribe to the specified value, if it is not available the
-    /// result will be NoSuchValue
-    Subscribe(Path),
-    /// Unsubscribe from the specified value, this will always result
-    /// in an Unsubscibed message even if you weren't ever subscribed
-    /// to the value, or it doesn't exist.
-    Unsubscribe(Id)
-}
-
-/// This is the set of protocol messages that may come from the publisher
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum FromPublisher {
-    /// The requested subscription to Path cannot be completed because
-    /// it doesn't exist
-    NoSuchValue(Path),
-    /// You have been unsubscriped from Path. This can be the result
-    /// of an Unsubscribe message, or it may be sent unsolicited, in
-    /// the case the value is no longer published, or the publisher is
-    /// in the process of shutting down.
-    Unsubscribed(Id),
-    /// You are now subscribed to Path with subscription id `Id`, and
-    /// The next message contains the first value for Id. All further
-    /// communications about this subscription will only refer to the
-    /// Id.
-    Subscribed(Path, Id),
-    /// The next message contains an updated value for Id.
-    Message(Id)
-}
-
-#[derive(
-    Serialize, Deserialize, Debug, Clone,
-    Copy, PartialEq, Eq, PartialOrd, Ord, Hash
-)]
-pub struct Id(u64);
-
-impl Id {
-    fn zero() -> Self {
-        Id(0)
-    }
-
-    fn take(&mut self) -> Self {
-        let new = *self;
-        *self = Id(self.0 + 1);
-        new
-    }
-}
 
 #[derive(Clone)]
 enum Update {
@@ -164,7 +114,7 @@ impl PublishedRaw {
 
 #[derive(Debug)]
 struct ToClient {
-    msgs: SmallVec<[Bytes; 8]>,
+    msgs: Vec<Bytes>,
     done: oneshot::Sender<()>,
     timeout: Option<Duration>,
 }
@@ -406,7 +356,7 @@ impl Publisher {
         fn get_tc<'a>(
             addr: SocketAddr,
             sender: &Sender<ToClient>,
-            flushes: &mut SmallVec<[oneshot::Receiver<()>; 32]>,
+            flushes: &mut Vec<oneshot::Receiver<()>>,
             to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
             timeout: Option<Duration>,
         ) -> &'a mut Tc {
@@ -415,13 +365,13 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {msgs: SmallVec::new(), done, timeout}
+                    to_client: ToClient {msgs: Vec::new(), done, timeout}
                 }
             })
         }
         let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut flushes = SmallVec::<[oneshot::Receiver<()>; 32]>::new();
+        let mut flushes = Vec::<oneshot::Receiver<()>>::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
         let mut resolver = {
@@ -553,6 +503,13 @@ async fn client_loop(
     let mut msgs = msgs.fuse();
     loop {
         select! {
+            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
+                Err(e) => return Err(Error::from(e)),
+                Ok(()) => {
+                    handle_batch(&t, &addr, batch.drain(..), &mut con)?;
+                    con.flush().await?
+                }
+            },
             to_cl = msgs.next() => match to_cl {
                 None => break Ok(()),
                 Some(m) => {
@@ -565,13 +522,6 @@ async fn client_loop(
                         Some(d) => time::timeout(d, f).await??
                     }
                     let _ = m.done.send(());
-                }
-            },
-            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    handle_batch(&t, &addr, batch.drain(..), &mut con)?;
-                    con.flush().await?
                 }
             }
         }
