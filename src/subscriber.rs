@@ -36,7 +36,7 @@ const BATCH: usize = 100_000;
 #[derive(Debug)]
 struct SubscribeRequest {
     path: Path,
-    finished: oneshot::Sender<Result<RawSubscription, Error>>,
+    finished: oneshot::Sender<Result<SubscriptionUt, Error>>,
     con: UnboundedSender<ToCon>,
 }
 
@@ -53,37 +53,37 @@ enum ToCon {
 }
 
 #[derive(Debug)]
-struct RawSubscriptionInner {
+struct SubscriptionUtInner {
     id: Id,
     addr: SocketAddr,
     connection: UnboundedSender<ToCon>,
 }
 
-impl Drop for RawSubscriptionInner {
+impl Drop for SubscriptionUtInner {
     fn drop(&mut self) {
         let _ = self.connection.send(ToCon::Unsubscribe(self.id));
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RawSubscriptionWeak(Weak<RawSubscriptionInner>);
+pub struct SubscriptionUtWeak(Weak<SubscriptionUtInner>);
 
-impl RawSubscriptionWeak {
-    pub fn upgrade(&self) -> Option<RawSubscription> {
-        Weak::upgrade(&self.0).map(|r| RawSubscription(r))
+impl SubscriptionUtWeak {
+    pub fn upgrade(&self) -> Option<SubscriptionUt> {
+        Weak::upgrade(&self.0).map(|r| SubscriptionUt(r))
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RawSubscription(Arc<RawSubscriptionInner>);
+pub struct SubscriptionUt(Arc<SubscriptionUtInner>);
 
-impl RawSubscription {
+impl SubscriptionUt {
     pub fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
         Subscription(self, PhantomData)
     }
 
-    pub fn downgrade(&self) -> RawSubscriptionWeak {
-        RawSubscriptionWeak(Arc::downgrade(&self.0))
+    pub fn downgrade(&self) -> SubscriptionUtWeak {
+        SubscriptionUtWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last published value.
@@ -116,14 +116,14 @@ impl RawSubscription {
     }
 }
 
-/// A typed version of RawSubscription
+/// A typed version of SubscriptionUt
 #[derive(Debug, Clone)]
-pub struct Subscription<T: DeserializeOwned>(RawSubscription, PhantomData<T>);
+pub struct Subscription<T: DeserializeOwned>(SubscriptionUt, PhantomData<T>);
 
 impl<T: DeserializeOwned> Subscription<T> {
-    /// Get the `RawSubscription`
-    pub fn raw(&self) -> RawSubscription {
-        self.0.clone()
+    /// Get the `SubscriptionUt`
+    pub fn untyped(self) -> SubscriptionUt {
+        self.0
     }
 
     /// Get and decode the last published value.
@@ -131,7 +131,7 @@ impl<T: DeserializeOwned> Subscription<T> {
         self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
     }
 
-    /// Same as `RawSubscription::updates` but it decodes the value
+    /// Same as `SubscriptionUt::updates` but it decodes the value
     pub fn updates(
         &self,
         begin_with_last: bool
@@ -141,8 +141,8 @@ impl<T: DeserializeOwned> Subscription<T> {
 }
 
 enum SubStatus {
-    Subscribed(RawSubscriptionWeak),
-    Pending(Vec<oneshot::Sender<Result<RawSubscription, Error>>>),
+    Subscribed(SubscriptionUtWeak),
+    Pending(Vec<oneshot::Sender<Result<SubscriptionUt, Error>>>),
 }
 
 struct SubscriberInner {
@@ -180,12 +180,12 @@ impl Subscriber {
     /// or failure.
     pub async fn subscribe_raw(
         &self, batch: impl IntoIterator<Item = Path>,
-    ) -> Vec<(Path, Result<RawSubscription, Error>)> {
+    ) -> Vec<(Path, Result<SubscriptionUt, Error>)> {
         enum St {
             Resolve,
-            Subscribing(oneshot::Receiver<Result<RawSubscription, Error>>),
-            WaitingOther(oneshot::Receiver<Result<RawSubscription, Error>>),
-            Subscribed(RawSubscription),
+            Subscribing(oneshot::Receiver<Result<SubscriptionUt, Error>>),
+            WaitingOther(oneshot::Receiver<Result<SubscriptionUt, Error>>),
+            Subscribed(SubscriptionUt),
             Error(Error),
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
@@ -335,7 +335,7 @@ impl Subscriber {
         }).collect()
     }
 
-    pub async fn subscribe_one_raw(&self, path: Path) -> Result<RawSubscription, Error> {
+    pub async fn subscribe_one_raw(&self, path: Path) -> Result<SubscriptionUt, Error> {
         self.subscribe_raw(iter::once(path)).await.pop().unwrap().1
     }
 
@@ -382,8 +382,8 @@ async fn handle_val(
                 last: msg,
                 streams: Vec::new(),
             });
-            let s = RawSubscriptionInner { id, addr, connection: req.con };
-            let _ = req.finished.send(Ok(RawSubscription(Arc::new(s))));
+            let s = SubscriptionUtInner { id, addr, connection: req.con };
+            let _ = req.finished.send(Ok(SubscriptionUt(Arc::new(s))));
         }
     }
 }
