@@ -3,6 +3,7 @@ use futures::{
     prelude::*,
     sink::Sink,
     task::{Context, Poll},
+    stream::FusedStream,
 };
 use serde::Serialize;
 use std::pin::Pin;

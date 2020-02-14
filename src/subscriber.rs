@@ -25,7 +25,7 @@ use tokio::{
 use fxhash::FxBuildHasher;
 use futures::{
     prelude::*,
-    select, stream,
+    select,
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -151,11 +151,11 @@ struct DurableSubscriptionUtInner {
 }
 
 #[derive(Debug, Clone)]
-struct DurableSubscriptionUtWeak(Weak<Mutex<DurableSubscriptionInner>>);
+struct DurableSubscriptionUtWeak(Weak<Mutex<DurableSubscriptionUtInner>>);
 
 impl DurableSubscriptionUtWeak {
     fn upgrade(&self) -> Option<DurableSubscriptionUt> {
-        Arc::upgrade(&self.0).map(|s| DurableSubscriptionUt(s))
+        Weak::upgrade(&self.0).map(|s| DurableSubscriptionUt(s))
     }
 }
 
@@ -185,8 +185,8 @@ impl DurableSubscriptionUt {
     ) -> impl Stream<Item = Bytes> {
         let mut t = self.0.lock();
         let (tx, rx) = mpsc::channel(10);
-        t.streams.push(tx);
-        if let Some(sub) = t.sub {
+        t.streams.push(tx.clone());
+        if let Some(ref sub) = t.sub {
             let m = ToCon::Stream {tx, last: begin_with_last, id: sub.0.id };
             let _ = sub.0.connection.send(m);
         }
@@ -228,7 +228,7 @@ struct SubscriberInner {
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DurableSubscriptionUtWeak>,
     durable_alive: HashMap<Path, DurableSubscriptionUtWeak>,
-    trigger_resub: UnboundedSender<DurableSubscriptionUtWeak>,
+    trigger_resub: UnboundedSender<()>,
 }
 
 struct SubscriberWeak(Weak<Mutex<SubscriberInner>>);
@@ -245,16 +245,16 @@ pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 impl Subscriber {
     pub fn new(resolver: config::Resolver) -> Result<Subscriber, Error> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let t = Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
+        let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
             resolver: Resolver::<ReadOnly>::new_r(resolver)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
             durable_dead: HashMap::new(),
             durable_alive: HashMap::new(),
-            resub: tx,
-        }))));
+            trigger_resub: tx,
+        })));
         t.start_resub_task(rx);
-        t
+        Ok(t)
     }
 
     fn downgrade(&self) -> SubscriberWeak {
@@ -269,11 +269,18 @@ impl Subscriber {
             }
         }
         fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
-            *retry = subscriber.durable_dead.vals()
+            *retry = subscriber.durable_dead.values()
                 .filter_map(|w| w.upgrade())
                 .map(|ds| ds.0.lock().next_try)
-                .min()
-                .map(|t| time::delay_for(t + Duration::from_secs(1)));
+                .fold(None, |min, v| match min {
+                    None => Some(v),
+                    Some(min) => if v < min {
+                        Some(v)
+                    } else {
+                        Some(min)
+                    }
+                })
+                .map(|t| time::delay_until(t + Duration::from_secs(1)));
         }
         async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
             if let Some(subscriber) = subscriber.upgrade() {
@@ -284,23 +291,23 @@ impl Subscriber {
                     let mut subscriber = subscriber.0.lock();
                     for (p, w) in &subscriber.durable_dead {
                         match w.upgrade() {
-                            None => { gc.push(p); }
+                            None => { gc.push(p.clone()); }
                             Some(s) => {
-                                let mut inner = s.lock();
-                                if inner.next_try <= now {
+                                let next_try = s.0.lock().next_try;
+                                if next_try <= now {
                                     b.insert(p.clone(), s);
                                 }
                             }
                         }
                     }
                     for p in gc {
-                        subscriber.durable_dead.remove(p);
+                        subscriber.durable_dead.remove(&p);
                     }
                     b
                 };
                 if batch.len() == 0 {
                     let mut subscriber = subscriber.0.lock();
-                    update_delay(&mut *subscriber, retry);
+                    update_retry(&mut *subscriber, retry);
                 } else {
                     let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
                     let mut subscriber = subscriber.0.lock();
@@ -310,12 +317,12 @@ impl Subscriber {
                         match r {
                             Err(_) => { // CR estokes: log this error?
                                 ds.tries += 1;
-                                ds.next_try = now + Duration::from_secs(ds.tries);
+                                ds.next_try = now + Duration::from_secs(ds.tries as u64);
                             },
                             Ok(sub) => {
                                 ds.tries = 0;
                                 for tx in ds.streams.iter().cloned() {
-                                    let _ = sub.connection.send(ToCon::Stream {
+                                    let _ = sub.0.connection.send(ToCon::Stream {
                                         tx, last: true, id: sub.0.id
                                     });
                                 }
@@ -325,7 +332,7 @@ impl Subscriber {
                             },
                         }
                     }
-                    update_delay(&mut *subscriber, retry);
+                    update_retry(&mut *subscriber, retry);
                 }
             }
         }
@@ -336,13 +343,13 @@ impl Subscriber {
             loop {
                 select! {
                     _ = wait_retry(&mut retry).fuse() => {
-                        do_resub(&subscriber, &mut dead, &mut retry).await;
+                        do_resub(&subscriber, &mut retry).await;
                     },
                     m = incoming.next() => match m {
                         None => break,
                         Some(BatchItem::InBatch(())) => (),
                         Some(BatchItem::EndBatch) => {
-                            do_resub(&subscriber, &mut dead, &mut retry).await;
+                            do_resub(&subscriber, &mut retry).await;
                         }
                     },
                 }
@@ -436,7 +443,7 @@ impl Subscriber {
                                 t.connections.entry(addr)
                                 .or_insert_with(|| {
                                     let (tx, rx) = mpsc::unbounded_channel();
-                                    task::spawn(connection(self.clone(), addr, rx));
+                                    task::spawn(connection(self.downgrade(), addr, rx));
                                     tx
                                 });
                             let (tx, rx) = oneshot::channel();
@@ -517,13 +524,13 @@ impl Subscriber {
     pub async fn subscribe<T: DeserializeOwned>(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<Subscription<T>, Error>)> {
-        self.subscribe_raw(batch).await.into_iter().map(|(p, r)| {
+        self.subscribe_ut(batch).await.into_iter().map(|(p, r)| {
             (p, r.map(|r| r.typed()))
         }).collect()
     }
 
     pub async fn subscribe_one_ut(&self, path: Path) -> Result<SubscriptionUt, Error> {
-        self.subscribe_raw(iter::once(path)).await.pop().unwrap().1
+        self.subscribe_ut(iter::once(path)).await.pop().unwrap().1
     }
 
     /// Subscribe to one path. This is sufficient for a small number
@@ -533,7 +540,7 @@ impl Subscriber {
         &self,
         path: Path
     ) -> Result<Subscription<T>, Error> {
-        self.subscribe_one_raw(path).await.map(|v| v.typed())
+        self.subscribe_one_ut(path).await.map(|v| v.typed())
     }
 
     /// A durable subscription will subscribe to `path` and attempt to
@@ -563,7 +570,9 @@ impl Subscriber {
     /// again for the same path will just return another pointer to it.
     pub fn subscribe_durable_ut(&self, path: Path) -> DurableSubscriptionUt {
         let mut t = self.0.lock();
-        if let Some(s) = t.durable_dead.get().or_else(|| t.durable_alive.get()) {
+        if let Some(s) =
+            t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
+        {
             if let Some(s) = s.upgrade() {
                 return s;
             }
@@ -574,8 +583,8 @@ impl Subscriber {
             tries: 0,
             next_try: Instant::now(),
         })));
-        self.durable_dead.insert(path, s.downgrade());
-        let _ = self.trigger_resub.send(());
+        t.durable_dead.insert(path, s.downgrade());
+        let _ = t.trigger_resub.send(());
         s
     }
 
@@ -609,7 +618,7 @@ async fn handle_val(
                     Ok(()) => { i += 1; }
                     Err(_) => {
                         sub.streams.remove(i);
-                        let mut s = subscriber.0.lock();
+                        let s = subscriber.0.lock();
                         if let Some(w) = s.durable_alive.get(&sub.path) {
                             if let Some(ds) = w.upgrade() {
                                 let mut inner = ds.0.lock();
