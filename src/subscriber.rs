@@ -25,9 +25,7 @@ use tokio::{
 use fxhash::FxBuildHasher;
 use futures::{
     prelude::*,
-    select,
-    stream::{self, SelectAll},
-    future::{self, IntoStream},
+    select, stream,
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -47,7 +45,6 @@ struct SubscribeRequest {
 #[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeRequest),
-    OnDead(Id, oneshot::Sender<()>),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Bytes>),
     Stream {
@@ -214,8 +211,6 @@ impl Subscriber {
         &self,
         incoming: UnboundedReceiver<()>
     ) {
-        type DeadItem = IntoStream<oneshot::Receiver<()>>;
-        type DeadSet = Batched<SelectAll<DeadItem>>>;
         let subscriber = self.downgrade();
         task::spawn(async move {
             async fn wait_retry(retry: &mut Option<Delay>) {
@@ -231,16 +226,8 @@ impl Subscriber {
                     .min()
                     .map(|t| time::delay_for(t + Duration::from_secs(1)));
             }
-            async fn wait_dead(dead: &mut DeadSet) {
-                if dead.len() == 0 {
-                    future::pending().await;
-                } else {
-                    let _ = dead.next().await;
-                }
-            }
             async fn do_resub(
                 subscriber: &SubscriberWeak,
-                dead: &mut DeadSet,
                 retry: &mut Option<Delay>,
             ) {
                 if let Some(subscriber) = subscriber.upgrade() {
@@ -275,19 +262,13 @@ impl Subscriber {
                                 Ok(sub) => {
                                     ds.tries = 0;
                                     for tx in ds.streams.iter().cloned() {
-                                        let m = ToCon::Stream {
+                                        let _ = sub.connection.send(ToCon::Stream {
                                             tx, last: true, id: sub.0.id
-                                        };
-                                        let _ = sub.connection.send(m);
+                                        });
                                     }
-                                    let (tx, rx) = oneshot::channel();
-                                    let _ = sub.connection.send(
-                                        ToCon::OnDead(sub.0.id, tx)
-                                    );
                                     ds.sub = Some(sub);
                                     let w = subscriber.durable_dead.remove(&p).unwrap();
                                     subscriber.durable_alive.insert(p.clone(), w.clone());
-                                    deads.inner_mut().push(rx.into_stream());
                                 },
                             }
                         }
@@ -296,10 +277,12 @@ impl Subscriber {
                 }
             }
             let mut incoming = Batched::new(incoming, 100_000);
-            let mut dead: DeadSet = Batched::new(SelectAll::new(), 100_000);
             let mut retry: Option<Delay> = None;
             loop {
                 select! {
+                    _ = wait_retry(&mut retry).fuse() => {
+                        do_resub(&subscriber, &mut dead, &mut retry).await;
+                    },
                     m = incoming.next() => match m {
                         None => break,
                         Some(BatchItem::InBatch(())) => (),
@@ -307,15 +290,9 @@ impl Subscriber {
                             do_resub(&subscriber, &mut dead, &mut retry).await;
                         }
                     },
-                    _ = wait_dead(&mut dead).fuse() => {
-                        do_resub(&subscriber, &mut dead, &mut retry).await;
-                    },
-                    _ = wait_retry(&mut retry).fuse() => {
-                        do_resub(&subscriber, &mut dead, &mut retry).await;
-                    },
                 }
             }
-        })
+        });
     }
     
     /// Subscribe to the specified set of paths.
@@ -504,16 +481,65 @@ impl Subscriber {
         self.subscribe_one_raw(path).await.map(|v| v.typed())
     }
 
+    /// A durable subscription will subscribe to `path` and attempt to
+    /// remain subscribed until dropped. As such, unlike a regular
+    /// subscription the stream returned by
+    /// `DurableSubscritionUt::updates` will never end, but it also
+    /// may not contain all values the publisher publishes, or it may
+    /// contain duplicate values, though both of these things will
+    /// only happen if the connection is lost and reestablished.
+    ///
+    /// A background task in subscriber will attempt to resubscribe to
+    /// any subscription that becomes unsubscribed. One attempt will
+    /// be made immediatly upon the subscription being dropped, and
+    /// after that linear backoff will be used.
+    ///
+    /// Batching of subscriptions is automatic, if you create a lot of
+    /// durable subscriptions all at once batching will minimize the
+    /// number of messages exchanged with both the resolver server and
+    /// the publishers.
+    ///
+    /// Durable subscriptions do use more memory, and have some small
+    /// overhead when fetching the last, however the overhead of
+    /// `updates` is exactly the same as a regular subscription.
+    ///
+    /// As with regular subscriptions there is really only ever one
+    /// subscription for a given path, calling `subscribe_durable_ut`
+    /// again for the same path will just return another pointer to it.
+    pub fn subscribe_durable_ut(&self, path: Path) -> DurableSubscriptionUt {
+        let mut t = self.0.lock();
+        if let Some(s) = t.durable_dead.get().or_else(|| t.durable_alive.get()) {
+            if let Some(s) = s.upgrade() {
+                return s;
+            }
+        }
+        let s = DurableSubscriptionUt(Arc::new(Mutex::new(DurableSubscriptionUtInner {
+            path: path.clone(),
+            sub: None,
+            streams: Vec::new(),
+            tries: 0,
+            next_try: Instant::now(),
+        })));
+        self.durable_dead.insert(path, s.downgrade());
+        let _ = self.trigger_resub.send(());
+        s
+    }
+
+    pub fn subscribe_durable<T: DeserializeOwned>(
+        &self, path: Path
+    ) -> DurableSubscription<T> {
+        self.subscribe_durable_ut(path).typed()
+    }
 }
 
 struct Sub {
     path: Path,
     streams: Vec<Sender<Bytes>>,
     last: Bytes,
-    on_dead: Vec<oneshot::Sender<()>>,
 }
 
 async fn handle_val(
+    subscriber: &Subscriber,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeRequest>,
     id: Id,
@@ -527,7 +553,16 @@ async fn handle_val(
             while i < sub.streams.len() {
                 match sub.streams[i].send(msg.clone()).await {
                     Ok(()) => { i += 1; }
-                    Err(_) => { sub.streams.remove(i); }
+                    Err(_) => {
+                        sub.streams.remove(i);
+                        let mut s = subscriber.0.lock();
+                        if let Some(w) = s.durable_alive.get(&sub.path) {
+                            if let Some(ds) = w.upgrade() {
+                                let mut inner = ds.0.lock();
+                                inner.streams.remove(i);
+                            }
+                        }
+                    }
                 }
             }
             sub.last = msg;
@@ -545,15 +580,16 @@ async fn handle_val(
 }
 
 fn unsubscribe(
+    subscriber: &mut SubscriberInner,
     sub: Sub,
     id: Id,
     addr: SocketAddr,
-    subscribed: &mut HashMap<Path, SubStatus>
 ) {
-    for s in sub.on_dead.drain(..) {
-        let _ = s.send(());
+    if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
+        subscriber.durable_dead.insert(sub.path.clone(), dsw);
+        let _ = subscriber.trigger_resub.send(());
     }
-    match subscribed.entry(sub.path) {
+    match subscriber.subscribed.entry(sub.path) {
         Entry::Vacant(_) => (),
         Entry::Occupied(e) => match e.get() {
             SubStatus::Pending(_) => (),
@@ -599,7 +635,7 @@ fn handle_control(
             outstanding.pop();
             if let Some(s) = subscriptions.remove(&id) {
                 let mut t = subscriber.0.lock();
-                unsubscribe(s, id, addr, &mut t.subscribed);
+                unsubscribe(&mut *t, s, id, addr);
             }
         }
     }
@@ -616,7 +652,7 @@ macro_rules! try_brk {
 }
 
 async fn connection(
-    subscriber: Subscriber,
+    subscriber: SubscriberWeak,
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
@@ -648,12 +684,13 @@ async fn connection(
         select! {
             r = con.receive_batch_raw(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
-                Ok(()) => {
+                Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
                     for msg in batch.drain(..) {
                         match next_val.take() {
                             Some(id) => {
                                 handle_val(
-                                    &mut subscriptions, &mut next_sub, id, to, msg
+                                    &subscriber, &mut subscriptions,
+                                    &mut next_sub, id, to, msg
                                 ).await;
                             }
                             None => {
@@ -684,11 +721,6 @@ async fn connection(
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
                     queued.push(ToPublisher::Unsubscribe(id));
                 }
-                Some(BatchItem::InBatch(ToCon::OnDead(id, s)) => {
-                    if let Some(sub) = subscriptions.get(&id) {
-                        sub.on_dead.push(s);
-                    }
-                }
                 Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
                     if let Some(sub) = subscriptions.get(&id) {
                         let _ = tx.send(sub.last.clone());
@@ -706,9 +738,11 @@ async fn connection(
             },
         }
     };
-    let mut t = subscriber.0.lock();
-    for (id, sub) in subscriptions {
-        unsubscribe(sub, id, to, &mut t.subscribed);
+    if let Some(subscriber) = subscriber.upgrade() {
+        let mut t = subscriber.0.lock();
+        for (id, sub) in subscriptions {
+            unsubscribe(&mut *t, sub, id, to);
+        }
     }
     res
 }
