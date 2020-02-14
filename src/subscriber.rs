@@ -163,6 +163,61 @@ impl DurableSubscriptionUtWeak {
 #[derive(Debug, Clone)]
 pub struct DurableSubscriptionUt(Arc<Mutex<DurableSubscriptionUtInner>>);
 
+impl DurableSubscriptionUt {
+    pub fn typed<T: DeserializeOwned>(self) -> DurableSubscription<T> {
+        DurableSubscription(self, PhantomData)
+    }
+
+    fn downgrade(&self) -> DurableSubscriptionUtWeak {
+        DurableSubscriptionUtWeak(Arc::downgrade(&self.0))
+    }
+
+    pub async fn last(&self) -> Option<Bytes> {
+        let sub = self.0.lock().sub.clone();
+        match sub {
+            None => None,
+            Some(sub) => sub.last().await
+        }
+    }
+
+    pub fn updates(
+        &self,
+        begin_with_last: bool
+    ) -> impl Stream<Item = Bytes> {
+        let mut t = self.0.lock();
+        let (tx, rx) = mpsc::channel(10);
+        t.streams.push(tx);
+        if let Some(sub) = t.sub {
+            let m = ToCon::Stream {tx, last: begin_with_last, id: sub.0.id };
+            let _ = sub.0.connection.send(m);
+        }
+        rx
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableSubscription<T: DeserializeOwned>(
+    DurableSubscriptionUt,
+    PhantomData<T>
+);
+
+impl<T: DeserializeOwned> DurableSubscription<T> {
+    pub fn untyped(self) -> DurableSubscriptionUt {
+        self.0
+    }
+
+    pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
+        self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
+    }
+
+    pub fn updates(
+        &self,
+        begin_with_last: bool
+    ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
+        self.0.updates(begin_with_last).map(|v| rmp_serde::decode::from_read(&*v))
+    }
+}
+
 enum SubStatus {
     Subscribed(SubscriptionUtWeak),
     Pending(Vec<oneshot::Sender<Result<SubscriptionUt, Error>>>),
@@ -207,75 +262,69 @@ impl Subscriber {
         SubscriberWeak(Arc::downgrade(&self.0))
     }
 
-    fn start_resub_task(
-        &self,
-        incoming: UnboundedReceiver<()>
-    ) {
+    fn start_resub_task(&self, incoming: UnboundedReceiver<()>) {
+        async fn wait_retry(retry: &mut Option<Delay>) {
+            match retry {
+                None => future::pending().await,
+                Some(d) => d.await,
+            }
+        }
+        fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
+            *retry = subscriber.durable_dead.vals()
+                .filter_map(|w| w.upgrade())
+                .map(|ds| ds.0.lock().next_try)
+                .min()
+                .map(|t| time::delay_for(t + Duration::from_secs(1)));
+        }
+        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
+            if let Some(subscriber) = subscriber.upgrade() {
+                let now = Instant::now();
+                let mut batch = {
+                    let mut b = HashMap::new();
+                    let mut subscriber = subscriber.0.lock();
+                    for (p, w) in &subscriber.durable_dead {
+                        if let Some(s) = w.upgrade() {
+                            let mut inner = s.lock();
+                            if inner.next_try <= now {
+                                b.insert(p.clone(), s);
+                            }
+                        }
+                    }
+                    b
+                };
+                if batch.len() == 0 {
+                    let mut subscriber = subscriber.0.lock();
+                    update_delay(&mut *subscriber, retry);
+                } else {
+                    let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
+                    let mut subscriber = subscriber.0.lock();
+                    let now = Instant::now();
+                    for (p, r) in r {
+                        let mut ds = batch.get_mut(&p).unwrap().0.lock();
+                        match r {
+                            Err(_) => { // CR estokes: log this error?
+                                ds.tries += 1;
+                                ds.next_try = now + Duration::from_secs(ds.tries);
+                            },
+                            Ok(sub) => {
+                                ds.tries = 0;
+                                for tx in ds.streams.iter().cloned() {
+                                    let _ = sub.connection.send(ToCon::Stream {
+                                        tx, last: true, id: sub.0.id
+                                    });
+                                }
+                                ds.sub = Some(sub);
+                                let w = subscriber.durable_dead.remove(&p).unwrap();
+                                subscriber.durable_alive.insert(p.clone(), w.clone());
+                            },
+                        }
+                    }
+                    update_delay(&mut *subscriber, retry);
+                }
+            }
+        }
         let subscriber = self.downgrade();
         task::spawn(async move {
-            async fn wait_retry(retry: &mut Option<Delay>) {
-                match retry {
-                    None => future::pending().await,
-                    Some(d) => d.await,
-                }
-            }
-            fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
-                *retry = subscriber.durable_dead.vals()
-                    .filter_map(|w| w.upgrade())
-                    .map(|ds| ds.0.lock().next_try)
-                    .min()
-                    .map(|t| time::delay_for(t + Duration::from_secs(1)));
-            }
-            async fn do_resub(
-                subscriber: &SubscriberWeak,
-                retry: &mut Option<Delay>,
-            ) {
-                if let Some(subscriber) = subscriber.upgrade() {
-                    let now = Instant::now();
-                    let mut batch = {
-                        let mut b = HashMap::new();
-                        let mut subscriber = subscriber.0.lock();
-                        for (p, w) in &subscriber.durable_dead {
-                            if let Some(s) = w.upgrade() {
-                                let mut inner = s.lock();
-                                if inner.next_try <= now {
-                                    b.insert(p.clone(), s);
-                                }
-                            }
-                        }
-                        b
-                    };
-                    if batch.len() == 0 {
-                        let mut subscriber = subscriber.0.lock();
-                        update_delay(&mut *subscriber, retry);
-                    } else {
-                        let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
-                        let mut subscriber = subscriber.0.lock();
-                        let now = Instant::now();
-                        for (p, r) in r {
-                            let mut ds = batch.get_mut(&p).unwrap().0.lock();
-                            match r {
-                                Err(_) => { // CR estokes: log this error?
-                                    ds.tries += 1;
-                                    ds.next_try = now + Duration::from_secs(ds.tries);
-                                },
-                                Ok(sub) => {
-                                    ds.tries = 0;
-                                    for tx in ds.streams.iter().cloned() {
-                                        let _ = sub.connection.send(ToCon::Stream {
-                                            tx, last: true, id: sub.0.id
-                                        });
-                                    }
-                                    ds.sub = Some(sub);
-                                    let w = subscriber.durable_dead.remove(&p).unwrap();
-                                    subscriber.durable_alive.insert(p.clone(), w.clone());
-                                },
-                            }
-                        }
-                        update_delay(&mut *subscriber, retry);
-                    }
-                }
-            }
             let mut incoming = Batched::new(incoming, 100_000);
             let mut retry: Option<Delay> = None;
             loop {
