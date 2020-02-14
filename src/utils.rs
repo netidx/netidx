@@ -239,6 +239,18 @@ impl<S: Stream> Batched<S> {
             current: 0,
         }
     }
+
+    pub fn inner(&self) -> &S {
+        &self.stream
+    }
+
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
 }
 
 impl<S: Stream> Stream for Batched<S> {
@@ -279,6 +291,12 @@ impl<S: Stream> Stream for Batched<S> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
+    }
+}
+
+impl<S: Stream> FusedStream for Batched<S> {
+    fn is_terminated(&self) -> bool {
+        self.ended
     }
 }
 

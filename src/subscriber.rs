@@ -14,16 +14,19 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Weak},
     cmp::min,
+    time::Duration,
 };
 use tokio::{
     task,
     sync::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
     net::TcpStream,
+    time::{self, Instant, Delay},
 };
 use fxhash::FxBuildHasher;
 use futures::{
     prelude::*,
     select,
+    stream::SelectAll,
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -43,6 +46,7 @@ struct SubscribeRequest {
 #[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeRequest),
+    OnDead(Id, oneshot::Sender<()>),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Bytes>),
     Stream {
@@ -140,6 +144,27 @@ impl<T: DeserializeOwned> Subscription<T> {
     }
 }
 
+#[derive(Debug)]
+struct DurableSubscriptionUtInner {
+    path: Path,
+    sub: Option<SubscriptionUt>,
+    streams: Vec<Sender<Bytes>>,
+    tries: usize,
+    next_try: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct DurableSubscriptionUtWeak(Weak<Mutex<DurableSubscriptionInner>>);
+
+impl DurableSubscriptionUtWeak {
+    fn upgrade(&self) -> Option<DurableSubscriptionUt> {
+        Arc::upgrade(&self.0).map(|s| DurableSubscriptionUt(s))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableSubscriptionUt(Arc<Mutex<DurableSubscriptionUtInner>>);
+
 enum SubStatus {
     Subscribed(SubscriptionUtWeak),
     Pending(Vec<oneshot::Sender<Result<SubscriptionUt, Error>>>),
@@ -149,6 +174,17 @@ struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
+    durable_dead: HashMap<Path, DurableSubscriptionUtWeak>,
+    durable_alive: HashMap<Path, DurableSubscriptionUtWeak>,
+    trigger_resub: UnboundedSender<DurableSubscriptionUtWeak>,
+}
+
+struct SubscriberWeak(Weak<Mutex<SubscriberInner>>);
+
+impl SubscriberWeak {
+    fn upgrade(&self) -> Option<Subscriber> {
+        Weak::upgrade(&self.0).map(|s| Subscriber(s))
+    }
 }
 
 #[derive(Clone)]
@@ -156,13 +192,121 @@ pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
     pub fn new(resolver: config::Resolver) -> Result<Subscriber, Error> {
-        Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let t = Ok(Subscriber(Arc::new(Mutex::new(SubscriberInner {
             resolver: Resolver::<ReadOnly>::new_r(resolver)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
-        }))))
+            durable_dead: HashMap::new(),
+            durable_alive: HashMap::new(),
+            resub: tx,
+        }))));
+        t.start_resub_task(rx);
+        t
     }
 
+    fn downgrade(&self) -> SubscriberWeak {
+        SubscriberWeak(Arc::downgrade(&self.0))
+    }
+
+    fn start_resub_task(
+        &self,
+        incoming: UnboundedReceiver<()>
+    ) {
+        type DeadItem = Box<dyn Stream<Item = (Path, DurableSubscriptionUtWeak)>>;
+        type DeadSet =
+            Batched<SelectAll<DeadItem>>>;
+        let subscriber = self.downgrade();
+        task::spawn(async move {
+            let mut incoming = Batched::new(incoming, 100_000);
+            let mut dead: DeadSet = Batched::new(SelectAll::new(), 100_000);
+            let mut retry: Option<Delay> = None;
+            async fn wait_retry(retry: &mut Option<Delay>) {
+                match retry {
+                    None => future::pending().await,
+                    Some(d) => d.await,
+                }
+            }
+            fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
+                *retry = subscriber.durable_dead.vals()
+                    .filter_map(|w| w.upgrade())
+                    .map(|ds| ds.0.lock().next_try)
+                    .min()
+                    .map(|t| time::delay_for(t + Duration::from_secs(1)));
+            }
+            async fn do_resub_batch(
+                subscriber: &SubscriberWeak,
+                dead: &mut DeadSet,
+                retry: &mut Option<Delay>,
+            ) {
+                if let Some(subscriber) = subscriber.upgrade() {
+                    let now = Instant::now();
+                    let mut batch = {
+                        let b = HashMap::new();
+                        let mut subscriber = subscriber.0.lock();
+                        for (p, w) in &subscriber.durable_dead {
+                            if let Some(s) = w.upgrade() {
+                                let mut inner = s.lock();
+                                if inner.next_try <= now {
+                                    b.insert(p.clone(), s);
+                                }
+                            }
+                        }
+                    };
+                    if batch.len() == 0 {
+                        let mut subscriber = subscriber.0.lock();
+                        update_delay(&mut *subscriber, retry);
+                    } else {
+                        let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
+                        let mut subscriber = subscriber.0.lock();
+                        let now = Instant::now();
+                        for (p, r) in r {
+                            let mut ds = batch.get_mut(&p).unwrap().0.lock();
+                            match r {
+                                Err(_) => { // CR estokes: log this error?
+                                    ds.tries += 1;
+                                    ds.next_try = now + Duration::from_secs(ds.tries);
+                                },
+                                Ok(sub) => {
+                                    ds.tries = 0;
+                                    for tx in ds.streams.iter().cloned() {
+                                        let m = ToCon::Stream {
+                                            tx, last: true, id: sub.0.id
+                                        };
+                                        let _ = sub.connection.send(m);
+                                    }
+                                    let (tx, rx) = oneshot::channel();
+                                    let _ = sub.connection.send(
+                                        ToCon::OnDead(sub.0.id, tx)
+                                    );
+                                    ds.sub = Some(sub);
+                                    let w = subscriber.durable_dead.remove(&p).unwrap();
+                                    subscriber.durable_alive.insert(p.clone(), w.clone());
+                                    deads.inner_mut().push(
+                                        Box::new(rx.into_stream().map(move |_| (p, w)))
+                                            as DeadItem
+                                    );
+                                },
+                            }
+                        }
+                        update_delay(&mut *subscriber, retry);
+                    }
+                }
+            }
+            loop {
+                select! {
+                    i = incoming.next() => match i {
+                        None => break,
+                        Some(BatchItem::InBatch(())) => (),
+                        Some(BatchItem::EndBatch) => {
+                            do_resub_batch(&subscriber, &mut dead).await
+                        }
+                    }
+                }
+            }
+        })
+    }
+    
     /// Subscribe to the specified set of paths.
     ///
     /// Path resolution and subscription are done in parallel, so the
@@ -178,7 +322,7 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    pub async fn subscribe_raw(
+    pub async fn subscribe_ut(
         &self, batch: impl IntoIterator<Item = Path>,
     ) -> Vec<(Path, Result<SubscriptionUt, Error>)> {
         enum St {
@@ -335,7 +479,7 @@ impl Subscriber {
         }).collect()
     }
 
-    pub async fn subscribe_one_raw(&self, path: Path) -> Result<SubscriptionUt, Error> {
+    pub async fn subscribe_one_ut(&self, path: Path) -> Result<SubscriptionUt, Error> {
         self.subscribe_raw(iter::once(path)).await.pop().unwrap().1
     }
 
@@ -355,6 +499,7 @@ struct Sub {
     path: Path,
     streams: Vec<Sender<Bytes>>,
     last: Bytes,
+    on_dead: Vec<oneshot::Sender<()>>,
 }
 
 async fn handle_val(
@@ -394,6 +539,9 @@ fn unsubscribe(
     addr: SocketAddr,
     subscribed: &mut HashMap<Path, SubStatus>
 ) {
+    for s in sub.on_dead.drain(..) {
+        let _ = s.send(());
+    }
     match subscribed.entry(sub.path) {
         Entry::Vacant(_) => (),
         Entry::Occupied(e) => match e.get() {
@@ -461,7 +609,7 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
-    let mut from_sub = Batched::new(from_sub, BATCH).fuse();
+    let mut from_sub = Batched::new(from_sub, BATCH);
     let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
@@ -524,6 +672,11 @@ async fn connection(
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
                     queued.push(ToPublisher::Unsubscribe(id));
+                }
+                Some(BatchItem::InBatch(ToCon::OnDead(id, s)) => {
+                    if let Some(sub) = subscriptions.get(&id) {
+                        sub.on_dead.push(s);
+                    }
                 }
                 Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
                     if let Some(sub) = subscriptions.get(&id) {
