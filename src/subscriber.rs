@@ -26,7 +26,8 @@ use fxhash::FxBuildHasher;
 use futures::{
     prelude::*,
     select,
-    stream::SelectAll,
+    stream::{self, SelectAll},
+    future::{self, IntoStream},
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -213,14 +214,10 @@ impl Subscriber {
         &self,
         incoming: UnboundedReceiver<()>
     ) {
-        type DeadItem = Box<dyn Stream<Item = (Path, DurableSubscriptionUtWeak)>>;
-        type DeadSet =
-            Batched<SelectAll<DeadItem>>>;
+        type DeadItem = IntoStream<oneshot::Receiver<()>>;
+        type DeadSet = Batched<SelectAll<DeadItem>>>;
         let subscriber = self.downgrade();
         task::spawn(async move {
-            let mut incoming = Batched::new(incoming, 100_000);
-            let mut dead: DeadSet = Batched::new(SelectAll::new(), 100_000);
-            let mut retry: Option<Delay> = None;
             async fn wait_retry(retry: &mut Option<Delay>) {
                 match retry {
                     None => future::pending().await,
@@ -234,7 +231,14 @@ impl Subscriber {
                     .min()
                     .map(|t| time::delay_for(t + Duration::from_secs(1)));
             }
-            async fn do_resub_batch(
+            async fn wait_dead(dead: &mut DeadSet) {
+                if dead.len() == 0 {
+                    future::pending().await;
+                } else {
+                    let _ = dead.next().await;
+                }
+            }
+            async fn do_resub(
                 subscriber: &SubscriberWeak,
                 dead: &mut DeadSet,
                 retry: &mut Option<Delay>,
@@ -242,7 +246,7 @@ impl Subscriber {
                 if let Some(subscriber) = subscriber.upgrade() {
                     let now = Instant::now();
                     let mut batch = {
-                        let b = HashMap::new();
+                        let mut b = HashMap::new();
                         let mut subscriber = subscriber.0.lock();
                         for (p, w) in &subscriber.durable_dead {
                             if let Some(s) = w.upgrade() {
@@ -252,6 +256,7 @@ impl Subscriber {
                                 }
                             }
                         }
+                        b
                     };
                     if batch.len() == 0 {
                         let mut subscriber = subscriber.0.lock();
@@ -282,10 +287,7 @@ impl Subscriber {
                                     ds.sub = Some(sub);
                                     let w = subscriber.durable_dead.remove(&p).unwrap();
                                     subscriber.durable_alive.insert(p.clone(), w.clone());
-                                    deads.inner_mut().push(
-                                        Box::new(rx.into_stream().map(move |_| (p, w)))
-                                            as DeadItem
-                                    );
+                                    deads.inner_mut().push(rx.into_stream());
                                 },
                             }
                         }
@@ -293,15 +295,24 @@ impl Subscriber {
                     }
                 }
             }
+            let mut incoming = Batched::new(incoming, 100_000);
+            let mut dead: DeadSet = Batched::new(SelectAll::new(), 100_000);
+            let mut retry: Option<Delay> = None;
             loop {
                 select! {
-                    i = incoming.next() => match i {
+                    m = incoming.next() => match m {
                         None => break,
                         Some(BatchItem::InBatch(())) => (),
                         Some(BatchItem::EndBatch) => {
-                            do_resub_batch(&subscriber, &mut dead).await
+                            do_resub(&subscriber, &mut dead, &mut retry).await;
                         }
-                    }
+                    },
+                    _ = wait_dead(&mut dead).fuse() => {
+                        do_resub(&subscriber, &mut dead, &mut retry).await;
+                    },
+                    _ = wait_retry(&mut retry).fuse() => {
+                        do_resub(&subscriber, &mut dead, &mut retry).await;
+                    },
                 }
             }
         })
