@@ -144,7 +144,6 @@ impl<T: DeserializeOwned> Subscription<T> {
 
 #[derive(Debug)]
 struct DurableSubscriptionUtInner {
-    path: Path,
     sub: Option<SubscriptionUt>,
     streams: Vec<Sender<Bytes>>,
     tries: usize,
@@ -281,14 +280,21 @@ impl Subscriber {
                 let now = Instant::now();
                 let mut batch = {
                     let mut b = HashMap::new();
+                    let mut gc = Vec::new();
                     let mut subscriber = subscriber.0.lock();
                     for (p, w) in &subscriber.durable_dead {
-                        if let Some(s) = w.upgrade() {
-                            let mut inner = s.lock();
-                            if inner.next_try <= now {
-                                b.insert(p.clone(), s);
+                        match w.upgrade() {
+                            None => { gc.push(p); }
+                            Some(s) => {
+                                let mut inner = s.lock();
+                                if inner.next_try <= now {
+                                    b.insert(p.clone(), s);
+                                }
                             }
                         }
+                    }
+                    for p in gc {
+                        subscriber.durable_dead.remove(p);
                     }
                     b
                 };
@@ -563,7 +569,6 @@ impl Subscriber {
             }
         }
         let s = DurableSubscriptionUt(Arc::new(Mutex::new(DurableSubscriptionUtInner {
-            path: path.clone(),
             sub: None,
             streams: Vec::new(),
             tries: 0,
