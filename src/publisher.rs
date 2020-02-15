@@ -143,6 +143,7 @@ struct PublisherInner {
     resolver: Resolver<WriteOnly>,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
+    wait_any_client: Vec<oneshot::Sender<()>>,
 }
 
 impl PublisherInner {
@@ -262,6 +263,7 @@ impl Publisher {
             resolver,
             to_publish: HashSet::new(),
             to_unpublish: HashSet::new(),
+            wait_any_client: Vec::new(),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -430,6 +432,21 @@ impl Publisher {
     /// Returns the number of subscribers subscribing to at least one value.
     pub fn clients(&self) -> usize { self.0.lock().clients.len() }
 
+    /// Wait for at least one client to connect
+    pub async fn wait_any_client(&self) {
+        let wait = {
+            let mut inner = self.0.lock();
+            if inner.clients.len() > 0 {
+                return
+            } else {
+                let (tx, rx) = oneshot::channel();
+                inner.wait_any_client.push(tx);
+                rx
+            }
+        };
+        let _ = wait.await;
+    }
+
     /// Wait for at least one client to subscribe to the specified
     /// published value. Returns immediatly if there is a client, or
     /// if the published value is dead.
@@ -554,6 +571,9 @@ async fn accept_loop(
                             to_client: tx,
                             subscribed: HashSet::with_hasher(FxBuildHasher::default()),
                         });
+                        for tx in pb.wait_any_client.drain(..) {
+                            let _ = tx.send(());
+                        }
                         task::spawn(async move {
                             let _ = client_loop(t_weak.clone(), addr, rx, s).await;
                             if let Some(t) = t_weak.upgrade() {
