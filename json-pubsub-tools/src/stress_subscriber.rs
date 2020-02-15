@@ -3,11 +3,11 @@ use futures::prelude::*;
 use json_pubsub::{
     path::Path,
     resolver::{ReadOnly, Resolver},
-    subscriber::{Subscriber, Subscription},
+    subscriber::{Subscriber, DurableSubscription},
     config,
 };
-use std::{result::Result, time::{Instant, Duration}};
-use tokio::{runtime::Runtime};
+use std::time::Duration;
+use tokio::{runtime::Runtime, time::Instant};
 
 pub(crate) fn run(config: config::Resolver) {
     let mut rt = Runtime::new().expect("runtime");
@@ -15,13 +15,9 @@ pub(crate) fn run(config: config::Resolver) {
         let mut r = Resolver::<ReadOnly>::new_r(config).expect("resolver");
         let paths = r.list(Path::from("/bench")).await.expect("list");
         let subscriber = Subscriber::new(config).unwrap();
-        let subs = subscriber
-            .subscribe(paths)
-            .await
-            .into_iter()
-            .map(|(_, s)| s)
-            .collect::<Result<Vec<Subscription<Data>>, _>>()
-            .expect("subscribe");
+        let subs =
+            paths.into_iter().map(|path| subscriber.subscribe_durable(path))
+            .collect::<Vec<DurableSubscription<Data>>>();
         let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true)));
         let one_second = Duration::from_secs(1);
         let mut last_stat = Instant::now();
@@ -39,6 +35,5 @@ pub(crate) fn run(config: config::Resolver) {
             }
         }
         future::pending::<()>().await;
-        drop(subs);
     });
 }

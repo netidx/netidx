@@ -153,12 +153,8 @@ impl PublisherInner {
             self.clients.clear();
             self.by_id.clear();
             while let Ok(_) = self.updates.pop() {}
-            let paths = mem::replace(&mut self.by_path, HashMap::new());
             let mut resolver = self.resolver.clone();
-            task::spawn(async move {
-                let paths = paths.into_iter().map(|(p, _)| p).collect();
-                let _ = resolver.unpublish(paths).await;
-            });
+            task::spawn(async move { let _ = resolver.clear().await; });
         }
     }
 }

@@ -114,6 +114,13 @@ impl<R: Writeable + ReadableOrWritable> Resolver<R> {
             _ => bail!("unexpected response"),
         }
     }
+
+    pub async fn clear(&mut self) -> Result<()> {
+        match self.send(ToResolver::Clear).await? {
+            FromResolver::Unpublished => Ok(()),
+            _ => bail!("unexpected response"),
+        }
+    }
 }
 
 async fn connect(
