@@ -302,7 +302,6 @@ impl Subscriber {
                 .map(|t| time::delay_until(t + Duration::from_secs(1)));
         }
         async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
-            dbg!("do resub");
             if let Some(subscriber) = subscriber.upgrade() {
                 let now = Instant::now();
                 let mut batch = {
@@ -325,20 +324,17 @@ impl Subscriber {
                     }
                     b
                 };
-                if dbg!(batch.len()) == 0 {
+                if batch.len() == 0 {
                     let mut subscriber = subscriber.0.lock();
                     update_retry(&mut *subscriber, retry);
                 } else {
-                    dbg!("doing resubscribe");
                     let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
-                    dbg!("after resubscribe");
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
                             Err(e) => { // CR estokes: log this error?
-                                dbg!(e);
                                 ds.tries += 1;
                                 ds.next_try = now + Duration::from_secs(ds.tries as u64);
                             },
@@ -375,17 +371,14 @@ impl Subscriber {
             let mut incoming = Batched::new(incoming, 100_000);
             let mut retry: Option<Delay> = None;
             loop {
-                dbg!("resub loop");
                 select! {
                     _ = wait_retry(&mut retry).fuse() => {
-                        dbg!("time to retry");
                         do_resub(&subscriber, &mut retry).await;
                     },
                     m = incoming.next() => match m {
                         None => break,
                         Some(BatchItem::InBatch(())) => (),
                         Some(BatchItem::EndBatch) => {
-                            dbg!("resub requested");
                             do_resub(&subscriber, &mut retry).await;
                         }
                     },
@@ -421,7 +414,6 @@ impl Subscriber {
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
-        dbg!("init");
         let mut r = { // Init
             let mut t = self.0.lock();
             for p in paths.clone() {
@@ -452,7 +444,6 @@ impl Subscriber {
             let mut rng = rand::thread_rng();
             rng.gen_range(0, n)
         }
-        dbg!("resolve");
         { // Resolve, Connect, Subscribe
             let to_resolve =
                 pending.iter()
@@ -466,14 +457,13 @@ impl Subscriber {
                     ));
                 }
                 Ok(addrs) => {
-                    dbg!("connect");
                     let mut t = self.0.lock();
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
                             pending.insert(p, St::Error(format_err!("path not found")));
                         } else {
                             let addr = {
-                                if dbg!(addrs.len()) == 1 {
+                                if addrs.len() == 1 {
                                     addrs[0]
                                 } else {
                                     addrs[pick(addrs.len())]
@@ -506,7 +496,6 @@ impl Subscriber {
             }
         }
         // Wait
-        dbg!("wait");
         for (path, st) in pending.iter_mut() {
             match st {
                 St::Resolve => unreachable!(),
@@ -525,16 +514,12 @@ impl Subscriber {
                         }
                     }
                 },
-                St::WaitingOther(w) => {
-                    dbg!("waiting other");
-                    match w.await {
-                        Err(_) => *st = St::Error(format_err!("other side died")),
-                        Ok(Err(e)) => *st = St::Error(e),
-                        Ok(Ok(raw)) => *st = St::Subscribed(raw),
-                    }
+                St::WaitingOther(w) => match w.await {
+                    Err(_) => *st = St::Error(format_err!("other side died")),
+                    Ok(Err(e)) => *st = St::Error(e),
+                    Ok(Ok(raw)) => *st = St::Subscribed(raw),
                 }
                 St::Subscribing(w) => {
-                    dbg!("waiting subscribe");
                     let res = match w.await {
                         Err(_) => Err(format_err!("connection died")),
                         Ok(Err(e)) => Err(e),
@@ -646,7 +631,6 @@ impl Subscriber {
         })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
-        dbg!("durable subscribe");
         s
     }
 
@@ -711,7 +695,7 @@ fn unsubscribe(
                     Err(_) => { inner.states.remove(i); }
                 }
             }
-            subscriber.durable_dead.insert(dbg!(sub.path.clone()), dsw);
+            subscriber.durable_dead.insert(sub.path.clone(), dsw);
             let _ = subscriber.trigger_resub.unbounded_send(());
         }
     }
