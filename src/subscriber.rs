@@ -106,7 +106,7 @@ impl SubscriptionUt {
     /// only receive updated values. If you only want to get the last
     /// value one time, it's cheaper to call `last`.
     ///
-    /// When the subscription dies the stream will end.
+    /// If the subscription dies the stream will end.
     pub fn updates(
         &self,
         begin_with_last: bool
@@ -142,10 +142,17 @@ impl<T: DeserializeOwned> Subscription<T> {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum DSState {
+    Subscribed,
+    Unsubscribed,
+}
+
 #[derive(Debug)]
 struct DurableSubscriptionUtInner {
     sub: Option<SubscriptionUt>,
     streams: Vec<Sender<Bytes>>,
+    states: Vec<UnboundedSender<DSState>>,
     tries: usize,
     next_try: Instant,
 }
@@ -177,6 +184,15 @@ impl DurableSubscriptionUt {
             None => None,
             Some(sub) => sub.last().await
         }
+    }
+
+    /// Return a stream that produces a value when the state of the
+    /// subscription changes. The initial state is unsubscribed.
+    pub fn state(&self) -> impl Stream<Item = DSState> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut t = self.0.lock();
+        t.states.push(tx);
+        rx
     }
 
     pub fn updates(
@@ -321,6 +337,13 @@ impl Subscriber {
                             },
                             Ok(sub) => {
                                 ds.tries = 0;
+                                let mut i = 0;
+                                while i < ds.states.len() {
+                                    match ds.states[i].send(DSState::Subscribed) {
+                                        Ok(()) => { i += 1; }
+                                        Err(_) => { ds.states.remove(i); }
+                                    }
+                                }
                                 for tx in ds.streams.iter().cloned() {
                                     let _ = sub.0.connection.send(ToCon::Stream {
                                         tx, last: true, id: sub.0.id
@@ -580,6 +603,7 @@ impl Subscriber {
         let s = DurableSubscriptionUt(Arc::new(Mutex::new(DurableSubscriptionUtInner {
             sub: None,
             streams: Vec::new(),
+            states: Vec::new(),
             tries: 0,
             next_try: Instant::now(),
         })));
@@ -649,8 +673,19 @@ fn unsubscribe(
     addr: SocketAddr,
 ) {
     if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
-        subscriber.durable_dead.insert(sub.path.clone(), dsw);
-        let _ = subscriber.trigger_resub.send(());
+        if let Some(ds) = dsw.upgrade() {
+            let mut inner = ds.0.lock();
+            inner.sub = None;
+            let mut i = 0;
+            while i < inner.states.len() {
+                match inner.states[i].send(DSState::Unsubscribed) {
+                    Ok(()) => { i+= 1; }
+                    Err(_) => { inner.states.remove(i); }
+                }
+            }
+            subscriber.durable_dead.insert(sub.path.clone(), dsw);
+            let _ = subscriber.trigger_resub.send(());
+        }
     }
     match subscriber.subscribed.entry(sub.path) {
         Entry::Vacant(_) => (),
