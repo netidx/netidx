@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     task,
-    sync::{oneshot, mpsc::{self, Sender, UnboundedReceiver, UnboundedSender}},
+    sync::oneshot,
     net::TcpStream,
     time::{self, Instant, Delay},
 };
@@ -26,6 +26,7 @@ use fxhash::FxBuildHasher;
 use futures::{
     prelude::*,
     select,
+    channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -91,7 +92,7 @@ impl SubscriptionUt {
     /// Get the last published value.
     pub async fn last(&self) -> Option<Bytes> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.connection.send(ToCon::Last(self.0.id, tx));
+        let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
         match rx.await {
             Ok(b) => Some(b),
             Err(_) => None
@@ -113,7 +114,7 @@ impl SubscriptionUt {
     ) -> impl Stream<Item = Bytes> {
         let (tx, rx) = mpsc::channel(10);
         let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
-        let _ = self.0.connection.send(m);
+        let _ = self.0.connection.unbounded_send(m);
         rx
     }
 }
@@ -189,8 +190,9 @@ impl DurableSubscriptionUt {
     /// Return a stream that produces a value when the state of the
     /// subscription changes. The initial state is unsubscribed.
     pub fn state(&self) -> impl Stream<Item = DSState> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded();
         let mut t = self.0.lock();
+        t.states.retain(|c| !c.is_closed());
         t.states.push(tx);
         rx
     }
@@ -201,10 +203,11 @@ impl DurableSubscriptionUt {
     ) -> impl Stream<Item = Bytes> {
         let mut t = self.0.lock();
         let (tx, rx) = mpsc::channel(10);
+        t.streams.retain(|c| !c.is_closed());
         t.streams.push(tx.clone());
         if let Some(ref sub) = t.sub {
             let m = ToCon::Stream {tx, last: begin_with_last, id: sub.0.id };
-            let _ = sub.0.connection.send(m);
+            let _ = sub.0.connection.unbounded_send(m);
         }
         rx
     }
@@ -260,7 +263,7 @@ pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
     pub fn new(resolver: config::Resolver) -> Result<Subscriber, Error> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded();
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
             resolver: Resolver::<ReadOnly>::new_r(resolver)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
@@ -339,13 +342,17 @@ impl Subscriber {
                                 ds.tries = 0;
                                 let mut i = 0;
                                 while i < ds.states.len() {
-                                    match ds.states[i].send(DSState::Subscribed) {
+                                    match
+                                        ds.states[i].unbounded_send(DSState::Subscribed)
+                                    {
                                         Ok(()) => { i += 1; }
                                         Err(_) => { ds.states.remove(i); }
                                     }
                                 }
+                                ds.streams.retain(|c| !c.is_closed());
                                 for tx in ds.streams.iter().cloned() {
-                                    let _ = sub.0.connection.send(ToCon::Stream {
+                                    let _ =
+                                        sub.0.connection.unbounded_send(ToCon::Stream {
                                         tx, last: true, id: sub.0.id
                                     });
                                 }
@@ -465,17 +472,18 @@ impl Subscriber {
                             let con =
                                 t.connections.entry(addr)
                                 .or_insert_with(|| {
-                                    let (tx, rx) = mpsc::unbounded_channel();
+                                    let (tx, rx) = mpsc::unbounded();
                                     task::spawn(connection(self.downgrade(), addr, rx));
                                     tx
                                 });
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
-                            let r = con.send(ToCon::Subscribe(SubscribeRequest {
-                                con: con_,
-                                path: p.clone(),
-                                finished: tx,
-                            }));
+                            let r =
+                                con.unbounded_send(ToCon::Subscribe(SubscribeRequest {
+                                    con: con_,
+                                    path: p.clone(),
+                                    finished: tx,
+                                }));
                             match r {
                                 Ok(()) => { pending.insert(p, St::Subscribing(rx)); }
                                 Err(e) => {
@@ -608,7 +616,7 @@ impl Subscriber {
             next_try: Instant::now(),
         })));
         t.durable_dead.insert(path, s.downgrade());
-        let _ = t.trigger_resub.send(());
+        let _ = t.trigger_resub.unbounded_send(());
         s
     }
 
@@ -626,7 +634,6 @@ struct Sub {
 }
 
 async fn handle_val(
-    subscriber: &Subscriber,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeRequest>,
     id: Id,
@@ -640,16 +647,7 @@ async fn handle_val(
             while i < sub.streams.len() {
                 match sub.streams[i].send(msg.clone()).await {
                     Ok(()) => { i += 1; }
-                    Err(_) => {
-                        sub.streams.remove(i);
-                        let s = subscriber.0.lock();
-                        if let Some(w) = s.durable_alive.get(&sub.path) {
-                            if let Some(ds) = w.upgrade() {
-                                let mut inner = ds.0.lock();
-                                inner.streams.remove(i);
-                            }
-                        }
-                    }
+                    Err(_) => { sub.streams.remove(i); }
                 }
             }
             sub.last = msg;
@@ -678,13 +676,13 @@ fn unsubscribe(
             inner.sub = None;
             let mut i = 0;
             while i < inner.states.len() {
-                match inner.states[i].send(DSState::Unsubscribed) {
+                match inner.states[i].unbounded_send(DSState::Unsubscribed) {
                     Ok(()) => { i+= 1; }
                     Err(_) => { inner.states.remove(i); }
                 }
             }
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
-            let _ = subscriber.trigger_resub.send(());
+            let _ = subscriber.trigger_resub.unbounded_send(());
         }
     }
     match subscriber.subscribed.entry(sub.path) {
@@ -787,8 +785,7 @@ async fn connection(
                         match next_val.take() {
                             Some(id) => {
                                 handle_val(
-                                    &subscriber, &mut subscriptions,
-                                    &mut next_sub, id, to, msg
+                                    &mut subscriptions, &mut next_sub, id, to, msg
                                 ).await;
                             }
                             None => {
@@ -830,6 +827,7 @@ async fn connection(
                             let last = sub.last.clone();
                             let _ = tx.send(last).await;
                         }
+                        sub.streams.retain(|c| !c.is_closed());
                         sub.streams.push(tx);
                     }
                 }

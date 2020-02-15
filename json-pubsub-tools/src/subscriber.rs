@@ -122,7 +122,7 @@ async fn run_subscription(
             loop {
                 select! {
                     _ = stop => return,
-                    r = subscriber.subscribe_one_raw(path.clone()).fuse() => match r {
+                    r = subscriber.subscribe_one_ut(path.clone()).fuse() => match r {
                         Ok(sub) => break sub,
                         Err(e) => {
                             let m = str_encode(&format!("{}", e));
