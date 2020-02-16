@@ -34,8 +34,7 @@ use crossbeam::queue::SegQueue;
 use bytes::Bytes;
 use parking_lot::Mutex;
 
-// TODO
-// * add a handler for lazy publishing (delegated subtrees)
+// CR estokes: add a handler for lazy publishing (delegated subtrees)
 
 static MAX_CLIENTS: usize = 768;
 
@@ -45,14 +44,14 @@ enum Update {
     Unpublish,
 }
 
-struct PublishedInner {
+struct UValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
     updates: Arc<SegQueue<(Id, Update)>>,
 }
 
-impl Drop for PublishedInner {
+impl Drop for UValInner {
     fn drop(&mut self) {
         self.updates.push((self.id, Update::Unpublish));
         if let Some(t) = self.publisher.upgrade() {
@@ -66,24 +65,24 @@ impl Drop for PublishedInner {
 }
 
 /// This represents a published value. Internally it is wrapped in an
-/// Arc, so cloning it is essentially free. When all references to a
-/// given published value have been dropped it will be unpublished.
-/// However you must call flush before reference to it will be removed
-/// from the resolver server.
+/// Arc, so cloning it is free. When all references to a given
+/// published value have been dropped it will be unpublished.  However
+/// you must call flush before references to it will be removed from
+/// the resolver server.
 #[derive(Clone)]
-pub struct Published<T>(Arc<PublishedInner>, PhantomData<T>);
+pub struct Val<T>(Arc<UValInner>, PhantomData<T>);
 
-impl<T: Serialize> Published<T> {
+impl<T: Serialize> Val<T> {
     /// Queue an update to the published value, it will not be sent
     /// out until you call `flush` on the publisher. New subscribers
     /// will not see the new value until you have called
     /// `flush`. Multiple updates can be queued before flush is
     /// called, in which case after `flush` is called new subscribers
-    /// will see the last value, and existing subscribers will receive
-    /// all the queued values in order. If updates are queued on
-    /// multiple different published values before `flush` is called,
-    /// they will all be sent out as a batch in the order that update
-    /// is called.
+    /// will see the last queued value, and existing subscribers will
+    /// receive all the queued values in order. If updates are queued
+    /// on multiple different published values before `flush` is
+    /// called, they will all be sent out as a batch in the order that
+    /// update is called.
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
@@ -91,25 +90,33 @@ impl<T: Serialize> Published<T> {
         Ok(self.0.updates.push((self.0.id, Update::Val(mp_encode(v)?))))
     }
 
+    /// Get the unique `Id` of this `Val`. This id is unique on this
+    /// publisher only, no attempt is made to make it globally unique.
     pub fn id(&self) -> Id { self.0.id }
+
+    /// Get a reference to the `Path` of this published value.
     pub fn path(&self) -> &Path { &self.0.path }
 }
 
 /// Except that you send raw bytes, this is exactly the same as a
-/// `Published`. You can mix `PublishedRaw` and `Published` on the
-/// same publisher. The bytes you send will be received by the
-/// subscriber as a discrete message, so there is no need to handle
-/// multiple messages in a buffer, or partial messages, or length
-/// encoding (the length of the `Bytes` is the length of the message).
+/// `Val`. You can mix `UVal` and `Val` on the same publisher. The
+/// bytes you send will be received by the subscriber as a discrete
+/// message, so there is no need to handle multiple messages in a
+/// buffer, or partial messages, or length encoding (the length of the
+/// `Bytes` is the length of the message).
 #[derive(Clone)]
-pub struct PublishedRaw(Arc<PublishedInner>);
+pub struct UVal(Arc<UValInner>);
 
-impl PublishedRaw {
+impl UVal {
+    /// Same as `Val::update`, but untyped.
     pub fn update(&self, v: Bytes) {
         self.0.updates.push((self.0.id, Update::Val(v)));
     }
 
+    /// Same as `Val::id`
     pub fn id(&self) -> Id { self.0.id }
+
+    /// Same as `Val::path`
     pub fn path(&self) -> &Path { &self.0.path }
 }
 
@@ -120,7 +127,7 @@ struct ToClient {
     timeout: Option<Duration>,
 }
 
-struct PublishedUntyped {
+struct PublishedUVal {
     header: Bytes,
     current: Bytes,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
@@ -138,7 +145,7 @@ struct PublisherInner {
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
     next_id: Id,
     by_path: HashMap<Path, Id>,
-    by_id: HashMap<Id, PublishedUntyped, FxBuildHasher>,
+    by_id: HashMap<Id, PublishedUVal, FxBuildHasher>,
     updates: Arc<SegQueue<(Id, Update)>>,
     resolver: Resolver<WriteOnly>,
     to_publish: HashSet<Path>,
@@ -147,21 +154,33 @@ struct PublisherInner {
 }
 
 impl PublisherInner {
-    fn shutdown(&mut self) {
-        if let Some(stop) = mem::replace(&mut self.stop, None) {
-            let _ = stop.send(());
-            self.clients.clear();
-            self.by_id.clear();
-            while let Ok(_) = self.updates.pop() {}
-            let mut resolver = self.resolver.clone();
-            task::spawn(async move { let _ = resolver.clear().await; });
+    fn cleanup(&mut self) -> bool {
+        match mem::replace(&mut self.stop, None) {
+            None => false,
+            Some(stop) => {
+                let _ = stop.send(());
+                while let Ok(_) = self.updates.pop() {}
+                self.clients.clear();
+                self.by_id.clear();
+                true
+            }
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        if self.cleanup() {
+            // CR estokes: report this, or is best effort the right approach?
+            let _ = self.resolver.clear().await;
         }
     }
 }
 
 impl Drop for PublisherInner {
     fn drop(&mut self) {
-        self.shutdown()
+        if self.cleanup() {
+            let mut resolver = self.resolver.clone();
+            tokio::spawn(async move { let _ = resolver.clear().await; });
+        }
     }
 }
 
@@ -203,9 +222,9 @@ fn rand_port(current: u16) -> u16 {
 
 /// Publisher allows to publish values, and gives central control of
 /// flushing queued updates. Publisher is internally wrapped in an
-/// Arc, so cloning it is virtually free. When all references to
-/// published values, and all references to publisher have been
-/// dropped the publisher will shutdown the listener.
+/// Arc, so cloning it is virtually free. When all references to to
+/// the publisher have been dropped the publisher will shutdown the
+/// listener, and remove all published paths from the resolver server.
 #[derive(Clone)]
 pub struct Publisher(Arc<Mutex<PublisherInner>>);
 
@@ -265,22 +284,45 @@ impl Publisher {
             let pb_weak = pb.downgrade();
             async move {
                 accept_loop(pb_weak.clone(), listener, receive_stop).await;
-                if let Some(pb) = pb_weak.upgrade() {
-                    pb.0.lock().shutdown();
-                }
             }
         });
         Ok(pb)
     }
 
+    /// Perform a clean shutdown of the publisher, remove all
+    /// published paths from the resolver server, shutdown the
+    /// listener, and close the connection to all clients. Dropping
+    /// all references to the publisher also calls this function,
+    /// however because async Drop is not yet implemented it is not
+    /// guaranteed that a clean shutdown will be achieved before the
+    /// Runtime itself is Dropped, as such it is necessary to call
+    /// this function directly in the case you are tearing down the
+    /// whole program. In the case where you have multiple publishers
+    /// in your process, or you are for some reason tearing down the
+    /// publisher but will continue to run async jobs on the same
+    /// Runtime, then there is no need to call this function, you can
+    /// just Drop all references to the Publisher.
+    ///
+    /// This function will return an error if other references to the
+    /// publisher exist.
+    pub async fn shutdown(self) -> Result<(), Error> {
+        match Arc::try_unwrap(self.0) {
+            Err(_) => bail!("publisher is not unique"),
+            Ok(mtx) => {
+                let mut inner = Mutex::into_inner(mtx);
+                Ok(inner.shutdown().await)
+            }
+        }
+    }
+    
     /// get the `SocketAddr` that publisher is bound to
     pub fn addr(&self) -> SocketAddr { self.0.lock().addr }
 
-    fn publish_internal(
+    fn publish_val_internal(
         &self,
         path: Path,
         init: Bytes
-    ) -> Result<Arc<PublishedInner>, Error> {
+    ) -> Result<Arc<UValInner>, Error> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             Err(format_err!("can't publish to relative path"))
@@ -292,7 +334,7 @@ impl Publisher {
             let id = pb.next_id.take();
             let header = mp_encode(&FromPublisher::Message(id))?;
             pb.by_path.insert(path.clone(), id);
-            pb.by_id.insert(id, PublishedUntyped {
+            pb.by_id.insert(id, PublishedUVal {
                 header,
                 current: init,
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
@@ -301,7 +343,7 @@ impl Publisher {
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
-            Ok(Arc::new(PublishedInner {
+            Ok(Arc::new(UValInner {
                 id, path,
                 publisher: self.downgrade(),
                 updates: Arc::clone(&pb.updates)
@@ -315,23 +357,23 @@ impl Publisher {
     /// they like. Subscribers will then pick randomly among the
     /// advertised publishers when subscribing. See the `subscriber`
     /// module for details.
-    pub fn publish<T: Serialize>(
+    pub fn publish_val<T: Serialize>(
         &self,
         path: Path,
         init: &T
-    ) -> Result<Published<T>, Error> {
+    ) -> Result<Val<T>, Error> {
         let init = mp_encode(init)?;
-        Ok(Published(self.publish_internal(path, init)?, PhantomData))
+        Ok(Val(self.publish_val_internal(path, init)?, PhantomData))
     }
 
     /// Publish `Path` with initial raw `Bytes` `init`. This is the
     /// otherwise exactly the same as publish.
-    pub fn publish_raw(
+    pub fn publish_val_ut(
         &self,
         path: Path,
         init: Bytes,
-    ) -> Result<PublishedRaw, Error> {
-        Ok(PublishedRaw(self.publish_internal(path, init)?))
+    ) -> Result<UVal, Error> {
+        Ok(UVal(self.publish_val_internal(path, init)?))
     }
     
     /// Send all queued updates out to subscribers, and send all

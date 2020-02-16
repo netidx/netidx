@@ -37,15 +37,15 @@ use parking_lot::Mutex;
 const BATCH: usize = 100_000;
 
 #[derive(Debug)]
-struct SubscribeRequest {
+struct SubscribeValRequest {
     path: Path,
-    finished: oneshot::Sender<Result<SubscriptionUt, Error>>,
+    finished: oneshot::Sender<Result<UVal, Error>>,
     con: UnboundedSender<ToCon>,
 }
 
 #[derive(Debug)]
 enum ToCon {
-    Subscribe(SubscribeRequest),
+    Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Bytes>),
     Stream {
@@ -56,40 +56,46 @@ enum ToCon {
 }
 
 #[derive(Debug)]
-struct SubscriptionUtInner {
+struct UValInner {
     id: Id,
     addr: SocketAddr,
     connection: UnboundedSender<ToCon>,
 }
 
-impl Drop for SubscriptionUtInner {
+impl Drop for UValInner {
     fn drop(&mut self) {
         let _ = self.connection.send(ToCon::Unsubscribe(self.id));
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct SubscriptionUtWeak(Weak<SubscriptionUtInner>);
+pub struct UValWeak(Weak<UValInner>);
 
-impl SubscriptionUtWeak {
-    pub fn upgrade(&self) -> Option<SubscriptionUt> {
-        Weak::upgrade(&self.0).map(|r| SubscriptionUt(r))
+impl UValWeak {
+    pub fn upgrade(&self) -> Option<UVal> {
+        Weak::upgrade(&self.0).map(|r| UVal(r))
     }
 }
 
+/// A UVal is an untyped subscription to a value. A value has a
+/// current value, and a stream of updates. The current value is
+/// accessed by `UVal::last`, which will be available as long as the
+/// subscription is alive. The stream of updates is accessed with the
+/// `UVal::updates` function.
 #[derive(Debug, Clone)]
-pub struct SubscriptionUt(Arc<SubscriptionUtInner>);
+pub struct UVal(Arc<UValInner>);
 
-impl SubscriptionUt {
-    pub fn typed<T: DeserializeOwned>(self) -> Subscription<T> {
-        Subscription(self, PhantomData)
+impl UVal {
+    pub fn typed<T: DeserializeOwned>(self) -> Val<T> {
+        Val(self, PhantomData)
     }
 
-    pub fn downgrade(&self) -> SubscriptionUtWeak {
-        SubscriptionUtWeak(Arc::downgrade(&self.0))
+    pub fn downgrade(&self) -> UValWeak {
+        UValWeak(Arc::downgrade(&self.0))
     }
 
-    /// Get the last published value.
+    /// Get the last published value, or None if the subscription is
+    /// dead.
     pub async fn last(&self) -> Option<Bytes> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
@@ -104,8 +110,7 @@ impl SubscriptionUt {
     /// `begin_with_last` is true, then the stream will start with the
     /// last published value at the time `updates` is called, and will
     /// then receive any updated values. Otherwise the stream will
-    /// only receive updated values. If you only want to get the last
-    /// value one time, it's cheaper to call `last`.
+    /// only receive new values.
     ///
     /// If the subscription dies the stream will end.
     pub fn updates(
@@ -119,17 +124,17 @@ impl SubscriptionUt {
     }
 }
 
-/// A typed version of SubscriptionUt
+/// A typed version of UVal
 #[derive(Debug, Clone)]
-pub struct Subscription<T: DeserializeOwned>(SubscriptionUt, PhantomData<T>);
+pub struct Val<T: DeserializeOwned>(UVal, PhantomData<T>);
 
-impl<T: DeserializeOwned> Subscription<T> {
-    /// Get the `SubscriptionUt`
-    pub fn untyped(self) -> SubscriptionUt {
+impl<T: DeserializeOwned> Val<T> {
+    pub fn untyped(self) -> UVal {
         self.0
     }
 
-    /// Get and decode the last published value.
+    /// Get and decode the last published value, or None if the
+    /// subscription is dead.
     pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
         self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
     }
@@ -144,41 +149,71 @@ impl<T: DeserializeOwned> Subscription<T> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum DSState {
+pub enum DVState {
     Subscribed,
     Unsubscribed,
 }
 
 #[derive(Debug)]
-struct DurableSubscriptionUtInner {
-    sub: Option<SubscriptionUt>,
+struct DUValInner {
+    sub: Option<UVal>,
     streams: Vec<Sender<Bytes>>,
-    states: Vec<UnboundedSender<DSState>>,
+    states: Vec<UnboundedSender<DVState>>,
     tries: usize,
     next_try: Instant,
 }
 
 #[derive(Debug, Clone)]
-struct DurableSubscriptionUtWeak(Weak<Mutex<DurableSubscriptionUtInner>>);
+struct DUValWeak(Weak<Mutex<DUValInner>>);
 
-impl DurableSubscriptionUtWeak {
-    fn upgrade(&self) -> Option<DurableSubscriptionUt> {
-        Weak::upgrade(&self.0).map(|s| DurableSubscriptionUt(s))
+impl DUValWeak {
+    fn upgrade(&self) -> Option<DUVal> {
+        Weak::upgrade(&self.0).map(|s| DUVal(s))
     }
 }
 
+/// `DUVal` is a durable value subscription. it behaves just like
+/// `UVal`, except that if it dies a task within subscriber will
+/// attempt to resubscribe. The resubscription process goes through
+/// the entire resolution and connection process again, so `DUVal` is
+/// robust to many failures. For example,
+/// 
+/// - multiple publishers are publishing on a path and one of them dies.
+///   `DUVal` will transparently move to another one.
+///
+/// - a publisher is restarted (possibly on a different machine).
+///   Since `DUVal` uses linear backoff to avoid saturating the
+///   resolver, and the network, but assuming the publisher is restarted
+///   quickly, resubscription will happen almost immediatly.
+///
+/// - The resolver server cluster is restarted. In this case existing
+///   subscriptions won't die, but new ones will fail if the new
+///   cluster is missing data. However even in this very bad case the
+///   publishers will notice during their heartbeat (default every 10
+///   minutes) that the resolver server is missing their data, and
+///   they will republish it. If the resolver is restarted quickly,
+///   then in the worst case all the data is back in 10 minutes, and
+///   all DUVals waiting to subscribe to missing data will retry and
+///   succeed 35 seconds after that.
+///
+/// A `DUVal` uses more memory than a `UVal` subscription, but other
+/// than that the performance is the same. It is therefore recommended
+/// that `DUVal` and `DVal` be considered the default value
+/// subscription type where semantics allow.
 #[derive(Debug, Clone)]
-pub struct DurableSubscriptionUt(Arc<Mutex<DurableSubscriptionUtInner>>);
+pub struct DUVal(Arc<Mutex<DUValInner>>);
 
-impl DurableSubscriptionUt {
-    pub fn typed<T: DeserializeOwned>(self) -> DurableSubscription<T> {
-        DurableSubscription(self, PhantomData)
+impl DUVal {
+    pub fn typed<T: DeserializeOwned>(self) -> DVal<T> {
+        DVal(self, PhantomData)
     }
 
-    fn downgrade(&self) -> DurableSubscriptionUtWeak {
-        DurableSubscriptionUtWeak(Arc::downgrade(&self.0))
+    fn downgrade(&self) -> DUValWeak {
+        DUValWeak(Arc::downgrade(&self.0))
     }
 
+    /// Get the last value published by the publisher, or None if the
+    /// subscription is currently dead.
     pub async fn last(&self) -> Option<Bytes> {
         let sub = self.0.lock().sub.clone();
         match sub {
@@ -188,15 +223,28 @@ impl DurableSubscriptionUt {
     }
 
     /// Return a stream that produces a value when the state of the
-    /// subscription changes. The initial state is unsubscribed.
-    pub fn state(&self) -> impl Stream<Item = DSState> {
+    /// subscription changes. if include_current is true, then the
+    /// current state will be immediatly emitted once even if there
+    /// was no state change.
+    pub fn state_updates(&self, include_current: bool) -> impl Stream<Item = DVState> {
         let (tx, rx) = mpsc::unbounded();
         let mut t = self.0.lock();
         t.states.retain(|c| !c.is_closed());
+        if include_current {
+            let current = match t.sub {
+                None => DVState::Unsubscribed,
+                Some(_) => DVState::Subscribed,
+            };
+            let _ = tx.unbounded_send(current);
+        }
         t.states.push(tx);
         rx
     }
 
+    /// Gets a stream of updates just like `UVal::updates` except that
+    /// the stream will not end when the subscription dies, it will
+    /// just stop producing values, and will start again if
+    /// resubscription is successful.
     pub fn updates(
         &self,
         begin_with_last: bool
@@ -213,14 +261,12 @@ impl DurableSubscriptionUt {
     }
 }
 
+/// A typed version of `DUVal`
 #[derive(Debug, Clone)]
-pub struct DurableSubscription<T: DeserializeOwned>(
-    DurableSubscriptionUt,
-    PhantomData<T>
-);
+pub struct DVal<T: DeserializeOwned>(DUVal, PhantomData<T>);
 
-impl<T: DeserializeOwned> DurableSubscription<T> {
-    pub fn untyped(self) -> DurableSubscriptionUt {
+impl<T: DeserializeOwned> DVal<T> {
+    pub fn untyped(self) -> DUVal {
         self.0
     }
 
@@ -237,16 +283,16 @@ impl<T: DeserializeOwned> DurableSubscription<T> {
 }
 
 enum SubStatus {
-    Subscribed(SubscriptionUtWeak),
-    Pending(Vec<oneshot::Sender<Result<SubscriptionUt, Error>>>),
+    Subscribed(UValWeak),
+    Pending(Vec<oneshot::Sender<Result<UVal, Error>>>),
 }
 
 struct SubscriberInner {
     resolver: Resolver<ReadOnly>,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
-    durable_dead: HashMap<Path, DurableSubscriptionUtWeak>,
-    durable_alive: HashMap<Path, DurableSubscriptionUtWeak>,
+    durable_dead: HashMap<Path, DUValWeak>,
+    durable_alive: HashMap<Path, DUValWeak>,
     trigger_resub: UnboundedSender<()>,
 }
 
@@ -328,7 +374,7 @@ impl Subscriber {
                     let mut subscriber = subscriber.0.lock();
                     update_retry(&mut *subscriber, retry);
                 } else {
-                    let r = subscriber.subscribe_ut(batch.keys().cloned()).await;
+                    let r = subscriber.subscribe_vals_ut(batch.keys().cloned()).await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
                     for (p, r) in r {
@@ -343,7 +389,7 @@ impl Subscriber {
                                 let mut i = 0;
                                 while i < ds.states.len() {
                                     match
-                                        ds.states[i].unbounded_send(DSState::Subscribed)
+                                        ds.states[i].unbounded_send(DVState::Subscribed)
                                     {
                                         Ok(()) => { i += 1; }
                                         Err(_) => { ds.states.remove(i); }
@@ -387,7 +433,7 @@ impl Subscriber {
         });
     }
     
-    /// Subscribe to the specified set of paths.
+    /// Subscribe to the specified set of values.
     ///
     /// Path resolution and subscription are done in parallel, so the
     /// lowest latency per subscription will be achieved with larger
@@ -402,14 +448,14 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
-    pub async fn subscribe_ut(
+    pub async fn subscribe_vals_ut(
         &self, batch: impl IntoIterator<Item = Path>,
-    ) -> Vec<(Path, Result<SubscriptionUt, Error>)> {
+    ) -> Vec<(Path, Result<UVal, Error>)> {
         enum St {
             Resolve,
-            Subscribing(oneshot::Receiver<Result<SubscriptionUt, Error>>),
-            WaitingOther(oneshot::Receiver<Result<SubscriptionUt, Error>>),
-            Subscribed(SubscriptionUt),
+            Subscribing(oneshot::Receiver<Result<UVal, Error>>),
+            WaitingOther(oneshot::Receiver<Result<UVal, Error>>),
+            Subscribed(UVal),
             Error(Error),
         }
         let paths = batch.into_iter().collect::<Vec<_>>();
@@ -479,7 +525,7 @@ impl Subscriber {
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
                             let r =
-                                con.unbounded_send(ToCon::Subscribe(SubscribeRequest {
+                                con.unbounded_send(ToCon::Subscribe(SubscribeValRequest {
                                     con: con_,
                                     path: p.clone(),
                                     finished: tx,
@@ -566,54 +612,42 @@ impl Subscriber {
         }).collect()
     }
 
-    pub async fn subscribe<T: DeserializeOwned>(
+    /// Subscribe to one value. This is sufficient for a small number
+    /// of paths, but if you need to subscribe to a lot of values it
+    /// is more efficent to use `subscribe_vals_ut`
+    pub async fn subscribe_val_ut(&self, path: Path) -> Result<UVal, Error> {
+        self.subscribe_vals_ut(iter::once(path)).await.pop().unwrap().1
+    }
+
+    /// Same as `subscribe_vals_ut`, but typed.
+    pub async fn subscribe_vals<T: DeserializeOwned>(
         &self, batch: impl IntoIterator<Item = Path>,
-    ) -> Vec<(Path, Result<Subscription<T>, Error>)> {
-        self.subscribe_ut(batch).await.into_iter().map(|(p, r)| {
+    ) -> Vec<(Path, Result<Val<T>, Error>)> {
+        self.subscribe_vals_ut(batch).await.into_iter().map(|(p, r)| {
             (p, r.map(|r| r.typed()))
         }).collect()
     }
 
-    pub async fn subscribe_one_ut(&self, path: Path) -> Result<SubscriptionUt, Error> {
-        self.subscribe_ut(iter::once(path)).await.pop().unwrap().1
-    }
-
-    /// Subscribe to one path. This is sufficient for a small number
-    /// of paths, but if you need to subscribe to a lot of things use
-    /// `subscribe`
-    pub async fn subscribe_one<T: DeserializeOwned>(
+    /// Same as `subscribe_val_ut` but typed.
+    pub async fn subscribe_val<T: DeserializeOwned>(
         &self,
         path: Path
-    ) -> Result<Subscription<T>, Error> {
-        self.subscribe_one_ut(path).await.map(|v| v.typed())
+    ) -> Result<Val<T>, Error> {
+        self.subscribe_val_ut(path).await.map(|v| v.typed())
     }
 
-    /// A durable subscription will subscribe to `path` and attempt to
-    /// remain subscribed until dropped. As such, unlike a regular
-    /// subscription the stream returned by
-    /// `DurableSubscritionUt::updates` will never end, but it also
-    /// may not contain all values the publisher publishes, or it may
-    /// contain duplicate values, though both of these things will
-    /// only happen if the connection is lost and reestablished.
+    /// Create a durable untyped value subscription to `path`.
     ///
-    /// A background task in subscriber will attempt to resubscribe to
-    /// any subscription that becomes unsubscribed. One attempt will
-    /// be made immediatly upon the subscription being dropped, and
-    /// after that linear backoff will be used.
+    /// Batching of durable subscriptions is automatic, if you create
+    /// a lot of durable subscriptions all at once they will batch,
+    /// minimizing the number of messages exchanged with both the
+    /// resolver server and the publishers.
     ///
-    /// Batching of subscriptions is automatic, if you create a lot of
-    /// durable subscriptions all at once batching will minimize the
-    /// number of messages exchanged with both the resolver server and
-    /// the publishers.
-    ///
-    /// Durable subscriptions do use more memory, and have some small
-    /// overhead when fetching the last, however the overhead of
-    /// `updates` is exactly the same as a regular subscription.
-    ///
-    /// As with regular subscriptions there is really only ever one
-    /// subscription for a given path, calling `subscribe_durable_ut`
-    /// again for the same path will just return another pointer to it.
-    pub fn subscribe_durable_ut(&self, path: Path) -> DurableSubscriptionUt {
+    /// As with regular subscriptions there is only ever one
+    /// subscription for a given path, calling
+    /// `subscribe_val_durable_ut` again for the same path will just
+    /// return another pointer to it.
+    pub fn subscribe_val_durable_ut(&self, path: Path) -> DUVal {
         let mut t = self.0.lock();
         if let Some(s) =
             t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
@@ -622,7 +656,7 @@ impl Subscriber {
                 return s;
             }
         }
-        let s = DurableSubscriptionUt(Arc::new(Mutex::new(DurableSubscriptionUtInner {
+        let s = DUVal(Arc::new(Mutex::new(DUValInner {
             sub: None,
             streams: Vec::new(),
             states: Vec::new(),
@@ -634,10 +668,9 @@ impl Subscriber {
         s
     }
 
-    pub fn subscribe_durable<T: DeserializeOwned>(
-        &self, path: Path
-    ) -> DurableSubscription<T> {
-        self.subscribe_durable_ut(path).typed()
+    /// Same as `subscribe_val_durable_ut` but typed.
+    pub fn subscribe_val_durable<T: DeserializeOwned>(&self, path: Path) -> DVal<T> {
+        self.subscribe_val_durable_ut(path).typed()
     }
 }
 
@@ -649,7 +682,7 @@ struct Sub {
 
 async fn handle_val(
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
-    next_sub: &mut Option<SubscribeRequest>,
+    next_sub: &mut Option<SubscribeValRequest>,
     id: Id,
     addr: SocketAddr,
     msg: Bytes,
@@ -672,8 +705,8 @@ async fn handle_val(
                 last: msg,
                 streams: Vec::new(),
             });
-            let s = SubscriptionUtInner { id, addr, connection: req.con };
-            let _ = req.finished.send(Ok(SubscriptionUt(Arc::new(s))));
+            let s = UValInner { id, addr, connection: req.con };
+            let _ = req.finished.send(Ok(UVal(Arc::new(s))));
         }
     }
 }
@@ -690,7 +723,7 @@ fn unsubscribe(
             inner.sub = None;
             let mut i = 0;
             while i < inner.states.len() {
-                match inner.states[i].unbounded_send(DSState::Unsubscribed) {
+                match inner.states[i].unbounded_send(DVState::Unsubscribed) {
                     Ok(()) => { i+= 1; }
                     Err(_) => { inner.states.remove(i); }
                 }
@@ -714,11 +747,11 @@ fn unsubscribe(
 fn handle_control(
     addr: SocketAddr,
     subscriber: &Subscriber,
-    pending: &mut HashMap<Path, SubscribeRequest>,
+    pending: &mut HashMap<Path, SubscribeValRequest>,
     outstanding: &mut Vec<ToPublisher>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_val: &mut Option<Id>,
-    next_sub: &mut Option<SubscribeRequest>,
+    next_sub: &mut Option<SubscribeValRequest>,
     msg: &[u8]
 ) -> Result<(), Error> {
     match rmp_serde::decode::from_read::<&[u8], FromPublisher>(&*msg) {
@@ -767,11 +800,11 @@ async fn connection(
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
     let mut from_sub = Batched::new(from_sub, BATCH);
-    let mut pending: HashMap<Path, SubscribeRequest> = HashMap::new();
+    let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
-    let mut next_sub: Option<SubscribeRequest> = None;
+    let mut next_sub: Option<SubscribeValRequest> = None;
     let mut con = Channel::new(TcpStream::connect(to).await?);
     let mut batch: Vec<Bytes> = Vec::new();
     let mut outstanding: Vec<ToPublisher> = Vec::new();
@@ -891,11 +924,11 @@ mod test {
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
                 let publisher = Publisher::new(cfg, BindCfg::Local).await.unwrap();
-                let vp0 = publisher.publish(
+                let vp0 = publisher.publish_val(
                     "/app/v0".into(),
                     &V {id: 0, v: "foo".into()}
                 ).unwrap();
-                let vp1 = publisher.publish(
+                let vp1 = publisher.publish_val(
                     "/app/v1".into(),
                     &V {id: 0, v: "bar".into()}
                 ).unwrap();
@@ -914,8 +947,8 @@ mod test {
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg).unwrap();
-            let vs0 = subscriber.subscribe_one::<V>("/app/v0".into()).await.unwrap();
-            let vs1 = subscriber.subscribe_one::<V>("/app/v1".into()).await.unwrap();
+            let vs0 = subscriber.subscribe_val::<V>("/app/v0".into()).await.unwrap();
+            let vs1 = subscriber.subscribe_val::<V>("/app/v1".into()).await.unwrap();
             let mut c0: Option<usize> = None;
             let mut c1: Option<usize> = None;
             let mut vs0s = vs0.updates(true);
