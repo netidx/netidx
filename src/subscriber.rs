@@ -334,7 +334,7 @@ impl Subscriber {
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
-                            Err(e) => { // CR estokes: log this error?
+                            Err(_) => { // CR estokes: log this error?
                                 ds.tries += 1;
                                 ds.next_try = now + Duration::from_secs(ds.tries as u64);
                             },
