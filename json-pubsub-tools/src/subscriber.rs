@@ -1,6 +1,6 @@
 use json_pubsub::{
     path::Path,
-    subscriber::Subscriber,
+    subscriber::Subscriber, 
     utils::{Batched, BatchItem, BytesDeque, BytesWriter},
     config,
 };
@@ -14,7 +14,6 @@ use tokio::{
     sync::{oneshot, mpsc},
 };
 use std::{
-    mem,
     collections::{HashMap, HashSet},
     str::{FromStr, from_utf8},
     result::Result,
@@ -122,7 +121,7 @@ async fn run_subscription(
             loop {
                 select! {
                     _ = stop => return,
-                    r = subscriber.subscribe_one_ut(path.clone()).fuse() => match r {
+                    r = subscriber.subscribe_val_ut(path.clone()).fuse() => match r {
                         Ok(sub) => break sub,
                         Err(e) => {
                             let m = str_encode(&format!("{}", e));
@@ -250,6 +249,5 @@ pub(crate) fn run(cfg: config::Resolver, paths: Vec<String>) {
         }
         // run until we are killed even if stdin closes
         future::pending::<()>().await;
-        mem::drop(subscriber);
     });
 }

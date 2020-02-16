@@ -2,7 +2,7 @@ use bytes::Bytes;
 use json_pubsub::{
     utils::{self, Batched, BatchItem},
     path::Path,
-    publisher::{BindCfg, Publisher, PublishedRaw},
+    publisher::{BindCfg, Publisher, UVal},
     config,
 };
 use futures::prelude::*;
@@ -48,7 +48,7 @@ pub(crate) fn run(config: config::Resolver, json: bool, timeout: Option<u64>) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
-        let mut published: HashMap<Path, PublishedRaw> = HashMap::new();
+        let mut published: HashMap<Path, UVal> = HashMap::new();
         let publisher = Publisher::new(config, BindCfg::Any).await
             .expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
@@ -74,7 +74,7 @@ pub(crate) fn run(config: config::Resolver, json: bool, timeout: Option<u64>) {
                                 let path = Path::from(path);
                                 let publ = try_cont!(
                                     "failed to publish",
-                                    publisher.publish_raw(path.clone(), val)
+                                    publisher.publish_val_ut(path.clone(), val)
                                 );
                                 published.insert(path, publ);
                             }

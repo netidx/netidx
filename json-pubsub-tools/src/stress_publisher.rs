@@ -37,7 +37,7 @@ async fn run_publisher(config: config::Resolver, nvals: usize, vsize: usize) {
     let mut vals = Data((0..vsize).into_iter().collect::<Vec<_>>());
     let published = (0..nvals).into_iter().map(|i| {
         let path = Path::from(format!("/bench/{}", i));
-        publisher.publish(path, &vals).expect("encode")
+        publisher.publish_val(path, &vals).expect("encode")
     }).collect::<Vec<_>>();
     publisher.flush(None).await.expect("publish");
     let mut last_stat = Instant::now();

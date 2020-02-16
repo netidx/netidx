@@ -3,7 +3,7 @@ use futures::prelude::*;
 use json_pubsub::{
     path::Path,
     resolver::{ReadOnly, Resolver},
-    subscriber::{Subscriber, DurableSubscription},
+    subscriber::{Subscriber, DVal},
     config,
 };
 use std::time::Duration;
@@ -16,8 +16,8 @@ pub(crate) fn run(config: config::Resolver) {
         let paths = r.list(Path::from("/bench")).await.expect("list");
         let subscriber = Subscriber::new(config).unwrap();
         let subs =
-            paths.into_iter().map(|path| subscriber.subscribe_durable(path))
-            .collect::<Vec<DurableSubscription<Data>>>();
+            paths.into_iter().map(|path| subscriber.durable_subscribe_val(path))
+            .collect::<Vec<DVal<Data>>>();
         let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true)));
         let one_second = Duration::from_secs(1);
         let mut last_stat = Instant::now();

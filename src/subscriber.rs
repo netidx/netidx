@@ -647,7 +647,7 @@ impl Subscriber {
     /// subscription for a given path, calling
     /// `subscribe_val_durable_ut` again for the same path will just
     /// return another pointer to it.
-    pub fn subscribe_val_durable_ut(&self, path: Path) -> DUVal {
+    pub fn durable_subscribe_val_ut(&self, path: Path) -> DUVal {
         let mut t = self.0.lock();
         if let Some(s) =
             t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
@@ -668,9 +668,9 @@ impl Subscriber {
         s
     }
 
-    /// Same as `subscribe_val_durable_ut` but typed.
-    pub fn subscribe_val_durable<T: DeserializeOwned>(&self, path: Path) -> DVal<T> {
-        self.subscribe_val_durable_ut(path).typed()
+    /// Same as `durable_subscribe_val_ut` but typed.
+    pub fn durable_subscribe_val<T: DeserializeOwned>(&self, path: Path) -> DVal<T> {
+        self.durable_subscribe_val_ut(path).typed()
     }
 }
 
