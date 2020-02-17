@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
     sync::{Arc, Weak},
-    cmp::min,
+    cmp::{max, min},
     time::Duration,
 };
 use tokio::{
@@ -41,6 +41,7 @@ struct SubscribeValRequest {
     path: Path,
     finished: oneshot::Sender<Result<UVal, Error>>,
     con: UnboundedSender<ToCon>,
+    deadline: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -350,17 +351,22 @@ impl Subscriber {
         async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
             if let Some(subscriber) = subscriber.upgrade() {
                 let now = Instant::now();
-                let mut batch = {
+                let (mut batch, timeout) = {
                     let mut b = HashMap::new();
                     let mut gc = Vec::new();
                     let mut subscriber = subscriber.0.lock();
+                    let mut max_tries = 0;
                     for (p, w) in &subscriber.durable_dead {
                         match w.upgrade() {
                             None => { gc.push(p.clone()); }
                             Some(s) => {
-                                let next_try = s.0.lock().next_try;
+                                let (next_try, tries) = {
+                                    let s = s.0.lock();
+                                    (s.next_try, s.tries)
+                                };
                                 if next_try <= now {
                                     b.insert(p.clone(), s);
+                                    max_tries = max(max_tries, tries);
                                 }
                             }
                         }
@@ -368,13 +374,16 @@ impl Subscriber {
                     for p in gc {
                         subscriber.durable_dead.remove(&p);
                     }
-                    b
+                    (b, Duration::from_secs(10 + max_tries as u64))
                 };
                 if batch.len() == 0 {
                     let mut subscriber = subscriber.0.lock();
                     update_retry(&mut *subscriber, retry);
                 } else {
-                    let r = subscriber.subscribe_vals_ut(batch.keys().cloned()).await;
+                    let r = subscriber.subscribe_vals_ut(
+                        batch.keys().cloned(),
+                        Some(timeout)
+                    ).await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
                     for (p, r) in r {
@@ -448,8 +457,16 @@ impl Subscriber {
     /// attempt will be made concurrently, and the result of that one
     /// attempt will be given to each concurrent caller upon success
     /// or failure.
+    ///
+    /// The timeout, if specified, will apply to each subscription
+    /// individually. Any subscription that does not complete
+    /// successfully before the specified timeout will result in an
+    /// error, but that error will not effect other subscriptions in
+    /// the batch, which may complete successfully. If you need all or
+    /// nothing behavior, specify None for timeout and wrap the
+    /// `subscribe_vals_ut` future in a `time::timeout`.
     pub async fn subscribe_vals_ut(
-        &self, batch: impl IntoIterator<Item = Path>,
+        &self, batch: impl IntoIterator<Item = Path>, timeout: Option<Duration>
     ) -> Vec<(Path, Result<UVal, Error>)> {
         enum St {
             Resolve,
@@ -458,6 +475,7 @@ impl Subscriber {
             Subscribed(UVal),
             Error(Error),
         }
+        let now = Instant::now();
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
         let mut r = { // Init
@@ -496,14 +514,24 @@ impl Subscriber {
                 .filter(|(_, s)| match s { St::Resolve => true, _ => false })
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
-            match r.resolve(to_resolve.clone()).await {
-                Err(e) => for p in to_resolve {
+            let r = match timeout {
+                None => Ok(r.resolve(to_resolve.clone()).await),
+                Some(d) => time::timeout(d, r.resolve(to_resolve.clone())).await
+            };
+            match r {
+                Err(_) => for p in to_resolve {
+                    pending.insert(p.clone(), St::Error(
+                        format_err!("resolving path: {} failed: request timed out", p)
+                    ));
+                },
+                Ok(Err(e)) => for p in to_resolve {
                     pending.insert(p.clone(), St::Error(
                         format_err!("resolving path: {} failed: {}", p, e)
                     ));
                 }
-                Ok(addrs) => {
+                Ok(Ok(addrs)) => {
                     let mut t = self.0.lock();
+                    let deadline = timeout.map(|t| now + t);
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
                             pending.insert(p, St::Error(format_err!("path not found")));
@@ -529,6 +557,7 @@ impl Subscriber {
                                     con: con_,
                                     path: p.clone(),
                                     finished: tx,
+                                    deadline,
                                 }));
                             match r {
                                 Ok(()) => { pending.insert(p, St::Subscribing(rx)); }
@@ -615,15 +644,19 @@ impl Subscriber {
     /// Subscribe to one value. This is sufficient for a small number
     /// of paths, but if you need to subscribe to a lot of values it
     /// is more efficent to use `subscribe_vals_ut`
-    pub async fn subscribe_val_ut(&self, path: Path) -> Result<UVal, Error> {
-        self.subscribe_vals_ut(iter::once(path)).await.pop().unwrap().1
+    pub async fn subscribe_val_ut(
+        &self,
+        path: Path,
+        timeout: Option<Duration>
+    ) -> Result<UVal, Error> {
+        self.subscribe_vals_ut(iter::once(path), timeout).await.pop().unwrap().1
     }
 
     /// Same as `subscribe_vals_ut`, but typed.
     pub async fn subscribe_vals<T: DeserializeOwned>(
-        &self, batch: impl IntoIterator<Item = Path>,
+        &self, batch: impl IntoIterator<Item = Path>, timeout: Option<Duration>
     ) -> Vec<(Path, Result<Val<T>, Error>)> {
-        self.subscribe_vals_ut(batch).await.into_iter().map(|(p, r)| {
+        self.subscribe_vals_ut(batch, timeout).await.into_iter().map(|(p, r)| {
             (p, r.map(|r| r.typed()))
         }).collect()
     }
@@ -631,9 +664,10 @@ impl Subscriber {
     /// Same as `subscribe_val_ut` but typed.
     pub async fn subscribe_val<T: DeserializeOwned>(
         &self,
-        path: Path
+        path: Path,
+        timeout: Option<Duration>
     ) -> Result<Val<T>, Error> {
-        self.subscribe_val_ut(path).await.map(|v| v.typed())
+        self.subscribe_val_ut(path, timeout).await.map(|v| v.typed())
     }
 
     /// Create a durable untyped value subscription to `path`.
@@ -715,16 +749,19 @@ async fn handle_val(
             }
             sub.last = msg;
         }
-        Entry::Vacant(e) => if let Some(req) = next_sub.take() {
-            let s = UValInner { id, addr, connection: req.con };
-            match req.finished.send(Ok(UVal(Arc::new(s)))) {
-                Err(_) => { queued.push(ToPublisher::Unsubscribe(id)); }
-                Ok(()) => {
-                    e.insert(Sub {
-                        path: req.path,
-                        last: msg,
-                        streams: Vec::new(),
-                    });
+        Entry::Vacant(e) => match next_sub.take() {
+            None => { queued.push(ToPublisher::Unsubscribe(id)); }
+            Some(req) => {
+                let s = UValInner { id, addr, connection: req.con };
+                match req.finished.send(Ok(UVal(Arc::new(s)))) {
+                    Err(_) => { queued.push(ToPublisher::Unsubscribe(id)); }
+                    Ok(()) => {
+                        e.insert(Sub {
+                            path: req.path,
+                            last: msg,
+                            streams: Vec::new(),
+                        });
+                    }
                 }
             }
         }
@@ -765,6 +802,7 @@ fn unsubscribe(
 }
 
 fn handle_control(
+    queued: &mut Vec<ToPublisher>,
     addr: SocketAddr,
     subscriber: &Subscriber,
     pending: &mut HashMap<Path, SubscribeValRequest>,
@@ -786,7 +824,7 @@ fn handle_control(
         Ok(FromPublisher::Subscribed(path, id)) => {
             outstanding.pop();
             match pending.remove(&path) {
-                None => return Err(format_err!("unsolicited: {}", path)),
+                None => { queued.push(ToPublisher::Unsubscribe(id)); },
                 Some(req) => {
                     *next_val = Some(id);
                     *next_sub = Some(req);
@@ -814,7 +852,7 @@ macro_rules! try_brk {
     }
 }
 
-const LINGER: Duration = Duration::from_secs(10);
+const PERIODIC: Duration = Duration::from_secs(10);
 
 async fn connection(
     subscriber: SubscriberWeak,
@@ -831,16 +869,29 @@ async fn connection(
     let mut batch: Vec<Bytes> = Vec::new();
     let mut outstanding: Vec<ToPublisher> = Vec::new();
     let mut queued: Vec<ToPublisher> = Vec::new();
-    let mut check_linger = time::interval(LINGER).fuse();
-    let mut linger_count = 0;
+    let mut periodic = time::interval(PERIODIC).fuse();
+    let mut idle_count = 0;
     let res = 'main: loop {
         select! {
-            _ = check_linger.next() => {
+            now = periodic.next() => if let Some(now) = now {
                 if subscriptions.len() == 0 && pending.len() == 0 {
-                    linger_count += 1;
-                    if linger_count == 2 { break 'main Ok(()); }
+                    idle_count += 1;
+                    if idle_count == 2 { break 'main Ok(()); }
                 } else {
-                    linger_count = 0;
+                    idle_count = 0;
+                }
+                let mut timed_out = Vec::new();
+                for (path, req) in pending.iter() {
+                    if let Some(deadline) = req.deadline {
+                        if deadline < now {
+                            timed_out.push(path.clone());
+                        }
+                    }
+                }
+                for path in timed_out {
+                    if let Some(req) = pending.remove(&path) {
+                        let _ = req.finished.send(Err(format_err!("timed out")));
+                    }
                 }
             },
             r = con.receive_batch_raw(&mut batch).fuse() => match r {
@@ -856,9 +907,9 @@ async fn connection(
                             }
                             None => {
                                 match handle_control(
-                                    to, &subscriber, &mut pending, &mut outstanding,
-                                    &mut subscriptions, &mut next_val, &mut next_sub,
-                                    &*msg
+                                    &mut queued, to, &subscriber, &mut pending,
+                                    &mut outstanding, &mut subscriptions, &mut next_val,
+                                    &mut next_sub, &*msg
                                 ) {
                                     Ok(()) => (),
                                     Err(e) => break 'main Err(Error::from(e)),
