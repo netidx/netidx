@@ -1022,8 +1022,8 @@ mod test {
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg).unwrap();
-            let vs0 = subscriber.subscribe_val::<V>("/app/v0".into()).await.unwrap();
-            let vs1 = subscriber.subscribe_val::<V>("/app/v1".into()).await.unwrap();
+            let vs0 = subscriber.subscribe_val::<V>("/app/v0".into(), None).await.unwrap();
+            let vs1 = subscriber.subscribe_val::<V>("/app/v1".into(), None).await.unwrap();
             let mut c0: Option<usize> = None;
             let mut c1: Option<usize> = None;
             let mut vs0s = vs0.updates(true);
