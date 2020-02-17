@@ -680,7 +680,23 @@ struct Sub {
     last: Bytes,
 }
 
+async fn flush(
+    outstanding: &mut Vec<ToPublisher>,
+    queued: &mut Vec<ToPublisher>,
+    con: &mut Channel,
+) -> Result<(), Error> {
+    if outstanding.len() == 0 && queued.len() > 0 {
+        outstanding.extend(queued.drain(0..min(BATCH, queued.len())));
+        for m in outstanding.iter() {
+            con.queue_send(m)?
+        }
+        con.flush().await?;
+    }
+    Ok(())
+}
+
 async fn handle_val(
+    queued: &mut Vec<ToPublisher>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeValRequest>,
     id: Id,
@@ -700,13 +716,17 @@ async fn handle_val(
             sub.last = msg;
         }
         Entry::Vacant(e) => if let Some(req) = next_sub.take() {
-            e.insert(Sub {
-                path: req.path,
-                last: msg,
-                streams: Vec::new(),
-            });
             let s = UValInner { id, addr, connection: req.con };
-            let _ = req.finished.send(Ok(UVal(Arc::new(s))));
+            match req.finished.send(Ok(UVal(Arc::new(s)))) {
+                Err(_) => { queued.push(ToPublisher::Unsubscribe(id)); }
+                Ok(()) => {
+                    e.insert(Sub {
+                        path: req.path,
+                        last: msg,
+                        streams: Vec::new(),
+                    });
+                }
+            }
         }
     }
 }
@@ -794,6 +814,8 @@ macro_rules! try_brk {
     }
 }
 
+const LINGER: Duration = Duration::from_secs(10);
+
 async fn connection(
     subscriber: SubscriberWeak,
     to: SocketAddr,
@@ -809,22 +831,18 @@ async fn connection(
     let mut batch: Vec<Bytes> = Vec::new();
     let mut outstanding: Vec<ToPublisher> = Vec::new();
     let mut queued: Vec<ToPublisher> = Vec::new();
-    async fn flush(
-        outstanding: &mut Vec<ToPublisher>,
-        queued: &mut Vec<ToPublisher>,
-        con: &mut Channel,
-    ) -> Result<(), Error> {
-        if outstanding.len() == 0 && queued.len() > 0 {
-            outstanding.extend(queued.drain(0..min(BATCH, queued.len())));
-            for m in outstanding.iter() {
-                con.queue_send(m)?
-            }
-            con.flush().await?;
-        }
-        Ok(())
-    }
+    let mut check_linger = time::interval(LINGER).fuse();
+    let mut linger_count = 0;
     let res = 'main: loop {
         select! {
+            _ = check_linger.next() => {
+                if subscriptions.len() == 0 && pending.len() == 0 {
+                    linger_count += 1;
+                    if linger_count == 2 { break 'main Ok(()); }
+                } else {
+                    linger_count = 0;
+                }
+            },
             r = con.receive_batch_raw(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
                 Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
@@ -832,7 +850,8 @@ async fn connection(
                         match next_val.take() {
                             Some(id) => {
                                 handle_val(
-                                    &mut subscriptions, &mut next_sub, id, to, msg
+                                    &mut queued, &mut subscriptions,
+                                    &mut next_sub, id, to, msg
                                 ).await;
                             }
                             None => {
@@ -870,11 +889,14 @@ async fn connection(
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
+                        sub.streams.retain(|c| !c.is_closed());
                         if last {
                             let last = sub.last.clone();
-                            let _ = tx.send(last).await;
+                            match tx.send(last).await {
+                                Err(_) => continue,
+                                Ok(()) => ()
+                            }
                         }
-                        sub.streams.retain(|c| !c.is_closed());
                         sub.streams.push(tx);
                     }
                 }
