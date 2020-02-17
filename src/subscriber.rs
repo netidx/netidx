@@ -464,7 +464,9 @@ impl Subscriber {
     /// error, but that error will not effect other subscriptions in
     /// the batch, which may complete successfully. If you need all or
     /// nothing behavior, specify None for timeout and wrap the
-    /// `subscribe_vals_ut` future in a `time::timeout`.
+    /// `subscribe_vals_ut` future in a `time::timeout`. In the case
+    /// timeout is specified, `subscribe_vals_ut` is guaranteed to
+    /// complete no later than `now + timeout`.
     pub async fn subscribe_vals_ut(
         &self, batch: impl IntoIterator<Item = Path>, timeout: Option<Duration>
     ) -> Vec<(Path, Result<UVal, Error>)> {
