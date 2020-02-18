@@ -74,12 +74,16 @@ impl Channel {
             }
         }
     }
+
+    pub(crate) fn outgoing(&self) -> usize {
+        self.outgoing.len()
+    }
     
     /// Initiate sending all outgoing messages and wait for the
     /// process to finish.
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
-        let r = self.socket.write_all(&*self.outgoing).await;
-        self.outgoing.clear();
+        let outgoing = self.outgoing.split().freeze();
+        let r = self.socket.write_all(&*outgoing).await;
         r
     }
 

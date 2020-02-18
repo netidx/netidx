@@ -66,6 +66,9 @@ pub mod publisher {
         Subscribed(Path, Id),
         /// The next message contains an updated value for Id.
         Message(Id),
+        /// Indicates that the publisher is idle, but still
+        /// functioning correctly.
+        Heartbeat,
     }
 
     #[derive(

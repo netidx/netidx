@@ -548,6 +548,8 @@ fn handle_batch(
     Ok(())
 }
 
+const HB: Duration = Duration::from_secs(5);
+
 async fn client_loop(
     t: PublisherWeak,
     addr: SocketAddr,
@@ -557,8 +559,17 @@ async fn client_loop(
     let mut con = Channel::new(s);
     let mut batch: Vec<ToPublisher> = Vec::new();
     let mut msgs = msgs.fuse();
+    let mut hb = time::interval(HB).fuse();
+    let mut msg_sent = false;
     loop {
         select! {
+            _ = hb.next() => {
+                if !msg_sent {
+                    con.queue_send(&FromPublisher::Heartbeat)?;
+                    con.flush().await?;
+                }
+                msg_sent = false;
+            },
             from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
                 Err(e) => return Err(Error::from(e)),
                 Ok(()) => {
@@ -569,6 +580,7 @@ async fn client_loop(
             to_cl = msgs.next() => match to_cl {
                 None => break Ok(()),
                 Some(m) => {
+                    msg_sent = true;
                     for msg in m.msgs {
                         con.queue_send_raw(msg)?;
                     }
