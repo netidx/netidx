@@ -529,7 +529,7 @@ fn handle_batch(
                         let ut = pb.by_id.get_mut(&id).unwrap();
                         ut.subscribed.insert(*addr, sender);
                         con.queue_send(&FromPublisher::Subscribed(path, id))?;
-                        con.queue_send_raw(ut.current.clone())?;
+                        con.queue_send_ut(ut.current.clone())?;
                         for tx in ut.wait_client.drain(..) {
                             let _ = tx.send(());
                         }
@@ -582,7 +582,7 @@ async fn client_loop(
                 Some(m) => {
                     msg_sent = true;
                     for msg in m.msgs {
-                        con.queue_send_raw(msg)?;
+                        con.queue_send_ut(msg)?;
                     }
                     let f = con.flush();
                     match m.timeout {

@@ -2,7 +2,7 @@ use crate::{
     path::Path,
     utils::{BatchItem, Batched},
     resolver::{Resolver, ReadOnly},
-    channel::Channel,
+    channel::{Channel, WriteChannel},
     protocol::publisher::*,
     config,
 };
@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
     sync::{Arc, Weak},
-    cmp::{max, min},
+    cmp::max,
     time::Duration,
 };
 use tokio::{
@@ -718,7 +718,7 @@ struct Sub {
 }
 
 async fn handle_val(
-    channel: &mut Channel,
+    channel: &mut WriteChannel,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     next_sub: &mut Option<SubscribeValRequest>,
     id: Id,
@@ -738,11 +738,11 @@ async fn handle_val(
             sub.last = msg;
         }
         Entry::Vacant(e) => match next_sub.take() {
-            None => { channel.queue_send(ToPublisher::Unsubscribe(id))?; }
+            None => { channel.queue_send(&ToPublisher::Unsubscribe(id))?; }
             Some(req) => {
                 let s = UValInner { id, addr, connection: req.con };
                 match req.finished.send(Ok(UVal(Arc::new(s)))) {
-                    Err(_) => { channel.queue_send(ToPublisher::Unsubscribe(id))?; }
+                    Err(_) => { channel.queue_send(&ToPublisher::Unsubscribe(id))?; }
                     Ok(()) => {
                         e.insert(Sub {
                             path: req.path,
@@ -791,7 +791,7 @@ fn unsubscribe(
 }
 
 fn handle_control(
-    channel: &mut Channel,
+    channel: &mut WriteChannel,
     addr: SocketAddr,
     subscriber: &Subscriber,
     pending: &mut HashMap<Path, SubscribeValRequest>,
@@ -828,32 +828,23 @@ fn handle_control(
     Ok(())
 }
 
-async fn poll_flush(
-    flush: &Option<Fuse<Box<dyn Future<(), io::Error>>>>
-) -> Result<(), io::Error> {
-    match flush {
-        None => future::pending().await,
-        Some(flush) => flush.await
-    }
-}
-
-fn maybe_flush(
-    flush: &mut Option<Fuse<Box<dyn Future<(), io::Error>>>>,
-    channel: &mut Channel,
-) {
-    match flush {
-        Some(_) => (),
-        None => if channel.outgoing() > 0 {
-            *flush = Some(Box::new(channel.flush()).fuse());
-        }
-    }
-}
-
 macro_rules! try_brk {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
             Err(e) => break Err(Error::from(e))
+        }
+    }
+}
+
+type Flush = Option<Fuse<oneshot::Receiver<Result<(), std::io::Error>>>>;
+
+async fn wait_flush(flush: &mut Flush) -> Result<(), Error> {
+    match flush {
+        None => future::pending().await,
+        Some(f) => match f.await {
+            Err(_) => bail!("failed to read result of flush"),
+            Ok(r) => Ok(r?)
         }
     }
 }
@@ -865,20 +856,31 @@ async fn connection(
     to: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
-    let mut from_sub = Batched::new(from_sub, BATCH);
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut next_val: Option<Id> = None;
     let mut next_sub: Option<SubscribeValRequest> = None;
-    let mut con = Channel::new(time::timeout(PERIODIC, TcpStream::connect(to)).await??);
-    let mut batch: Vec<Bytes> = Vec::new();
-    let mut flush: Option<Fuse<Box<dyn Future<(), io::Error>>>> = None;
-    let mut periodic = time::interval(PERIODIC).fuse();
-    let mut idle = 0;
+    let mut idle: usize = 0;
     let mut msg_recvd = false;
+    let mut from_sub = Batched::new(from_sub, BATCH);
+    let con = Channel::new(time::timeout(PERIODIC, TcpStream::connect(to)).await??);
+    let (mut read_con, mut write_con) = con.split();
+    let mut batch: Vec<Bytes> = Vec::new();
+    let mut flush: Flush = None;
+    let mut periodic = time::interval(PERIODIC).fuse();
     let res = 'main: loop {
         select! {
+            r = wait_flush(&mut flush).fuse() => match r {
+                Err(e) => break Err(e),
+                Ok(()) => {
+                    if write_con.bytes_queued() == 0 {
+                        flush = None;
+                    } else {
+                        flush = Some(write_con.flush().fuse());
+                    }
+                }
+            },
             now = periodic.next() => if let Some(now) = now {
                 if !msg_recvd {
                     break 'main Err(format_err!("hung publisher"));
@@ -905,21 +907,24 @@ async fn connection(
                     }
                 }
             },
-            r = con.receive_batch_raw(&mut batch).fuse() => match r {
+            r = read_con.receive_batch_ut(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
                 Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
                     msg_recvd = true;
                     for msg in batch.drain(..) {
                         match next_val.take() {
                             Some(id) => {
-                                handle_val(
-                                    &mut channel, &mut subscriptions,
+                                match handle_val(
+                                    &mut write_con, &mut subscriptions,
                                     &mut next_sub, id, to, msg
-                                ).await;
+                                ).await {
+                                    Ok(()) => (),
+                                    Err(e) => break 'main Err(Error::from(e)),
+                                }
                             }
                             None => {
                                 match handle_control(
-                                    &mut channel, to, &subscriber, &mut pending,
+                                    &mut write_con, to, &subscriber, &mut pending,
                                     &mut subscriptions, &mut next_val,
                                     &mut next_sub, &*msg
                                 ) {
@@ -929,21 +934,25 @@ async fn connection(
                             }
                         }
                     }
-                    maybe_flush(&mut flush, &mut channel);
+                    if flush.is_none() {
+                        flush = Some(write_con.flush().fuse());
+                    }
                 }
             },
             msg = from_sub.next() => match msg {
                 None => break Err(format_err!("dropped")),
                 Some(BatchItem::EndBatch) => {
-                    maybe_flush(&mut flush, &mut channel);
+                    if flush.is_none() {
+                        flush = Some(write_con.flush().fuse());
+                    }
                 }
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     pending.insert(path.clone(), req);
-                    queued.push(ToPublisher::Subscribe(path));
+                    try_brk!(write_con.queue_send(&ToPublisher::Subscribe(path)))
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    queued.push(ToPublisher::Unsubscribe(id));
+                    try_brk!(write_con.queue_send(&ToPublisher::Unsubscribe(id)))
                 }
                 Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
                     if let Some(sub) = subscriptions.get(&id) {
