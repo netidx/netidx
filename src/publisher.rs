@@ -3,7 +3,7 @@ use crate::{
     path::Path,
     resolver::{Resolver, WriteOnly},
     channel::Channel,
-    protocol::publisher::*,
+    protocol::publisher::{self, Id},
     config,
 };
 use std::{
@@ -121,8 +121,14 @@ impl UVal {
 }
 
 #[derive(Debug)]
+enum ToClientMsg {
+    Val(Bytes, Bytes),
+    Unpublish(Bytes),
+}
+
+#[derive(Debug)]
 struct ToClient {
-    msgs: Vec<Bytes>,
+    msgs: Vec<ToClientMsg>,
     done: oneshot::Sender<()>,
     timeout: Option<Duration>,
 }
@@ -332,7 +338,7 @@ impl Publisher {
             Err(format_err!("already published"))
         } else {
             let id = pb.next_id.take();
-            let header = mp_encode(&FromPublisher::Message(id))?;
+            let header = mp_encode(&publisher::From::Message(id))?;
             pb.by_path.insert(path.clone(), id);
             pb.by_id.insert(id, PublishedUVal {
                 header,
@@ -428,13 +434,15 @@ impl Publisher {
                                 let tc = get_tc(
                                     *addr, sender, &mut flushes, &mut to_clients, timeout
                                 );
-                                tc.to_client.msgs.push(ut.header.clone());
-                                tc.to_client.msgs.push(m.clone());
+                                tc.to_client.msgs.push(ToClientMsg::Val(
+                                    ut.header.clone(),
+                                    m.clone()
+                                ));
                             }
                         }
                     }
                     Update::Unpublish => {
-                        let m = mp_encode(&FromPublisher::Unsubscribed(id))?;
+                        let m = mp_encode(&publisher::From::Unsubscribed(id))?;
                         if let Some(ut) = pb.by_id.remove(&id) {
                             for (addr, sender) in ut.subscribed {
                                 if let Some(cl) = pb.clients.get_mut(&addr) {
@@ -443,7 +451,9 @@ impl Publisher {
                                         addr, &sender, &mut flushes, &mut to_clients,
                                         timeout
                                     );
-                                    tc.to_client.msgs.push(m.clone());
+                                    tc.to_client.msgs.push(
+                                        ToClientMsg::Unpublish(m.clone())
+                                    );
                                 }
                             }
                         }
@@ -511,16 +521,16 @@ impl Publisher {
 fn handle_batch(
     t: &PublisherWeak,
     addr: &SocketAddr,
-    msgs: impl Iterator<Item = ToPublisher>,
+    msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel,
 ) -> Result<(), Error> {
     let t_st = t.upgrade().ok_or_else(|| format_err!("dead publisher"))?;
     let mut pb = t_st.0.lock();
     for msg in msgs {
         match msg {
-            ToPublisher::Subscribe(path) => {
+            publisher::To::Subscribe(path) => {
                 match pb.by_path.get(&path) {
-                    None => con.queue_send(&FromPublisher::NoSuchValue(path))?,
+                    None => con.queue_send(&publisher::From::NoSuchValue(path))?,
                     Some(id) => {
                         let id = *id;
                         let cl = pb.clients.get_mut(&addr).unwrap();
@@ -528,20 +538,22 @@ fn handle_batch(
                         let sender = cl.to_client.clone();
                         let ut = pb.by_id.get_mut(&id).unwrap();
                         ut.subscribed.insert(*addr, sender);
-                        con.queue_send(&FromPublisher::Subscribed(path, id))?;
-                        con.queue_send_ut(ut.current.clone())?;
+                        let mut msg = con.begin_msg();
+                        msg.pack(&publisher::From::Subscribed(path, id))?;
+                        msg.pack_ut(&ut.current);
+                        msg.finish()?;
                         for tx in ut.wait_client.drain(..) {
                             let _ = tx.send(());
                         }
                     }
                 }
             }
-            ToPublisher::Unsubscribe(id) => {
+            publisher::To::Unsubscribe(id) => {
                 if let Some(ut) = pb.by_id.get_mut(&id) {
                     ut.subscribed.remove(&addr);
                     pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
                 }
-                con.queue_send(&FromPublisher::Unsubscribed(id))?;
+                con.queue_send(&publisher::From::Unsubscribed(id))?;
             }
         }
     }
@@ -557,7 +569,7 @@ async fn client_loop(
     s: TcpStream,
 ) -> Result<(), Error> {
     let mut con = Channel::new(s);
-    let mut batch: Vec<ToPublisher> = Vec::new();
+    let mut batch: Vec<publisher::To> = Vec::new();
     let mut msgs = msgs.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
@@ -565,7 +577,7 @@ async fn client_loop(
         select! {
             _ = hb.next() => {
                 if !msg_sent {
-                    con.queue_send(&FromPublisher::Heartbeat)?;
+                    con.queue_send(&publisher::From::Heartbeat)?;
                     con.flush().await?;
                 }
                 msg_sent = false;
@@ -582,7 +594,14 @@ async fn client_loop(
                 Some(m) => {
                     msg_sent = true;
                     for msg in m.msgs {
-                        con.queue_send_ut(msg)?;
+                        match msg {
+                            ToClientMsg::Val(hdr, body) => {
+                                con.queue_send_ut(&[hdr, body])?;
+                            }
+                            ToClientMsg::Unpublish(m) => {
+                                con.queue_send_ut(&[m])?;
+                            }
+                        }
                     }
                     let f = con.flush();
                     match m.timeout {

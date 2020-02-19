@@ -6,6 +6,7 @@ use std::{
     io::{Error, ErrorKind},
     mem,
     result::Result,
+    ops::Drop,
 };
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
@@ -19,6 +20,52 @@ use tokio::{
 use futures::prelude::*;
 
 const BUF: usize = 4096;
+
+pub(crate) struct Msg<'a> {
+    head: BytesMut,
+    body: BytesMut,
+    con: &'a mut WriteChannel,
+    finished: bool,
+}
+
+impl<'a> Drop for Msg<'a> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.head.clear();
+            self.body.clear();
+            self.head.unsplit(self.body.split());
+            self.con.buf.unsplit(self.head.split());
+        }
+    }
+}
+
+impl<'a> Msg<'a> {
+    pub(crate) fn pack_ut(&mut self, msg: &Bytes) {
+        self.body.extend_from_slice(&**msg);
+    }
+
+    pub(crate) fn pack<T: Serialize>(
+        &mut self,
+        msg: &T
+    ) -> Result<(), rmp_serde::encode::Error> {
+        rmp_serde::encode::write_named(&mut BytesWriter(&mut self.body), msg)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), Error> {
+        if self.body.len() > u32::max_value() as usize {
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("message too large {} > {}", self.body.len(), u32::max_value()),
+            ))
+        } else {
+            self.head.put_u32(self.body.len() as u32);
+            self.head.unsplit(self.body.split());
+            self.con.buf.unsplit(self.head.split());
+            self.finished = true;
+            Ok(())
+        }
+    }
+}
 
 pub(crate) struct WriteChannel {
     to_flush: UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)>,
@@ -47,47 +94,47 @@ impl WriteChannel {
         tx
     }
 
-    /// Queue an outgoing message. This ONLY queues the message, use
+    /// Queue outgoing messages. This ONLY queues the messages, use
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
-    pub(crate) fn queue_send_ut(&mut self, msg: Bytes) -> Result<(), Error> {
-        if msg.len() > u32::max_value() as usize {
+    pub(crate) fn queue_send_ut(&mut self, msgs: &[Bytes]) -> Result<(), Error> {
+        let len = msgs.into_iter().fold(0, |s, m| s + m.len());
+        if len > u32::max_value() as usize {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("message too large {} > {}", msg.len(), u32::max_value()),
+                format!("message too large {} > {}", len, u32::max_value()),
             ));
         }
         if self.buf.remaining_mut() < mem::size_of::<u32>() {
             self.buf.reserve(self.buf.capacity());
         }
-        self.buf.put_u32(msg.len() as u32);
-        Ok(self.buf.extend_from_slice(&*msg))
+        self.buf.put_u32(len as u32);
+        Ok(for m in msgs { self.buf.extend_from_slice(&**m); })
     }
 
     /// Same as queue_send_ut, but encodes the message using msgpack
     pub(crate) fn queue_send<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
+        let mut msgbuf = self.begin_msg();
+        match msgbuf.pack(msg) {
+            Ok(()) => msgbuf.finish(),
+            Err(e) => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("can't encode message {}", e)
+            ))
+        }
+    }
+
+    /// Get an interface that you can use to pack multiple different
+    /// things in one message with one length header.
+    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a> {
         if self.buf.remaining_mut() < mem::size_of::<u32>() {
             self.buf.reserve(self.buf.capacity());
         }
-        let mut msgbuf = self.buf.split_off(self.buf.len());
-        msgbuf.put_u32(0);
-        let mut header = msgbuf.split_to(msgbuf.len());
-        header.clear();
-        let r = rmp_serde::encode::write_named(&mut BytesWriter(&mut msgbuf), msg)
-            .map_err(|e| Error::new(ErrorKind::InvalidData, e));
-        match r {
-            Ok(()) => {
-                header.put_u32(msgbuf.len() as u32);
-                header.unsplit(msgbuf);
-                Ok(self.buf.unsplit(header))
-            }
-            Err(e) => {
-                msgbuf.clear();
-                header.unsplit(msgbuf);
-                self.buf.unsplit(header);
-                Err(e)
-            }
-        }
+        let mut body = self.buf.split_off(self.buf.len());
+        body.put_u32(0);
+        let mut head = body.split_to(body.len());
+        head.clear();
+        Msg { head, body, con: self, finished: false }
     }
 
     pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
@@ -128,7 +175,8 @@ impl ReadChannel {
         }
     }
     
-    async fn fill_buffer(&mut self) -> Result<(), Error> {
+    /// Read a load of bytes from the socket into the read buffer
+    pub(crate) async fn fill_buffer(&mut self) -> Result<(), Error> {
         if self.buf.remaining_mut() < BUF {
             self.buf.reserve(self.buf.capacity());
         }
@@ -154,6 +202,11 @@ impl ReadChannel {
                 Some(self.buf.split_to(len).freeze())
             }
         }
+    }
+
+    /// Direct access to the read buffer
+    pub(crate) fn buffer_mut(&mut self) -> &mut BytesMut {
+        &mut self.buf
     }
     
     /// Receive one message, potentially waiting for one to arrive if
@@ -220,7 +273,7 @@ impl Channel {
         (self.read, self.write)
     }
 
-    pub(crate) fn queue_send_ut(&mut self, msg: Bytes) -> Result<(), Error> {
+    pub(crate) fn queue_send_ut(&mut self, msg: &[Bytes]) -> Result<(), Error> {
         self.write.queue_send_ut(msg)
     }
 
@@ -230,6 +283,10 @@ impl Channel {
 
     pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.send_one(msg).await
+    }
+
+    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a> {
+        self.write.begin_msg()
     }
 
     #[allow(dead_code)]

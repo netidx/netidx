@@ -2,7 +2,7 @@ use crate::{
     channel::Channel,
     path::Path,
     resolver_store::Store,
-    protocol::resolver::*,
+    protocol::resolver,
 };
 use tokio::{
     task, time::{self, Instant}, sync::oneshot,
@@ -24,7 +24,7 @@ type ClientInfo = Option<oneshot::Sender<()>>;
 
 fn handle_batch(
     store: &Store<ClientInfo>,
-    msgs: impl Iterator<Item = ToResolver>,
+    msgs: impl Iterator<Item = resolver::To>,
     con: &mut Channel,
     wa: Option<SocketAddr>
 ) -> Result<(), Error> {
@@ -33,18 +33,18 @@ fn handle_batch(
             let s = store.read();
             for m in msgs {
                 match m {
-                    ToResolver::Heartbeat => (),
-                    ToResolver::Resolve(paths) => {
+                    resolver::To::Heartbeat => (),
+                    resolver::To::Resolve(paths) => {
                         let res = paths.iter().map(|p| s.resolve(p)).collect();
-                        con.queue_send(&FromResolver::Resolved(res))?
+                        con.queue_send(&resolver::From::Resolved(res))?
                     },
-                    ToResolver::List(path) => {
-                        con.queue_send(&FromResolver::List(s.list(&path)))?
+                    resolver::To::List(path) => {
+                        con.queue_send(&resolver::From::List(s.list(&path)))?
                     }
-                    ToResolver::Publish(_)
-                        | ToResolver::Unpublish(_)
-                        | ToResolver::Clear =>
-                        con.queue_send(&FromResolver::Error("read only".into()))?,
+                    resolver::To::Publish(_)
+                        | resolver::To::Unpublish(_)
+                        | resolver::To::Clear =>
+                        con.queue_send(&resolver::From::Error("read only".into()))?,
                 }
             }
         }
@@ -52,31 +52,31 @@ fn handle_batch(
             let mut s = store.write();
             for m in msgs {
                 match m {
-                    ToResolver::Heartbeat => (),
-                    ToResolver::Resolve(_) | ToResolver::List(_) =>
-                        con.queue_send(&FromResolver::Error("write only".into()))?,
-                    ToResolver::Publish(paths) => {
+                    resolver::To::Heartbeat => (),
+                    resolver::To::Resolve(_) | resolver::To::List(_) =>
+                        con.queue_send(&resolver::From::Error("write only".into()))?,
+                    resolver::To::Publish(paths) => {
                         if !paths.iter().all(Path::is_absolute) {
                             con.queue_send(
-                                &FromResolver::Error("absolute paths required".into())
+                                &resolver::From::Error("absolute paths required".into())
                             )?
                         } else {
                             for path in paths {
                                 s.publish(path, write_addr);
                             }
-                            con.queue_send(&FromResolver::Published)?
+                            con.queue_send(&resolver::From::Published)?
                         }
                     }
-                    ToResolver::Unpublish(paths) => {
+                    resolver::To::Unpublish(paths) => {
                         for path in paths {
                             s.unpublish(path, write_addr);
                         }
-                        con.queue_send(&FromResolver::Unpublished)?
+                        con.queue_send(&resolver::From::Unpublished)?
                     }
-                    ToResolver::Clear => {
+                    resolver::To::Clear => {
                         s.unpublish_addr(write_addr);
                         s.gc();
-                        con.queue_send(&FromResolver::Unpublished)?
+                        con.queue_send(&resolver::From::Unpublished)?
                     }
                 }
             }
@@ -97,10 +97,11 @@ async fn client_loop(
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
-    let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
+    let hello: resolver::ClientHello =
+        time::timeout(HELLO_TIMEOUT, con.receive()).await??;
     let (ttl, ttl_expired, write_addr) = match hello {
-        ClientHello::ReadOnly => (READER_TTL, false, None),
-        ClientHello::WriteOnly {ttl, write_addr} => {
+        resolver::ClientHello::ReadOnly => (READER_TTL, false, None),
+        resolver::ClientHello::WriteOnly {ttl, write_addr} => {
             if ttl <= 0 || ttl > MAX_TTL { bail!("invalid ttl") }
             let mut store = store.write();
             let clinfos = store.clinfo_mut();
@@ -119,7 +120,10 @@ async fn client_loop(
             }
         }
     };
-    time::timeout(HELLO_TIMEOUT, con.send_one(&ServerHello { ttl_expired })).await??;
+    time::timeout(
+        HELLO_TIMEOUT,
+        con.send_one(&resolver::ServerHello { ttl_expired })
+    ).await??;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -128,7 +132,7 @@ async fn client_loop(
     let mut timeout = time::interval_at(Instant::now() + ttl, ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel>,
-        batch: &mut Vec<ToResolver>
+        batch: &mut Vec<resolver::To>
     ) -> Result<(), io::Error> {
         match con {
             Some(ref mut con) => con.receive_batch(batch).await,

@@ -1,7 +1,7 @@
 use crate::{
     channel::Channel,
     path::Path,
-    protocol::resolver::*,
+    protocol::resolver,
     config,
 };
 use failure::Error;
@@ -23,8 +23,8 @@ use tokio::{
 static TTL: u64 = 600;
 static LINGER: u64 = 10;
 
-type FromCon = oneshot::Sender<FromResolver>;
-type ToCon = (ToResolver, FromCon);
+type FromCon = oneshot::Sender<resolver::From>;
+type ToCon = (resolver::To, FromCon);
 
 pub trait Readable {}
 pub trait Writeable {}
@@ -51,11 +51,11 @@ pub struct Resolver<R> {
 }
 
 impl<R: ReadableOrWritable> Resolver<R> {
-    async fn send(&mut self, m: ToResolver) -> Result<FromResolver> {
+    async fn send(&mut self, m: resolver::To) -> Result<resolver::From> {
         let (tx, rx) = oneshot::channel();
         self.sender.send((m, tx))?;
         match rx.await? {
-            FromResolver::Error(s) => bail!(s),
+            resolver::From::Error(s) => bail!(s),
             m => Ok(m),
         }
     }
@@ -86,15 +86,15 @@ impl<R: ReadableOrWritable> Resolver<R> {
 
 impl<R: Readable + ReadableOrWritable> Resolver<R> {
     pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Vec<Vec<SocketAddr>>> {
-        match self.send(ToResolver::Resolve(paths)).await? {
-            FromResolver::Resolved(ports) => Ok(ports),
+        match self.send(resolver::To::Resolve(paths)).await? {
+            resolver::From::Resolved(ports) => Ok(ports),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn list(&mut self, p: Path) -> Result<Vec<Path>> {
-        match self.send(ToResolver::List(p)).await? {
-            FromResolver::List(v) => Ok(v),
+        match self.send(resolver::To::List(p)).await? {
+            resolver::From::List(v) => Ok(v),
             _ => bail!("unexpected response"),
         }
     }
@@ -102,22 +102,22 @@ impl<R: Readable + ReadableOrWritable> Resolver<R> {
 
 impl<R: Writeable + ReadableOrWritable> Resolver<R> {
     pub async fn publish(&mut self, paths: Vec<Path>) -> Result<()> {
-        match self.send(ToResolver::Publish(paths)).await? {
-            FromResolver::Published => Ok(()),
+        match self.send(resolver::To::Publish(paths)).await? {
+            resolver::From::Published => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn unpublish(&mut self, paths: Vec<Path>) -> Result<()> {
-        match self.send(ToResolver::Unpublish(paths)).await? {
-            FromResolver::Unpublished => Ok(()),
+        match self.send(resolver::To::Unpublish(paths)).await? {
+            resolver::From::Unpublished => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn clear(&mut self) -> Result<()> {
-        match self.send(ToResolver::Clear).await? {
-            FromResolver::Unpublished => Ok(()),
+        match self.send(resolver::To::Clear).await? {
+            resolver::From::Unpublished => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
@@ -141,22 +141,22 @@ async fn connect(
         try_cont!(
             "hello",
             con.send_one(&match publisher {
-                None => ClientHello::ReadOnly,
-                Some(write_addr) => ClientHello::WriteOnly {
+                None => resolver::ClientHello::ReadOnly,
+                Some(write_addr) => resolver::ClientHello::WriteOnly {
                     ttl: TTL,
                     write_addr
                 },
             })
             .await
         );
-        let r: ServerHello = try_cont!("hello reply", con.receive().await);
+        let r: resolver::ServerHello = try_cont!("hello reply", con.receive().await);
         if !r.ttl_expired {
             break con;
         } else {
-            let m = ToResolver::Publish(published.iter().cloned().collect());
+            let m = resolver::To::Publish(published.iter().cloned().collect());
             try_cont!("republish", con.send_one(&m).await);
             match try_cont!("replublish reply", con.receive().await) {
-                FromResolver::Published => break con,
+                resolver::From::Published => break con,
                 _ => (),
             }
         }
@@ -195,10 +195,11 @@ async fn connection(
                             con = Some(connect(resolver, publisher, &published).await);
                             break;
                         },
-                        Some(ref mut c) => match c.send_one(&ToResolver::Heartbeat).await {
-                            Ok(()) => break,
-                            Err(_) => { con = None; }
-                        }
+                        Some(ref mut c) =>
+                            match c.send_one(&resolver::To::Heartbeat).await {
+                                Ok(()) => break,
+                                Err(_) => { con = None; }
+                            }
                     }
                 }
             },
@@ -211,7 +212,9 @@ async fn connection(
                         let c = match con {
                             Some(ref mut c) => c,
                             None => {
-                                con = Some(connect(resolver, publisher, &published).await);
+                                con = Some(connect(
+                                    resolver, publisher, &published).await
+                                );
                                 con.as_mut().unwrap()
                             }
                         };
@@ -220,11 +223,11 @@ async fn connection(
                             Ok(()) => match c.receive().await {
                                 Err(_) => { con = None; }
                                 Ok(r) => break r,
-                                Ok(FromResolver::Published) => {
-                                    if let ToResolver::Publish(p) = m_r {
+                                Ok(resolver::From::Published) => {
+                                    if let resolver::To::Publish(p) = m_r {
                                         published.extend(p.iter().cloned());
                                     }
-                                    break FromResolver::Published
+                                    break resolver::From::Published
                                 }
                             }
                         }

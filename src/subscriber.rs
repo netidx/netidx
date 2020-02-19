@@ -2,12 +2,12 @@ use crate::{
     path::Path,
     utils::{BatchItem, Batched},
     resolver::{Resolver, ReadOnly},
-    channel::{Channel, WriteChannel},
-    protocol::publisher::*,
+    channel::{Channel, ReadChannel},
+    protocol::publisher::{self, Id},
     config,
 };
 use std::{
-    mem, iter,
+    mem, iter, io,
     result::Result,
     marker::PhantomData,
     collections::{HashMap, hash_map::Entry},
@@ -32,7 +32,7 @@ use futures::{
 use rand::Rng;
 use serde::de::DeserializeOwned;
 use failure::Error;
-use bytes::Bytes;
+use bytes::{Bytes, Buf};
 use parking_lot::Mutex;
 
 const BATCH: usize = 100_000;
@@ -727,50 +727,69 @@ impl Subscriber {
     }
 }
 
-struct Sub {
-    path: Path,
-    streams: Vec<Sender<Bytes>>,
-    last: Bytes,
+struct CReader<R: io::Read>(R, usize);
+
+impl<R: io::Read> io::Read for CReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        let read = self.0.read(buf)?;
+        self.1 += read;
+        Ok(read)
+    }
 }
 
-async fn handle_val(
-    channel: &mut WriteChannel,
-    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
-    next_sub: &mut Option<SubscribeValRequest>,
-    id: Id,
-    addr: SocketAddr,
-    msg: Bytes,
-) -> Result<(), Error> {
-    match subscriptions.entry(id) {
-        Entry::Occupied(mut e) => {
-            let sub = e.get_mut();
-            let mut i = 0;
-            while i < sub.streams.len() {
-                match sub.streams[i].send(msg.clone()).await {
-                    Ok(()) => { i += 1; }
-                    Err(_) => { sub.streams.remove(i); }
-                }
-            }
-            sub.last = msg;
-        }
-        Entry::Vacant(e) => match next_sub.take() {
-            None => { channel.queue_send(&ToPublisher::Unsubscribe(id))?; }
-            Some(req) => {
-                let s = UValInner { id, addr, connection: req.con };
-                match req.finished.send(Ok(UVal(Arc::new(s)))) {
-                    Err(_) => { channel.queue_send(&ToPublisher::Unsubscribe(id))?; }
-                    Ok(()) => {
-                        e.insert(Sub {
-                            path: req.path,
-                            last: msg,
-                            streams: Vec::new(),
-                        });
-                    }
+enum AugFP {
+    NoSuchValue(Path),
+    Unsubscribed(Id),
+    Subscribed(Path, Id, Bytes),
+    Message(Id, Bytes),
+    Heartbeat
+}
+
+impl AugFP {
+    fn decode(con: &mut ReadChannel) -> Option<Result<AugFP, rmp_serde::decode::Error>> {
+        use byteorder::{BigEndian, ByteOrder};
+        let u32s = mem::size_of::<u32>();
+        let buf = con.buffer_mut();
+        if buf.remaining() < u32s {
+            None
+        } else {
+            let len = BigEndian::read_u32(&*buf) as usize;
+            if buf.remaining() - u32s < len {
+                None
+            } else {
+                buf.advance(u32s);
+                let (head, sz) = {
+                    let mut cr = CReader(buf.as_ref(), 0);
+                    let r = rmp_serde::decode::from_read(&mut cr);
+                    (r, cr.1)
+                };
+                match head {
+                    Err(e) => Some(Err(e)),
+                    Ok(m) => Some(Ok(match m {
+                        publisher::From::NoSuchValue(p) => AugFP::NoSuchValue(p),
+                        publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
+                        publisher::From::Heartbeat => AugFP::Heartbeat,
+                        publisher::From::Subscribed(p, id) => {
+                            buf.advance(sz);
+                            AugFP::Subscribed(
+                                p, id, buf.split_to(len - sz - u32s).freeze()
+                            )
+                        }
+                        publisher::From::Message(id) => {
+                            buf.advance(sz);
+                            AugFP::Message(id, buf.split_to(len - sz - u32s).freeze())
+                        }
+                    }))
                 }
             }
         }
     }
-    Ok(())
+}
+
+struct Sub {
+    path: Path,
+    streams: Vec<Sender<Bytes>>,
+    last: Bytes,
 }
 
 fn unsubscribe(
@@ -806,49 +825,20 @@ fn unsubscribe(
     }
 }
 
-fn handle_control(
-    channel: &mut WriteChannel,
-    addr: SocketAddr,
-    subscriber: &Subscriber,
-    pending: &mut HashMap<Path, SubscribeValRequest>,
-    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
-    next_val: &mut Option<Id>,
-    next_sub: &mut Option<SubscribeValRequest>,
-    msg: &[u8]
-) -> Result<(), Error> {
-    match rmp_serde::decode::from_read::<&[u8], FromPublisher>(&*msg) {
-        Err(e) => return Err(Error::from(e)),
-        Ok(FromPublisher::Heartbeat) => (),
-        Ok(FromPublisher::Message(id)) => { *next_val = Some(id); }
-        Ok(FromPublisher::NoSuchValue(path)) => {
-            if let Some(r) = pending.remove(&path) {
-                let _ = r.finished.send(Err(format_err!("no such value")));
-            }
-        }
-        Ok(FromPublisher::Subscribed(path, id)) => {
-            match pending.remove(&path) {
-                None => { channel.queue_send(&ToPublisher::Unsubscribe(id))?; },
-                Some(req) => {
-                    *next_val = Some(id);
-                    *next_sub = Some(req);
-                }
-            }
-        }
-        Ok(FromPublisher::Unsubscribed(id)) => {
-            if let Some(s) = subscriptions.remove(&id) {
-                let mut t = subscriber.0.lock();
-                unsubscribe(&mut *t, s, id, addr);
-            }
-        }
-    }
-    Ok(())
-}
-
-macro_rules! try_brk {
+macro_rules! brk {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
             Err(e) => break Err(Error::from(e))
+        }
+    }
+}
+
+macro_rules! brkm {
+    ($l:tt, $e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => break $l Err(Error::from(e))
         }
     }
 }
@@ -869,20 +859,17 @@ const PERIOD: Duration = Duration::from_secs(10);
 
 async fn connection(
     subscriber: SubscriberWeak,
-    to: SocketAddr,
+    addr: SocketAddr,
     from_sub: UnboundedReceiver<ToCon>
 ) -> Result<(), Error> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
-    let mut next_val: Option<Id> = None;
-    let mut next_sub: Option<SubscribeValRequest> = None;
     let mut idle: usize = 0;
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
-    let con = Channel::new(time::timeout(PERIOD, TcpStream::connect(to)).await??);
+    let con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
     let (mut read_con, mut write_con) = con.split();
-    let mut batch: Vec<Bytes> = Vec::new();
     let mut flush: Flush = None;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let res = 'main: loop {
@@ -923,30 +910,71 @@ async fn connection(
                     }
                 }
             },
-            r = read_con.receive_batch_ut(&mut batch).fuse() => match r {
+            r = read_con.fill_buffer().fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
                 Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
                     msg_recvd = true;
-                    for msg in batch.drain(..) {
-                        match next_val.take() {
-                            Some(id) => {
-                                match handle_val(
-                                    &mut write_con, &mut subscriptions,
-                                    &mut next_sub, id, to, msg
-                                ).await {
-                                    Ok(()) => (),
-                                    Err(e) => break 'main Err(Error::from(e)),
-                                }
-                            }
-                            None => {
-                                match handle_control(
-                                    &mut write_con, to, &subscriber, &mut pending,
-                                    &mut subscriptions, &mut next_val,
-                                    &mut next_sub, &*msg
-                                ) {
-                                    Ok(()) => (),
-                                    Err(e) => break 'main Err(Error::from(e)),
-                                }
+                    loop {
+                        match AugFP::decode(&mut read_con) {
+                            None => break,
+                            Some(m) => match brkm!('main, m) {
+                                AugFP::Heartbeat => (),
+                                AugFP::NoSuchValue(path) =>
+                                    if let Some(r) = pending.remove(&path) {
+                                        let _ = r.finished.send(
+                                            Err(format_err!("no such value"))
+                                        );
+                                    },
+                                AugFP::Unsubscribed(id) => {
+                                    if let Some(s) = subscriptions.remove(&id) {
+                                        let mut t = subscriber.0.lock();
+                                        unsubscribe(&mut *t, s, id, addr);
+                                    }
+                                },
+                                AugFP::Subscribed(p, id, m) => match pending.remove(&p) {
+                                    None => {
+                                        brkm!('main, write_con.queue_send(
+                                            &publisher::To::Unsubscribe(id))
+                                        );
+                                    }
+                                    Some(req) => {
+                                        let s = Ok(UVal(Arc::new(UValInner {
+                                            id, addr, connection: req.con
+                                        })));
+                                        match req.finished.send(s) {
+                                            Err(_) => {
+                                                brkm!('main, write_con.queue_send(
+                                                    &publisher::To::Unsubscribe(id)
+                                                ));
+                                            }
+                                            Ok(()) => {
+                                                subscriptions.insert(id, Sub {
+                                                    path: req.path,
+                                                    last: m,
+                                                    streams: Vec::new(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                },
+                                AugFP::Message(i, m) => match subscriptions.get_mut(&i) {
+                                    None => {
+                                        brkm!('main, write_con.queue_send(
+                                            &publisher::To::Unsubscribe(i))
+                                        );
+                                    }
+                                    Some(sub) => {
+                                        let mut i = 0;
+                                        while i < sub.streams.len() {
+                                            let c = &mut sub.streams[i];
+                                            match c.send(m.clone()).await {
+                                                Ok(()) => { i += 1; }
+                                                Err(_) => { sub.streams.remove(i); }
+                                            }
+                                        }
+                                        sub.last = m;
+                                    }
+                                },
                             }
                         }
                     }
@@ -965,10 +993,10 @@ async fn connection(
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     pending.insert(path.clone(), req);
-                    try_brk!(write_con.queue_send(&ToPublisher::Subscribe(path)))
+                    brk!(write_con.queue_send(&publisher::To::Subscribe(path)))
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    try_brk!(write_con.queue_send(&ToPublisher::Unsubscribe(id)))
+                    brk!(write_con.queue_send(&publisher::To::Unsubscribe(id)))
                 }
                 Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
                     if let Some(sub) = subscriptions.get(&id) {
@@ -993,9 +1021,9 @@ async fn connection(
     };
     if let Some(subscriber) = subscriber.upgrade() {
         let mut t = subscriber.0.lock();
-        t.connections.remove(&to);
+        t.connections.remove(&addr);
         for (id, sub) in subscriptions {
-            unsubscribe(&mut *t, sub, id, to);
+            unsubscribe(&mut *t, sub, id, addr);
         }
         for (_, req) in pending {
             let _ = req.finished.send(Err(format_err!("connection died")));
