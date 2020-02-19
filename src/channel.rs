@@ -132,8 +132,14 @@ impl ReadChannel {
         if self.buf.remaining_mut() < BUF {
             self.buf.reserve(self.buf.capacity());
         }
-        self.socket.read_buf(&mut self.buf).await?;
-        Ok(())
+        match self.socket.read_buf(&mut self.buf).await {
+            Err(e) => Err(e),
+            Ok(0) => Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                format!("eof while reading"),
+            )),
+            Ok(_) => Ok(()),
+        }
     }
 
     fn decode_from_buffer(&mut self) -> Option<Bytes> {

@@ -243,6 +243,14 @@ impl DUVal {
         rx
     }
 
+    pub fn state(&self) -> DVState {
+        if self.0.lock().sub.is_none() {
+            DVState::Unsubscribed
+        } else {
+            DVState::Subscribed
+        }
+    }
+
     /// Gets a stream of updates just like `UVal::updates` except that
     /// the stream will not end when the subscription dies, it will
     /// just stop producing values, and will start again if
@@ -274,6 +282,14 @@ impl<T: DeserializeOwned> DVal<T> {
 
     pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
         self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
+    }
+
+    pub fn state_updates(&self, include_current: bool) -> impl Stream<Item = DVState> {
+        self.0.state_updates(include_current)
+    }
+
+    pub fn state(&self) -> DVState {
+        self.0.state()
     }
 
     pub fn updates(
@@ -849,7 +865,7 @@ async fn wait_flush(flush: &mut Flush) -> Result<(), Error> {
     }
 }
 
-const PERIODIC: Duration = Duration::from_secs(10);
+const PERIOD: Duration = Duration::from_secs(10);
 
 async fn connection(
     subscriber: SubscriberWeak,
@@ -864,11 +880,11 @@ async fn connection(
     let mut idle: usize = 0;
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
-    let con = Channel::new(time::timeout(PERIODIC, TcpStream::connect(to)).await??);
+    let con = Channel::new(time::timeout(PERIOD, TcpStream::connect(to)).await??);
     let (mut read_con, mut write_con) = con.split();
     let mut batch: Vec<Bytes> = Vec::new();
     let mut flush: Flush = None;
-    let mut periodic = time::interval(PERIODIC).fuse();
+    let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let res = 'main: loop {
         select! {
             r = wait_flush(&mut flush).fuse() => match r {
@@ -977,8 +993,12 @@ async fn connection(
     };
     if let Some(subscriber) = subscriber.upgrade() {
         let mut t = subscriber.0.lock();
+        t.connections.remove(&to);
         for (id, sub) in subscriptions {
             unsubscribe(&mut *t, sub, id, to);
+        }
+        for (_, req) in pending {
+            let _ = req.finished.send(Err(format_err!("connection died")));
         }
     }
     res

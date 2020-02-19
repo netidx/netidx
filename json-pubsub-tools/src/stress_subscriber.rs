@@ -3,7 +3,7 @@ use futures::prelude::*;
 use json_pubsub::{
     path::Path,
     resolver::{ReadOnly, Resolver},
-    subscriber::{Subscriber, DVal},
+    subscriber::{Subscriber, DVal, DVState},
     config,
 };
 use std::time::Duration;
@@ -27,8 +27,19 @@ pub(crate) fn run(config: config::Resolver) {
             if n >= subs.len() {
                 let now = Instant::now();
                 let elapsed = now - last_stat;
+                let mut subscribed = 0;
+                let mut unsubscribed = 0;
+                for s in subs.iter() {
+                    match s.state() {
+                        DVState::Unsubscribed => { unsubscribed += 1; }
+                        DVState::Subscribed => { subscribed += 1; }
+                    }
+                }
                 if elapsed > one_second {
-                    println!("rx: {:.0}", n as f64 / elapsed.as_secs_f64());
+                    println!(
+                        "subscribed: {} unsubscribed: {} rx: {:.0}",
+                        subscribed, unsubscribed, n as f64 / elapsed.as_secs_f64()
+                    );
                     n = 0;
                     last_stat = now;
                 }
