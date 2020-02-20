@@ -877,6 +877,7 @@ async fn connection(
     let (mut read_con, mut write_con) = con.split();
     let mut flush: Flush = None;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
+    let mut batch = Vec::new();
     let res = 'main: loop {
         select! {
             r = wait_flush(&mut flush).fuse() => match r {
@@ -919,68 +920,71 @@ async fn connection(
                 Err(e) => break Err(Error::from(e)),
                 Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
                     msg_recvd = true;
-                    loop {
-                        match AugFP::decode(&mut read_con) {
-                            None => break,
-                            Some(m) => match brkm!('main, m) {
-                                AugFP::Heartbeat => (),
-                                AugFP::NoSuchValue(path) =>
-                                    if let Some(r) = pending.remove(&path) {
-                                        let _ = r.finished.send(
-                                            Err(format_err!("no such value"))
-                                        );
-                                    },
-                                AugFP::Unsubscribed(id) => {
-                                    if let Some(s) = subscriptions.remove(&id) {
-                                        let mut t = subscriber.0.lock();
-                                        unsubscribe(&mut *t, s, id, addr);
-                                    }
-                                },
-                                AugFP::Subscribed(p, id, m) => match pending.remove(&p) {
-                                    None => {
-                                        brkm!('main, write_con.queue_send(
-                                            &publisher::To::Unsubscribe(id))
-                                        );
-                                    }
-                                    Some(req) => {
-                                        let s = Ok(UVal(Arc::new(UValInner {
-                                            id, addr, connection: req.con
-                                        })));
-                                        match req.finished.send(s) {
-                                            Err(_) => {
-                                                brkm!('main, write_con.queue_send(
-                                                    &publisher::To::Unsubscribe(id)
-                                                ));
-                                            }
-                                            Ok(()) => {
-                                                subscriptions.insert(id, Sub {
-                                                    path: req.path,
-                                                    last: m,
-                                                    streams: Vec::new(),
-                                                });
-                                            }
+                    // 2020-02-19 estokes: this is faster as two seperate loops.
+                    while let Some(m) = AugFP::decode(&mut read_con) {
+                        batch.push(m);
+                    }
+                    for m in batch.drain(..) {
+                        match brkm!('main, m) {
+                            AugFP::Message(i, m) => match subscriptions.get_mut(&i) {
+                                None => {
+                                    brkm!('main, write_con.queue_send(
+                                        &publisher::To::Unsubscribe(i))
+                                    );
+                                }
+                                Some(sub) => {
+                                    let mut gc = false;
+                                    for c in sub.streams.iter_mut() {
+                                        match c.send(m.clone()).await {
+                                            Ok(()) => (),
+                                            Err(_) => { gc = true; }
                                         }
                                     }
-                                },
-                                AugFP::Message(i, m) => match subscriptions.get_mut(&i) {
-                                    None => {
-                                        brkm!('main, write_con.queue_send(
-                                            &publisher::To::Unsubscribe(i))
-                                        );
+                                    if gc {
+                                        sub.streams.retain(|c| !c.is_closed());
                                     }
-                                    Some(sub) => {
-                                        let mut i = 0;
-                                        while i < sub.streams.len() {
-                                            let c = &mut sub.streams[i];
-                                            match c.send(m.clone()).await {
-                                                Ok(()) => { i += 1; }
-                                                Err(_) => { sub.streams.remove(i); }
-                                            }
+                                    sub.last = m;
+                                }
+                            },
+                            AugFP::Heartbeat => (),
+                            AugFP::NoSuchValue(path) =>
+                                if let Some(r) = pending.remove(&path) {
+                                    let _ = r.finished.send(
+                                        Err(format_err!("no such value"))
+                                    );
+                                },
+                            AugFP::Unsubscribed(id) => {
+                                if let Some(s) = subscriptions.remove(&id) {
+                                    let mut t = subscriber.0.lock();
+                                    unsubscribe(&mut *t, s, id, addr);
+                                }
+                            },
+                            AugFP::Subscribed(p, id, m) => match pending.remove(&p) {
+                                None => {
+                                    brkm!('main, write_con.queue_send(
+                                        &publisher::To::Unsubscribe(id))
+                                    );
+                                }
+                                Some(req) => {
+                                    let s = Ok(UVal(Arc::new(UValInner {
+                                        id, addr, connection: req.con
+                                    })));
+                                    match req.finished.send(s) {
+                                        Err(_) => {
+                                            brkm!('main, write_con.queue_send(
+                                                &publisher::To::Unsubscribe(id)
+                                            ));
                                         }
-                                        sub.last = m;
+                                        Ok(()) => {
+                                            subscriptions.insert(id, Sub {
+                                                path: req.path,
+                                                last: m,
+                                                streams: Vec::new(),
+                                            });
+                                        }
                                     }
-                                },
-                            }
+                                }
+                            },
                         }
                     }
                     if write_con.bytes_queued() > 0 && flush.is_none() {
