@@ -760,8 +760,16 @@ impl AugFP {
                 buf.advance(u32s);
                 let (head, sz) = {
                     let mut cr = CReader(buf.as_ref(), 0);
-                    let r = rmp_serde::decode::from_read(&mut cr);
-                    (r, cr.1)
+                    match rmp_serde::decode::from_read(&mut cr) {
+                        Ok(()) => {
+                            buf.advance(cr.1);
+                            (r, cr.1)
+                        }
+                        Err(e) => {
+                            buf.advance(len);
+                            return Err(Error::from(e));
+                        }
+                    }
                 };
                 match head {
                     Err(e) => Some(Err(e)),
@@ -770,13 +778,11 @@ impl AugFP {
                         publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
                         publisher::From::Heartbeat => AugFP::Heartbeat,
                         publisher::From::Subscribed(p, id) => {
-                            buf.advance(sz);
                             AugFP::Subscribed(
                                 p, id, buf.split_to(len - sz - u32s).freeze()
                             )
                         }
                         publisher::From::Message(id) => {
-                            buf.advance(sz);
                             AugFP::Message(id, buf.split_to(len - sz - u32s).freeze())
                         }
                     }))
