@@ -737,6 +737,7 @@ impl<R: io::Read> io::Read for CReader<R> {
     }
 }
 
+#[derive(Debug)]
 enum AugFP {
     NoSuchValue(Path),
     Unsubscribed(Id),
@@ -761,32 +762,30 @@ impl AugFP {
                 let (head, sz) = {
                     let mut cr = CReader(buf.as_ref(), 0);
                     match rmp_serde::decode::from_read(&mut cr) {
-                        Ok(()) => {
-                            buf.advance(cr.1);
-                            (r, cr.1)
+                        Ok(m) => {
+                            let read = cr.1;
+                            buf.advance(read);
+                            (m, read)
                         }
                         Err(e) => {
                             buf.advance(len);
-                            return Err(Error::from(e));
+                            return Some(Err(e));
                         }
                     }
                 };
-                match head {
-                    Err(e) => Some(Err(e)),
-                    Ok(m) => Some(Ok(match m {
-                        publisher::From::NoSuchValue(p) => AugFP::NoSuchValue(p),
-                        publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
-                        publisher::From::Heartbeat => AugFP::Heartbeat,
-                        publisher::From::Subscribed(p, id) => {
-                            AugFP::Subscribed(
-                                p, id, buf.split_to(len - sz - u32s).freeze()
-                            )
-                        }
-                        publisher::From::Message(id) => {
-                            AugFP::Message(id, buf.split_to(len - sz - u32s).freeze())
-                        }
-                    }))
-                }
+                Some(Ok(match head {
+                    publisher::From::NoSuchValue(p) => AugFP::NoSuchValue(p),
+                    publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
+                    publisher::From::Heartbeat => AugFP::Heartbeat,
+                    publisher::From::Subscribed(p, id) => {
+                        AugFP::Subscribed(
+                            p, id, buf.split_to(len - sz).freeze()
+                        )
+                    }
+                    publisher::From::Message(id) => {
+                        AugFP::Message(id, buf.split_to(len - sz).freeze())
+                    }
+                }))
             }
         }
     }
@@ -984,7 +983,7 @@ async fn connection(
                             }
                         }
                     }
-                    if flush.is_none() {
+                    if write_con.bytes_queued() > 0 && flush.is_none() {
                         flush = Some(write_con.flush().fuse());
                     }
                 }
@@ -992,7 +991,7 @@ async fn connection(
             msg = from_sub.next() => match msg {
                 None => break Err(format_err!("dropped")),
                 Some(BatchItem::EndBatch) => {
-                    if flush.is_none() {
+                    if write_con.bytes_queued() > 0 && flush.is_none() {
                         flush = Some(write_con.flush().fuse());
                     }
                 }
@@ -1095,8 +1094,10 @@ mod test {
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg).unwrap();
-            let vs0 = subscriber.subscribe_val::<V>("/app/v0".into(), None).await.unwrap();
-            let vs1 = subscriber.subscribe_val::<V>("/app/v1".into(), None).await.unwrap();
+            let vs0 =
+                subscriber.subscribe_val::<V>("/app/v0".into(), None).await.unwrap();
+            let vs1 =
+                subscriber.subscribe_val::<V>("/app/v1".into(), None).await.unwrap();
             let mut c0: Option<usize> = None;
             let mut c1: Option<usize> = None;
             let mut vs0s = vs0.updates(true);
