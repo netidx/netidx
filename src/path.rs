@@ -1,7 +1,7 @@
 use crate::utils;
 use std::{
     borrow::Borrow, convert::{AsRef, From}, sync::Arc,
-    cmp::{PartialEq, PartialOrd, Eq, Ord},
+    cmp::{PartialEq, PartialOrd, Eq, Ord}, iter::Iterator,
     ops::Deref,
     str::FromStr,
     fmt
@@ -112,6 +112,34 @@ fn is_escaped(s: &str, i: usize) -> bool {
     })
 }
 
+struct BaseNames<'a> {
+    cur: &'a str,
+    all: &'a str,
+    base: usize,
+}
+
+impl<'a> Iterator for BaseNames<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.base == self.all.len() {
+            None
+        } else {
+            match Path::find_sep(self.cur) {
+                None => {
+                    self.base = self.all.len();
+                    Some(self.all)
+                }
+                Some(p) => {
+                    self.base += p + 1;
+                    self.cur = &self.all[self.base..];
+                    Some(&self.all[0..self.base - 1])
+                }
+            }
+        }
+    }
+}
+
 impl Path {
     /// returns /
     pub fn root() -> Path { Path::from("/") }
@@ -173,6 +201,38 @@ impl Path {
         utils::split_escaped(s, ESC, SEP).skip(skip)
     }
 
+    /// Return an iterator over all the basenames in the path starting
+    /// from the root and ending with the entire path.
+    ///
+    /// # Examples
+    /// ```
+    /// use json_pubsub::path::Path;
+    /// let p = Path::from("/some/path/ending/in/foo");
+    /// let mut bn = Path::basenames(&p);
+    /// assert_eq!(bn.next(), Some("/"));
+    /// assert_eq!(bn.next(), Some("/some"));
+    /// assert_eq!(bn.next(), Some("/some/path"));
+    /// assert_eq!(bn.next(), Some("/some/path/ending"));
+    /// assert_eq!(bn.next(), Some("/some/path/ending/in"));
+    /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
+    /// assert_eq!(bn.next(), None);
+    /// ```
+    pub fn basenames(s: &str) -> impl Iterator<Item=&str> {
+        BaseNames {
+            cur: s,
+            all: s,
+            base: 1,
+        }
+    }
+
+    /// Return the number of levels in the path.
+    ///
+    /// # Examples
+    /// ```
+    /// use json_pubsub::path::Path;
+    /// let p = Path::from("/foo/bar/baz");
+    /// assert_eq!(Path::levels(&p), 3);
+    /// ```
     pub fn levels(s: &str) -> usize {
         let mut p = 0;
         for _ in Path::parts(s) {
@@ -234,6 +294,24 @@ impl Path {
         }
     }
 
+    fn find_sep_int<F: Fn(&str) -> Option<usize>>(mut s: &str, f: F) -> Option<usize> {
+        if s.len() == 0 { None }
+        else {
+            loop {
+                match f(s) {
+                    None => return None,
+                    Some(i) => {
+                        if !is_escaped(s, i) {
+                            return Some(i)
+                        } else {
+                            s = &s[0..i];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// return the position of the last path separator in the path, or
     /// None if there isn't one.
     ///
@@ -246,16 +324,23 @@ impl Path {
     /// let p = Path::from("");
     /// assert_eq!(Path::rfind_sep(&p), None);
     /// ```
-    pub fn rfind_sep(mut s: &str) -> Option<usize> {
-        if s.len() == 0 { None }
-        else {
-            loop {
-                match s.rfind(SEP) {
-                    Some(i) =>
-                        if !is_escaped(s, i) { return Some(i) } else { s = &s[0..i] }
-                    None => return None,
-                }
-            }
-        }
+    pub fn rfind_sep(s: &str) -> Option<usize> {
+        Path::find_sep_int(s, |s| s.rfind(SEP))
+    }
+
+    /// return the position of the first path separator in the path, or
+    /// None if there isn't one.
+    ///
+    /// # Examples
+    /// ```
+    /// use json_pubsub::path::Path;
+    /// let p = Path::from("foo/bar/baz");
+    /// assert_eq!(Path::find_sep(&p), Some(3));
+    ///
+    /// let p = Path::from("");
+    /// assert_eq!(Path::find_sep(&p), None);
+    /// ```
+    pub fn find_sep(s: &str) -> Option<usize> {
+        Path::find_sep_int(s, |s| s.find(SEP))
     }
 }
