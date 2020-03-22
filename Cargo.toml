@@ -5,7 +5,7 @@ authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 
 [target.'cfg(unix)'.dependencies]
-libgssapi = "0.3"
+libgssapi = {path = "../libgssapi/libgssapi"}
 
 [target.'cfg(windows)'.dependencies]
 sspi = "0.3"
