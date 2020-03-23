@@ -1,5 +1,5 @@
 use crate::Path;
-use std::{sync::Arc, collections::HashMap, ops::Deref, error, convert::TryFrom};
+use std::{sync::Arc, collections::HashMap, ops::Deref, error, convert::TryFrom, iter};
 use failure::Error;
 
 bitflags! {
@@ -40,6 +40,18 @@ impl TryFrom<&str> for Permissions {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity(u32);
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserInfo {
+    id: Entity,
+    groups: Vec<Entity>,
+}
+
+impl UserInfo {
+    fn entities(&self) -> impl Iterator<Item=&Entity> {
+        iter::chain(iter::once(&self.id), self.groups.iter())
+    }
+}
+
 pub struct EntityDb {
     next: u32,
     entities: HashMap<String, Entity>,
@@ -67,25 +79,49 @@ impl EntityDb {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AuthMapFile(HashMap<Path, HashMap<String, String>>);
+pub struct PMapFile(HashMap<Path, HashMap<String, String>>);
 
 #[derive(Debug)]
-pub struct AuthMap(HashMap<Path, HashMap<Entity, Permissions>>);
+pub struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
 
-impl AuthMap {
+impl PMap {
     fn from_file(
-        file: AuthMapFile,
+        file: PMapFile,
         db: &mut EntityDb
-    ) -> Result<AuthMap, Error> {
-        let mut authmap = HashMap::with_capacity(file.0.len());
+    ) -> Result<Self, Error> {
+        let mut pmap = HashMap::with_capacity(file.0.len());
         for (path, tbl) in file.0.iter() {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
                 entry.insert(db.entity(ent), perm.parse::<Permissions>()?)
             }
-            authmap.insert(path.clone(), entry);
+            pmap.insert(path.clone(), entry);
         }
-        Ok(AuthMap(authmap))
+        Ok(PMap(pmap))
+    }
+
+    fn permissions(&self, path: &Path, user: &UserInfo) -> Permissions {
+        Path::basenames(&*path).fold(Permissions::empty(), |p, s| {
+            match self.0.get(s) {
+                None => p,
+                Some(set) => {
+                    let init = (p, Permissions::empty());
+                    let (ap, dp) = user.entities().fold(init, |(ap, dp), e| {
+                        match set.get(e) {
+                            None => (ap, dp),
+                            Some(p_) => {
+                                if p_.contains(Permissions::DENY) {
+                                    (ap, dp | p_)
+                                } else {
+                                    (ap | p_, dp)
+                                }
+                            }
+                        }
+                    });
+                    ap & !dp
+                }
+            }
+        })
     }
 }
 
@@ -96,7 +132,7 @@ pub trait Krb5Ctx {
     fn step(&self, token: Option<&[u8]>) -> Result<Option<Buf>, Error>;
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Buf, Error>;
     fn unwrap(&self, msg: &[u8]) -> Result<Buf, Error>;
-    fn ttl(&self) -> Result<u32, Error>;
+    fn ttl(&self) -> Result<Duration, Error>;
 }
 
 pub trait Krb5ServerCtx: Krb5Ctx {
@@ -125,79 +161,54 @@ mod krb5 {
     };
     use std::{sync::Arc, collections::HashMap};
 
-    struct UserDbInner {
-        next: u32,
-        cache: HashMap<Buf, ClientInfo>
-    }
-
-    struct UserDb(Arc<Mutex<UserDbInner>>);
-
-    impl UserDb {
-        fn new() -> UserDb {
-            UserDb(Arc::new(Mutex::new(UserDbInner {
-                next: 0,
-                cache: HashMap::new()
-            })))
-        }
-
-        fn translate(ifo: CtxInfo) -> Krb5CtxInfo {
-            
-        }
-    }
-
-
-    pub struct Krb5ClientCtx {
-        gss: ClientCtx,
-        db: UserDb,
-    }
-
-    impl Krb5Ctx for Krb5ClientCtx {
+    impl Krb5Ctx for ClientCtx {
         type Error = Error;
         type Buf = Buf;
 
         fn step(&self, token: Option<&[u8]>) -> Result<Option<Buf>, Error> {
-            self.gss.step(token)
+            ClientCtx::step(token)
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Buf, Error> {
-            self.gss.wrap(encrypt, msg)
+            SecurityContext::wrap(self, encrypt, msg)
         }
 
         fn unwrap(&self, msg: &[u8]) -> Result<Buf, Error> {
-            self.gss.unwrap(msg)
+            SecurityContext::unwrap(self, msg)
         }
 
-        fn info(&self) -> Result<Krb5CtxInfo, Error> {
-            self.db.translate(self.gss.info()?)
+        fn ttl(&self) -> Result<Duration, Error> {
+            SecurityContext::lifetime(self)
         }
     }
 
-    pub struct Krb5ServerCtx {
-        gss: ServerCtx,
-        db: UserDb,
-    }
-
-    impl Krb5Ctx for  {
+    impl Krb5Ctx for ServerCtx {
         type Error = Error;
         type Buf = Buf;
 
         fn step(&self, token: Option<&[u8]>) -> Result<Buf, Error> {
             match token {
-                Some(token) => self.gss.step(token),
+                Some(token) => ServerCtx::step(self, token),
                 None => Err(Error {major: MajorFlags::GSS_S_DEFECTIVE_TOKEN, minor: 0})
             }
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Buf, Error> {
-            self.gss.wrap(encrypt, msg)
+            SecurityContext::wrap(self, encrypt, msg)
         }
 
         fn unwrap(&self, msg: &[u8]) -> Result<Buf, Error> {
-            self.gss.unwrap(msg)
+            SecurityContext::unwrap(self, msg)
         }
 
-        fn info(&self) -> Result<Krb5CtxInfo, Error> {
-            self.db.translate(self.gss.info()?)
+        fn ttl(&self) -> Result<Duration, Error> {
+            SecurityContext::lifetime(self)
+        }
+    }
+
+    impl Krb5ServerCtx for ServerCtx {
+        fn client(&self) -> Result<Self::Buf, Self::Error> {
+            
         }
     }
 }
