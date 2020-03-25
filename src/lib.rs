@@ -40,10 +40,12 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
 #[macro_use] extern crate pin_utils;
+#[macro_use] extern crate bitflags;
 
 #[macro_use] pub mod utils;
 mod resolver_store;
 pub mod path;
+mod auth;
 pub mod protocol;
 pub mod config;
 pub mod channel;
