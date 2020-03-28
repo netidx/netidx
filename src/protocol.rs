@@ -22,38 +22,44 @@ pub mod resolver {
     use crate::path::Path;
     use std::net::SocketAddr;
 
+    pub enum Authentication<'a> {
+        Anonymous,
+        Token(&'a [u8]),
+    }
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum ClientHello {
+    pub enum ClientHello<'a> {
         /// Instruct the resolver server that this connection will not
         /// publish paths.
-        ReadOnly,
+        ReadOnly(Authentication<'a>),
         /// Instruct the resolver server that this connection will
         /// only publish paths. All published paths will use the
         /// specified address `write_addr`, and the publisher must
         /// send a heartbeat at least every `ttl` seconds or the
         /// resolver server will purge all paths published by
         /// `write_addr`.
-        WriteOnly { ttl: u64, write_addr: SocketAddr },
+        WriteOnly { ttl: u64, write_addr: SocketAddr, auth: Authentication<'a> },
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct ServerHello {
+    pub struct ServerHello<'a> {
         /// If `ttl_expired` is true, the resolver has previously
         /// purged everything published by this publisher, if desired
         /// it should be republished.
         pub ttl_expired: bool,
+        pub auth: Authentication<'a>,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum To {
+    pub enum To<'a> {
         /// Resolve the list of paths to addresses/ports
-        Resolve(Vec<Path>),
+        Resolve(&'a [&'a str]),
         /// List the paths published under the specified root path
-        List(Path),
+        List(&'a str),
         /// Publish the list of paths
-        Publish(Vec<Path>),
+        Publish(&'a [&'a str]),
         /// Stop publishing the list of paths
-        Unpublish(Vec<Path>),
+        Unpublish(&'a [&'a str]),
         /// Clear all paths published by our ip/port
         Clear,
         /// Tell the resolver that we are still alive
@@ -61,18 +67,20 @@ pub mod resolver {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum From {
-        Resolved(Vec<Vec<SocketAddr>>),
-        List(Vec<Path>),
+    pub enum From<'a> {
+        Resolved(&'a [&'a [SocketAddr]]),
+        List(&'a [&'a str]),
         Published,
         Unpublished,
-        Error(String),
+        Error(&'a str),
     }
 }
 
 /// The protocol between the publisher and the subscriber. Messages in
 /// this protocol are structured as,
 ///
+/// client hello to publisher:   `[u32, resolver::Authentication]`
+/// publisher hello to client:   `[u32, resolver::Authentication]`
 /// messages to the publisher:   `[u32, publisher::To]`
 /// messages from the publisher: `[u32, publisher::From, optional Bytes]`
 ///
@@ -84,10 +92,10 @@ pub mod publisher {
     use crate::path::Path;
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum To {
+    pub enum To<'a> {
         /// Subscribe to the specified value, if it is not available the
         /// result will be NoSuchValue
-        Subscribe(Path),
+        Subscribe(&'a str),
         /// Unsubscribe from the specified value, this will always result
         /// in an Unsubscibed message even if you weren't ever subscribed
         /// to the value, or it doesn't exist.
@@ -95,10 +103,10 @@ pub mod publisher {
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum From {
+    pub enum From<'a> {
         /// The requested subscription to Path cannot be completed because
         /// it doesn't exist
-        NoSuchValue(Path),
+        NoSuchValue(&'a str),
         /// You have been unsubscriped from Path. This can be the result
         /// of an Unsubscribe message, or it may be sent unsolicited, in
         /// the case the value is no longer published, or the publisher is
@@ -108,7 +116,7 @@ pub mod publisher {
         /// The next message contains the first value for Id. All further
         /// communications about this subscription will only refer to the
         /// Id.
-        Subscribed(Path, Id),
+        Subscribed(&'a str, Id),
         /// The next message contains an updated value for Id.
         Message(Id),
         /// Indicates that the publisher is idle, but still
@@ -133,4 +141,3 @@ pub mod publisher {
         }
     }
 }
-

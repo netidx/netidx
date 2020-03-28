@@ -1,32 +1,42 @@
 use crate::{
+    auth::{
+        syskrb5::{sys_krb5, ServerCtx, SysKrb5},
+        Krb5, Krb5Ctx, Krb5ServerCtx,
+    },
     channel::Channel,
     path::Path,
+    protocol::{publisher::Id, resolver},
     resolver_store::Store,
-    protocol::resolver,
-};
-use tokio::{
-    task, time::{self, Instant}, sync::oneshot,
-    net::{TcpStream, TcpListener}
-};
-use futures::{
-    select,
-    prelude::*,
-};
-use std::{
-    mem, io,
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
-    time::Duration,
-    net::SocketAddr,
 };
 use failure::Error;
+use futures::{prelude::*, select};
+use parking_lot::Mutex;
+use smallvec::SmallVec;
+use std::{
+    collections::HashMap,
+    io, mem,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+    ops::Deref,
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+    task,
+    time::{self, Instant},
+};
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_batch(
+fn handle_batch<'a>(
     store: &Store<ClientInfo>,
-    msgs: impl Iterator<Item = resolver::To>,
+    msgs: impl Iterator<Item = resolver::To<'a>>,
     con: &mut Channel,
-    wa: Option<SocketAddr>
+    wa: Option<SocketAddr>,
 ) -> Result<(), Error> {
     match wa {
         None => {
@@ -35,16 +45,20 @@ fn handle_batch(
                 match m {
                     resolver::To::Heartbeat => (),
                     resolver::To::Resolve(paths) => {
-                        let res = paths.iter().map(|p| s.resolve(p)).collect();
-                        con.queue_send(&resolver::From::Resolved(res))?
-                    },
+                        let mut res = SmallVec::<[&[SocketAddr]; 32]>::new();
+                        res.extend(paths.iter().map(|p| s.resolve(p)));
+                        con.queue_send(&resolver::From::Resolved(&res))?
+                    }
                     resolver::To::List(path) => {
-                        con.queue_send(&resolver::From::List(s.list(&path)))?
+                        let mut res = SmallVec::<[&str; 32]>::new();
+                        s.list(&path, &mut res);
+                        con.queue_send(&resolver::From::List(&res))?
                     }
                     resolver::To::Publish(_)
-                        | resolver::To::Unpublish(_)
-                        | resolver::To::Clear =>
-                        con.queue_send(&resolver::From::Error("read only".into()))?,
+                    | resolver::To::Unpublish(_)
+                    | resolver::To::Clear => {
+                        con.queue_send(&resolver::From::Error("read only".into()))?
+                    }
                 }
             }
         }
@@ -53,16 +67,17 @@ fn handle_batch(
             for m in msgs {
                 match m {
                     resolver::To::Heartbeat => (),
-                    resolver::To::Resolve(_) | resolver::To::List(_) =>
-                        con.queue_send(&resolver::From::Error("write only".into()))?,
+                    resolver::To::Resolve(_) | resolver::To::List(_) => {
+                        con.queue_send(&resolver::From::Error("write only".into()))?
+                    }
                     resolver::To::Publish(paths) => {
                         if !paths.iter().all(Path::is_absolute) {
-                            con.queue_send(
-                                &resolver::From::Error("absolute paths required".into())
-                            )?
+                            con.queue_send(&resolver::From::Error(
+                                "absolute paths required".into(),
+                            ))?
                         } else {
                             for path in paths {
-                                s.publish(path, write_addr);
+                                s.publish(Path::from(path), write_addr);
                             }
                             con.queue_send(&resolver::From::Published)?
                         }
@@ -85,6 +100,48 @@ fn handle_batch(
     Ok(())
 }
 
+struct SecStoreInner {
+    principal: String,
+    next: Id,
+    ctxts: HashMap<Id, ServerCtx>,
+}
+
+impl SecStoreInner {
+    fn get(&self, id: &Id) -> Option<ServerCtx> {
+        self.ctxts.get(id).and_then(|ctx| match ctx.open() {
+            Err(_) => None,
+            Ok(open) => {
+                if open {
+                    Some(ctx)
+                } else {
+                    None
+                }
+            }
+        })
+    }
+
+    fn create(&mut self) -> Result<(Id, ServerCtx), Error> {
+        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
+        let id = self.next.take();
+        self.ctxts.insert(id, ctx.clone());
+        Ok((id, ctx))
+    }
+
+    fn drop(&mut self, id: &Id) {
+        self.ctxts.remove(id);
+    }
+}
+
+struct SecStore(Arc<Mutex<SecStoreInner>>);
+
+impl Deref for SecStore {
+    type Target = Mutex<SecStoreInner>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
 static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 static READER_TTL: Duration = Duration::from_secs(120);
 static MAX_TTL: u64 = 3600;
@@ -93,6 +150,7 @@ async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
+    secstore: SecStore,
 ) -> Result<(), Error> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
@@ -101,8 +159,10 @@ async fn client_loop(
         time::timeout(HELLO_TIMEOUT, con.receive()).await??;
     let (ttl, ttl_expired, write_addr) = match hello {
         resolver::ClientHello::ReadOnly => (READER_TTL, false, None),
-        resolver::ClientHello::WriteOnly {ttl, write_addr} => {
-            if ttl <= 0 || ttl > MAX_TTL { bail!("invalid ttl") }
+        resolver::ClientHello::WriteOnly { ttl, write_addr } => {
+            if ttl <= 0 || ttl > MAX_TTL {
+                bail!("invalid ttl")
+            }
             let mut store = store.write();
             let clinfos = store.clinfo_mut();
             let ttl = Duration::from_secs(ttl);
@@ -110,7 +170,7 @@ async fn client_loop(
                 None => {
                     clinfos.insert(write_addr, Some(tx_stop));
                     (ttl, true, Some(write_addr))
-                },
+                }
                 Some(cl) => {
                     if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
                         let _ = old_stop.send(());
@@ -122,8 +182,9 @@ async fn client_loop(
     };
     time::timeout(
         HELLO_TIMEOUT,
-        con.send_one(&resolver::ServerHello { ttl_expired })
-    ).await??;
+        con.send_one(&resolver::ServerHello { ttl_expired }),
+    )
+    .await??;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -132,11 +193,11 @@ async fn client_loop(
     let mut timeout = time::interval_at(Instant::now() + ttl, ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel>,
-        batch: &mut Vec<resolver::To>
+        batch: &mut Vec<resolver::To>,
     ) -> Result<(), io::Error> {
         match con {
             Some(ref mut con) => con.receive_batch(batch).await,
-            None => future::pending().await
+            None => future::pending().await,
         }
     }
     loop {
@@ -248,7 +309,7 @@ impl Server {
         };
         Ok(Server {
             stop: Some(send_stop),
-            local_addr
+            local_addr,
         })
     }
 
@@ -259,13 +320,13 @@ impl Server {
 
 #[cfg(test)]
 mod test {
-    use std::net::SocketAddr;
     use crate::{
-        path::Path,
-        resolver_server::Server,
-        resolver::{WriteOnly, ReadOnly, Resolver},
         config,
+        path::Path,
+        resolver::{ReadOnly, Resolver, WriteOnly},
+        resolver_server::Server,
     };
+    use std::net::SocketAddr;
 
     async fn init_server() -> Server {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -283,24 +344,18 @@ mod test {
         rt.block_on(async {
             let server = init_server().await;
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let cfg = config::Resolver { addr: *server.local_addr() };
+            let cfg = config::Resolver {
+                addr: *server.local_addr(),
+            };
             let mut w = Resolver::<WriteOnly>::new_w(cfg, paddr).unwrap();
             let mut r = Resolver::<ReadOnly>::new_r(cfg).unwrap();
-            let paths = vec![
-                p("/foo/bar"),
-                p("/foo/baz"),
-                p("/app/v0"),
-                p("/app/v1"),
-            ];
+            let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             w.publish(paths.clone()).await.unwrap();
             for addrs in r.resolve(paths.clone()).await.unwrap() {
                 assert_eq!(addrs.len(), 1);
                 assert_eq!(addrs[0], paddr);
             }
-            assert_eq!(
-                r.list(p("/")).await.unwrap(),
-                vec![p("/app"), p("/foo")]
-            );
+            assert_eq!(r.list(p("/")).await.unwrap(), vec![p("/app"), p("/foo")]);
             assert_eq!(
                 r.list(p("/foo")).await.unwrap(),
                 vec![p("/foo/bar"), p("/foo/baz")]
