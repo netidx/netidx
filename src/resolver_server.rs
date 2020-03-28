@@ -109,9 +109,9 @@ struct SecStoreInner {
 }
 
 impl SecStoreInner {
-    fn take(&mut self, id: Id) -> Option<(Id, ServerCtx)> {
-        self.ctxts.remove(&id).and_then(|ctx| match ctx.open() {
-            Ok(open) if open => Some((id, ctx)),
+    fn take(&mut self, id: &Id) -> Option<ServerCtx> {
+        self.ctxts.remove(id).and_then(|ctx| match ctx.ttl() {
+            Ok(ttl) if ttl.to_secs() > 0 => Some(ctx),
             _ => None
         })
     }
@@ -120,10 +120,20 @@ impl SecStoreInner {
         self.ctxts.insert(id, ctx);
     }
 
-    fn create(&mut self) -> Result<(Id, ServerCtx), Error> {
-        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
-        let id = self.next.take();
-        Ok((id, ctx))
+    fn id(&mut self) -> Id {
+        self.next.take()
+    }
+
+    fn gc(&mut self) {
+        let mut delete = SmallVec::<[Id; 64]>();
+        for (id, ctx) in self.ctxts.iter() {
+            if ctx.ttl().to_secs() == 0 {
+                delete.push(id);
+            }
+        }
+        for id in delete.into_iter() {
+            self.ctxts.remove(id);
+        }
     }
 }
 
@@ -136,6 +146,27 @@ impl SecStore {
             next: Id::zero(),
             ctxts: HashMap::with_hasher(FxBuildHasher::default()),
         })))
+    }
+
+    fn take(&self, id: &Id) -> Option<ServerCtx> {
+        let mut inner = self.0.lock();
+        inner.take(id)
+    }
+
+    fn save(&self, id: Id, ctx: ServerCtx) {
+        let mut inner = self.0.lock();
+        inner.save(id, ctx);
+    }
+
+    fn create(&self) -> Result<(Id, ServerCtx), Error> {
+        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
+        let mut inner = self.0.lock();
+        Ok((inner.id(), ctx))
+    }
+
+    fn gc(&self) {
+        let mut inner = self.0.lock();
+        inner.gc()
     }
 }
 
@@ -181,6 +212,10 @@ async fn client_loop(
     };
     let (auth, ctx) = match auth {
         Authentication::Anonymous => (Authentication::Anonymous, None),
+        Authentication::Current(id) => match secstore.take(&id) {
+            None => bail!("invalid security context"),
+            Some(ctx) => (Authentication::Current(id), Some((id, ctx)))
+        },
         
     }
     time::timeout(

@@ -163,7 +163,6 @@ pub trait Krb5Ctx {
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error>;
     fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error>;
     fn ttl(&self) -> Result<Duration, Error>;
-    fn open(&self) -> Result<bool, Error>;
 }
 
 pub trait Krb5ServerCtx: Krb5Ctx {
@@ -230,12 +229,6 @@ pub(crate) mod syskrb5 {
                 .lifetime()
                 .map_err(|e| Error::from_boxed_compat(Box::new(e)))
         }
-
-        fn open(&self) -> Result<bool, Error> {
-            self.0
-                .open()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
-        }
     }
 
     #[derive(Clone)]
@@ -270,12 +263,6 @@ pub(crate) mod syskrb5 {
         fn ttl(&self) -> Result<Duration, Error> {
             self.0
                 .lifetime()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
-        }
-
-        fn open(&self) -> Result<bool, Error> {
-            self.0
-                .open()
                 .map_err(|e| Error::from_boxed_compat(Box::new(e)))
         }
     }
