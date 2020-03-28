@@ -109,11 +109,15 @@ struct SecStoreInner {
 }
 
 impl SecStoreInner {
-    fn take(&mut self, id: &Id) -> Option<ServerCtx> {
-        self.ctxts.remove(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.to_secs() > 0 => Some(ctx),
+    fn get(&mut self, id: &Id) -> Option<ServerCtx> {
+        self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
+            Ok(ttl) if ttl.to_secs() > 0 => Some(ctx.clone()),
             _ => None
         })
+    }
+
+    fn delete(&mut self, id: &Id) {
+        self.ctxts.remove(id);
     }
 
     fn save(&mut self, id: Id, ctx: ServerCtx) {
@@ -148,9 +152,14 @@ impl SecStore {
         })))
     }
 
-    fn take(&self, id: &Id) -> Option<ServerCtx> {
+    fn get(&self, id: &Id) -> Option<ServerCtx> {
         let mut inner = self.0.lock();
-        inner.take(id)
+        inner.get(id)
+    }
+
+    fn delete(&self, id: &Id) {
+        let mut inner = self.0.lock();
+        inner.delete(id);
     }
 
     fn save(&self, id: Id, ctx: ServerCtx) {
@@ -210,19 +219,35 @@ async fn client_loop(
             }
         }
     };
-    let (auth, ctx) = match auth {
-        Authentication::Anonymous => (Authentication::Anonymous, None),
-        Authentication::Current(id) => match secstore.take(&id) {
-            None => bail!("invalid security context"),
-            Some(ctx) => (Authentication::Current(id), Some((id, ctx)))
-        },
-        
-    }
-    time::timeout(
-        HELLO_TIMEOUT,
-        con.send_one(&resolver::ServerHello { ttl_expired }),
-    )
-    .await??;
+    let ctx = {
+        let (tok, ctx) = match auth {
+            resolver::ClientAuth::Anonymous => (None, None),
+            resolver::ClientAuth::Reuse(id) => match secstore.get(&id) {
+                None => bail!("invalid security context id"),
+                Some(ctx) => (None, Some((id, ctx)))
+            },
+            resolver::ClientAuth::Token(tok) => {
+                // krb5 operations can block, as they may need to talk to
+                // the KDC, and/or read files.
+                task::block_in_pace(|| {
+                    let (id, ctx) = secstore.create()?;
+                    let tok = ctx.step(Some(tok))?;
+                    (Some(tok), Some((id, ctx)))
+                })?
+            },
+        };
+        let auth = match (tok, ctx) {
+            (None, None) => resolver::ServerAuth::Anonymous,
+            (None, Some(_)) => resolver::ServerAuth::Reused,
+            (Some(ref tok), Some((id, _))) => resolver::ServerAuth::Accepted(&**tok, id),
+            (Some(_), None) => unreachable!(),
+        };
+        time::timeout(
+            HELLO_TIMEOUT,
+            con.send_one(&resolver::ServerHello { ttl_expired, auth }),
+        ).await??;
+        ctx
+    };
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -244,6 +269,9 @@ async fn client_loop(
             _ = rx_stop => break Ok(()),
             m = receive_batch(&mut con, &mut batch).fuse() => match m {
                 Err(e) => {
+                    if let Some(id, ref ctx) = ctx {
+                        secstore.save(id, ctx.clone());
+                    }
                     batch.clear();
                     con = None;
                     // CR estokes: use proper log module
@@ -265,6 +293,9 @@ async fn client_loop(
                 if act {
                     act = false;
                 } else {
+                    if let Some((id, _)) = ctx {
+                        secstore.delete(&id);
+                    }
                     if let Some(write_addr) = write_addr {
                         let mut store = store.write();
                         if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {

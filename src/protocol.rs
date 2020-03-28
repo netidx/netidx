@@ -22,9 +22,16 @@ pub mod resolver {
     use crate::path::Path;
     use std::net::SocketAddr;
 
-    pub enum Authentication<'a> {
+    pub enum ClientAuth<'a> {
         Anonymous,
+        Reuse(Id),
         Token(&'a [u8]),
+    }
+
+    pub enum ServerAuth<'a> {
+        Anonymous,
+        Reused,
+        Accepted(&'a [u8], Id),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,7 +54,7 @@ pub mod resolver {
         /// purged everything published by this publisher, if desired
         /// it should be republished.
         pub ttl_expired: bool,
-        pub auth: Authentication<'a>,
+        pub auth: ServerAuth<'a>,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
