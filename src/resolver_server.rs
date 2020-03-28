@@ -8,6 +8,7 @@ use crate::{
     protocol::{publisher::Id, resolver},
     resolver_store::Store,
 };
+use fxhash::FxBuildHasher;
 use failure::Error;
 use futures::{prelude::*, select};
 use parking_lot::Mutex;
@@ -23,6 +24,7 @@ use std::{
     time::Duration,
     ops::Deref,
 };
+use rmp_serde::decode;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
@@ -103,42 +105,37 @@ fn handle_batch<'a>(
 struct SecStoreInner {
     principal: String,
     next: Id,
-    ctxts: HashMap<Id, ServerCtx>,
+    ctxts: HashMap<Id, ServerCtx, FxBuildHasher>,
 }
 
 impl SecStoreInner {
-    fn get(&self, id: &Id) -> Option<ServerCtx> {
-        self.ctxts.get(id).and_then(|ctx| match ctx.open() {
-            Err(_) => None,
-            Ok(open) => {
-                if open {
-                    Some(ctx)
-                } else {
-                    None
-                }
-            }
+    fn take(&mut self, id: Id) -> Option<(Id, ServerCtx)> {
+        self.ctxts.remove(&id).and_then(|ctx| match ctx.open() {
+            Ok(open) if open => Some((id, ctx)),
+            _ => None
         })
+    }
+
+    fn save(&mut self, id: Id, ctx: ServerCtx) {
+        self.ctxts.insert(id, ctx);
     }
 
     fn create(&mut self) -> Result<(Id, ServerCtx), Error> {
         let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
         let id = self.next.take();
-        self.ctxts.insert(id, ctx.clone());
         Ok((id, ctx))
-    }
-
-    fn drop(&mut self, id: &Id) {
-        self.ctxts.remove(id);
     }
 }
 
 struct SecStore(Arc<Mutex<SecStoreInner>>);
 
-impl Deref for SecStore {
-    type Target = Mutex<SecStoreInner>;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
+impl SecStore {
+    fn new(principal: String) -> Self {
+        SecStore(Arc::new(Mutex::new(SecStoreInner {
+            principal,
+            next: Id::zero(),
+            ctxts: HashMap::with_hasher(FxBuildHasher::default()),
+        })))
     }
 }
 
@@ -155,11 +152,13 @@ async fn client_loop(
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
+    let hello_buf = time::timeout(HELLO_TIMEOUT, con.receive_ut()).await??;
     let hello: resolver::ClientHello =
-        time::timeout(HELLO_TIMEOUT, con.receive()).await??;
-    let (ttl, ttl_expired, write_addr) = match hello {
-        resolver::ClientHello::ReadOnly => (READER_TTL, false, None),
-        resolver::ClientHello::WriteOnly { ttl, write_addr } => {
+        decode::from_read_ref(&*hello_buf)
+        .map_err(|e| Error::from_boxed_compat(Box::new(e)))?
+    let (ttl, ttl_expired, write_addr, auth) = match hello {
+        resolver::ClientHello::ReadOnly(auth) => (READER_TTL, false, None, auth),
+        resolver::ClientHello::WriteOnly { ttl, write_addr, auth } => {
             if ttl <= 0 || ttl > MAX_TTL {
                 bail!("invalid ttl")
             }
@@ -169,17 +168,21 @@ async fn client_loop(
             match clinfos.get_mut(&write_addr) {
                 None => {
                     clinfos.insert(write_addr, Some(tx_stop));
-                    (ttl, true, Some(write_addr))
+                    (ttl, true, Some(write_addr), auth)
                 }
                 Some(cl) => {
                     if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
                         let _ = old_stop.send(());
                     }
-                    (ttl, false, Some(write_addr))
+                    (ttl, false, Some(write_addr), auth)
                 }
             }
         }
     };
+    let (auth, ctx) = match auth {
+        Authentication::Anonymous => (Authentication::Anonymous, None),
+        
+    }
     time::timeout(
         HELLO_TIMEOUT,
         con.send_one(&resolver::ServerHello { ttl_expired }),
