@@ -1,17 +1,17 @@
 use crate::{
+    auth::{
+        syskrb5::{sys_krb5, ClientCtx},
+        Krb5, Krb5Ctx,
+    },
     channel::Channel,
-    path::Path,
-    protocol::resolver,
     config,
+    path::Path,
+    protocol::{Id, resolver},
 };
 use failure::Error;
 use futures::{prelude::*, select};
 use std::{
-    collections::HashSet,
-    marker::PhantomData,
-    net::SocketAddr,
-    result,
-    time::Duration,
+    collections::HashSet, marker::PhantomData, net::SocketAddr, result, time::Duration,
 };
 use tokio::{
     net::TcpStream,
@@ -45,6 +45,12 @@ impl ReadableOrWritable for WriteOnly {}
 type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
+pub enum Auth {
+    Anonymous,
+    Krb5 {principal: Option<String>},
+}
+
+#[derive(Debug, Clone)]
 pub struct Resolver<R> {
     sender: mpsc::UnboundedSender<ToCon>,
     kind: PhantomData<R>,
@@ -63,9 +69,10 @@ impl<R: ReadableOrWritable> Resolver<R> {
     pub fn new_w(
         resolver: config::Resolver,
         publisher: SocketAddr,
+        desired_auth: Auth,
     ) -> Result<Resolver<WriteOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        task::spawn(connection(receiver, resolver, Some(publisher)));
+        task::spawn(connection(receiver, resolver, Some(publisher), desired_auth));
         Ok(Resolver {
             sender,
             kind: PhantomData,
@@ -74,9 +81,12 @@ impl<R: ReadableOrWritable> Resolver<R> {
 
     // CR estokes: when given more than one socket address the
     // resolver should make use of all of them.
-    pub fn new_r(resolver: config::Resolver) -> Result<Resolver<ReadOnly>> {
+    pub fn new_r(
+        resolver: config::Resolver,
+        desired_auth: Auth
+    ) -> Result<Resolver<ReadOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        task::spawn(connection(receiver, resolver, None));
+        task::spawn(connection(receiver, resolver, None, desired_auth));
         Ok(Resolver {
             sender,
             kind: PhantomData,
@@ -123,10 +133,23 @@ impl<R: Writeable + ReadableOrWritable> Resolver<R> {
     }
 }
 
+fn create_ctx(
+    principal: Option<&[u8]>,
+    target_principal: &[u8]
+) -> Result<(ClientCtx, Vec<u8>), Error> {
+    let ctx = sys_krb5.create_client_ctx(principal, target_principal)?;
+    match ctx.step(None)? {
+        None => bail!("client ctx first step produced no token"),
+        Some(tok) => Ok((ctx, Vec::from(&*tok)))
+    }
+}
+
 async fn connect(
     resolver: config::Resolver,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
+    ctx: &mut Option<(Id, ClientCtx)>,
+    desired_auth: &Auth,
 ) -> Channel {
     let mut backoff = 0;
     loop {
@@ -136,20 +159,68 @@ async fn connect(
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&resolver.addr).await);
         let mut con = Channel::new(con);
+        let (auth, new_ctx) = match desired_auth {
+            Auth::Anonymous => (resolver::ClientAuth::Anonymous, None),
+            Auth::Krb5 {ref principal} => match ctx {
+                Some((id, ctx)) => (resolver::ClientAuth::Reuse(id), None),
+                None => {
+                    let (ctx, tok) = try_cont!("create ctx", task::block_in_place(|| {
+                        create_ctx(
+                            principal.map(|s| s.as_bytes()),
+                            resolver.principal.as_bytes()
+                        )
+                    }));
+                    (resolver::ClientAuth::Token(tok), Some(ctx))
+                }
+            }
+        };
         // the unwrap can't fail, we can always encode the message,
         // and it's never bigger then 4 GB.
         try_cont!(
             "hello",
             con.send_one(&match publisher {
-                None => resolver::ClientHello::ReadOnly,
+                None => resolver::ClientHello::ReadOnly(auth),
                 Some(write_addr) => resolver::ClientHello::WriteOnly {
                     ttl: TTL,
-                    write_addr
+                    write_addr,
+                    auth,
                 },
             })
             .await
         );
         let r: resolver::ServerHello = try_cont!("hello reply", con.receive().await);
+        // CR estokes: replace this with proper logging
+        match (desired_auth, r.auth) {
+            (Auth::Anonymous, resolver::ServerAuth::Anonymous) => (),
+            (Auth::Anonymous, _) => {
+                println!("server requires authentication");
+                continue;
+            }
+            (Auth::Krb5 {..}, resolver::ServerAuth::Anonymous) => {
+                println!("could not authenticate resolver server");
+                continue;
+            }
+            (Auth::Krb5 {..}, resolver::ServerAuth::Reused) => match new_ctx {
+                None => (), // context reused
+                Some(_) => {
+                    println!("server wants to reuse a ctx, but we created a new one");
+                    continue;
+                }
+            }
+            (Auth::Krb5 {..}, resolver::ServerAuth::Accepted(tok, id)) => match new_ctx {
+                None => {
+                    println!("we asked to reuse a ctx but the server created a new one");
+                    continue;
+                }
+                Some(new_ctx) => {
+                    try_cont!(
+                        "authenticate resolver",
+                        task::block_in_place(|| new_ctx.step(&tok))
+                    );
+                    ctx = Some((id, new_ctx));
+                }
+            }
+        }
         if !r.ttl_expired {
             break con;
         } else {
@@ -167,9 +238,11 @@ async fn connection(
     receiver: mpsc::UnboundedReceiver<ToCon>,
     resolver: config::Resolver,
     publisher: Option<SocketAddr>,
+    desired_auth: Auth,
 ) {
     let mut published = HashSet::new();
     let mut con: Option<Channel> = None;
+    let mut ctx: Option<(Id, ClientCtx)> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
     let now = Instant::now();
@@ -192,7 +265,9 @@ async fn connection(
                 } else {
                     match con {
                         None => {
-                            con = Some(connect(resolver, publisher, &published).await);
+                            con = Some(connect(
+                                resolver, publisher, &published, &mut ctx, &auth
+                            ).await);
                             break;
                         },
                         Some(ref mut c) =>
@@ -213,8 +288,8 @@ async fn connection(
                             Some(ref mut c) => c,
                             None => {
                                 con = Some(connect(
-                                    resolver, publisher, &published).await
-                                );
+                                    resolver, publisher, &published, &mut ctx, &auth
+                                ).await);
                                 con.as_mut().unwrap()
                             }
                         };

@@ -8,7 +8,6 @@ use std::{
         HashSet, HashMap, BTreeSet
     },
 };
-use smallvec::SmallVec;
 use parking_lot::RwLock;
 
 lazy_static! {
@@ -124,26 +123,25 @@ impl<T> StoreInner<T> {
         self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
     }
 
-    pub(crate) fn unpublish<S: AsRef<str>>(&mut self, path: S, addr: SocketAddr) {
-        let path = path.as_ref();
+    pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
         let client_gone = self.by_addr.get_mut(&addr).map(|s| {
-            s.remove(path);
+            s.remove(&path);
             s.is_empty()
         }).unwrap_or(true);
         if client_gone {
             self.by_addr.remove(&addr);
         }
-        match self.by_path.get_mut(path) {
+        match self.by_path.get_mut(&path) {
             None => (),
             Some(addrs) => match self.addrs.remove_address(addrs, addr) {
                 Some(new_addrs) => { *addrs = new_addrs; }
                 None => {
-                    self.by_path.remove(path);
-                    let n = Path::levels(path);
+                    self.by_path.remove(&path);
+                    let n = Path::levels(path.as_ref());
                     self.by_level.get_mut(&n).into_iter().for_each(|s| {
-                        s.remove(path);
+                        s.remove(&path);
                     });
-                    self.remove_parents(path)
+                    self.remove_parents(path.as_ref())
                 }
             }
         }
@@ -157,19 +155,20 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> &[SocketAddr] {
-        self.by_path.get(path.as_ref()).map(|p| &**p).unwrap_or(&[])
+    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<SocketAddr> {
+        self.by_path.get(path.as_ref())
+            .map(|a| a.iter().copied().collect())
+            .unwrap_or_else(|| Vec::new())
     }
 
-    pub(crate) fn list<S: AsRef<str>>(&self, parent: &S, out: &mut SmallVec<[&str; 32]>) {
+    pub(crate) fn list<S: AsRef<str>>(&self, parent: &S) -> Vec<Path> {
         let parent = parent.as_ref();
-        if let Some(l) = self.by_level.get(&(Path::levels(parent) + 1)) {
-            out.extend(
-                l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                    .map(|p| p.as_ref())
-                    .take_while(|p| p.starts_with(parent))
-            );
-        }
+        self.by_level.get(&(Path::levels(parent) + 1)).map(|l| {
+            l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
+                .take_while(|p| p.as_ref().starts_with(parent))
+                .cloned()
+                .collect()
+        }).unwrap_or_else(Vec::new)
     }
 
     pub(crate) fn gc(&mut self) {

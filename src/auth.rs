@@ -189,7 +189,7 @@ pub(crate) mod syskrb5 {
     use failure::Error;
     use libgssapi::{
         context::{
-            ClientCtx as GssClientCtx, CtxFlags, CtxInfo, SecurityContext,
+            ClientCtx as GssClientCtx, CtxFlags, SecurityContext,
             ServerCtx as GssServerCtx,
         },
         credential::{Cred, CredUsage},
@@ -198,7 +198,7 @@ pub(crate) mod syskrb5 {
         oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
         util::Buf,
     };
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::time::Duration;
 
     #[derive(Clone)]
     pub(crate) struct ClientCtx(GssClientCtx);

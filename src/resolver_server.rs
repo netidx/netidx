@@ -5,12 +5,13 @@ use crate::{
     },
     channel::Channel,
     path::Path,
-    protocol::{publisher::Id, resolver},
+    protocol::{resolver, Id},
     resolver_store::Store,
+    config,
 };
-use fxhash::FxBuildHasher;
 use failure::Error;
 use futures::{prelude::*, select};
+use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
@@ -22,9 +23,7 @@ use std::{
         Arc,
     },
     time::Duration,
-    ops::Deref,
 };
-use rmp_serde::decode;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
@@ -34,9 +33,9 @@ use tokio::{
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_batch<'a>(
+fn handle_batch(
     store: &Store<ClientInfo>,
-    msgs: impl Iterator<Item = resolver::To<'a>>,
+    msgs: impl Iterator<Item = resolver::To>,
     con: &mut Channel,
     wa: Option<SocketAddr>,
 ) -> Result<(), Error> {
@@ -47,14 +46,11 @@ fn handle_batch<'a>(
                 match m {
                     resolver::To::Heartbeat => (),
                     resolver::To::Resolve(paths) => {
-                        let mut res = SmallVec::<[&[SocketAddr]; 32]>::new();
-                        res.extend(paths.iter().map(|p| s.resolve(p)));
-                        con.queue_send(&resolver::From::Resolved(&res))?
+                        let res = paths.iter().map(|p| s.resolve(p)).collect();
+                        con.queue_send(&resolver::From::Resolved(res))?
                     }
                     resolver::To::List(path) => {
-                        let mut res = SmallVec::<[&str; 32]>::new();
-                        s.list(&path, &mut res);
-                        con.queue_send(&resolver::From::List(&res))?
+                        con.queue_send(&resolver::From::List(s.list(&path)))?
                     }
                     resolver::To::Publish(_)
                     | resolver::To::Unpublish(_)
@@ -79,7 +75,7 @@ fn handle_batch<'a>(
                             ))?
                         } else {
                             for path in paths {
-                                s.publish(Path::from(path), write_addr);
+                                s.publish(path, write_addr);
                             }
                             con.queue_send(&resolver::From::Published)?
                         }
@@ -112,7 +108,7 @@ impl SecStoreInner {
     fn get(&mut self, id: &Id) -> Option<ServerCtx> {
         self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
             Ok(ttl) if ttl.to_secs() > 0 => Some(ctx.clone()),
-            _ => None
+            _ => None,
         })
     }
 
@@ -129,7 +125,7 @@ impl SecStoreInner {
     }
 
     fn gc(&mut self) {
-        let mut delete = SmallVec::<[Id; 64]>();
+        let mut delete = SmallVec::<[Id; 64]>::new();
         for (id, ctx) in self.ctxts.iter() {
             if ctx.ttl().to_secs() == 0 {
                 delete.push(id);
@@ -141,6 +137,7 @@ impl SecStoreInner {
     }
 }
 
+#[derive(Clone)]
 struct SecStore(Arc<Mutex<SecStoreInner>>);
 
 impl SecStore {
@@ -187,18 +184,20 @@ async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
-    secstore: SecStore,
+    secstore: Option<SecStore>,
 ) -> Result<(), Error> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
-    let hello_buf = time::timeout(HELLO_TIMEOUT, con.receive_ut()).await??;
     let hello: resolver::ClientHello =
-        decode::from_read_ref(&*hello_buf)
-        .map_err(|e| Error::from_boxed_compat(Box::new(e)))?
+        time::timeout(HELLO_TIMEOUT, con.receive()).await??;
     let (ttl, ttl_expired, write_addr, auth) = match hello {
         resolver::ClientHello::ReadOnly(auth) => (READER_TTL, false, None, auth),
-        resolver::ClientHello::WriteOnly { ttl, write_addr, auth } => {
+        resolver::ClientHello::WriteOnly {
+            ttl,
+            write_addr,
+            auth,
+        } => {
             if ttl <= 0 || ttl > MAX_TTL {
                 bail!("invalid ttl")
             }
@@ -220,32 +219,38 @@ async fn client_loop(
         }
     };
     let ctx = {
-        let (tok, ctx) = match auth {
-            resolver::ClientAuth::Anonymous => (None, None),
-            resolver::ClientAuth::Reuse(id) => match secstore.get(&id) {
-                None => bail!("invalid security context id"),
-                Some(ctx) => (None, Some((id, ctx)))
-            },
-            resolver::ClientAuth::Token(tok) => {
-                // krb5 operations can block, as they may need to talk to
-                // the KDC, and/or read files.
-                task::block_in_pace(|| {
-                    let (id, ctx) = secstore.create()?;
-                    let tok = ctx.step(Some(tok))?;
-                    (Some(tok), Some((id, ctx)))
-                })?
-            },
+        fn create_ctx(
+            secstore: &SecStore,
+            tok: &Vec<u8>,
+        ) -> Result<(Option<Vec<u8>>, Option<(Id, ServerCtx)>), Error> {
+            let (id, ctx) = secstore.create()?;
+            let tok = ctx.step(Some(&*tok))?.map(|b| Vec::from(&*b));
+            Ok((tok, Some((id, ctx))))
+        }
+        let (tok, ctx) = match secstore {
+            None => (None, None),
+            Some(ref secstore) => match auth {
+                resolver::ClientAuth::Anonymous => (None, None),
+                resolver::ClientAuth::Reuse(id) => match secstore.get(&id) {
+                    None => bail!("invalid security context id"),
+                    Some(ctx) => (None, Some((id, ctx))),
+                },
+                resolver::ClientAuth::Token(tok) => {
+                    task::block_in_place(|| create_ctx(&secstore, &tok))?
+                }
+            }
         };
         let auth = match (tok, ctx) {
             (None, None) => resolver::ServerAuth::Anonymous,
             (None, Some(_)) => resolver::ServerAuth::Reused,
-            (Some(ref tok), Some((id, _))) => resolver::ServerAuth::Accepted(&**tok, id),
+            (Some(tok), Some((id, _))) => resolver::ServerAuth::Accepted(tok, id),
             (Some(_), None) => unreachable!(),
         };
         time::timeout(
             HELLO_TIMEOUT,
             con.send_one(&resolver::ServerHello { ttl_expired, auth }),
-        ).await??;
+        )
+        .await??;
         ctx
     };
     let mut con = Some(con);
@@ -269,9 +274,6 @@ async fn client_loop(
             _ = rx_stop => break Ok(()),
             m = receive_batch(&mut con, &mut batch).fuse() => match m {
                 Err(e) => {
-                    if let Some(id, ref ctx) = ctx {
-                        secstore.save(id, ctx.clone());
-                    }
                     batch.clear();
                     con = None;
                     // CR estokes: use proper log module
@@ -293,8 +295,10 @@ async fn client_loop(
                 if act {
                     act = false;
                 } else {
-                    if let Some((id, _)) = ctx {
-                        secstore.delete(&id);
+                    if let Some(ref secstore) = secstore {
+                        if let Some((id, _)) = ctx {
+                            secstore.delete(&id);
+                        }
                     }
                     if let Some(write_addr) = write_addr {
                         let mut store = store.write();
@@ -314,14 +318,17 @@ async fn client_loop(
 }
 
 async fn server_loop(
-    addr: SocketAddr,
-    max_connections: usize,
+    cfg: config::Resolver,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr, Error> {
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let mut listener = TcpListener::bind(addr).await?;
+    let secstore = match cfg.auth {
+        config::Auth::Anonymous => None,
+        config::Auth::Krb5 {principal} => Some(SecStore::new(principal.clone()))
+    };
+    let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops = Vec::new();
@@ -331,13 +338,14 @@ async fn server_loop(
             cl = listener.accept().fuse() => match cl {
                 Err(_) => (),
                 Ok((client, _)) => {
-                    if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
+                    if connections.fetch_add(1, Ordering::Relaxed) < cfg.max_connections {
                         let connections = connections.clone();
                         let published = published.clone();
+                        let secstore = secstore.clone();
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = client_loop(published, client, rx).await;
+                            let _ = client_loop(published, client, rx, secstore).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
@@ -368,10 +376,10 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(addr: SocketAddr, max_connections: usize) -> Result<Server, Error> {
+    pub async fn new(cfg: config::Resolver) -> Result<Server, Error> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(addr, max_connections, recv_stop, send_ready);
+        let tsk = server_loop(cfg, recv_stop, send_ready);
         let local_addr = select! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,
@@ -399,7 +407,7 @@ mod test {
 
     async fn init_server() -> Server {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        Server::new(addr, 100).await.expect("start server")
+        Server::new(addr, 100, "".into()).await.expect("start server")
     }
 
     fn p(p: &str) -> Path {
