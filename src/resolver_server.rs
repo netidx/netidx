@@ -1,6 +1,6 @@
 use crate::{
     auth::{
-        syskrb5::{sys_krb5, ServerCtx, SysKrb5},
+        syskrb5::{sys_krb5, ServerCtx},
         Krb5, Krb5Ctx, Krb5ServerCtx,
     },
     channel::Channel,
@@ -107,7 +107,7 @@ struct SecStoreInner {
 impl SecStoreInner {
     fn get(&mut self, id: &Id) -> Option<ServerCtx> {
         self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.to_secs() > 0 => Some(ctx.clone()),
+            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
             _ => None,
         })
     }
@@ -124,16 +124,17 @@ impl SecStoreInner {
         self.next.take()
     }
 
-    fn gc(&mut self) {
+    fn gc(&mut self) -> Result<(), Error> {
         let mut delete = SmallVec::<[Id; 64]>::new();
         for (id, ctx) in self.ctxts.iter() {
-            if ctx.ttl().to_secs() == 0 {
-                delete.push(id);
+            if ctx.ttl()?.as_secs() == 0 {
+                delete.push(*id);
             }
         }
         for id in delete.into_iter() {
-            self.ctxts.remove(id);
+            self.ctxts.remove(&id);
         }
+        Ok(())
     }
 }
 
@@ -165,14 +166,14 @@ impl SecStore {
     }
 
     fn create(&self) -> Result<(Id, ServerCtx), Error> {
-        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
         let mut inner = self.0.lock();
+        let ctx = sys_krb5.create_server_ctx(inner.principal.as_bytes())?;
         Ok((inner.id(), ctx))
     }
 
-    fn gc(&self) {
+    fn gc(&self) -> Result<(), Error> {
         let mut inner = self.0.lock();
-        inner.gc()
+        Ok(inner.gc()?)
     }
 }
 
@@ -240,11 +241,15 @@ async fn client_loop(
                 }
             }
         };
-        let auth = match (tok, ctx) {
-            (None, None) => resolver::ServerAuth::Anonymous,
-            (None, Some(_)) => resolver::ServerAuth::Reused,
-            (Some(tok), Some((id, _))) => resolver::ServerAuth::Accepted(tok, id),
-            (Some(_), None) => unreachable!(),
+        let auth = match tok {
+            None => match &ctx {
+                None => resolver::ServerAuth::Anonymous,
+                Some(_) => resolver::ServerAuth::Reused,
+            }
+            Some(tok) => match &ctx {
+                None => unreachable!(),
+                Some((id, _)) => resolver::ServerAuth::Accepted(tok, *id)
+            }
         };
         time::timeout(
             HELLO_TIMEOUT,

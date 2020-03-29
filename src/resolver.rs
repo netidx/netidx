@@ -72,7 +72,9 @@ impl<R: ReadableOrWritable> Resolver<R> {
         desired_auth: Auth,
     ) -> Result<Resolver<WriteOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        task::spawn(connection(receiver, resolver, Some(publisher), desired_auth));
+        task::spawn(async move {
+            let _ = connection(receiver, resolver, Some(publisher), desired_auth);
+        });
         Ok(Resolver {
             sender,
             kind: PhantomData,
@@ -86,7 +88,9 @@ impl<R: ReadableOrWritable> Resolver<R> {
         desired_auth: Auth
     ) -> Result<Resolver<ReadOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        task::spawn(connection(receiver, resolver, None, desired_auth));
+        task::spawn(async move {
+            let _ = connection(receiver, resolver, None, desired_auth);
+        });
         Ok(Resolver {
             sender,
             kind: PhantomData,
@@ -136,7 +140,7 @@ impl<R: Writeable + ReadableOrWritable> Resolver<R> {
 fn create_ctx(
     principal: Option<&[u8]>,
     target_principal: &[u8]
-) -> Result<(ClientCtx, Vec<u8>), Error> {
+) -> Result<(ClientCtx, Vec<u8>)> {
     let ctx = sys_krb5.create_client_ctx(principal, target_principal)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
@@ -145,12 +149,12 @@ fn create_ctx(
 }
 
 async fn connect(
-    resolver: config::Resolver,
+    resolver: &config::Resolver,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
     ctx: &mut Option<(Id, ClientCtx)>,
     desired_auth: &Auth,
-) -> Channel {
+) -> Result<Channel> {
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -159,18 +163,22 @@ async fn connect(
         backoff += 1;
         let con = try_cont!("connect", TcpStream::connect(&resolver.addr).await);
         let mut con = Channel::new(con);
-        let (auth, new_ctx) = match desired_auth {
-            Auth::Anonymous => (resolver::ClientAuth::Anonymous, None),
-            Auth::Krb5 {ref principal} => match ctx {
-                Some((id, ctx)) => (resolver::ClientAuth::Reuse(id), None),
-                None => {
-                    let (ctx, tok) = try_cont!("create ctx", task::block_in_place(|| {
-                        create_ctx(
-                            principal.map(|s| s.as_bytes()),
-                            resolver.principal.as_bytes()
-                        )
-                    }));
-                    (resolver::ClientAuth::Token(tok), Some(ctx))
+        let (auth, new_ctx) = match (desired_auth, &resolver.auth) {
+            (Auth::Anonymous, _) => (resolver::ClientAuth::Anonymous, None),
+            (Auth::Krb5 {..}, config::Auth::Anonymous) =>
+                bail!("server does not support authentication"),
+            (Auth::Krb5 {ref principal}, config::Auth::Krb5 {principal: ref target}) => {
+                match ctx {
+                    Some((id, ctx)) => (resolver::ClientAuth::Reuse(*id), None),
+                    None => {
+                        let principal = principal.as_ref().map(|s| s.as_bytes());
+                        let target = target.as_bytes();
+                        let (ctx, tok) = try_cont!(
+                            "create ctx",
+                            task::block_in_place(|| create_ctx(principal, target))
+                        );
+                        (resolver::ClientAuth::Token(tok), Some(ctx))
+                    }
                 }
             }
         };
@@ -215,19 +223,19 @@ async fn connect(
                 Some(new_ctx) => {
                     try_cont!(
                         "authenticate resolver",
-                        task::block_in_place(|| new_ctx.step(&tok))
+                        task::block_in_place(|| new_ctx.step(Some(&tok)))
                     );
-                    ctx = Some((id, new_ctx));
+                    *ctx = Some((id, new_ctx));
                 }
             }
         }
         if !r.ttl_expired {
-            break con;
+            break Ok(con);
         } else {
             let m = resolver::To::Publish(published.iter().cloned().collect());
             try_cont!("republish", con.send_one(&m).await);
             match try_cont!("replublish reply", con.receive().await) {
-                resolver::From::Published => break con,
+                resolver::From::Published => break Ok(con),
                 _ => (),
             }
         }
@@ -239,7 +247,7 @@ async fn connection(
     resolver: config::Resolver,
     publisher: Option<SocketAddr>,
     desired_auth: Auth,
-) {
+) -> Result<()> {
     let mut published = HashSet::new();
     let mut con: Option<Channel> = None;
     let mut ctx: Option<(Id, ClientCtx)> = None;
@@ -266,8 +274,9 @@ async fn connection(
                     match con {
                         None => {
                             con = Some(connect(
-                                resolver, publisher, &published, &mut ctx, &auth
-                            ).await);
+                                &resolver, publisher, &published,
+                                &mut ctx, &desired_auth
+                            ).await?);
                             break;
                         },
                         Some(ref mut c) =>
@@ -288,8 +297,9 @@ async fn connection(
                             Some(ref mut c) => c,
                             None => {
                                 con = Some(connect(
-                                    resolver, publisher, &published, &mut ctx, &auth
-                                ).await);
+                                    &resolver, publisher, &published,
+                                    &mut ctx, &desired_auth
+                                ).await?);
                                 con.as_mut().unwrap()
                             }
                         };
@@ -312,4 +322,5 @@ async fn connection(
             }
         }
     }
+    Ok(())
 }

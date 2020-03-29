@@ -1,7 +1,7 @@
 use crate::path::Path;
 use failure::Error;
 use std::{
-    collections::HashMap, convert::TryFrom, error, iter, ops::Deref, sync::Arc,
+    collections::HashMap, convert::TryFrom, iter, ops::Deref,
     time::Duration,
 };
 
@@ -305,14 +305,14 @@ pub(crate) mod syskrb5 {
             let cred = {
                 let mut s = OidSet::new()?;
                 s.add(&GSS_MECH_KRB5)?;
-                Cred::acquire(name, None, CredUsage::Initiate, Some(&s))?
+                Cred::acquire(name.as_ref(), None, CredUsage::Initiate, Some(&s))?
             };
             Ok(ClientCtx(GssClientCtx::new(
                 cred,
                 target,
                 CtxFlags::GSS_C_MUTUAL_FLAG,
                 Some(&GSS_MECH_KRB5),
-            )?))
+            )))
         }
 
         // CR estokes: Should we offer an api to set KRB5_KTNAME, or
@@ -325,14 +325,14 @@ pub(crate) mod syskrb5 {
         ) -> Result<Self::Krb5ServerCtx, Error> {
             let name = Some(
                 Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                    .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL)),
+                    .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?,
             );
             let cred = {
                 let mut s = OidSet::new()?;
                 s.add(&GSS_MECH_KRB5)?;
-                Cred::acquire(name, None, CredUsage::Accept, Some(&s))?
+                Cred::acquire(name.as_ref(), None, CredUsage::Accept, Some(&s))?
             };
-            Ok(ServerCtx(GssServerCtx::new(cred)?))
+            Ok(ServerCtx(GssServerCtx::new(cred)))
         }
     }
 }

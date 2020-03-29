@@ -40,12 +40,14 @@ pub mod resolver {
     use std::net::SocketAddr;
     use super::Id;
 
+    #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientAuth {
         Anonymous,
         Reuse(Id),
         Token(Vec<u8>),
     }
 
+    #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ServerAuth {
         Anonymous,
         Reused,
