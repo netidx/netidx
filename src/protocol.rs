@@ -87,15 +87,13 @@ pub mod resolver {
         Publish(Vec<Path>),
         /// Stop publishing the list of paths
         Unpublish(Vec<Path>),
-        /// Clear all paths published by our ip/port
-        Clear,
         /// Tell the resolver that we are still alive
         Heartbeat,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum From {
-        Resolved(Vec<Vec<SocketAddr>>),
+        Resolved(Vec<Vec<(SocketAddr, Vec<u8>)>>),
         List(Vec<Path>),
         Published,
         Unpublished,

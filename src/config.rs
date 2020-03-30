@@ -1,11 +1,16 @@
+use crate::Path;
 use std::{
     net::SocketAddr,
+    collections::HashMap,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PMapFile(HashMap<Path, HashMap<Option<String>, String>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Auth {
     Anonymous,
-    Krb5 {principal: String}
+    Krb5 {principal: String, permissions: String}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,17 +1,17 @@
-use crate::path::Path;
+use crate::{config::PMapFile, path::Path};
 use failure::Error;
 use std::{
-    collections::HashMap, convert::TryFrom, iter, ops::Deref,
-    time::Duration,
+    collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
 };
 
 bitflags! {
     pub struct Permissions: u32 {
         const DENY             = 0x01;
         const SUBSCRIBE        = 0x02;
-        const PUBLISH          = 0x04;
-        const PUBLISH_DEFAULT  = 0x08;
-        const PUBLISH_REFERRAL = 0x10;
+        const LIST             = 0x04;
+        const PUBLISH          = 0x08;
+        const PUBLISH_DEFAULT  = 0x10;
+        const PUBLISH_REFERRAL = 0x20;
     }
 }
 
@@ -32,6 +32,9 @@ impl TryFrom<&str> for Permissions {
                 's' => {
                     p |= Permissions::SUBSCRIBE;
                 }
+                'l' => {
+                    p |= Permissions::LIST;
+                }
                 'p' => {
                     p |= Permissions::PUBLISH;
                 }
@@ -41,7 +44,7 @@ impl TryFrom<&str> for Permissions {
                 'r' => {
                     p |= Permissions::PUBLISH_REFERRAL;
                 }
-                c => bail!("unrecognized permission bit {}, valid bits are !spdr", c),
+                c => bail!("unrecognized permission bit {}, valid bits are !spldr", c),
             }
         }
         Ok(p)
@@ -56,9 +59,9 @@ pub trait GMapper {
 pub struct Entity(u32);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UserInfo {
-    id: Entity,
-    groups: Vec<Entity>,
+pub(crate) struct UserInfo {
+    pub(crate) id: Entity,
+    pub(crate) groups: Vec<Entity>,
 }
 
 impl UserInfo {
@@ -67,17 +70,24 @@ impl UserInfo {
     }
 }
 
-pub struct UserDb<M: GMapper> {
+lazy_static! {
+    pub(crate) static ref ANONYMOUS: Arc<UserInfo> = Arc::new(UserInfo {
+        id: Entity(0),
+        groups: Vec::new(),
+    });
+}
+
+pub(crate) struct UserDb<M: GMapper> {
     next: u32,
     mapper: M,
     entities: HashMap<String, Entity>,
-    users: HashMap<String, UserInfo>,
+    users: HashMap<String, Arc<UserInfo>>,
 }
 
 impl<M: GMapper> UserDb<M> {
-    pub fn new(mapper: M) -> UserDb<M> {
+    pub(crate) fn new(mapper: M) -> UserDb<M> {
         UserDb {
-            next: 0,
+            next: 1,
             mapper,
             entities: HashMap::new(),
             users: HashMap::new(),
@@ -96,46 +106,76 @@ impl<M: GMapper> UserDb<M> {
         }
     }
 
-    pub fn get_info(&self, user: &str) -> Option<&UserInfo> {
-        self.users.get(user)
-    }
-
-    pub fn add_info(&mut self, user: &str) -> Result<(), Error> {
-        let ifo = UserInfo {
-            id: self.entity(user),
-            groups: self
-                .mapper
-                .groups(user)?
-                .into_iter()
-                .map(|b| self.entity(&b))
-                .collect::<Vec<_>>(),
-        };
-        self.users.insert(String::from(user), ifo);
-        Ok(())
+    pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
+        match user {
+            None => ANONYMOUS.clone(),
+            Some(user) => match self.users.get(user) {
+                Some(user) => Ok(user.clone()),
+                None => {
+                    let ifo = Arc::new(UserInfo {
+                        id: self.entity(user),
+                        groups: self
+                            .mapper
+                            .groups(user)?
+                            .into_iter()
+                            .map(|b| self.entity(&b))
+                            .collect::<Vec<_>>(),
+                    });
+                    self.users.insert(String::from(user), ifo.clone());
+                    Ok(ifo)
+                }
+            },
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PMapFile(HashMap<Path, HashMap<String, String>>);
-
 #[derive(Debug)]
-pub struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
+pub(crate) struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
-    fn from_file<M: GMapper>(file: PMapFile, db: &mut UserDb<M>) -> Result<Self, Error> {
+    pub(crate) fn from_file<M: GMapper>(
+        file: PMapFile,
+        db: &mut UserDb<M>,
+    ) -> Result<Self, Error> {
         let mut pmap = HashMap::with_capacity(file.0.len());
         for (path, tbl) in file.0.iter() {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
-                entry.insert(db.entity(ent), Permissions::try_from(perm.as_str())?);
+                entry.insert(
+                    ent.map(|ent| db.entity(ent))
+                        .unwrap_or_else(|| ANONYMOUS.id),
+                    Permissions::try_from(perm.as_str())?,
+                );
             }
             pmap.insert(path.clone(), entry);
         }
         Ok(PMap(pmap))
     }
 
-    fn permissions(&self, path: &Path, user: &UserInfo) -> Permissions {
-        Path::basenames(&*path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
+    pub(crate) fn allowed_forall<'a>(
+        &'a self,
+        paths: impl Iterator<Item = &'a str>,
+        desired_rights: Permissions,
+        user: &UserInfo,
+    ) -> bool {
+        paths.for_all(|p| {
+            let actual_rights = self.permissions(p, user);
+            actual_rights & desired_rights == desired_rights
+        })
+    }
+
+    pub(crate) fn allowed(
+        &self,
+        path: &str,
+        desired_rights: Permissions,
+        user: &UserInfo,
+    ) -> bool {
+        let actual_rights = self.permissions(path, user);
+        actual_rights & desired_rights == desired_rights
+    }
+
+    pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
+        Path::basenames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
             None => p,
             Some(set) => {
                 let init = (p, Permissions::empty());
@@ -156,7 +196,7 @@ impl PMap {
     }
 }
 
-pub trait Krb5Ctx {
+pub(crate) trait Krb5Ctx {
     type Buf: Deref<Target = [u8]>;
 
     fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error>;
@@ -165,11 +205,11 @@ pub trait Krb5Ctx {
     fn ttl(&self) -> Result<Duration, Error>;
 }
 
-pub trait Krb5ServerCtx: Krb5Ctx {
+pub(crate) trait Krb5ServerCtx: Krb5Ctx {
     fn client(&self) -> Result<String, Error>;
 }
 
-pub trait Krb5 {
+pub(crate) trait Krb5 {
     type Buf: Deref<Target = [u8]>;
     type Krb5ClientCtx: Krb5Ctx<Buf = Self::Buf>;
     type Krb5ServerCtx: Krb5ServerCtx<Buf = Self::Buf>;
@@ -199,6 +239,7 @@ pub(crate) mod syskrb5 {
         util::Buf,
     };
     use std::time::Duration;
+    use tokio::task;
 
     #[derive(Clone)]
     pub(crate) struct ClientCtx(GssClientCtx);
@@ -207,9 +248,11 @@ pub(crate) mod syskrb5 {
         type Buf = Buf;
 
         fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error> {
-            self.0
-                .step(token)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            task::block_in_place(|| {
+                self.0
+                    .step(token)
+                    .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            })
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error> {
@@ -238,14 +281,16 @@ pub(crate) mod syskrb5 {
         type Buf = Buf;
 
         fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error> {
-            match token {
-                Some(token) => self.0.step(token),
-                None => Err(GssError {
-                    major: MajorFlags::GSS_S_DEFECTIVE_TOKEN,
-                    minor: 0,
-                }),
-            }
-            .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            task::block_in_place(|| {
+                match token {
+                    Some(token) => self.0.step(token),
+                    None => Err(GssError {
+                        major: MajorFlags::GSS_S_DEFECTIVE_TOKEN,
+                        minor: 0,
+                    }),
+                }
+                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            })
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error> {
@@ -294,25 +339,27 @@ pub(crate) mod syskrb5 {
             principal: Option<&[u8]>,
             target_principal: &[u8],
         ) -> Result<Self::Krb5ClientCtx, Error> {
-            let name = principal
-                .map(|n| {
-                    Name::new(n, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                        .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))
-                })
-                .transpose()?;
-            let target = Name::new(target_principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?;
-            let cred = {
-                let mut s = OidSet::new()?;
-                s.add(&GSS_MECH_KRB5)?;
-                Cred::acquire(name.as_ref(), None, CredUsage::Initiate, Some(&s))?
-            };
-            Ok(ClientCtx(GssClientCtx::new(
-                cred,
-                target,
-                CtxFlags::GSS_C_MUTUAL_FLAG,
-                Some(&GSS_MECH_KRB5),
-            )))
+            task::block_in_place(|| {
+                let name = principal
+                    .map(|n| {
+                        Name::new(n, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                            .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))
+                    })
+                    .transpose()?;
+                let target = Name::new(target_principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                    .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?;
+                let cred = {
+                    let mut s = OidSet::new()?;
+                    s.add(&GSS_MECH_KRB5)?;
+                    Cred::acquire(name.as_ref(), None, CredUsage::Initiate, Some(&s))?
+                };
+                Ok(ClientCtx(GssClientCtx::new(
+                    cred,
+                    target,
+                    CtxFlags::GSS_C_MUTUAL_FLAG,
+                    Some(&GSS_MECH_KRB5),
+                )))
+            })
         }
 
         // CR estokes: Should we offer an api to set KRB5_KTNAME, or
@@ -323,22 +370,24 @@ pub(crate) mod syskrb5 {
             &self,
             principal: &[u8],
         ) -> Result<Self::Krb5ServerCtx, Error> {
-            let name = Some(
-                Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                    .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?,
-            );
-            let cred = {
-                let mut s = OidSet::new()?;
-                s.add(&GSS_MECH_KRB5)?;
-                Cred::acquire(name.as_ref(), None, CredUsage::Accept, Some(&s))?
-            };
-            Ok(ServerCtx(GssServerCtx::new(cred)))
+            task::block_in_place(|| {
+                let name = Some(
+                    Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                        .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?,
+                );
+                let cred = {
+                    let mut s = OidSet::new()?;
+                    s.add(&GSS_MECH_KRB5)?;
+                    Cred::acquire(name.as_ref(), None, CredUsage::Accept, Some(&s))?
+                };
+                Ok(ServerCtx(GssServerCtx::new(cred)))
+            })
         }
     }
 }
 
 #[cfg(unix)]
-mod sysgmapper {
+pub(crate) mod sysgmapper {
     // Unix group membership is a little complex, it can come from a
     // lot of places, and it's not entirely standardized at the api
     // level, it seems libc provides getgrouplist on most platforms,
@@ -347,25 +396,30 @@ mod sysgmapper {
     use super::GMapper;
     use failure::Error;
     use std::process::Command;
+    use tokio::task;
 
-    pub struct Mapper(String);
+    pub(crate) struct Mapper(String);
 
     impl GMapper for Mapper {
         fn groups(&mut self, user: &str) -> Result<Vec<String>, Error> {
-            let out = Command::new(&self.0).arg(user).output()?;
-            Mapper::parse_output(&String::from_utf8_lossy(&out.stdout))
+            task::block_in_place(|| {
+                let out = Command::new(&self.0).arg(user).output()?;
+                Mapper::parse_output(&String::from_utf8_lossy(&out.stdout))
+            })
         }
     }
 
     impl Mapper {
         fn new() -> Result<Mapper, Error> {
-            let out = Command::new("sh").arg("-c").arg("which id").output()?;
-            let buf = String::from_utf8_lossy(&out.stdout);
-            let path = buf
-                .lines()
-                .next()
-                .ok_or_else(|| format_err!("can't find the id command"))?;
-            Ok(Mapper(String::from(path)))
+            task::block_in_place(|| {
+                let out = Command::new("sh").arg("-c").arg("which id").output()?;
+                let buf = String::from_utf8_lossy(&out.stdout);
+                let path = buf
+                    .lines()
+                    .next()
+                    .ok_or_else(|| format_err!("can't find the id command"))?;
+                Ok(Mapper(String::from(path)))
+            })
         }
 
         fn parse_output(out: &str) -> Result<Vec<String>, Error> {

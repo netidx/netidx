@@ -1,14 +1,16 @@
 use crate::{
     auth::{
+        sysgmapper::Mapper,
         syskrb5::{sys_krb5, ServerCtx},
-        Krb5, Krb5Ctx, Krb5ServerCtx,
+        Krb5, Krb5Ctx, Krb5ServerCtx, PMap, Permissions, UserDb, UserInfo, ANONYMOUS,
     },
     channel::Channel,
+    config,
     path::Path,
     protocol::{resolver, Id},
     resolver_store::Store,
-    config,
 };
+use arc_swap::{ArcSwap, Guard};
 use failure::Error;
 use futures::{prelude::*, select};
 use fxhash::FxBuildHasher;
@@ -33,12 +35,124 @@ use tokio::{
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
+struct SecStoreInner {
+    next: Id,
+    ctxts: HashMap<Id, ServerCtx, FxBuildHasher>,
+    userdb: UserDb<Mapper>,
+}
+
+impl SecStoreInner {
+    fn get(&mut self, id: &Id) -> Option<ServerCtx> {
+        self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
+            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
+            _ => None,
+        })
+    }
+
+    fn delete(&mut self, id: &Id) {
+        self.ctxts.remove(id);
+    }
+
+    fn id(&mut self) -> Id {
+        self.next.take()
+    }
+
+    fn gc(&mut self) -> Result<(), Error> {
+        let mut delete = SmallVec::<[Id; 64]>::new();
+        for (id, ctx) in self.ctxts.iter() {
+            if ctx.ttl()?.as_secs() == 0 {
+                delete.push(*id);
+            }
+        }
+        for id in delete.into_iter() {
+            self.ctxts.remove(&id);
+        }
+        Ok(())
+    }
+
+    fn ifo(&mut self, user: &str) -> Result<Arc<UserInfo>, Error> {
+        self.userdb.ifo(user)
+    }
+}
+
+#[derive(Clone)]
+struct SecStore {
+    principal: Arc<String>,
+    pmap: ArcSwap<PMap>,
+    store: Arc<Mutex<SecStoreInner>>,
+}
+
+impl SecStore {
+    fn new(principal: String, pmap: PMap) -> Self {
+        SecStore {
+            principal: Arc::new(principal),
+            pmap: ArcSwap::from(Arc::new(pmap)),
+            store: Arc::new(Mutex::new(SecStoreInner {
+                next: Id::zero(),
+                ctxts: HashMap::with_hasher(FxBuildHasher::default()),
+            })),
+        }
+    }
+
+    fn pmap(&self) -> Guard<'static, Arc<PMap>> {
+        self.pmap.load()
+    }
+
+    fn update_pmap(&self, pmap: PMap) {
+        self.pmap.swap(Arc::new(pmap));
+    }
+
+    fn get(&self, id: &Id) -> Option<ServerCtx> {
+        let mut inner = self.store.lock();
+        inner.get(id)
+    }
+
+    fn delete(&self, id: &Id) {
+        let mut inner = self.store.lock();
+        inner.delete(id);
+    }
+
+    fn create(&self, tok: &[u8]) -> Result<(Id, ServerCtx, Option<Vec<u8>>), Error> {
+        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
+        let tok = ctx.step(Some(tok))?.map(|b| Vec::from(&*b));
+        let mut inner = self.store.lock();
+        let id = inner.id();
+        inner.ctxts.insert(id, ctx);
+        Ok((id, ctx, tok))
+    }
+
+    fn gc(&self) -> Result<(), Error> {
+        let mut inner = self.store.lock();
+        Ok(inner.gc()?)
+    }
+
+    fn ifo(&self, user: &str) -> Result<Arc<UserInfo>, Error> {
+        let mut inner = self.store.lock();
+        Ok(inner.ifo(user)?)
+    }
+}
+
+fn allowed_for(
+    pmap: Option<&PMap>,
+    paths: &Vec<Path>,
+    perm: Permissions,
+    user: &UserInfo,
+) -> bool {
+}
+
 fn handle_batch(
     store: &Store<ClientInfo>,
+    secstore: Option<&SecStore>,
+    user: &UserInfo,
     msgs: impl Iterator<Item = resolver::To>,
     con: &mut Channel,
     wa: Option<SocketAddr>,
 ) -> Result<(), Error> {
+    let pmap = secstore.map(|s| s.pmap());
+    let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
+        pmap.map(|pm| pm.allowed_forall(paths.iter().map(|p| &*p), perm, user))
+            .unwrap_or(true)
+    };
     match wa {
         None => {
             let s = store.read();
@@ -46,11 +160,22 @@ fn handle_batch(
                 match m {
                     resolver::To::Heartbeat => (),
                     resolver::To::Resolve(paths) => {
-                        let res = paths.iter().map(|p| s.resolve(p)).collect();
-                        con.queue_send(&resolver::From::Resolved(res))?
+                        if allowed_for(&paths, Permissions::SUBSCRIBE) {
+                            let res = paths.iter().map(|p| s.resolve(p)).collect();
+                            con.queue_send(&resolver::From::Resolved(res))?
+                        } else {
+                            con.queue_send(&resolver::From::Error("denied".into()))?
+                        }
                     }
                     resolver::To::List(path) => {
-                        con.queue_send(&resolver::From::List(s.list(&path)))?
+                        let allowed = pmap
+                            .map(|pm| pm.allowed(&*path, user, Permissions::LIST))
+                            .unwrap_or(true);
+                        if allowed {
+                            con.queue_send(&resolver::From::List(s.list(&path)))?
+                        } else {
+                            con.queue_send(&resolver::From::Error("denied".into()))
+                        }
                     }
                     resolver::To::Publish(_)
                     | resolver::To::Unpublish(_)
@@ -74,22 +199,23 @@ fn handle_batch(
                                 "absolute paths required".into(),
                             ))?
                         } else {
-                            for path in paths {
-                                s.publish(path, write_addr);
+                            if allowed_for(&paths, Permissions::PUBLISH) {
+                                for path in paths {
+                                    s.publish(path, write_addr);
+                                }
+                                con.queue_send(&resolver::From::Published)?
+                            } else {
+                                con.queue_send(&resolver::From::Error("denied".into()))
                             }
-                            con.queue_send(&resolver::From::Published)?
                         }
                     }
                     resolver::To::Unpublish(paths) => {
-                        for path in paths {
-                            s.unpublish(path, write_addr);
+                        if allowed_for(&paths, Permissions::PUBLISH) {
+                            for path in paths {
+                                s.unpublish(path, write_addr);
+                            }
+                            con.queue_send(&resolver::From::Unpublished)?
                         }
-                        con.queue_send(&resolver::From::Unpublished)?
-                    }
-                    resolver::To::Clear => {
-                        s.unpublish_addr(write_addr);
-                        s.gc();
-                        con.queue_send(&resolver::From::Unpublished)?
                     }
                 }
             }
@@ -98,98 +224,23 @@ fn handle_batch(
     Ok(())
 }
 
-struct SecStoreInner {
-    principal: String,
-    next: Id,
-    ctxts: HashMap<Id, ServerCtx, FxBuildHasher>,
-}
-
-impl SecStoreInner {
-    fn get(&mut self, id: &Id) -> Option<ServerCtx> {
-        self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
-            _ => None,
-        })
-    }
-
-    fn delete(&mut self, id: &Id) {
-        self.ctxts.remove(id);
-    }
-
-    fn save(&mut self, id: Id, ctx: ServerCtx) {
-        self.ctxts.insert(id, ctx);
-    }
-
-    fn id(&mut self) -> Id {
-        self.next.take()
-    }
-
-    fn gc(&mut self) -> Result<(), Error> {
-        let mut delete = SmallVec::<[Id; 64]>::new();
-        for (id, ctx) in self.ctxts.iter() {
-            if ctx.ttl()?.as_secs() == 0 {
-                delete.push(*id);
-            }
-        }
-        for id in delete.into_iter() {
-            self.ctxts.remove(&id);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct SecStore(Arc<Mutex<SecStoreInner>>);
-
-impl SecStore {
-    fn new(principal: String) -> Self {
-        SecStore(Arc::new(Mutex::new(SecStoreInner {
-            principal,
-            next: Id::zero(),
-            ctxts: HashMap::with_hasher(FxBuildHasher::default()),
-        })))
-    }
-
-    fn get(&self, id: &Id) -> Option<ServerCtx> {
-        let mut inner = self.0.lock();
-        inner.get(id)
-    }
-
-    fn delete(&self, id: &Id) {
-        let mut inner = self.0.lock();
-        inner.delete(id);
-    }
-
-    fn save(&self, id: Id, ctx: ServerCtx) {
-        let mut inner = self.0.lock();
-        inner.save(id, ctx);
-    }
-
-    fn create(&self) -> Result<(Id, ServerCtx), Error> {
-        let mut inner = self.0.lock();
-        let ctx = sys_krb5.create_server_ctx(inner.principal.as_bytes())?;
-        Ok((inner.id(), ctx))
-    }
-
-    fn gc(&self) -> Result<(), Error> {
-        let mut inner = self.0.lock();
-        Ok(inner.gc()?)
-    }
-}
-
 static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 static READER_TTL: Duration = Duration::from_secs(120);
 static MAX_TTL: u64 = 3600;
 
-async fn client_loop(
-    store: Store<ClientInfo>,
-    s: TcpStream,
-    server_stop: oneshot::Receiver<()>,
-    secstore: Option<SecStore>,
-) -> Result<(), Error> {
-    s.set_nodelay(true)?;
-    let mut con = Channel::new(s);
-    let (tx_stop, rx_stop) = oneshot::channel();
+struct ClientState {
+    ctx: Option<(Id, ServerCtx)>,
+    uifo: Arc<UserInfo>,
+    write_addr: Option<SocketAddr>,
+    ttl: Duration,
+}
+
+async fn hello_client(
+    store: &Store<ClientInfo>,
+    con: &mut Channel,
+    secstore: Option<&SecStore>,
+    tx_stop: oneshot::Sender<()>,
+) -> Result<ClientState, Error> {
     let hello: resolver::ClientHello =
         time::timeout(HELLO_TIMEOUT, con.receive()).await??;
     let (ttl, ttl_expired, write_addr, auth) = match hello {
@@ -202,32 +253,11 @@ async fn client_loop(
             if ttl <= 0 || ttl > MAX_TTL {
                 bail!("invalid ttl")
             }
-            let mut store = store.write();
-            let clinfos = store.clinfo_mut();
             let ttl = Duration::from_secs(ttl);
-            match clinfos.get_mut(&write_addr) {
-                None => {
-                    clinfos.insert(write_addr, Some(tx_stop));
-                    (ttl, true, Some(write_addr), auth)
-                }
-                Some(cl) => {
-                    if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
-                        let _ = old_stop.send(());
-                    }
-                    (ttl, false, Some(write_addr), auth)
-                }
-            }
+            (ttl, true, Some(write_addr), auth)
         }
     };
     let ctx = {
-        fn create_ctx(
-            secstore: &SecStore,
-            tok: &Vec<u8>,
-        ) -> Result<(Option<Vec<u8>>, Option<(Id, ServerCtx)>), Error> {
-            let (id, ctx) = secstore.create()?;
-            let tok = ctx.step(Some(&*tok))?.map(|b| Vec::from(&*b));
-            Ok((tok, Some((id, ctx))))
-        }
         let (tok, ctx) = match secstore {
             None => (None, None),
             Some(ref secstore) => match auth {
@@ -237,19 +267,20 @@ async fn client_loop(
                     Some(ctx) => (None, Some((id, ctx))),
                 },
                 resolver::ClientAuth::Token(tok) => {
-                    task::block_in_place(|| create_ctx(&secstore, &tok))?
+                    let (id, ctx, tok) = secstore.create(&tok)?;
+                    (tok, Some((id, ctx)))
                 }
-            }
+            },
         };
         let auth = match tok {
             None => match &ctx {
                 None => resolver::ServerAuth::Anonymous,
                 Some(_) => resolver::ServerAuth::Reused,
-            }
+            },
             Some(tok) => match &ctx {
                 None => unreachable!(),
-                Some((id, _)) => resolver::ServerAuth::Accepted(tok, *id)
-            }
+                Some((id, _)) => resolver::ServerAuth::Accepted(tok, *id),
+            },
         };
         time::timeout(
             HELLO_TIMEOUT,
@@ -258,12 +289,48 @@ async fn client_loop(
         .await??;
         ctx
     };
+    let uifo = match (secstore, ctx) {
+        (None, _) | (_, None) => ANONYMOUS.clone(),
+        (Some(ref secstore), Some((_, ref ctx))) => secstore.ifo(&ctx.client()?)?,
+    };
+    if let Some(write_addr) = write_addr {
+        let mut store = store.write();
+        let clinfos = store.clinfo_mut();
+        match clinfos.get_mut(&write_addr) {
+            None => {
+                clinfos.insert(write_addr, Some(tx_stop));
+            }
+            Some(cl) => {
+                if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
+                    let _ = old_stop.send(());
+                }
+            }
+        }
+    }
+    Ok(ClientState {
+        ctx,
+        uifo,
+        write_addr,
+        ttl,
+    })
+}
+
+async fn client_loop(
+    store: Store<ClientInfo>,
+    s: TcpStream,
+    server_stop: oneshot::Receiver<()>,
+    secstore: Option<SecStore>,
+) -> Result<(), Error> {
+    s.set_nodelay(true)?;
+    let mut con = Channel::new(s);
+    let (tx_stop, rx_stop) = oneshot::channel();
+    let state = hello_client(&store, &mut con, secstore.as_ref(), tx_stop).await?;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
     let mut batch = Vec::new();
     let mut act = false;
-    let mut timeout = time::interval_at(Instant::now() + ttl, ttl).fuse();
+    let mut timeout = time::interval_at(Instant::now() + state.ttl, state.ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel>,
         batch: &mut Vec<resolver::To>,
@@ -287,7 +354,11 @@ async fn client_loop(
                 Ok(()) => {
                     act = true;
                     let c = con.as_mut().unwrap();
-                    match handle_batch(&store, batch.drain(..), c, write_addr) {
+                    let r = handle_batch(
+                        &store, secstore.as_ref(), &state.uifo,
+                        batch.drain(..), c, state.write_addr
+                    );
+                    match r {
                         Err(_) => { con = None },
                         Ok(()) => match c.flush().await {
                             Err(_) => { con = None }, // CR estokes: Log this
@@ -301,11 +372,11 @@ async fn client_loop(
                     act = false;
                 } else {
                     if let Some(ref secstore) = secstore {
-                        if let Some((id, _)) = ctx {
+                        if let Some((id, _)) = state.ctx {
                             secstore.delete(&id);
                         }
                     }
-                    if let Some(write_addr) = write_addr {
+                    if let Some(write_addr) = state.write_addr {
                         let mut store = store.write();
                         if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
                             if let Some(stop) = mem::replace(cl, None) {
@@ -331,7 +402,7 @@ async fn server_loop(
     let published: Store<ClientInfo> = Store::new();
     let secstore = match cfg.auth {
         config::Auth::Anonymous => None,
-        config::Auth::Krb5 {principal} => Some(SecStore::new(principal.clone()))
+        config::Auth::Krb5 { principal } => Some(SecStore::new(principal.clone())),
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
@@ -412,7 +483,9 @@ mod test {
 
     async fn init_server() -> Server {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        Server::new(addr, 100, "".into()).await.expect("start server")
+        Server::new(addr, 100, "".into())
+            .await
+            .expect("start server")
     }
 
     fn p(p: &str) -> Path {
