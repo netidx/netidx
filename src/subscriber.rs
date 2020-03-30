@@ -1,9 +1,9 @@
 use crate::{
     path::Path,
     utils::{BatchItem, Batched},
-    resolver::{Resolver, ReadOnly},
+    resolver::{Auth, Resolver, ReadOnly},
     channel::{Channel, ReadChannel},
-    protocol::publisher::{self, Id},
+    protocol::{Id, publisher},
     config,
 };
 use std::{
@@ -326,10 +326,13 @@ impl SubscriberWeak {
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    pub fn new(resolver: config::Resolver) -> Result<Subscriber, Error> {
+    pub fn new(
+        resolver: config::Resolver,
+        desired_auth: Auth
+    ) -> Result<Subscriber, Error> {
         let (tx, rx) = mpsc::unbounded();
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
-            resolver: Resolver::<ReadOnly>::new_r(resolver)?,
+            resolver: Resolver::<ReadOnly>::new_r(resolver, desired_auth)?,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
             durable_dead: HashMap::new(),

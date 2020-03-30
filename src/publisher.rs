@@ -1,9 +1,9 @@
 use crate::{
     utils::mp_encode,
     path::Path,
-    resolver::{Resolver, WriteOnly},
+    resolver::{Resolver, Auth, WriteOnly},
     channel::Channel,
-    protocol::publisher::{self, Id},
+    protocol::{Id, publisher},
     config,
 };
 use std::{
@@ -242,6 +242,7 @@ impl Publisher {
     /// Create a new publisher using the specified resolver and bind config.
     pub async fn new(
         resolver: config::Resolver,
+        desired_auth: Auth,
         bind_cfg: BindCfg
     ) -> Result<Publisher, Error> {
         let (addr, listener) = match bind_cfg {
@@ -271,7 +272,7 @@ impl Publisher {
                 }
             }
         };
-        let resolver = Resolver::<WriteOnly>::new_w(resolver, addr)?;
+        let resolver = Resolver::<WriteOnly>::new_w(resolver, addr, desired_auth)?;
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
