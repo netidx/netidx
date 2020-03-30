@@ -238,6 +238,7 @@ struct ClientState {
 async fn hello_client(
     store: &Store<ClientInfo>,
     con: &mut Channel,
+    origin: SocketAddr,
     secstore: Option<&SecStore>,
     tx_stop: oneshot::Sender<()>,
 ) -> Result<ClientState, Error> {
@@ -254,6 +255,9 @@ async fn hello_client(
                 bail!("invalid ttl")
             }
             let ttl = Duration::from_secs(ttl);
+            if write_addr.ip() != origin.ip() {
+                bail!("invalid publisher ip addr")
+            }
             (ttl, true, Some(write_addr), auth)
         }
     };
@@ -318,13 +322,16 @@ async fn hello_client(
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
+    origin: SocketAddr,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
 ) -> Result<(), Error> {
+    // CR estokes: require that a write client asserting write addr ip
+    // is actually coming from that ip.
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
-    let state = hello_client(&store, &mut con, secstore.as_ref(), tx_stop).await?;
+    let state = hello_client(&store, &mut con, origin, secstore.as_ref(), tx_stop).await?;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -413,7 +420,7 @@ async fn server_loop(
         select! {
             cl = listener.accept().fuse() => match cl {
                 Err(_) => (),
-                Ok((client, _)) => {
+                Ok((client, sa)) => {
                     if connections.fetch_add(1, Ordering::Relaxed) < cfg.max_connections {
                         let connections = connections.clone();
                         let published = published.clone();
@@ -421,7 +428,9 @@ async fn server_loop(
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = client_loop(published, client, rx, secstore).await;
+                            let _ = client_loop(
+                                published, client, sa, rx, secstore
+                            ).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
