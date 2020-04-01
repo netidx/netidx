@@ -37,13 +37,21 @@ type ClientInfo = Option<oneshot::Sender<()>>;
 
 struct SecStoreInner {
     next: Id,
-    ctxts: HashMap<Id, ServerCtx, FxBuildHasher>,
+    read_ctxts: HashMap<Id, ServerCtx, FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, (Arc<UserInfo>, ServerCtx), FxBuildHasher>,
     userdb: UserDb<Mapper>,
 }
 
 impl SecStoreInner {
-    fn get(&mut self, id: &Id) -> Option<ServerCtx> {
-        self.ctxts.get(id).and_then(|ctx| match ctx.ttl() {
+    fn get_read(&mut self, id: &Id) -> Option<ServerCtx> {
+        self.read_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
+            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
+            _ => None,
+        })
+    }
+
+    fn get_write(&mut self, id: &SocketAddr) -> Option<ServerCtx> {
+        self.write_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
             _ => None,
         })
@@ -58,14 +66,23 @@ impl SecStoreInner {
     }
 
     fn gc(&mut self) -> Result<(), Error> {
-        let mut delete = SmallVec::<[Id; 64]>::new();
-        for (id, ctx) in self.ctxts.iter() {
+        let mut read_delete = SmallVec::<[Id; 64]>::new();
+        let mut write_delete = SmallVec::<[SocketAddr; 64]>::new();
+        for (id, ctx) in self.read_ctxts.iter() {
             if ctx.ttl()?.as_secs() == 0 {
-                delete.push(*id);
+                read_delete.push(*id);
             }
         }
-        for id in delete.into_iter() {
-            self.ctxts.remove(&id);
+        for (id, ctx) in self.write_ctxts.iter() {
+            if ctx.ttl()?.as_secs() == 0 {
+                write_delete.push(*id);
+            }
+        }
+        for id in read_delete.into_iter() {
+            self.read_ctxts.remove(&id);
+        }
+        for id in write_delete.into_iter() {
+            self.write_ctxts.remove(&id);
         }
         Ok(())
     }
@@ -102,9 +119,14 @@ impl SecStore {
         self.pmap.swap(Arc::new(pmap));
     }
 
-    fn get(&self, id: &Id) -> Option<ServerCtx> {
+    fn get_read(&self, id: &Id) -> Option<ServerCtx> {
         let mut inner = self.store.lock();
-        inner.get(id)
+        inner.get_read(id)
+    }
+
+    fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
+        let mut inner = self.store.lock();
+        inner.get_write(id)
     }
 
     fn delete(&self, id: &Id) {
@@ -112,13 +134,50 @@ impl SecStore {
         inner.delete(id);
     }
 
-    fn create(&self, tok: &[u8]) -> Result<(Id, ServerCtx, Option<Vec<u8>>), Error> {
+    fn create_read(&self, tok: &[u8]) -> Result<(Id, ServerCtx, Option<Vec<u8>>), Error> {
         let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
         let tok = ctx.step(Some(tok))?.map(|b| Vec::from(&*b));
         let mut inner = self.store.lock();
         let id = inner.id();
         inner.ctxts.insert(id, ctx);
         Ok((id, ctx, tok))
+    }
+
+    fn create_write(
+        &self,
+        tok: &[u8],
+        store: &Store,
+        addr: &SocketAddr
+    ) -> Result<(ServerCtx, Option<Vec<u8>>), Error> {
+        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
+        let tok = ctx.step(Some(tok))?.map(|b| Vec::from(&*b));
+        let mut inner = self.store.lock();
+        let ifo = inner.ifo(&ctx.client()?)?;
+        match inner.write_ctxts.remove(addr) {
+            None => {
+                inner.write_ctxts.insert(addr, (ifo, ctx.clone()));
+                Ok((ctx, tok))
+            }
+            Some((cur_ifo, _)) => {
+                if ifo == cur_ifo {
+                    inner.write_ctxts.insert(addr, (ifo, ctx.clone()));
+                    Ok((ctx, tok))
+                } else {
+                    // it's a different user trying to take over this
+                    // publisher address, we have to check that they
+                    // have permission to do it.
+                    let inner_store = store.read();
+                    let pmap = self.pmap.load();
+                    let mut paths = inner_store.published_by(addr);
+                    if pmap.allowed_all(paths, Permissions::PUBLISH, &*ifo) {
+                        inner.write_ctxts.insert(addr, (ifo, ctx.clone()));
+                        Ok((ctx, tok))
+                    } else {
+                        bail!("denied")
+                    }
+                }
+            }
+        }
     }
 
     fn gc(&self) -> Result<(), Error> {
@@ -132,14 +191,6 @@ impl SecStore {
     }
 }
 
-fn allowed_for(
-    pmap: Option<&PMap>,
-    paths: &Vec<Path>,
-    perm: Permissions,
-    user: &UserInfo,
-) -> bool {
-}
-
 fn handle_batch(
     store: &Store<ClientInfo>,
     secstore: Option<&SecStore>,
@@ -150,7 +201,7 @@ fn handle_batch(
 ) -> Result<(), Error> {
     let pmap = secstore.map(|s| s.pmap());
     let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
-        pmap.map(|pm| pm.allowed_forall(paths.iter().map(|p| &*p), perm, user))
+        pmap.map(|pm| pm.allowed_all(paths.iter().map(|p| &*p), perm, user))
             .unwrap_or(true)
     };
     match wa {

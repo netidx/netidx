@@ -43,7 +43,7 @@ pub mod resolver {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientAuth {
         Anonymous,
-        Reuse(Id),
+        Reuse(Option<Id>),
         Token(Vec<u8>),
     }
 
@@ -51,7 +51,7 @@ pub mod resolver {
     pub enum ServerAuth {
         Anonymous,
         Reused,
-        Accepted(Vec<u8>, Id),
+        Accepted(Vec<u8>, Option<Id>),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -69,12 +69,9 @@ pub mod resolver {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct ServerHello {
-        /// If `ttl_expired` is true, the resolver has previously
-        /// purged everything published by this publisher, if desired
-        /// it should be republished.
-        pub ttl_expired: bool,
-        pub auth: ServerAuth,
+    pub enum ServerHello {
+        ReadOnly(ServerAuth),
+        WriteOnly { ttl_expired: bool, auth: ServerAuth }
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -124,6 +121,20 @@ pub mod publisher {
         /// in an Unsubscibed message even if you weren't ever subscribed
         /// to the value, or it doesn't exist.
         Unsubscribe(Id),
+        /// In order to prevent denial of service, spoofing, etc,
+        /// authenticated publishers must prove that they are actually
+        /// listening on the socket they claim to be listening on. To
+        /// facilitate this, after a new security context has been
+        /// created the metadata server will encrypt a random number
+        /// with it, connect to the write address specified by the
+        /// publisher, and send the encrypted token. The publisher
+        /// must decrypt the token using it's end of the security
+        /// context, add 1 to the number, encrypt it again and send it
+        /// back. If that round trip succeeds then the new security
+        /// context will replace any old one, if it fails the new
+        /// context will be thrown away and the old one will continue
+        /// to be associated with the write address.
+        Authenticate(Vec<u8>),
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -155,6 +155,10 @@ impl<T> StoreInner<T> {
         })
     }
 
+    pub(crate) fn published_by(&self, addr: &SocketAddr) -> impl Iterator<Item=&str> {
+        self.by_addr.get(addr).unwrap_or_else(HashSet::new).iter().map(|p| &*p)
+    }
+    
     pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<SocketAddr> {
         self.by_path.get(path.as_ref())
             .map(|a| a.iter().copied().collect())

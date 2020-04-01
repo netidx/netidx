@@ -158,7 +158,7 @@ impl PMap {
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
-        paths.for_all(|p| {
+        paths.all(|p| {
             let actual_rights = self.permissions(p, user);
             actual_rights & desired_rights == desired_rights
         })
