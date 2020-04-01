@@ -144,8 +144,8 @@ pub mod publisher {
         /// the result will be NoSuchValue. The optional security
         /// token is a proof from the resolver server that this
         /// subscription is permitted. In the case of an anonymous
-        /// connection this proof will be omitted.
-        Subscribe(Path, Option<Vec<u8>>),
+        /// connection this proof will be empty.
+        Subscribe(Path, Vec<u8>),
         /// Unsubscribe from the specified value, this will always result
         /// in an Unsubscibed message even if you weren't ever subscribed
         /// to the value, or it doesn't exist.

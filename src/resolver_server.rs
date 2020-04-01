@@ -29,6 +29,7 @@ use std::{
         Arc,
     },
     time::Duration,
+    convert::TryFrom,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -259,6 +260,7 @@ fn handle_batch(
 
 static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 static READER_TTL: Duration = Duration::from_secs(120);
+static MIN_TTL: u64 = 60;
 static MAX_TTL: u64 = 3600;
 
 enum ClientState {
@@ -289,12 +291,21 @@ impl ClientState {
             ClientState::AuthenticatedWrite { ttl, .. } => ttl,
         }
     }
+
+    fn ifo(&self) -> Arc<UserInfo> {
+        match self {
+            ClientState::AnonymousRead | ClientState::AnonymousWrite { .. } => {
+                ANONYMOUS.clone()
+            }
+            ClientState::AuthenticatedRead { uifo, .. } => uifo.clone(),
+            ClientState::AuthenticatedWrite { uifo, .. } => uifo.clone(),
+        }
+    }
 }
 
 async fn hello_client(
     store: &Store<ClientInfo>,
     con: &mut Channel,
-    origin: SocketAddr,
     secstore: Option<&SecStore>,
     tx_stop: oneshot::Sender<()>,
 ) -> Result<ClientState, Error> {
@@ -337,6 +348,7 @@ async fn hello_client(
                         return Err(e);
                     }
                 }
+                ClientState::AuthenticatedRead { ctx, uifo }
             }
         },
         ClientHello::WriteOnly {
@@ -344,13 +356,10 @@ async fn hello_client(
             write_addr,
             auth,
         } => {
-            if ttl <= 0 || ttl > MAX_TTL {
+            if ttl < MIN_TTL || ttl > MAX_TTL {
                 bail!("invalid ttl")
             }
             let ttl = Duration::from_secs(ttl);
-            if write_addr.ip() != origin.ip() {
-                bail!("invalid publisher ip addr")
-            }
             // this is a race, but if it races it'll resolve by the next heartbeat
             let ttl_expired = !store.read().clinfo.contains(&write_addr);
             let client_state = match auth {
@@ -406,23 +415,14 @@ async fn hello_client(
                             con.send_one(publisher::Hello::Authenticate(tok)),
                         )
                         .await??;
-                        let resp: publisher::Hello =
-                            time::timeout(HELLO_TIMEOUT, con.receive()).await??;
-                        match resp {
+                        match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
                             publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
                                 bail!("denied")
                             }
                             publisher::Hello::Authenticate(tok) => {
-                                let decrypted = Vec::from(&*ctx.unwrap(&tok)?);
-                                let mut n = [0u8; 8];
-                                if decrypted.len() != 8 {
-                                    bail!("denied");
-                                }
-                                for (i, b) in decrypted.into_iter().enumerated() {
-                                    n[i] = b;
-                                }
-                                let decrypted_salt = u64::from_be_bytes(n);
-                                if decrypted_salt != salt + 2 {
+                                let d = Vec::from(&*ctx.unwrap(&tok)?);
+                                let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
+                                if dsalt != salt + 2 {
                                     bail!("denied")
                                 }
                                 secstore.store_write(write_addr, ctx);
