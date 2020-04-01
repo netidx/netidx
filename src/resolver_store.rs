@@ -179,6 +179,10 @@ impl<T> StoreInner<T> {
         self.addrs.gc();
     }
 
+    pub(crate) fn clinfo(&self) -> &HashMap<SocketAddr, T, FxHashBuilder> {
+        &self.clinfos
+    }
+
     pub(crate) fn clinfo_mut(&mut self) -> &mut HashMap<SocketAddr, T, FxBuildHasher> {
         &mut self.clinfos
     }

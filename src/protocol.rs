@@ -10,7 +10,7 @@ impl Id {
 
     pub fn take(&mut self) -> Self {
         let new = *self;
-        *self = Id(self.0 + 1);
+        *self = Id(u64::wrapping_add(self.0, 1));
         new
     }
 }
@@ -113,19 +113,16 @@ pub mod publisher {
     use super::Id;
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum To {
-        /// Subscribe to the specified value, if it is not available the
-        /// result will be NoSuchValue
-        Subscribe(Path),
-        /// Unsubscribe from the specified value, this will always result
-        /// in an Unsubscibed message even if you weren't ever subscribed
-        /// to the value, or it doesn't exist.
-        Unsubscribe(Id),
+    pub enum Hello {
+        /// No authentication will be provided. The publisher may drop
+        /// the connection at this point, if it chooses to allow this
+        /// then it will return Anonymous.
+        Anonymous,
         /// In order to prevent denial of service, spoofing, etc,
         /// authenticated publishers must prove that they are actually
         /// listening on the socket they claim to be listening on. To
         /// facilitate this, after a new security context has been
-        /// created the metadata server will encrypt a random number
+        /// created the resolver server will encrypt a random number
         /// with it, connect to the write address specified by the
         /// publisher, and send the encrypted token. The publisher
         /// must decrypt the token using it's end of the security
@@ -135,6 +132,24 @@ pub mod publisher {
         /// context will be thrown away and the old one will continue
         /// to be associated with the write address.
         Authenticate(Vec<u8>),
+        /// An authentication token, if the token is valid then the
+        /// publisher will send a token back to authenticate itself to
+        /// the subscriber.
+        Token(Vec<u8>),
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum To {
+        /// Subscribe to the specified value, if it is not available
+        /// the result will be NoSuchValue. The optional security
+        /// token is a proof from the resolver server that this
+        /// subscription is permitted. In the case of an anonymous
+        /// connection this proof will be omitted.
+        Subscribe(Path, Option<Vec<u8>>),
+        /// Unsubscribe from the specified value, this will always result
+        /// in an Unsubscibed message even if you weren't ever subscribed
+        /// to the value, or it doesn't exist.
+        Unsubscribe(Id),
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -142,6 +157,8 @@ pub mod publisher {
         /// The requested subscription to Path cannot be completed because
         /// it doesn't exist
         NoSuchValue(Path),
+        /// Permission to subscribe to the specified path is denied.
+        Denied(Path)
         /// You have been unsubscriped from Path. This can be the result
         /// of an Unsubscribe message, or it may be sent unsolicited, in
         /// the case the value is no longer published, or the publisher is
