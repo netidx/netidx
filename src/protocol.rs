@@ -1,20 +1,3 @@
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-pub struct Id(u64);
-
-impl Id {
-    pub fn zero() -> Self {
-        Id(0)
-    }
-
-    pub fn take(&mut self) -> Self {
-        let new = *self;
-        *self = Id(u64::wrapping_add(self.0, 1));
-        new
-    }
-}
-
 /// Messages to and from the resolver server consist of the following basic structure,
 ///
 /// hello from the client: `[u32, resolver::ClientHello]`
@@ -38,12 +21,24 @@ impl Id {
 pub mod resolver {
     use crate::path::Path;
     use std::net::SocketAddr;
-    use super::Id;
 
+    #[derive(
+        Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    )]
+    pub struct CtxId(u64);
+
+    impl CtxId {
+        pub fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+    
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientAuth {
         Anonymous,
-        Reuse(Option<Id>),
+        Reuse(Option<CtxId>),
         Token(Vec<u8>),
     }
 
@@ -51,7 +46,7 @@ pub mod resolver {
     pub enum ServerAuth {
         Anonymous,
         Reused,
-        Accepted(Vec<u8>, Option<Id>),
+        Accepted(Vec<u8>, Option<CtxId>),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -96,6 +91,14 @@ pub mod resolver {
         Unpublished,
         Error(String),
     }
+
+    /// This is the format of the Vec<u8> passed back with each
+    /// Resolved msg, however it is encrypted with the publisher's
+    /// security context. This allows the subscriber to prove to the
+    /// publisher that it is allowed to subscribe to the specified
+    /// path.
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct PermissionToken(Path, u64);
 }
 
 /// The protocol between the publisher and the subscriber. Messages in
@@ -110,14 +113,30 @@ pub mod resolver {
 /// encoding, and will not be interpreted at this layer.
 pub mod publisher {
     use crate::path::Path;
-    use super::Id;
 
+    #[derive(
+        Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    )]
+    pub struct Id(u64);
+
+    impl Id {
+        pub fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            Id(NEXT.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+    
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum Hello {
         /// No authentication will be provided. The publisher may drop
         /// the connection at this point, if it chooses to allow this
         /// then it will return Anonymous.
         Anonymous,
+        /// An authentication token, if the token is valid then the
+        /// publisher will send a token back to authenticate itself to
+        /// the subscriber.
+        Token(Vec<u8>),
         /// In order to prevent denial of service, spoofing, etc,
         /// authenticated publishers must prove that they are actually
         /// listening on the socket they claim to be listening on. To
@@ -131,11 +150,7 @@ pub mod publisher {
         /// context will replace any old one, if it fails the new
         /// context will be thrown away and the old one will continue
         /// to be associated with the write address.
-        Authenticate(Vec<u8>),
-        /// An authentication token, if the token is valid then the
-        /// publisher will send a token back to authenticate itself to
-        /// the subscriber.
-        Token(Vec<u8>),
+        ResolverAuthenticate(Vec<u8>),
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
