@@ -85,7 +85,7 @@ pub mod resolver {
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum From {
-        Resolved(Vec<Vec<(SocketAddr, Vec<u8>)>>),
+        Resolved(Vec<Vec<(SocketAddr, Vec<[u8]>)>>),
         List(Vec<Path>),
         Published,
         Unpublished,
@@ -98,7 +98,7 @@ pub mod resolver {
     /// publisher that it is allowed to subscribe to the specified
     /// path.
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct PermissionToken(Path, u64);
+    pub struct PermissionToken<'a>(&'a str, u64);
 }
 
 /// The protocol between the publisher and the subscriber. Messages in

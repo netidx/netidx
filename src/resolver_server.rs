@@ -9,7 +9,10 @@ use crate::{
     path::Path,
     protocol::{
         publisher,
-        resolver::{CtxId, ClientAuth, ClientHello, From, ServerAuth, ServerHello, To},
+        resolver::{
+            CtxId, ClientAuth, ClientHello, From, ServerAuth, ServerHello,
+            To, PermissionToken
+        },
     },
     resolver_store::Store,
     utils::mp_encode,
@@ -47,14 +50,14 @@ struct SecStoreInner {
 }
 
 impl SecStoreInner {
-    fn get_read(&mut self, id: &Id) -> Option<ServerCtx> {
+    fn get_read(&self, id: &Id) -> Option<ServerCtx> {
         self.read_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
             _ => None,
         })
     }
 
-    fn get_write(&mut self, id: &SocketAddr) -> Option<ServerCtx> {
+    fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
         self.write_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
             _ => None,
@@ -100,7 +103,7 @@ impl SecStoreInner {
 struct SecStore {
     principal: Arc<String>,
     pmap: ArcSwap<PMap>,
-    store: Arc<Mutex<SecStoreInner>>,
+    store: Arc<RwLock<SecStoreInner>>,
 }
 
 impl SecStore {
@@ -108,7 +111,7 @@ impl SecStore {
         SecStore {
             principal: Arc::new(principal),
             pmap: ArcSwap::from(Arc::new(pmap)),
-            store: Arc::new(Mutex::new(SecStoreInner {
+            store: Arc::new(RwLock::new(SecStoreInner {
                 read_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
                 write_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
             })),
@@ -124,17 +127,17 @@ impl SecStore {
     }
 
     fn get_read(&self, id: &Id) -> Option<ServerCtx> {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.read();
         inner.get_read(id)
     }
 
     fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.read();
         inner.get_write(id)
     }
 
     fn delete(&self, id: &Id) {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.write();
         inner.delete(id);
     }
 
@@ -151,23 +154,23 @@ impl SecStore {
 
     fn store_read(&self, ctx: ServerCtx) -> Id {
         let id = CtxId::new();
-        let mut inner = self.store.lock();
+        let mut inner = self.store.write();
         inner.read_ctxts.insert(id, ctx);
         id
     }
 
     fn store_write(&self, addr: SocketAddr, ctx: ServerCtx) {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.write();
         inner.write_ctxts.insert(*addr, ctx);
     }
 
     fn gc(&self) -> Result<(), Error> {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.write();
         Ok(inner.gc()?)
     }
 
     fn ifo(&self, user: &str) -> Result<Arc<UserInfo>, Error> {
-        let mut inner = self.store.lock();
+        let mut inner = self.store.write();
         Ok(inner.ifo(user)?)
     }
 }
@@ -181,7 +184,7 @@ fn sign_path(
     match match store.get_write_ref(&addr) {
         None => Ok((addr, vec![])),
         Some(ctx) => {
-            let msg = mp_encode((path, now.as_secs()))?;
+            let msg = mp_encode(&PermissionToken(&*path, now.as_secs()))?;
             let tok = Vec::from(&*ctx.wrap(&*msg)?);
             (addr, tok)
         }
@@ -209,16 +212,21 @@ fn handle_batch(
                     resolver::To::Resolve(paths) => {
                         if allowed_for(&paths, Permissions::SUBSCRIBE) {
                             let now = Instant::now().as_secs();
-                            let res = Vec::with_capacity(paths.len());
-                            for p in paths.iter() {
-                                let addrs = s.resolve(p);
-                                let sig = match state.ctx {
-                                    None => vec![],
-                                    Some(ctx) => {
-                                        mp_encode
-                                    }
+                            let res = match secstore { 
+                                None => {
+                                    paths.iter()
+                                        .map(|p| (s.resolve(p), Vec::new()))
+                                        .collect::<Vec<_>>()
+                                },
+                                Some(secstore) => {
+                                    let inner = secstore.store.read();
+                                    paths.iter().map(|p| {
+                                        s.resolve(p).into_iter().map(|addr| {
+                                            Ok((addr, sign_path(&*inner, p, addr, now)?))
+                                        }).collect::<Result<Vec<_>, Error>>()?
+                                    }).collect::<Result<Vec<_>, Error>>()?
                                 }
-                            }
+                            };
                             con.queue_send(&resolver::From::Resolved(res))?
                         } else {
                             con.queue_send(&resolver::From::Error("denied".into()))?
