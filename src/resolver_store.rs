@@ -1,4 +1,9 @@
-use crate::path::Path;
+use crate::{
+    path::Path,
+    resolver_server::SecStoreInner,
+    utils::mp_encode,
+    protocol::resolver::PermissionToken,
+};
 use fxhash::FxBuildHasher;
 use std::{
     iter, net::SocketAddr, sync::{Arc, Weak},
@@ -159,10 +164,30 @@ impl<T> StoreInner<T> {
         self.by_addr.get(addr).unwrap_or_else(HashSet::new).iter().map(|p| &*p)
     }
     
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<SocketAddr> {
+    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Vec<u8>)> {
         self.by_path.get(path.as_ref())
-            .map(|a| a.iter().copied().collect())
+            .map(|a| a.iter().map(|addr| (*addr, vec![])).collect())
             .unwrap_or_else(|| Vec::new())
+    }
+
+    pub(crate) fn resolve_and_sign<S: AsRef<str>>(
+        &self,
+        sec: &SecStoreInner,
+        now: u64,
+        path: &S
+    ) -> Result<Vec<(SocketAddr, Vec<u8>)>, Error> {
+        Ok(self.by_path.get(path.as_ref()).map(|addrs| {
+            addrs.iter().map(|addr| {
+                match sec.get_write_ref(&addr) {
+                    None => Ok((*addr, vec![])),
+                    Some(ctx) => {
+                        let msg = mp_encode(&PermissionToken(path.as_ref(), now))?;
+                        let tok = Vec::from(&*ctx.wrap(&*msg)?);
+                        (addr, tok)
+                    }
+                }
+            }).collect::<Result<Vec<_>, Error>>()?
+        }).collect::<Result<Vec<_>, Error>>()?)
     }
 
     pub(crate) fn list<S: AsRef<str>>(&self, parent: &S) -> Vec<Path> {

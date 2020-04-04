@@ -3,6 +3,7 @@ use crate::{
         sysgmapper::Mapper,
         syskrb5::{sys_krb5, ServerCtx},
         Krb5, Krb5Ctx, Krb5ServerCtx, PMap, Permissions, UserDb, UserInfo, ANONYMOUS,
+        SecStore, SecStoreInner,
     },
     channel::Channel,
     config,
@@ -43,154 +44,6 @@ use tokio::{
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-struct SecStoreInner {
-    read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (Arc<UserInfo>, ServerCtx), FxBuildHasher>,
-    userdb: UserDb<Mapper>,
-}
-
-impl SecStoreInner {
-    fn get_read(&self, id: &Id) -> Option<ServerCtx> {
-        self.read_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
-            _ => None,
-        })
-    }
-
-    fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        self.write_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
-            _ => None,
-        })
-    }
-
-    fn get_write_ref(&self, id: &SocketAddr) -> Option<&ServerCtx> {
-        self.write_ctxts.get(id)
-    }
-
-    fn delete(&mut self, id: &Id) {
-        self.ctxts.remove(id);
-    }
-
-    fn gc(&mut self) -> Result<(), Error> {
-        let mut read_delete = SmallVec::<[Id; 64]>::new();
-        let mut write_delete = SmallVec::<[SocketAddr; 64]>::new();
-        for (id, ctx) in self.read_ctxts.iter() {
-            if ctx.ttl()?.as_secs() == 0 {
-                read_delete.push(*id);
-            }
-        }
-        for (id, ctx) in self.write_ctxts.iter() {
-            if ctx.ttl()?.as_secs() == 0 {
-                write_delete.push(*id);
-            }
-        }
-        for id in read_delete.into_iter() {
-            self.read_ctxts.remove(&id);
-        }
-        for id in write_delete.into_iter() {
-            self.write_ctxts.remove(&id);
-        }
-        Ok(())
-    }
-
-    fn ifo(&mut self, user: &str) -> Result<Arc<UserInfo>, Error> {
-        self.userdb.ifo(user)
-    }
-}
-
-#[derive(Clone)]
-struct SecStore {
-    principal: Arc<String>,
-    pmap: ArcSwap<PMap>,
-    store: Arc<RwLock<SecStoreInner>>,
-}
-
-impl SecStore {
-    fn new(principal: String, pmap: PMap) -> Self {
-        SecStore {
-            principal: Arc::new(principal),
-            pmap: ArcSwap::from(Arc::new(pmap)),
-            store: Arc::new(RwLock::new(SecStoreInner {
-                read_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
-                write_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
-            })),
-        }
-    }
-
-    fn pmap(&self) -> Guard<'static, Arc<PMap>> {
-        self.pmap.load()
-    }
-
-    fn update_pmap(&self, pmap: PMap) {
-        self.pmap.swap(Arc::new(pmap));
-    }
-
-    fn get_read(&self, id: &Id) -> Option<ServerCtx> {
-        let mut inner = self.store.read();
-        inner.get_read(id)
-    }
-
-    fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        let mut inner = self.store.read();
-        inner.get_write(id)
-    }
-
-    fn delete(&self, id: &Id) {
-        let mut inner = self.store.write();
-        inner.delete(id);
-    }
-
-    fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
-        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
-        let tok = ctx
-            .step(Some(tok))?
-            .map(|b| Vec::from(&*b))
-            .ok_or_else(|| {
-                format_error!("step didn't generate a mutual authentication token")
-            })?;
-        Ok((ctx, tok))
-    }
-
-    fn store_read(&self, ctx: ServerCtx) -> Id {
-        let id = CtxId::new();
-        let mut inner = self.store.write();
-        inner.read_ctxts.insert(id, ctx);
-        id
-    }
-
-    fn store_write(&self, addr: SocketAddr, ctx: ServerCtx) {
-        let mut inner = self.store.write();
-        inner.write_ctxts.insert(*addr, ctx);
-    }
-
-    fn gc(&self) -> Result<(), Error> {
-        let mut inner = self.store.write();
-        Ok(inner.gc()?)
-    }
-
-    fn ifo(&self, user: &str) -> Result<Arc<UserInfo>, Error> {
-        let mut inner = self.store.write();
-        Ok(inner.ifo(user)?)
-    }
-}
-
-fn sign_path(
-    secstore: &SecStoreInner,
-    path: &Path,
-    addr: SocketAddr,
-    now: Instant,
-) -> Result<(SocketAddr, Vec<u8>), Error> {
-    match match store.get_write_ref(&addr) {
-        None => Ok((addr, vec![])),
-        Some(ctx) => {
-            let msg = mp_encode(&PermissionToken(&*path, now.as_secs()))?;
-            let tok = Vec::from(&*ctx.wrap(&*msg)?);
-            (addr, tok)
-        }
-    }
-}
-
 fn handle_batch(
     store: &Store<ClientInfo>,
     secstore: Option<&SecStore>,
@@ -206,6 +59,7 @@ fn handle_batch(
     match state.write_addr {
         None => {
             let s = store.read();
+            let secstore = secstore.map(|s| s.store.read());
             for m in msgs {
                 match m {
                     resolver::To::Heartbeat => (),
@@ -215,16 +69,13 @@ fn handle_batch(
                             let res = match secstore { 
                                 None => {
                                     paths.iter()
-                                        .map(|p| (s.resolve(p), Vec::new()))
+                                        .map(|p| s.resolve(p))
                                         .collect::<Vec<_>>()
                                 },
-                                Some(secstore) => {
-                                    let inner = secstore.store.read();
-                                    paths.iter().map(|p| {
-                                        s.resolve(p).into_iter().map(|addr| {
-                                            Ok((addr, sign_path(&*inner, p, addr, now)?))
-                                        }).collect::<Result<Vec<_>, Error>>()?
-                                    }).collect::<Result<Vec<_>, Error>>()?
+                                Some(sec) => {
+                                    paths.iter()
+                                        .map(|p| s.resolve_and_sign(&*sec, now, p)?)
+                                        .collect::<Result<Vec<_>, Error>>()?
                                 }
                             };
                             con.queue_send(&resolver::From::Resolved(res))?
