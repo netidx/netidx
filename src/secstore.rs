@@ -1,4 +1,5 @@
 use crate::{
+    config::PMapFile,
     auth::{
         sysgmapper::Mapper,
         syskrb5::{sys_krb5, ServerCtx},
@@ -38,8 +39,12 @@ impl SecStoreInner {
         self.write_ctxts.get(id)
     }
 
-    fn delete(&mut self, id: &CtxId) {
-        self.ctxts.remove(id);
+    fn delete_read(&mut self, id: &CtxId) {
+        self.read_ctxts.remove(id);
+    }
+
+    fn delete_write(&mut self, id: &SocketAddr) {
+        self.write_ctxts.remove(id);
     }
 
     fn gc(&mut self) -> Result<(), Error> {
@@ -77,13 +82,16 @@ pub(crate) struct SecStore {
 }
 
 impl SecStore {
-    pub(crate) fn new(principal: String, pmap: PMap) -> Self {
+    pub(crate) fn new(principal: String, pmap: PMapFile) -> Result<Self, Error> {
+        let mut userdb = UserDb::new(Mapper::new()?);
+        let pmap = PMap::from_file(pmap, &mut userdb)?;
         SecStore {
             principal: Arc::new(principal),
             pmap: ArcSwap::from(Arc::new(pmap)),
             store: Arc::new(RwLock::new(SecStoreInner {
                 read_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
                 write_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
+                userdb,
             })),
         }
     }
@@ -106,9 +114,14 @@ impl SecStore {
         inner.get_write(id)
     }
 
-    pub(crate) fn delete(&self, id: &Id) {
+    pub(crate) fn delete_read(&self, id: &CtxId) {
         let mut inner = self.store.write();
-        inner.delete(id);
+        inner.delete_read(id);
+    }
+
+    pub(crate) fn delete_write(&self, id: &SocketAddr) {
+        let mut inner = self.store.write();
+        inner.delete_write(id);
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
@@ -117,12 +130,12 @@ impl SecStore {
             .step(Some(tok))?
             .map(|b| Vec::from(&*b))
             .ok_or_else(|| {
-                format_error!("step didn't generate a mutual authentication token")
+                format_err!("step didn't generate a mutual authentication token")
             })?;
         Ok((ctx, tok))
     }
 
-    pub(crate) fn store_read(&self, ctx: ServerCtx) -> Id {
+    pub(crate) fn store_read(&self, ctx: ServerCtx) -> CtxId {
         let id = CtxId::new();
         let mut inner = self.store.write();
         inner.read_ctxts.insert(id, ctx);

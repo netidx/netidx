@@ -1,4 +1,4 @@
-use crate::Path;
+use crate::path::Path;
 use std::{
     net::SocketAddr,
     collections::HashMap,
@@ -19,4 +19,3 @@ pub struct Resolver {
     pub auth: Auth,
     pub max_connections: usize,
 }
-

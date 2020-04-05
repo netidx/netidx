@@ -6,7 +6,7 @@ use crate::{
     channel::Channel,
     config,
     path::Path,
-    protocol::{Id, resolver},
+    protocol::resolver::{self, CtxId},
 };
 use failure::Error;
 use futures::{prelude::*, select};
@@ -47,7 +47,7 @@ type Result<T> = result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
-    Krb5 {principal: Option<String>},
+    Krb5 { principal: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +85,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     // resolver should make use of all of them.
     pub fn new_r(
         resolver: config::Resolver,
-        desired_auth: Auth
+        desired_auth: Auth,
     ) -> Result<Resolver<ReadOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(async move {
@@ -99,7 +99,10 @@ impl<R: ReadableOrWritable> Resolver<R> {
 }
 
 impl<R: Readable + ReadableOrWritable> Resolver<R> {
-    pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Vec<Vec<SocketAddr>>> {
+    pub async fn resolve(
+        &mut self,
+        paths: Vec<Path>,
+    ) -> Result<Vec<Vec<(SocketAddr, Vec<u8>)>>> {
         match self.send(resolver::To::Resolve(paths)).await? {
             resolver::From::Resolved(ports) => Ok(ports),
             _ => bail!("unexpected response"),
@@ -139,12 +142,12 @@ impl<R: Writeable + ReadableOrWritable> Resolver<R> {
 
 fn create_ctx(
     principal: Option<&[u8]>,
-    target_principal: &[u8]
+    target_principal: &[u8],
 ) -> Result<(ClientCtx, Vec<u8>)> {
     let ctx = sys_krb5.create_client_ctx(principal, target_principal)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
-        Some(tok) => Ok((ctx, Vec::from(&*tok)))
+        Some(tok) => Ok((ctx, Vec::from(&*tok))),
     }
 }
 
@@ -152,9 +155,9 @@ async fn connect(
     resolver: &config::Resolver,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
-    ctx: &mut Option<(Id, ClientCtx)>,
+    ctx: &mut Option<(Option<CtxId>, ClientCtx)>,
     desired_auth: &Auth,
-) -> Result<Channel> {
+) -> Result<Channel<ClientCtx>> {
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -165,22 +168,27 @@ async fn connect(
         let mut con = Channel::new(con);
         let (auth, new_ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (resolver::ClientAuth::Anonymous, None),
-            (Auth::Krb5 {..}, config::Auth::Anonymous) =>
-                bail!("server does not support authentication"),
-            (Auth::Krb5 {ref principal}, config::Auth::Krb5 {principal: ref target}) => {
-                match ctx {
-                    Some((id, ctx)) => (resolver::ClientAuth::Reuse(*id), None),
-                    None => {
-                        let principal = principal.as_ref().map(|s| s.as_bytes());
-                        let target = target.as_bytes();
-                        let (ctx, tok) = try_cont!(
-                            "create ctx",
-                            task::block_in_place(|| create_ctx(principal, target))
-                        );
-                        (resolver::ClientAuth::Token(tok), Some(ctx))
-                    }
-                }
+            (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
+                bail!("server does not support authentication")
             }
+            (
+                Auth::Krb5 { ref principal },
+                config::Auth::Krb5 {
+                    principal: ref target,
+                    ..
+                },
+            ) => match ctx {
+                Some((id, ctx)) => (resolver::ClientAuth::Reuse(*id), None),
+                None => {
+                    let principal = principal.as_ref().map(|s| s.as_bytes());
+                    let target = target.as_bytes();
+                    let (ctx, tok) = try_cont!(
+                        "create ctx",
+                        task::block_in_place(|| create_ctx(principal, target))
+                    );
+                    (resolver::ClientAuth::Token(tok), Some(ctx))
+                }
+            },
         };
         // the unwrap can't fail, we can always encode the message,
         // and it's never bigger then 4 GB.
@@ -204,18 +212,19 @@ async fn connect(
                 println!("server requires authentication");
                 continue;
             }
-            (Auth::Krb5 {..}, resolver::ServerAuth::Anonymous) => {
+            (Auth::Krb5 { .. }, resolver::ServerAuth::Anonymous) => {
                 println!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 {..}, resolver::ServerAuth::Reused) => match new_ctx {
+            (Auth::Krb5 { .. }, resolver::ServerAuth::Reused) => match new_ctx {
                 None => (), // context reused
                 Some(_) => {
                     println!("server wants to reuse a ctx, but we created a new one");
                     continue;
                 }
-            }
-            (Auth::Krb5 {..}, resolver::ServerAuth::Accepted(tok, id)) => match new_ctx {
+            },
+            (Auth::Krb5 { .. }, resolver::ServerAuth::Accepted(tok, id)) => match new_ctx
+            {
                 None => {
                     println!("we asked to reuse a ctx but the server created a new one");
                     continue;
@@ -227,7 +236,7 @@ async fn connect(
                     );
                     *ctx = Some((id, new_ctx));
                 }
-            }
+            },
         }
         if !r.ttl_expired {
             break Ok(con);
@@ -249,8 +258,8 @@ async fn connection(
     desired_auth: Auth,
 ) -> Result<()> {
     let mut published = HashSet::new();
-    let mut con: Option<Channel> = None;
-    let mut ctx: Option<(Id, ClientCtx)> = None;
+    let mut con: Option<Channel<ClientCtx>> = None;
+    let mut ctx: Option<(Option<CtxId>, ClientCtx)> = None;
     let ttl = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(LINGER);
     let now = Instant::now();

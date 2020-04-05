@@ -34,7 +34,7 @@ pub mod resolver {
             CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
         }
     }
-    
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientAuth {
         Anonymous,
@@ -60,13 +60,17 @@ pub mod resolver {
         /// send a heartbeat at least every `ttl` seconds or the
         /// resolver server will purge all paths published by
         /// `write_addr`.
-        WriteOnly { ttl: u64, write_addr: SocketAddr, auth: ClientAuth },
+        WriteOnly {
+            ttl: u64,
+            write_addr: SocketAddr,
+            auth: ClientAuth,
+        },
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum ServerHello {
-        ReadOnly(ServerAuth),
-        WriteOnly { ttl_expired: bool, auth: ServerAuth }
+    pub struct ServerHello {
+        pub ttl_expired: bool,
+        pub auth: ServerAuth,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -79,13 +83,15 @@ pub mod resolver {
         Publish(Vec<Path>),
         /// Stop publishing the list of paths
         Unpublish(Vec<Path>),
+        /// Clear all values you've published
+        Clear,
         /// Tell the resolver that we are still alive
         Heartbeat,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum From {
-        Resolved(Vec<Vec<(SocketAddr, Vec<[u8]>)>>),
+        Resolved(Vec<Vec<(SocketAddr, Vec<u8>)>>),
         List(Vec<Path>),
         Published,
         Unpublished,
@@ -98,7 +104,7 @@ pub mod resolver {
     /// publisher that it is allowed to subscribe to the specified
     /// path.
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct PermissionToken<'a>(&'a str, u64);
+    pub struct PermissionToken<'a>(pub &'a str, pub u64);
 }
 
 /// The protocol between the publisher and the subscriber. Messages in
@@ -126,7 +132,7 @@ pub mod publisher {
             Id(NEXT.fetch_add(1, Ordering::Relaxed))
         }
     }
-    
+
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum Hello {
         /// No authentication will be provided. The publisher may drop

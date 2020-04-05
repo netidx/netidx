@@ -88,7 +88,7 @@ pub(crate) struct WriteChannel<C> {
 }
 
 impl<C: Krb5Ctx + Clone> WriteChannel<C> {
-    pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel {
+    pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
         WriteChannel {
             to_flush: WriteChannel::flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
@@ -107,7 +107,7 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
             mpsc::unbounded_channel();
         task::spawn(async move {
             while let Some((batch, fin)) = rx.next().await {
-                let _ = fin.send(Ok(soc.write_all(&*batch).await?));
+                let _ = fin.send(soc.write_all(&*batch).await.map_err(Error::from));
             }
         });
         tx
@@ -135,7 +135,7 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
 
     /// Get an interface that you can use to pack multiple different
     /// things in one message with one length header.
-    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a> {
+    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a, C> {
         if self.buf.remaining_mut() < mem::size_of::<u32>() {
             self.buf.reserve(self.buf.capacity());
         }
@@ -148,7 +148,7 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
 
     pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
         self.queue_send(msg)?;
-        Ok(self.flush().await?)
+        Ok(self.flush().await??)
     }
 
     pub(crate) fn bytes_queued(&self) -> usize {
@@ -172,8 +172,8 @@ pub(crate) struct ReadChannel<C> {
     ctx: Option<C>,
 }
     
-impl<C: Krb5Ctx + Clone> ReadChannel {
-    pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel {
+impl<C: Krb5Ctx + Clone> ReadChannel<C> {
+    pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         ReadChannel {
             socket,
             buf: BytesMut::with_capacity(BUF),
@@ -190,11 +190,9 @@ impl<C: Krb5Ctx + Clone> ReadChannel {
         if self.buf.remaining_mut() < BUF {
             self.buf.reserve(self.buf.capacity());
         }
-        match self.socket.read_buf(&mut self.buf).await {
-            Err(e) => Err(e),
-            Ok(0) => bail!("eof while reading"),
-            Ok(_) => Ok(()),
-        }
+        Ok(if self.socket.read_buf(&mut self.buf).await? == 0 {
+            bail!("eof while reading");
+        })
     }
 
     fn decode_from_buffer(&mut self) -> Result<Option<Bytes>, Error> {
@@ -239,7 +237,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel {
     /// none are presently in the buffer.
     pub(crate) async fn receive_ut(&mut self) -> Result<Bytes, Error> {
         loop {
-            match self.decode_from_buffer() {
+            match self.decode_from_buffer()? {
                 Some(msg) => break Ok(msg),
                 None => { self.fill_buffer().await?; }
             }
@@ -256,7 +254,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel {
         batch: &mut Vec<Bytes>,
     ) -> Result<(), Error> {
         batch.push(self.receive_ut().await?);
-        while let Some(b) = self.decode_from_buffer() {
+        while let Some(b) = self.decode_from_buffer()? {
             batch.push(b);
         }
         Ok(())
@@ -270,7 +268,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel {
         batch: &mut Vec<T>,
     ) -> Result<(), Error> {
         batch.push(self.receive().await?);
-        while let Some(b) = self.decode_from_buffer() {
+        while let Some(b) = self.decode_from_buffer()? {
             batch.push(rmp_serde::decode::from_read(&*b)?);
         }
         Ok(())
@@ -283,7 +281,7 @@ pub(crate) struct Channel<C> {
 }
 
 impl<C: Krb5Ctx + Clone> Channel<C> {
-    pub(crate) fn new(socket: TcpStream) -> Channel {
+    pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel {
             read: ReadChannel::new(rh),
@@ -296,7 +294,7 @@ impl<C: Krb5Ctx + Clone> Channel<C> {
         self.write.set_ctx(ctx);
     }
 
-    pub(crate) fn split(self) -> (ReadChannel, WriteChannel) {
+    pub(crate) fn split(self) -> (ReadChannel<C>, WriteChannel<C>) {
         (self.read, self.write)
     }
 
@@ -312,7 +310,7 @@ impl<C: Krb5Ctx + Clone> Channel<C> {
         self.write.send_one(msg).await
     }
 
-    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a> {
+    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a, C> {
         self.write.begin_msg()
     }
 
@@ -322,13 +320,7 @@ impl<C: Krb5Ctx + Clone> Channel<C> {
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
-        match self.write.flush().await {
-            Ok(r) => r,
-            Err(_) => Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                format!("flush process died while writing"),
-            ))
-        }
+        Ok(self.write.flush().await??)
     }
 
     #[allow(dead_code)]

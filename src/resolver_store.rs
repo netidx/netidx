@@ -1,6 +1,6 @@
 use crate::{
     path::Path,
-    resolver_server::SecStoreInner,
+    secstore::SecStoreInner,
     utils::mp_encode,
     protocol::resolver::PermissionToken,
 };
@@ -14,6 +14,7 @@ use std::{
     },
 };
 use parking_lot::RwLock;
+use failure::Error;
 
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
@@ -204,7 +205,7 @@ impl<T> StoreInner<T> {
         self.addrs.gc();
     }
 
-    pub(crate) fn clinfo(&self) -> &HashMap<SocketAddr, T, FxHashBuilder> {
+    pub(crate) fn clinfo(&self) -> &HashMap<SocketAddr, T, FxBuildHasher> {
         &self.clinfos
     }
 
