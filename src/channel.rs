@@ -23,7 +23,7 @@ const BUF: usize = 4096;
 const LEN_MASK: u32 = 0x7FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
 
-pub(crate) struct Msg<'a, C> {
+pub(crate) struct Msg<'a, C: Krb5Ctx + Clone> {
     head: BytesMut,
     body: BytesMut,
     con: &'a mut WriteChannel<C>,
@@ -81,6 +81,20 @@ impl<'a, C: Krb5Ctx + Clone> Msg<'a, C> {
     }
 }
 
+fn flush_task(
+    mut soc: WriteHalf<TcpStream>,
+) -> UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)> {
+    type T = (Bytes, oneshot::Sender<Result<(), Error>>);
+    let (tx, mut rx): (UnboundedSender<T>, UnboundedReceiver<T>) =
+        mpsc::unbounded_channel();
+    task::spawn(async move {
+        while let Some((batch, fin)) = rx.next().await {
+            let _ = fin.send(soc.write_all(&*batch).await.map_err(Error::from));
+        }
+    });
+    tx
+}
+
 pub(crate) struct WriteChannel<C> {
     to_flush: UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)>,
     buf: BytesMut,
@@ -90,8 +104,9 @@ pub(crate) struct WriteChannel<C> {
 impl<C: Krb5Ctx + Clone> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
         WriteChannel {
-            to_flush: WriteChannel::flush_task(socket),
+            to_flush: flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
+            ctx: None,
         }
     }
 
@@ -99,20 +114,6 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
         self.ctx = ctx;
     }
     
-    fn flush_task(
-        mut soc: WriteHalf<TcpStream>,
-    ) -> UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)> {
-        type T = (Bytes, oneshot::Sender<Result<(), Error>>);
-        let (tx, mut rx): (UnboundedSender<T>, UnboundedReceiver<T>) =
-            mpsc::unbounded_channel();
-        task::spawn(async move {
-            while let Some((batch, fin)) = rx.next().await {
-                let _ = fin.send(soc.write_all(&*batch).await.map_err(Error::from));
-            }
-        });
-        tx
-    }
-
     /// Queue outgoing messages. This ONLY queues the messages, use
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
@@ -177,6 +178,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
         ReadChannel {
             socket,
             buf: BytesMut::with_capacity(BUF),
+            decrypted: BytesMut::with_capacity(BUF),
             ctx: None,
         }
     }
@@ -217,7 +219,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
                             self.buf.advance(mem::size_of::<u32>());
                             let buf = ctx.unwrap(&*self.buf.split_to(len))?;
                             self.decrypted.extend_from_slice(&*buf);
-                            Ok(self.decrypted.split().freeze())
+                            Ok(Some(self.decrypted.split().freeze()))
                         }
                     }
                 } else {

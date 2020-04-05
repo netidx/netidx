@@ -1,6 +1,7 @@
 use crate::{
     path::Path,
     secstore::SecStoreInner,
+    auth::Krb5Ctx,
     utils::mp_encode,
     protocol::resolver::PermissionToken,
 };
@@ -161,10 +162,6 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn published_by(&self, addr: &SocketAddr) -> impl Iterator<Item=&str> {
-        self.by_addr.get(addr).unwrap_or_else(HashSet::new).iter().map(|p| &*p)
-    }
-    
     pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Vec<u8>)> {
         self.by_path.get(path.as_ref())
             .map(|a| a.iter().map(|addr| (*addr, vec![])).collect())
@@ -177,18 +174,18 @@ impl<T> StoreInner<T> {
         now: u64,
         path: &S
     ) -> Result<Vec<(SocketAddr, Vec<u8>)>, Error> {
-        Ok(self.by_path.get(path.as_ref()).map(|addrs| {
-            addrs.iter().map(|addr| {
+        self.by_path.get(path.as_ref()).map(|addrs| {
+            Ok(addrs.iter().map(|addr| {
                 match sec.get_write_ref(&addr) {
                     None => Ok((*addr, vec![])),
                     Some(ctx) => {
                         let msg = mp_encode(&PermissionToken(path.as_ref(), now))?;
                         let tok = Vec::from(&*ctx.wrap(true, &*msg)?);
-                        (addr, tok)
+                        Ok((*addr, tok))
                     }
                 }
-            }).collect::<Result<Vec<_>, Error>>()?
-        }).collect::<Result<Vec<_>, Error>>()?)
+            }).collect::<Result<Vec<(SocketAddr, Vec<u8>)>, Error>>()?)
+        }).unwrap_or_else(|| Ok(vec![]))
     }
 
     pub(crate) fn list<S: AsRef<str>>(&self, parent: &S) -> Vec<Path> {

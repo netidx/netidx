@@ -39,7 +39,8 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
-    task, time,
+    task,
+    time::{self, Instant},
 };
 
 type ClientInfo = Option<oneshot::Sender<()>>;
@@ -182,7 +183,7 @@ async fn hello_client(
             Some(secstore) => match secstore.get_read(&id) {
                 None => bail!("id not recognized"),
                 Some(ctx) => {
-                    let uifo = secstore.ifo(&ctx.client()?)?;
+                    let uifo = secstore.ifo(Some(&ctx.client()?))?;
                     send(
                         con,
                         ServerHello {
@@ -205,7 +206,7 @@ async fn hello_client(
             None => bail!("authentication not supported"),
             Some(secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
-                let uifo = secstore.ifo(&ctx.client()?)?;
+                let uifo = secstore.ifo(Some(&ctx.client()?))?;
                 let id = secstore.store_read(ctx.clone());
                 let h = ServerHello {
                     ttl_expired: false,
@@ -261,7 +262,7 @@ async fn hello_client(
                     Some(secstore) => match secstore.get_write(&write_addr) {
                         None => bail!("session does not exist"),
                         Some(ctx) => {
-                            let uifo = secstore.ifo(&ctx.client()?)?;
+                            let uifo = secstore.ifo(Some(&ctx.client()?))?;
                             let h = ServerHello {
                                 ttl_expired,
                                 auth: ServerAuth::Reused,
@@ -281,7 +282,7 @@ async fn hello_client(
                     None => bail!("authentication not supported"),
                     Some(secstore) => {
                         let (ctx, tok) = secstore.create(&tok)?;
-                        let uifo = secstore.ifo(&ctx.client()?)?;
+                        let uifo = secstore.ifo(Some(&ctx.client()?))?;
                         let h = ServerHello {
                             ttl_expired,
                             auth: ServerAuth::Accepted(tok, None),
@@ -308,7 +309,7 @@ async fn hello_client(
                                 if dsalt != salt + 2 {
                                     bail!("denied")
                                 }
-                                secstore.store_write(write_addr, ctx);
+                                secstore.store_write(write_addr, ctx.clone());
                                 ClientState {
                                     ctxid: None,
                                     ctx: Some(ctx),

@@ -16,7 +16,7 @@ use arc_swap::{ArcSwap, Guard};
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (Arc<UserInfo>, ServerCtx), FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, ServerCtx, FxBuildHasher>,
     userdb: UserDb<Mapper>,
 }
 
@@ -35,7 +35,7 @@ impl SecStoreInner {
         })
     }
 
-    fn get_write_ref(&self, id: &SocketAddr) -> Option<&ServerCtx> {
+    pub(crate) fn get_write_ref(&self, id: &SocketAddr) -> Option<&ServerCtx> {
         self.write_ctxts.get(id)
     }
 
@@ -69,7 +69,7 @@ impl SecStoreInner {
         Ok(())
     }
 
-    fn ifo(&mut self, user: &str) -> Result<Arc<UserInfo>, Error> {
+    fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
         self.userdb.ifo(user)
     }
 }
@@ -85,7 +85,7 @@ impl SecStore {
     pub(crate) fn new(principal: String, pmap: PMapFile) -> Result<Self, Error> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb)?;
-        SecStore {
+        Ok(SecStore {
             principal: Arc::new(principal),
             pmap: ArcSwap::from(Arc::new(pmap)),
             store: Arc::new(RwLock::new(SecStoreInner {
@@ -93,7 +93,7 @@ impl SecStore {
                 write_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
                 userdb,
             })),
-        }
+        })
     }
 
     pub(crate) fn pmap(&self) -> Guard<'static, Arc<PMap>> {
@@ -144,7 +144,7 @@ impl SecStore {
 
     pub(crate) fn store_write(&self, addr: SocketAddr, ctx: ServerCtx) {
         let mut inner = self.store.write();
-        inner.write_ctxts.insert(*addr, ctx);
+        inner.write_ctxts.insert(addr, ctx);
     }
 
     pub(crate) fn gc(&self) -> Result<(), Error> {
@@ -152,7 +152,7 @@ impl SecStore {
         Ok(inner.gc()?)
     }
 
-    pub(crate) fn ifo(&self, user: &str) -> Result<Arc<UserInfo>, Error> {
+    pub(crate) fn ifo(&self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
         let mut inner = self.store.write();
         Ok(inner.ifo(user)?)
     }

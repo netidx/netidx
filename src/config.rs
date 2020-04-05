@@ -4,8 +4,8 @@ use std::{
     collections::HashMap,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PMapFile(HashMap<Path, HashMap<Option<String>, String>>);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PMapFile(pub HashMap<Path, HashMap<Option<String>, String>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Auth {

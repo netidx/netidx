@@ -112,7 +112,7 @@ impl<M: GMapper> UserDb<M> {
 
     pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
         match user {
-            None => ANONYMOUS.clone(),
+            None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
                 Some(user) => Ok(user.clone()),
                 None => {
@@ -146,7 +146,7 @@ impl PMap {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
                 entry.insert(
-                    ent.map(|ent| db.entity(ent))
+                    ent.map(|ent| db.entity(&ent))
                         .unwrap_or_else(|| ANONYMOUS.id),
                     Permissions::try_from(perm.as_str())?,
                 );
@@ -414,7 +414,7 @@ pub(crate) mod sysgmapper {
     }
 
     impl Mapper {
-        fn new() -> Result<Mapper, Error> {
+        pub(crate) fn new() -> Result<Mapper, Error> {
             task::block_in_place(|| {
                 let out = Command::new("sh").arg("-c").arg("which id").output()?;
                 let buf = String::from_utf8_lossy(&out.stdout);
