@@ -52,9 +52,8 @@ fn handle_batch(
     msgs: impl Iterator<Item = To>,
     con: &mut Channel<ServerCtx>,
 ) -> Result<(), Error> {
-    let pmap = secstore.map(|s| s.pmap());
     let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
-        pmap.map(|pm| {
+        secstore.map(|s| s.pmap()).map(|pm| {
             pm.allowed_forall(paths.iter().map(|p| p.as_ref()), perm, &state.uifo)
         })
         .unwrap_or(true)
@@ -62,7 +61,7 @@ fn handle_batch(
     match state.write_addr {
         None => {
             let s = store.read();
-            let secstore = secstore.map(|s| s.store.read());
+            let sec = secstore.map(|s| s.store.read());
             for m in msgs {
                 match m {
                     To::Heartbeat => (),
@@ -71,13 +70,13 @@ fn handle_batch(
                             let now = SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)?
                                 .as_secs();
-                            let res = match secstore {
+                            let res = match sec {
                                 None => {
                                     paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>()
                                 }
-                                Some(sec) => paths
+                                Some(ref sec) => paths
                                     .iter()
-                                    .map(|p| Ok(s.resolve_and_sign(&*sec, now, p)?))
+                                    .map(|p| Ok(s.resolve_and_sign(&**sec, now, p)?))
                                     .collect::<Result<Vec<_>, Error>>()?,
                             };
                             con.queue_send(&From::Resolved(res))?
@@ -86,7 +85,7 @@ fn handle_batch(
                         }
                     }
                     To::List(path) => {
-                        let allowed = pmap
+                        let allowed = secstore.map(|s| s.pmap())
                             .map(|pm| pm.allowed(&*path, Permissions::LIST, &state.uifo))
                             .unwrap_or(true);
                         if allowed {
@@ -126,12 +125,15 @@ fn handle_batch(
                         }
                     }
                     To::Unpublish(paths) => {
-                        if allowed_for(&paths, Permissions::PUBLISH) {
-                            for path in paths {
-                                s.unpublish(path, write_addr);
-                            }
-                            con.queue_send(&From::Unpublished)?
+                        for path in paths {
+                            s.unpublish(path, write_addr);
                         }
+                        con.queue_send(&From::Unpublished)?
+                    }
+                    To::Clear => {
+                        s.unpublish_addr(write_addr);
+                        s.gc();
+                        con.queue_send(&From::Unpublished)?
                     }
                 }
             }
@@ -288,7 +290,7 @@ async fn hello_client(
                             auth: ServerAuth::Accepted(tok, None),
                         };
                         send(con, h).await?;
-                        let con: Channel<ServerCtx> = Channel::new(
+                        let mut con: Channel<ServerCtx> = Channel::new(
                             time::timeout(HELLO_TIMEOUT, TcpStream::connect(write_addr))
                                 .await??,
                         );

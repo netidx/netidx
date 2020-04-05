@@ -105,12 +105,12 @@ impl SecStore {
     }
 
     pub(crate) fn get_read(&self, id: &CtxId) -> Option<ServerCtx> {
-        let mut inner = self.store.read();
+        let inner = self.store.read();
         inner.get_read(id)
     }
 
     pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        let mut inner = self.store.read();
+        let inner = self.store.read();
         inner.get_write(id)
     }
 

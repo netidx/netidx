@@ -146,7 +146,7 @@ impl PMap {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
                 entry.insert(
-                    ent.map(|ent| db.entity(&ent))
+                    ent.as_ref().map(|ent| db.entity(ent))
                         .unwrap_or_else(|| ANONYMOUS.id),
                     Permissions::try_from(perm.as_str())?,
                 );
@@ -158,7 +158,7 @@ impl PMap {
 
     pub(crate) fn allowed_forall<'a>(
         &'a self,
-        paths: impl Iterator<Item = &'a str>,
+        mut paths: impl Iterator<Item = &'a str>,
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {

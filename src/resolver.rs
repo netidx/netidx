@@ -178,7 +178,7 @@ async fn connect(
                     ..
                 },
             ) => match ctx {
-                Some((id, ctx)) => (resolver::ClientAuth::Reuse(*id), None),
+                Some((id, _)) => (resolver::ClientAuth::Reuse(*id), None),
                 None => {
                     let principal = principal.as_ref().map(|s| s.as_bytes());
                     let target = target.as_bytes();

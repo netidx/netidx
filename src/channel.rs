@@ -60,19 +60,19 @@ impl<'a, C: Krb5Ctx + Clone> Msg<'a, C> {
             match self.con.ctx {
                 None => {
                     self.head.put_u32(self.body.len() as u32);
-                    self.head.unsplit(self.body);
-                    self.con.buf.unsplit(self.head);
+                    self.head.unsplit(self.body.split());
+                    self.con.buf.unsplit(self.head.split());
                 }
-                Some(ctx) => {
+                Some(ref ctx) => {
                     let buf = ctx.wrap(true, &*self.body)?;
                     if buf.len() > LEN_MASK as usize {
                         bail!("message too large {} > {}", buf.len(), LEN_MASK)
                     }
                     self.head.put_u32(buf.len() as u32 | ENC_MASK);
                     self.body.clear();
-                    self.head.unsplit(self.body);
+                    self.head.unsplit(self.body.split());
                     self.head.extend_from_slice(&*buf);
-                    self.con.buf.unsplit(self.head);
+                    self.con.buf.unsplit(self.head.split());
                 }
             }
             self.finished = true;
@@ -215,7 +215,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
                 if encrypted {
                     match self.ctx {
                         None => bail!("a decryption context is required"),
-                        Some(ctx) => {
+                        Some(ref ctx) => {
                             self.buf.advance(mem::size_of::<u32>());
                             let buf = ctx.unwrap(&*self.buf.split_to(len))?;
                             self.decrypted.extend_from_slice(&*buf);
