@@ -204,6 +204,13 @@ async fn connect(
             })
             .await
         );
+        match new_ctx {
+            Some(ref ctx) => { con.set_ctx(Some(ctx.clone())); }
+            None => match ctx {
+                None => (),
+                Some((_, ref ctx)) => { con.set_ctx(Some(ctx.clone())); }
+            }
+        }
         let r: resolver::ServerHello = try_cont!("hello reply", con.receive().await);
         // CR estokes: replace this with proper logging
         match (desired_auth, r.auth) {

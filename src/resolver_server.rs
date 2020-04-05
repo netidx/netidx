@@ -149,7 +149,6 @@ static MAX_TTL: u64 = 3600;
 
 struct ClientState {
     ctxid: Option<CtxId>,
-    ctx: Option<ServerCtx>,
     uifo: Arc<UserInfo>,
     write_addr: Option<SocketAddr>,
     ttl: Duration,
@@ -172,7 +171,6 @@ async fn hello_client(
     match hello {
         ClientHello::ReadOnly(ClientAuth::Anonymous) => Ok(ClientState {
             ctxid: None,
-            ctx: None,
             uifo: ANONYMOUS.clone(),
             write_addr: None,
             ttl: READER_TTL,
@@ -186,6 +184,7 @@ async fn hello_client(
                 None => bail!("id not recognized"),
                 Some(ctx) => {
                     let uifo = secstore.ifo(Some(&ctx.client()?))?;
+                    con.set_ctx(Some(ctx));
                     send(
                         con,
                         ServerHello {
@@ -196,7 +195,6 @@ async fn hello_client(
                     .await?;
                     Ok(ClientState {
                         ctxid: Some(id),
-                        ctx: Some(ctx),
                         uifo,
                         write_addr: None,
                         ttl: READER_TTL,
@@ -214,6 +212,7 @@ async fn hello_client(
                     ttl_expired: false,
                     auth: ServerAuth::Accepted(tok, Some(id)),
                 };
+                con.set_ctx(Some(ctx));
                 match send(con, h).await {
                     Ok(()) => (),
                     Err(e) => {
@@ -223,7 +222,6 @@ async fn hello_client(
                 }
                 Ok(ClientState {
                     ctxid: Some(id),
-                    ctx: Some(ctx),
                     uifo,
                     write_addr: None,
                     ttl: READER_TTL,
@@ -250,7 +248,6 @@ async fn hello_client(
                     send(con, h).await?;
                     ClientState {
                         ctxid: None,
-                        ctx: None,
                         uifo: ANONYMOUS.clone(),
                         write_addr: Some(write_addr),
                         ttl,
@@ -269,10 +266,10 @@ async fn hello_client(
                                 ttl_expired,
                                 auth: ServerAuth::Reused,
                             };
+                            con.set_ctx(Some(ctx));
                             send(con, h).await?;
                             ClientState {
                                 ctxid: None,
-                                ctx: Some(ctx),
                                 uifo,
                                 write_addr: Some(write_addr),
                                 ttl,
@@ -289,6 +286,7 @@ async fn hello_client(
                             ttl_expired,
                             auth: ServerAuth::Accepted(tok, None),
                         };
+                        con.set_ctx(Some(ctx.clone()));
                         send(con, h).await?;
                         let mut con: Channel<ServerCtx> = Channel::new(
                             time::timeout(HELLO_TIMEOUT, TcpStream::connect(write_addr))
@@ -314,7 +312,6 @@ async fn hello_client(
                                 secstore.store_write(write_addr, ctx.clone());
                                 ClientState {
                                     ctxid: None,
-                                    ctx: Some(ctx),
                                     uifo,
                                     write_addr: Some(write_addr),
                                     ttl,
