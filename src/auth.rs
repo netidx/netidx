@@ -1,7 +1,6 @@
 use crate::{
     config::PMapFile,
     path::Path,
-    protocol::resolver::CtxId,
 };
 use failure::Error;
 use std::{
@@ -328,7 +327,7 @@ pub(crate) mod syskrb5 {
 
     pub(crate) struct SysKrb5;
 
-    pub(crate) static sys_krb5: SysKrb5 = SysKrb5;
+    pub(crate) static SYS_KRB5: SysKrb5 = SysKrb5;
 
     impl Krb5 for SysKrb5 {
         type Buf = Buf;

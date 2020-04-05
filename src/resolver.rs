@@ -1,6 +1,6 @@
 use crate::{
     auth::{
-        syskrb5::{sys_krb5, ClientCtx},
+        syskrb5::{SYS_KRB5, ClientCtx},
         Krb5, Krb5Ctx,
     },
     channel::Channel,
@@ -144,7 +144,7 @@ fn create_ctx(
     principal: Option<&[u8]>,
     target_principal: &[u8],
 ) -> Result<(ClientCtx, Vec<u8>)> {
-    let ctx = sys_krb5.create_client_ctx(principal, target_principal)?;
+    let ctx = SYS_KRB5.create_client_ctx(principal, target_principal)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
         Some(tok) => Ok((ctx, Vec::from(&*tok))),

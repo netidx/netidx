@@ -1,34 +1,23 @@
 use crate::{
     auth::{
-        sysgmapper::Mapper,
-        syskrb5::{sys_krb5, ServerCtx},
-        Krb5, Krb5Ctx, Krb5ServerCtx, PMap, Permissions, UserDb, UserInfo, ANONYMOUS,
+        syskrb5::ServerCtx, Krb5Ctx, Krb5ServerCtx, Permissions, UserInfo, ANONYMOUS,
     },
     channel::Channel,
     config,
     path::Path,
     protocol::{
         publisher,
-        resolver::{
-            ClientAuth, ClientHello, CtxId, From, PermissionToken, ServerAuth,
-            ServerHello, To,
-        },
+        resolver::{ClientAuth, ClientHello, CtxId, From, ServerAuth, ServerHello, To},
     },
     resolver_store::Store,
-    secstore::{SecStore, SecStoreInner},
-    utils::mp_encode,
+    secstore::SecStore,
 };
-use arc_swap::{ArcSwap, Guard};
 use failure::Error;
 use futures::{prelude::*, select};
-use fxhash::FxBuildHasher;
-use parking_lot::Mutex;
 use rand::Rng;
-use smallvec::SmallVec;
 use std::{
-    collections::HashMap,
     convert::TryFrom,
-    io, mem,
+    mem,
     net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -53,10 +42,12 @@ fn handle_batch(
     con: &mut Channel<ServerCtx>,
 ) -> Result<(), Error> {
     let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
-        secstore.map(|s| s.pmap()).map(|pm| {
-            pm.allowed_forall(paths.iter().map(|p| p.as_ref()), perm, &state.uifo)
-        })
-        .unwrap_or(true)
+        secstore
+            .map(|s| s.pmap())
+            .map(|pm| {
+                pm.allowed_forall(paths.iter().map(|p| p.as_ref()), perm, &state.uifo)
+            })
+            .unwrap_or(true)
     };
     match state.write_addr {
         None => {
@@ -85,7 +76,8 @@ fn handle_batch(
                         }
                     }
                     To::List(path) => {
-                        let allowed = secstore.map(|s| s.pmap())
+                        let allowed = secstore
+                            .map(|s| s.pmap())
                             .map(|pm| pm.allowed(&*path, Permissions::LIST, &state.uifo))
                             .unwrap_or(true);
                         if allowed {

@@ -2,7 +2,7 @@ use crate::{
     config::PMapFile,
     auth::{
         sysgmapper::Mapper,
-        syskrb5::{sys_krb5, ServerCtx},
+        syskrb5::{SYS_KRB5, ServerCtx},
         Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
     },
     protocol::resolver::CtxId,
@@ -125,7 +125,7 @@ impl SecStore {
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
-        let ctx = sys_krb5.create_server_ctx(self.principal.as_bytes())?;
+        let ctx = SYS_KRB5.create_server_ctx(self.principal.as_bytes())?;
         let tok = ctx
             .step(Some(tok))?
             .map(|b| Vec::from(&*b))
