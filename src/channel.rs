@@ -1,9 +1,8 @@
-use crate::utils::BytesWriter;
+use crate::{utils::BytesWriter, auth::Krb5Ctx};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    io::{Error, ErrorKind},
     mem,
     result::Result,
     ops::Drop,
@@ -17,18 +16,21 @@ use tokio::{
     },
     task,
 };
+use failure::Error;
 use futures::prelude::*;
 
 const BUF: usize = 4096;
+const LEN_MASK: u32 = 0x7FFFFFFF;
+const ENC_MASK: u32 = 0x80000000;
 
-pub(crate) struct Msg<'a> {
+pub(crate) struct Msg<'a, C> {
     head: BytesMut,
     body: BytesMut,
-    con: &'a mut WriteChannel,
+    con: &'a mut WriteChannel<C>,
     finished: bool,
 }
 
-impl<'a> Drop for Msg<'a> {
+impl<'a, C: Krb5Ctx + Clone> Drop for Msg<'a, C> {
     fn drop(&mut self) {
         if !self.finished {
             self.head.clear();
@@ -39,7 +41,7 @@ impl<'a> Drop for Msg<'a> {
     }
 }
 
-impl<'a> Msg<'a> {
+impl<'a, C: Krb5Ctx + Clone> Msg<'a, C> {
     pub(crate) fn pack_ut(&mut self, msg: &Bytes) {
         self.body.extend_from_slice(&**msg);
     }
@@ -52,27 +54,40 @@ impl<'a> Msg<'a> {
     }
 
     pub(crate) fn finish(mut self) -> Result<(), Error> {
-        if self.body.len() > u32::max_value() as usize {
-            Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("message too large {} > {}", self.body.len(), u32::max_value()),
-            ))
+        if self.body.len() > LEN_MASK as usize {
+            bail!("message too large {} > {}", self.body.len(), LEN_MASK)
         } else {
-            self.head.put_u32(self.body.len() as u32);
-            self.head.unsplit(self.body.split());
-            self.con.buf.unsplit(self.head.split());
+            match self.con.ctx {
+                None => {
+                    self.head.put_u32(self.body.len() as u32);
+                    self.head.unsplit(self.body);
+                    self.con.buf.unsplit(self.head);
+                }
+                Some(ctx) => {
+                    let buf = ctx.wrap(true, &*self.body)?;
+                    if buf.len() > LEN_MASK as usize {
+                        bail!("message too large {} > {}", buf.len(), LEN_MASK)
+                    }
+                    self.head.put_u32(buf.len() as u32 | ENC_MASK);
+                    self.body.clear();
+                    self.head.unsplit(self.body);
+                    self.head.extend_from_slice(&*buf);
+                    self.con.buf.unsplit(self.head);
+                }
+            }
             self.finished = true;
             Ok(())
         }
     }
 }
 
-pub(crate) struct WriteChannel {
+pub(crate) struct WriteChannel<C> {
     to_flush: UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)>,
     buf: BytesMut,
+    ctx: Option<C>
 }
 
-impl WriteChannel {
+impl<C: Krb5Ctx + Clone> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel {
         WriteChannel {
             to_flush: WriteChannel::flush_task(socket),
@@ -80,6 +95,10 @@ impl WriteChannel {
         }
     }
 
+    pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
+        self.ctx = ctx;
+    }
+    
     fn flush_task(
         mut soc: WriteHalf<TcpStream>,
     ) -> UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)> {
@@ -88,7 +107,7 @@ impl WriteChannel {
             mpsc::unbounded_channel();
         task::spawn(async move {
             while let Some((batch, fin)) = rx.next().await {
-                let _ = fin.send(soc.write_all(&*batch).await);
+                let _ = fin.send(Ok(soc.write_all(&*batch).await?));
             }
         });
         tx
@@ -98,18 +117,11 @@ impl WriteChannel {
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
     pub(crate) fn queue_send_ut(&mut self, msgs: &[Bytes]) -> Result<(), Error> {
-        let len = msgs.into_iter().fold(0, |s, m| s + m.len());
-        if len > u32::max_value() as usize {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("message too large {} > {}", len, u32::max_value()),
-            ));
+        let mut msgbuf = self.begin_msg();
+        for msg in msgs {
+            msgbuf.pack_ut(msg);
         }
-        if self.buf.remaining_mut() < mem::size_of::<u32>() {
-            self.buf.reserve(self.buf.capacity());
-        }
-        self.buf.put_u32(len as u32);
-        Ok(for m in msgs { self.buf.extend_from_slice(&**m); })
+        Ok(msgbuf.finish()?)
     }
 
     /// Same as queue_send_ut, but encodes the message using msgpack
@@ -117,10 +129,7 @@ impl WriteChannel {
         let mut msgbuf = self.begin_msg();
         match msgbuf.pack(msg) {
             Ok(()) => msgbuf.finish(),
-            Err(e) => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("can't encode message {}", e)
-            ))
+            Err(e) => bail!("can't encode message {}", e)
         }
     }
 
@@ -139,13 +148,7 @@ impl WriteChannel {
 
     pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
         self.queue_send(msg)?;
-        match self.flush().await {
-            Ok(r) => r,
-            Err(_) => Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                format!("flush process died while writing"),
-            ))
-        }
+        Ok(self.flush().await?)
     }
 
     pub(crate) fn bytes_queued(&self) -> usize {
@@ -162,17 +165,24 @@ impl WriteChannel {
     }
 }
 
-pub(crate) struct ReadChannel {
+pub(crate) struct ReadChannel<C> {
     socket: ReadHalf<TcpStream>,
     buf: BytesMut,
+    decrypted: BytesMut,
+    ctx: Option<C>,
 }
     
-impl ReadChannel {
+impl<C: Krb5Ctx + Clone> ReadChannel {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel {
         ReadChannel {
             socket,
             buf: BytesMut::with_capacity(BUF),
+            ctx: None,
         }
+    }
+
+    pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
+        self.ctx = ctx;
     }
     
     /// Read a load of bytes from the socket into the read buffer
@@ -182,24 +192,40 @@ impl ReadChannel {
         }
         match self.socket.read_buf(&mut self.buf).await {
             Err(e) => Err(e),
-            Ok(0) => Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                format!("eof while reading"),
-            )),
+            Ok(0) => bail!("eof while reading"),
             Ok(_) => Ok(()),
         }
     }
 
-    fn decode_from_buffer(&mut self) -> Option<Bytes> {
+    fn decode_from_buffer(&mut self) -> Result<Option<Bytes>, Error> {
         if self.buf.remaining() < mem::size_of::<u32>() {
-            None
+            Ok(None)
         } else {
-            let len = BigEndian::read_u32(&*self.buf) as usize;
+            let (encrypted, len) = {
+                let header = BigEndian::read_u32(&*self.buf);
+                if header > LEN_MASK {
+                    (true, (header & LEN_MASK) as usize)
+                } else {
+                    (false, header as usize)
+                }
+            };
             if self.buf.remaining() - mem::size_of::<u32>() < len {
-                None
+                Ok(None)
             } else {
-                self.buf.advance(mem::size_of::<u32>());
-                Some(self.buf.split_to(len).freeze())
+                if encrypted {
+                    match self.ctx {
+                        None => bail!("a decryption context is required"),
+                        Some(ctx) => {
+                            self.buf.advance(mem::size_of::<u32>());
+                            let buf = ctx.unwrap(&*self.buf.split_to(len))?;
+                            self.decrypted.extend_from_slice(&*buf);
+                            Ok(self.decrypted.split().freeze())
+                        }
+                    }
+                } else {
+                    self.buf.advance(mem::size_of::<u32>());
+                    Ok(Some(self.buf.split_to(len).freeze()))
+                }
             }
         }
     }
@@ -221,8 +247,7 @@ impl ReadChannel {
     }
 
     pub(crate) async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, Error> {
-        rmp_serde::decode::from_read(&*self.receive_ut().await?)
-            .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+        Ok(rmp_serde::decode::from_read(&*self.receive_ut().await?)?)
     }
 
     /// Receive one or more messages.
@@ -246,27 +271,29 @@ impl ReadChannel {
     ) -> Result<(), Error> {
         batch.push(self.receive().await?);
         while let Some(b) = self.decode_from_buffer() {
-            batch.push(
-                rmp_serde::decode::from_read(&*b)
-                    .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
-            );
+            batch.push(rmp_serde::decode::from_read(&*b)?);
         }
         Ok(())
     }
 }
 
-pub(crate) struct Channel {
-    read: ReadChannel,
-    write: WriteChannel,
+pub(crate) struct Channel<C> {
+    read: ReadChannel<C>,
+    write: WriteChannel<C>,
 }
 
-impl Channel {
+impl<C: Krb5Ctx + Clone> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel {
         let (rh, wh) = io::split(socket);
         Channel {
             read: ReadChannel::new(rh),
             write: WriteChannel::new(wh),
         }
+    }
+
+    pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
+        self.read.set_ctx(ctx.clone());
+        self.write.set_ctx(ctx);
     }
 
     pub(crate) fn split(self) -> (ReadChannel, WriteChannel) {

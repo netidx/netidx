@@ -182,7 +182,7 @@ impl<T> StoreInner<T> {
                     None => Ok((*addr, vec![])),
                     Some(ctx) => {
                         let msg = mp_encode(&PermissionToken(path.as_ref(), now))?;
-                        let tok = Vec::from(&*ctx.wrap(&*msg)?);
+                        let tok = Vec::from(&*ctx.wrap(true, &*msg)?);
                         (addr, tok)
                     }
                 }
