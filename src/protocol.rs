@@ -173,7 +173,7 @@ pub mod publisher {
         /// it doesn't exist
         NoSuchValue(Path),
         /// Permission to subscribe to the specified path is denied.
-        Denied(Path)
+        Denied(Path),
         /// You have been unsubscriped from Path. This can be the result
         /// of an Unsubscribe message, or it may be sent unsolicited, in
         /// the case the value is no longer published, or the publisher is

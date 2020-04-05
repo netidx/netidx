@@ -1,4 +1,8 @@
-use crate::{config::PMapFile, path::Path};
+use crate::{
+    config::PMapFile,
+    path::Path,
+    protocol::resolver::CtxId,
+};
 use failure::Error;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
@@ -199,7 +203,7 @@ impl PMap {
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
     write_ctxts: HashMap<SocketAddr, (Arc<UserInfo>, ServerCtx), FxBuildHasher>,
-    userdb: UserDb<Mapper>,
+    userdb: UserDb<sysgmapper::Mapper>,
 }
 
 impl SecStoreInner {

@@ -44,12 +44,13 @@
 
 #[macro_use] pub mod utils;
 mod resolver_store;
-pub mod path;
 mod auth;
+mod secstore;
+pub mod path;
 pub mod protocol;
 pub mod config;
 pub mod channel;
 pub mod resolver;
 pub mod resolver_server;
-pub mod publisher;
-pub mod subscriber;
+//pub mod publisher;
+//pub mod subscriber;

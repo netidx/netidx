@@ -3,8 +3,8 @@ use crate::{
         sysgmapper::Mapper,
         syskrb5::{sys_krb5, ServerCtx},
         Krb5, Krb5Ctx, Krb5ServerCtx, PMap, Permissions, UserDb, UserInfo, ANONYMOUS,
-        SecStore, SecStoreInner,
     },
+    secstore::{SecStore, SecStoreInner},
     channel::Channel,
     config,
     path::Path,
@@ -48,12 +48,12 @@ fn handle_batch(
     store: &Store<ClientInfo>,
     secstore: Option<&SecStore>,
     state: &ClientState,
-    msgs: impl Iterator<Item = resolver::To>,
-    con: &mut Channel,
+    msgs: impl Iterator<Item = To>,
+    con: &mut Channel<ServerCtx>,
 ) -> Result<(), Error> {
     let pmap = secstore.map(|s| s.pmap());
     let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
-        pmap.map(|pm| pm.allowed_all(paths.iter().map(|p| &*p), perm, user))
+        pmap.map(|pm| pm.allowed_all(paths.iter().map(|p| &*p), perm, &state.uifo))
             .unwrap_or(true)
     };
     match state.write_addr {
@@ -62,8 +62,8 @@ fn handle_batch(
             let secstore = secstore.map(|s| s.store.read());
             for m in msgs {
                 match m {
-                    resolver::To::Heartbeat => (),
-                    resolver::To::Resolve(paths) => {
+                    To::Heartbeat => (),
+                    To::Resolve(paths) => {
                         if allowed_for(&paths, Permissions::SUBSCRIBE) {
                             let now = Instant::now().as_secs();
                             let res = match secstore { 
@@ -78,25 +78,25 @@ fn handle_batch(
                                         .collect::<Result<Vec<_>, Error>>()?
                                 }
                             };
-                            con.queue_send(&resolver::From::Resolved(res))?
+                            con.queue_send(&From::Resolved(res))?
                         } else {
-                            con.queue_send(&resolver::From::Error("denied".into()))?
+                            con.queue_send(&From::Error("denied".into()))?
                         }
                     }
-                    resolver::To::List(path) => {
+                    To::List(path) => {
                         let allowed = pmap
-                            .map(|pm| pm.allowed(&*path, user, Permissions::LIST))
+                            .map(|pm| pm.allowed(&*path, &state.uifo, Permissions::LIST))
                             .unwrap_or(true);
                         if allowed {
-                            con.queue_send(&resolver::From::List(s.list(&path)))?
+                            con.queue_send(&From::List(s.list(&path)))?
                         } else {
-                            con.queue_send(&resolver::From::Error("denied".into()))
+                            con.queue_send(&From::Error("denied".into()))
                         }
                     }
-                    resolver::To::Publish(_)
-                    | resolver::To::Unpublish(_)
-                    | resolver::To::Clear => {
-                        con.queue_send(&resolver::From::Error("read only".into()))?
+                    To::Publish(_)
+                    | To::Unpublish(_)
+                    | To::Clear => {
+                        con.queue_send(&From::Error("read only".into()))?
                     }
                 }
             }
@@ -105,13 +105,13 @@ fn handle_batch(
             let mut s = store.write();
             for m in msgs {
                 match m {
-                    resolver::To::Heartbeat => (),
-                    resolver::To::Resolve(_) | resolver::To::List(_) => {
-                        con.queue_send(&resolver::From::Error("write only".into()))?
+                    To::Heartbeat => (),
+                    To::Resolve(_) | To::List(_) => {
+                        con.queue_send(&From::Error("write only".into()))?
                     }
-                    resolver::To::Publish(paths) => {
+                    To::Publish(paths) => {
                         if !paths.iter().all(Path::is_absolute) {
-                            con.queue_send(&resolver::From::Error(
+                            con.queue_send(&From::Error(
                                 "absolute paths required".into(),
                             ))?
                         } else {
@@ -119,18 +119,18 @@ fn handle_batch(
                                 for path in paths {
                                     s.publish(path, write_addr);
                                 }
-                                con.queue_send(&resolver::From::Published)?
+                                con.queue_send(&From::Published)?
                             } else {
-                                con.queue_send(&resolver::From::Error("denied".into()))
+                                con.queue_send(&From::Error("denied".into()))
                             }
                         }
                     }
-                    resolver::To::Unpublish(paths) => {
+                    To::Unpublish(paths) => {
                         if allowed_for(&paths, Permissions::PUBLISH) {
                             for path in paths {
                                 s.unpublish(path, write_addr);
                             }
-                            con.queue_send(&resolver::From::Unpublished)?
+                            con.queue_send(&From::Unpublished)?
                         }
                     }
                 }
@@ -318,7 +318,6 @@ async fn hello_client(
 async fn client_loop(
     store: Store<ClientInfo>,
     s: TcpStream,
-    origin: SocketAddr,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
 ) -> Result<(), Error> {
@@ -326,7 +325,7 @@ async fn client_loop(
     let mut con = Channel::new(s);
     let (tx_stop, rx_stop) = oneshot::channel();
     let state =
-        hello_client(&store, &mut con, origin, secstore.as_ref(), tx_stop).await?;
+        hello_client(&store, &mut con, secstore.as_ref(), tx_stop).await?;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -407,7 +406,8 @@ async fn server_loop(
     let published: Store<ClientInfo> = Store::new();
     let secstore = match cfg.auth {
         config::Auth::Anonymous => None,
-        config::Auth::Krb5 { principal } => Some(SecStore::new(principal.clone())),
+        config::Auth::Krb5 { principal, permissions } =>
+            Some(SecStore::new(principal.clone())),
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
@@ -418,7 +418,7 @@ async fn server_loop(
         select! {
             cl = listener.accept().fuse() => match cl {
                 Err(_) => (),
-                Ok((client, sa)) => {
+                Ok((client, _)) => {
                     if connections.fetch_add(1, Ordering::Relaxed) < cfg.max_connections {
                         let connections = connections.clone();
                         let published = published.clone();
@@ -426,9 +426,7 @@ async fn server_loop(
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = client_loop(
-                                published, client, sa, rx, secstore
-                            ).await;
+                            let _ = client_loop(published, client, rx, secstore).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
