@@ -244,7 +244,7 @@ pub(crate) mod syskrb5 {
     use std::time::Duration;
     use tokio::task;
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     pub(crate) struct ClientCtx(GssClientCtx);
 
     impl Krb5Ctx for ClientCtx {
@@ -277,7 +277,7 @@ pub(crate) mod syskrb5 {
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     pub(crate) struct ServerCtx(GssServerCtx);
 
     impl Krb5Ctx for ServerCtx {

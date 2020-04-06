@@ -1,6 +1,6 @@
 use crate::{
     auth::{
-        syskrb5::{SYS_KRB5, ClientCtx},
+        syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
     },
     channel::Channel,
@@ -8,10 +8,12 @@ use crate::{
     path::Path,
     protocol::resolver::{self, CtxId},
 };
+use arc_swap::ArcSwap;
 use failure::Error;
 use futures::{prelude::*, select};
 use std::{
-    collections::HashSet, marker::PhantomData, net::SocketAddr, result, time::Duration,
+    collections::HashSet, marker::PhantomData, net::SocketAddr, result, sync::Arc,
+    time::Duration,
 };
 use tokio::{
     net::TcpStream,
@@ -53,6 +55,7 @@ pub enum Auth {
 #[derive(Debug, Clone)]
 pub struct Resolver<R> {
     sender: mpsc::UnboundedSender<ToCon>,
+    ctx: ArcSwap<Option<ClientCtx>>,
     kind: PhantomData<R>,
 }
 
@@ -72,12 +75,22 @@ impl<R: ReadableOrWritable> Resolver<R> {
         desired_auth: Auth,
     ) -> Result<Resolver<WriteOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let ctx = ArcSwap::from(Arc::new(None));
+        let ctx_c = ctx.clone();
+
         task::spawn(async move {
-            let _ = connection(receiver, resolver, Some(publisher), desired_auth);
+            let _ = connection(
+                receiver,
+                resolver,
+                Some(publisher),
+                desired_auth,
+                ctx_c,
+            );
         });
         Ok(Resolver {
             sender,
             kind: PhantomData,
+            ctx,
         })
     }
 
@@ -88,12 +101,15 @@ impl<R: ReadableOrWritable> Resolver<R> {
         desired_auth: Auth,
     ) -> Result<Resolver<ReadOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let ctx = ArcSwap::from(Arc::new(None));
+        let ctx_c = ctx.clone();
         task::spawn(async move {
-            let _ = connection(receiver, resolver, None, desired_auth);
+            let _ = connection(receiver, resolver, None, desired_auth, ctx_c);
         });
         Ok(Resolver {
             sender,
             kind: PhantomData,
+            ctx,
         })
     }
 }
@@ -114,6 +130,10 @@ impl<R: Readable + ReadableOrWritable> Resolver<R> {
             resolver::From::List(v) => Ok(v),
             _ => bail!("unexpected response"),
         }
+    }
+
+    pub(crate) fn get_ctx(&self) -> Option<ClientCtx> {
+        (**self.ctx.load()).clone()
     }
 }
 
@@ -205,11 +225,15 @@ async fn connect(
             .await
         );
         match new_ctx {
-            Some(ref ctx) => { con.set_ctx(Some(ctx.clone())); }
+            Some(ref ctx) => {
+                con.set_ctx(Some(ctx.clone()));
+            }
             None => match ctx {
                 None => (),
-                Some((_, ref ctx)) => { con.set_ctx(Some(ctx.clone())); }
-            }
+                Some((_, ref ctx)) => {
+                    con.set_ctx(Some(ctx.clone()));
+                }
+            },
         }
         let r: resolver::ServerHello = try_cont!("hello reply", con.receive().await);
         // CR estokes: replace this with proper logging
@@ -258,11 +282,26 @@ async fn connect(
     }
 }
 
+fn set_ctx(
+    ctx: &Option<(Option<CtxId>, ClientCtx)>,
+    ctxswp: &ArcSwap<Option<ClientCtx>>,
+) {
+    match ctx {
+        None => {
+            ctxswp.store(Arc::new(None));
+        }
+        Some((_, ref ctx)) => {
+            ctxswp.store(Arc::new(Some(ctx.clone())));
+        }
+    }
+}
+
 async fn connection(
     receiver: mpsc::UnboundedReceiver<ToCon>,
     resolver: config::Resolver,
     publisher: Option<SocketAddr>,
     desired_auth: Auth,
+    ctxswp: ArcSwap<Option<ClientCtx>>,
 ) -> Result<()> {
     let mut published = HashSet::new();
     let mut con: Option<Channel<ClientCtx>> = None;
@@ -293,6 +332,7 @@ async fn connection(
                                 &resolver, publisher, &published,
                                 &mut ctx, &desired_auth
                             ).await?);
+                            set_ctx(&ctx, &ctxswp);
                             break;
                         },
                         Some(ref mut c) =>
@@ -316,6 +356,7 @@ async fn connection(
                                     &resolver, publisher, &published,
                                     &mut ctx, &desired_auth
                                 ).await?);
+                                set_ctx(&ctx, &ctxswp);
                                 con.as_mut().unwrap()
                             }
                         };
