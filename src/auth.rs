@@ -371,7 +371,7 @@ pub(crate) mod syskrb5 {
         // it to the user.
         fn create_server_ctx(
             &self,
-            principal: &[u8],
+            principal: Option<&[u8]>,
         ) -> Result<Self::Krb5ServerCtx, Error> {
             task::block_in_place(|| {
                 let name = Some(

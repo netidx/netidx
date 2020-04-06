@@ -1,38 +1,39 @@
 use crate::{
-    utils::mp_encode,
-    path::Path,
-    resolver::{Resolver, Auth, WriteOnly},
+    auth::{syskrb5::{ClientCtx, ServerCtx, SYS_KRB5}, Krb5Ctx},
     channel::Channel,
-    protocol::{Id, publisher},
     config,
+    path::Path,
+    protocol::{publisher, Id},
+    resolver::{Auth, Resolver, WriteOnly},
+    utils::mp_encode,
 };
-use std::{
-    mem,
-    result::Result,
-    marker::PhantomData,
-    collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
-    sync::{Arc, Weak},
-    default::Default,
-    time::Duration,
-};
-use futures::{
-    prelude::*,
-    select,
-};
-use tokio::{
-    task,
-    sync::{oneshot, mpsc::{channel, Receiver, Sender}},
-    net::{TcpStream, TcpListener},
-    time,
-};
+use bytes::Bytes;
+use crossbeam::queue::SegQueue;
+use failure::Error;
+use futures::{prelude::*, select};
 use fxhash::FxBuildHasher;
+use parking_lot::Mutex;
 use rand::{self, Rng};
 use serde::Serialize;
-use failure::Error;
-use crossbeam::queue::SegQueue;
-use bytes::Bytes;
-use parking_lot::Mutex;
+use std::{
+    collections::{HashMap, HashSet},
+    default::Default,
+    marker::PhantomData,
+    mem,
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
+    result::Result,
+    sync::{Arc, Weak},
+    time::Duration,
+    convert::TryFrom,
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        oneshot,
+    },
+    task, time,
+};
 
 // CR estokes: add a handler for lazy publishing (delegated subtrees)
 
@@ -92,10 +93,14 @@ impl<T: Serialize> Val<T> {
 
     /// Get the unique `Id` of this `Val`. This id is unique on this
     /// publisher only, no attempt is made to make it globally unique.
-    pub fn id(&self) -> Id { self.0.id }
+    pub fn id(&self) -> Id {
+        self.0.id
+    }
 
     /// Get a reference to the `Path` of this published value.
-    pub fn path(&self) -> &Path { &self.0.path }
+    pub fn path(&self) -> &Path {
+        &self.0.path
+    }
 }
 
 /// Except that you send raw bytes, this is exactly the same as a
@@ -114,10 +119,14 @@ impl UVal {
     }
 
     /// Same as `Val::id`
-    pub fn id(&self) -> Id { self.0.id }
+    pub fn id(&self) -> Id {
+        self.0.id
+    }
 
     /// Same as `Val::path`
-    pub fn path(&self) -> &Path { &self.0.path }
+    pub fn path(&self) -> &Path {
+        &self.0.path
+    }
 }
 
 #[derive(Debug)]
@@ -185,7 +194,9 @@ impl Drop for PublisherInner {
     fn drop(&mut self) {
         if self.cleanup() {
             let mut resolver = self.resolver.clone();
-            tokio::spawn(async move { let _ = resolver.clear().await; });
+            tokio::spawn(async move {
+                let _ = resolver.clear().await;
+            });
         }
     }
 }
@@ -212,7 +223,7 @@ pub enum BindCfg {
     /// unused port as in `Local`.
     Addr(IpAddr),
     /// Bind to the specifed `SocketAddr`, error if it is in use.
-    Exact(SocketAddr)
+    Exact(SocketAddr),
 }
 
 impl Default for BindCfg {
@@ -243,14 +254,16 @@ impl Publisher {
     pub async fn new(
         resolver: config::Resolver,
         desired_auth: Auth,
-        bind_cfg: BindCfg
+        bind_cfg: BindCfg,
     ) -> Result<Publisher, Error> {
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
             BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr, Error> {
-                    Ok((ip, port).to_socket_addrs()?.next()
-                       .ok_or_else(|| format_err!("socketaddrs bug"))?)
+                    Ok((ip, port)
+                        .to_socket_addrs()?
+                        .next()
+                        .ok_or_else(|| format_err!("socketaddrs bug"))?)
                 };
                 let ip = match bind_cfg {
                     BindCfg::Exact(_) => unreachable!(),
@@ -260,13 +273,17 @@ impl Publisher {
                 };
                 let mut port = 5000;
                 loop {
-                    if port >= 32768 { bail!("couldn't allocate a port"); }
+                    if port >= 32768 {
+                        bail!("couldn't allocate a port");
+                    }
                     port = rand_port(port);
                     let addr = mkaddr(ip, port)?;
                     match TcpListener::bind(&addr).await {
                         Ok(l) => break (addr, l),
-                        Err(e) => if e.kind() != std::io::ErrorKind::AddrInUse {
-                            bail!(e)
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::AddrInUse {
+                                bail!(e)
+                            }
                         }
                     }
                 }
@@ -321,14 +338,16 @@ impl Publisher {
             }
         }
     }
-    
+
     /// get the `SocketAddr` that publisher is bound to
-    pub fn addr(&self) -> SocketAddr { self.0.lock().addr }
+    pub fn addr(&self) -> SocketAddr {
+        self.0.lock().addr
+    }
 
     fn publish_val_internal(
         &self,
         path: Path,
-        init: Bytes
+        init: Bytes,
     ) -> Result<Arc<UValInner>, Error> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
@@ -341,19 +360,23 @@ impl Publisher {
             let id = pb.next_id.take();
             let header = mp_encode(&publisher::From::Message(id))?;
             pb.by_path.insert(path.clone(), id);
-            pb.by_id.insert(id, PublishedUVal {
-                header,
-                current: init,
-                subscribed: HashMap::with_hasher(FxBuildHasher::default()),
-                wait_client: Vec::new(),
-            });
+            pb.by_id.insert(
+                id,
+                PublishedUVal {
+                    header,
+                    current: init,
+                    subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+                    wait_client: Vec::new(),
+                },
+            );
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
             Ok(Arc::new(UValInner {
-                id, path,
+                id,
+                path,
                 publisher: self.downgrade(),
-                updates: Arc::clone(&pb.updates)
+                updates: Arc::clone(&pb.updates),
             }))
         }
     }
@@ -367,7 +390,7 @@ impl Publisher {
     pub fn publish_val<T: Serialize>(
         &self,
         path: Path,
-        init: &T
+        init: &T,
     ) -> Result<Val<T>, Error> {
         let init = mp_encode(init)?;
         Ok(Val(self.publish_val_internal(path, init)?, PhantomData))
@@ -375,14 +398,10 @@ impl Publisher {
 
     /// Publish `Path` with initial raw `Bytes` `init`. This is the
     /// otherwise exactly the same as publish.
-    pub fn publish_val_ut(
-        &self,
-        path: Path,
-        init: Bytes,
-    ) -> Result<UVal, Error> {
+    pub fn publish_val_ut(&self, path: Path, init: Bytes) -> Result<UVal, Error> {
         Ok(UVal(self.publish_val_internal(path, init)?))
     }
-    
+
     /// Send all queued updates out to subscribers, and send all
     /// queued publish/unpublish operations to the resolver. When the
     /// future returned by this function is ready all data has been
@@ -413,7 +432,11 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {msgs: Vec::new(), done, timeout}
+                    to_client: ToClient {
+                        msgs: Vec::new(),
+                        done,
+                        timeout,
+                    },
                 }
             })
         }
@@ -433,12 +456,15 @@ impl Publisher {
                             ut.current = m.clone();
                             for (addr, sender) in ut.subscribed.iter() {
                                 let tc = get_tc(
-                                    *addr, sender, &mut flushes, &mut to_clients, timeout
+                                    *addr,
+                                    sender,
+                                    &mut flushes,
+                                    &mut to_clients,
+                                    timeout,
                                 );
-                                tc.to_client.msgs.push(ToClientMsg::Val(
-                                    ut.header.clone(),
-                                    m.clone()
-                                ));
+                                tc.to_client
+                                    .msgs
+                                    .push(ToClientMsg::Val(ut.header.clone(), m.clone()));
                             }
                         }
                     }
@@ -449,12 +475,15 @@ impl Publisher {
                                 if let Some(cl) = pb.clients.get_mut(&addr) {
                                     cl.subscribed.remove(&id);
                                     let tc = get_tc(
-                                        addr, &sender, &mut flushes, &mut to_clients,
-                                        timeout
+                                        addr,
+                                        &sender,
+                                        &mut flushes,
+                                        &mut to_clients,
+                                        timeout,
                                     );
-                                    tc.to_client.msgs.push(
-                                        ToClientMsg::Unpublish(m.clone())
-                                    );
+                                    tc.to_client
+                                        .msgs
+                                        .push(ToClientMsg::Unpublish(m.clone()));
                                 }
                             }
                         }
@@ -479,14 +508,16 @@ impl Publisher {
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
-    pub fn clients(&self) -> usize { self.0.lock().clients.len() }
+    pub fn clients(&self) -> usize {
+        self.0.lock().clients.len()
+    }
 
     /// Wait for at least one client to connect
     pub async fn wait_any_client(&self) {
         let wait = {
             let mut inner = self.0.lock();
             if inner.clients.len() > 0 {
-                return
+                return;
             } else {
                 let (tx, rx) = oneshot::channel();
                 inner.wait_any_client.push(tx);
@@ -529,26 +560,24 @@ fn handle_batch(
     let mut pb = t_st.0.lock();
     for msg in msgs {
         match msg {
-            publisher::To::Subscribe(path) => {
-                match pb.by_path.get(&path) {
-                    None => con.queue_send(&publisher::From::NoSuchValue(path))?,
-                    Some(id) => {
-                        let id = *id;
-                        let cl = pb.clients.get_mut(&addr).unwrap();
-                        cl.subscribed.insert(id);
-                        let sender = cl.to_client.clone();
-                        let ut = pb.by_id.get_mut(&id).unwrap();
-                        ut.subscribed.insert(*addr, sender);
-                        let mut msg = con.begin_msg();
-                        msg.pack(&publisher::From::Subscribed(path, id))?;
-                        msg.pack_ut(&ut.current);
-                        msg.finish()?;
-                        for tx in ut.wait_client.drain(..) {
-                            let _ = tx.send(());
-                        }
+            publisher::To::Subscribe(path) => match pb.by_path.get(&path) {
+                None => con.queue_send(&publisher::From::NoSuchValue(path))?,
+                Some(id) => {
+                    let id = *id;
+                    let cl = pb.clients.get_mut(&addr).unwrap();
+                    cl.subscribed.insert(id);
+                    let sender = cl.to_client.clone();
+                    let ut = pb.by_id.get_mut(&id).unwrap();
+                    ut.subscribed.insert(*addr, sender);
+                    let mut msg = con.begin_msg();
+                    msg.pack(&publisher::From::Subscribed(path, id))?;
+                    msg.pack_ut(&ut.current);
+                    msg.finish()?;
+                    for tx in ut.wait_client.drain(..) {
+                        let _ = tx.send(());
                     }
                 }
-            }
+            },
             publisher::To::Unsubscribe(id) => {
                 if let Some(ut) = pb.by_id.get_mut(&id) {
                     ut.subscribed.remove(&addr);
@@ -563,17 +592,57 @@ fn handle_batch(
 
 const HB: Duration = Duration::from_secs(5);
 
+async fn hello_client(
+    t: &PublisherWeak,
+    con: &mut Channel<ServerCtx>,
+    principal: &Option<String>,
+) -> Result<(), Error> {
+    let hello: publisher::Hello = con.receive().await?;
+    match hello {
+        publisher::Hello::Anonymous => {
+            Ok(con.send_one(&publisher::Hello::Anonymous).await?)
+        }
+        publisher::Hello::Token(tok) => match principal {
+            None => { Ok(con.send_one(&publisher::Hello::Anonymous).await?) }
+            Some(ref principal) => {
+                let ctx = SYS_KRB5.create_server_ctx(principal.as_bytes())?;
+                let tok = ctx
+                    .step(Some(&*tok))
+                    .map(|b| Vec::from(&*b))
+                    .ok_or_else(|| {
+                        format_err!("expected step to generate a token")
+                    })?;
+                con.send_one(&publisher::Hello::Token(tok)).await?;
+                con.set_ctx(Some(ctx));
+            }
+        }
+        publisher::Hello::ResolverAuthenticate(tok) => match t.upgrade() {
+            None => bail!("dead publisher"),
+            Some(t) => match t.0.lock().resolver.get_ctx() {
+                None => bail!("no security context"),
+                Some(ctx) => {
+                    let n = ctx.unwrap(&*tok)?;
+                    let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+                    let tok = Vec::from(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+                    Ok(con.send_one(&publisher::Hello::ResolverAuthenticate(tok))?)
+                }
+            }
+        }
+    }
+}
+
 async fn client_loop(
     t: PublisherWeak,
     addr: SocketAddr,
     msgs: Receiver<ToClient>,
     s: TcpStream,
 ) -> Result<(), Error> {
-    let mut con = Channel::new(s);
+    let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::To> = Vec::new();
     let mut msgs = msgs.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
+    hello_client(&t, &mut con).await?;
     loop {
         select! {
             _ = hb.next() => {

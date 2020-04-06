@@ -110,6 +110,8 @@ pub mod resolver {
 /// The protocol between the publisher and the subscriber. Messages in
 /// this protocol are structured as,
 ///
+/// hello from the client        `[u32, publisher::Hello]`
+/// hello from the server        `[u32, publisher::Hello]`
 /// messages to the publisher:   `[u32, publisher::To]`
 /// messages from the publisher: `[u32, publisher::From, optional Bytes]`
 ///
