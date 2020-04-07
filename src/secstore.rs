@@ -76,13 +76,13 @@ impl SecStoreInner {
 
 #[derive(Clone)]
 pub(crate) struct SecStore {
-    principal: Arc<String>,
+    principal: Arc<Option<String>>,
     pmap: ArcSwap<PMap>,
     pub(crate) store: Arc<RwLock<SecStoreInner>>,
 }
 
 impl SecStore {
-    pub(crate) fn new(principal: String, pmap: PMapFile) -> Result<Self, Error> {
+    pub(crate) fn new(principal: Option<String>, pmap: PMapFile) -> Result<Self, Error> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb)?;
         Ok(SecStore {
@@ -125,7 +125,7 @@ impl SecStore {
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
-        let ctx = SYS_KRB5.create_server_ctx(self.principal.as_bytes())?;
+        let ctx = SYS_KRB5.create_server_ctx(self.principal.map(|s| s.as_bytes()))?;
         let tok = ctx
             .step(Some(tok))?
             .map(|b| Vec::from(&*b))

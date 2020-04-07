@@ -20,7 +20,7 @@
 /// order.
 pub mod resolver {
     use crate::path::Path;
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, collections::HashMap};
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -91,7 +91,10 @@ pub mod resolver {
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum From {
-        Resolved(Vec<Vec<(SocketAddr, Vec<u8>)>>),
+        Resolved {
+            krb5_principals: HashMap<SocketAddr, String>,
+            addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
+        },
         List(Vec<Path>),
         Published,
         Unpublished,

@@ -61,16 +61,29 @@ fn handle_batch(
                             let now = SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)?
                                 .as_secs();
-                            let res = match sec {
+                            con.queue_send(&match sec {
                                 None => {
-                                    paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>()
+                                    From::Resolved {
+                                        krb5_principals: HashMap::new(),
+                                        addrs: paths.iter()
+                                            .map(|p| s.resolve(p))
+                                            .collect::<Vec<_>>()
+                                    }
                                 }
-                                Some(ref sec) => paths
-                                    .iter()
-                                    .map(|p| Ok(s.resolve_and_sign(&**sec, now, p)?))
-                                    .collect::<Result<Vec<_>, Error>>()?,
-                            };
-                            con.queue_send(&From::Resolved(res))?
+                                Some(ref sec) => {
+                                    let mut krb5_principals = HashMap::new();
+                                    let addrs = paths
+                                        .iter()
+                                        .map(|p| Ok(s.resolve_and_sign(
+                                            &**sec,
+                                            &mut krb5_principals,
+                                            now,
+                                            p
+                                        )?))
+                                        .collect::<Result<Vec<_>, Error>>()?;
+                                    From::Resolved { krb5_principals, addrs }
+                                }
+                            })?
                         } else {
                             con.queue_send(&From::Error("denied".into()))?
                         }

@@ -53,6 +53,12 @@ pub enum Auth {
 }
 
 #[derive(Debug, Clone)]
+pub struct Answer {
+    pub krb5_principals: HashMap<SocketAddr, String>,
+    pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Resolver<R> {
     sender: mpsc::UnboundedSender<ToCon>,
     ctx: ArcSwap<Option<ClientCtx>>,
@@ -118,9 +124,10 @@ impl<R: Readable + ReadableOrWritable> Resolver<R> {
     pub async fn resolve(
         &mut self,
         paths: Vec<Path>,
-    ) -> Result<Vec<Vec<(SocketAddr, Vec<u8>)>>> {
+    ) -> Result<Answer> {
         match self.send(resolver::To::Resolve(paths)).await? {
-            resolver::From::Resolved(ports) => Ok(ports),
+            resolver::From::Resolved {krb5_principals, addrs} =>
+                Ok(Answer { krb5_principals, addrs}),
             _ => bail!("unexpected response"),
         }
     }

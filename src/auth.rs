@@ -334,9 +334,6 @@ pub(crate) mod syskrb5 {
         type Krb5ClientCtx = ClientCtx;
         type Krb5ServerCtx = ServerCtx;
 
-        // CR estokes: this has to read files and potentially talk to
-        // the KDC, so it can block, we need to figure out how best to
-        // deal with that.
         fn create_client_ctx(
             &self,
             principal: Option<&[u8]>,
@@ -365,19 +362,15 @@ pub(crate) mod syskrb5 {
             })
         }
 
-        // CR estokes: Should we offer an api to set KRB5_KTNAME, or
-        // just let the user do it? At the moment I'm not sure heimdal
-        // uses the same environment variable/format, so maybe leave
-        // it to the user.
         fn create_server_ctx(
             &self,
             principal: Option<&[u8]>,
         ) -> Result<Self::Krb5ServerCtx, Error> {
             task::block_in_place(|| {
-                let name = Some(
+                let name = principal.map(|principal| {
                     Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
                         .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?,
-                );
+                }).transpose()?;
                 let cred = {
                     let mut s = OidSet::new()?;
                     s.add(&GSS_MECH_KRB5)?;
