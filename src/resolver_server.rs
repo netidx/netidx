@@ -24,6 +24,7 @@ use std::{
         Arc,
     },
     time::{Duration, SystemTime},
+    collections::HashMap,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -428,20 +429,24 @@ async fn client_loop(
 }
 
 async fn server_loop(
-    cfg: config::Resolver,
+    cfg: config::resolver_server::Config,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr, Error> {
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
     let secstore = match cfg.auth {
-        config::Auth::Anonymous => None,
-        config::Auth::Krb5 {
+        config::resolver_server::Auth::Anonymous => None,
+        config::resolver_server::Auth::Krb5 {
             principal,
             permissions,
         } => Some(SecStore::new(principal.clone(), permissions)?),
     };
-    let mut listener = TcpListener::bind(cfg.addr).await?;
+    let addr = match cfg.kind {
+        config::resolver_server::Kind::Master {addr} => addr,
+        config::resolver_server::Kind::Replica {addr, ..} => addr
+    };
+    let mut listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops = Vec::new();
@@ -489,7 +494,7 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: config::Resolver) -> Result<Server, Error> {
+    pub async fn new(cfg: config::resolver_server::Config) -> Result<Server, Error> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, recv_stop, send_ready);

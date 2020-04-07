@@ -1,5 +1,5 @@
 use crate::{
-    config::PMapFile,
+    config,
     path::Path,
 };
 use failure::Error;
@@ -137,7 +137,7 @@ pub(crate) struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
     pub(crate) fn from_file<M: GMapper>(
-        file: PMapFile,
+        file: config::resolver_server::PMap,
         db: &mut UserDb<M>,
     ) -> Result<Self, Error> {
         let mut pmap = HashMap::with_capacity(file.0.len());
@@ -223,7 +223,10 @@ pub(crate) trait Krb5 {
         target_principal: &[u8],
     ) -> Result<Self::Krb5ClientCtx, Error>;
 
-    fn create_server_ctx(&self, principal: &[u8]) -> Result<Self::Krb5ServerCtx, Error>;
+    fn create_server_ctx(
+        &self,
+        principal: Option<&[u8]>
+    ) -> Result<Self::Krb5ServerCtx, Error>;
 }
 
 #[cfg(unix)]
@@ -367,9 +370,9 @@ pub(crate) mod syskrb5 {
             principal: Option<&[u8]>,
         ) -> Result<Self::Krb5ServerCtx, Error> {
             task::block_in_place(|| {
-                let name = principal.map(|principal| {
-                    Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                        .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?,
+                let name = principal.map(|principal| -> Result<Name, Error> {
+                    Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                       .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?)
                 }).transpose()?;
                 let cred = {
                     let mut s = OidSet::new()?;

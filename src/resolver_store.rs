@@ -1,7 +1,7 @@
 use crate::{
     path::Path,
     secstore::SecStoreInner,
-    auth::Krb5Ctx,
+    auth::{Krb5Ctx, Krb5ServerCtx},
     utils::mp_encode,
     protocol::resolver::PermissionToken,
 };

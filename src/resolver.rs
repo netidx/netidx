@@ -12,8 +12,9 @@ use arc_swap::ArcSwap;
 use failure::Error;
 use futures::{prelude::*, select};
 use std::{
-    collections::HashSet, marker::PhantomData, net::SocketAddr, result, sync::Arc,
-    time::Duration,
+    collections::{HashMap, HashSet},
+    marker::PhantomData, net::SocketAddr, result,
+    sync::Arc, time::Duration,
 };
 use tokio::{
     net::TcpStream,
@@ -76,7 +77,7 @@ impl<R: ReadableOrWritable> Resolver<R> {
     }
 
     pub fn new_w(
-        resolver: config::Resolver,
+        resolver: config::resolver::Config,
         publisher: SocketAddr,
         desired_auth: Auth,
     ) -> Result<Resolver<WriteOnly>> {
@@ -100,10 +101,8 @@ impl<R: ReadableOrWritable> Resolver<R> {
         })
     }
 
-    // CR estokes: when given more than one socket address the
-    // resolver should make use of all of them.
     pub fn new_r(
-        resolver: config::Resolver,
+        resolver: config::resolver::Config,
         desired_auth: Auth,
     ) -> Result<Resolver<ReadOnly>> {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -178,8 +177,27 @@ fn create_ctx(
     }
 }
 
+fn choose_addr(
+    resolver: &config::resolver::Config,
+    publisher: &Option<SocketAddr>
+) -> SocketAddr {
+    match publisher {
+        Some(_) => resolver.master,
+        None => {
+            use rand::{self, Rng};
+            let mut rng = rand::thread_rng();
+            let i = rng.gen_range(0usize, resolver.replicas.len() + 1);
+            if i == 0 {
+                resolver.master
+            } else {
+                resolver.replicas[i - 1]
+            }
+        }
+    }
+}
+
 async fn connect(
-    resolver: &config::Resolver,
+    resolver: &config::resolver::Config,
     publisher: Option<SocketAddr>,
     published: &HashSet<Path>,
     ctx: &mut Option<(Option<CtxId>, ClientCtx)>,
@@ -191,19 +209,17 @@ async fn connect(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con = try_cont!("connect", TcpStream::connect(&resolver.addr).await);
+        let addr = &choose_addr(resolver, &publisher);
+        let con = try_cont!("connect", TcpStream::connect(&addr).await);
         let mut con = Channel::new(con);
         let (auth, new_ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (resolver::ClientAuth::Anonymous, None),
-            (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
+            (Auth::Krb5 { .. }, config::resolver::Auth::Anonymous) => {
                 bail!("server does not support authentication")
             }
             (
-                Auth::Krb5 { ref principal },
-                config::Auth::Krb5 {
-                    principal: ref target,
-                    ..
-                },
+                Auth::Krb5 {ref principal},
+                config::resolver::Auth::Krb5 {principal: ref target},
             ) => match ctx {
                 Some((id, _)) => (resolver::ClientAuth::Reuse(*id), None),
                 None => {
@@ -218,7 +234,7 @@ async fn connect(
             },
         };
         // the unwrap can't fail, we can always encode the message,
-        // and it's never bigger then 4 GB.
+        // and it's never bigger then 2 GB.
         try_cont!(
             "hello",
             con.send_one(&match publisher {
@@ -305,7 +321,7 @@ fn set_ctx(
 
 async fn connection(
     receiver: mpsc::UnboundedReceiver<ToCon>,
-    resolver: config::Resolver,
+    resolver: config::resolver::Config,
     publisher: Option<SocketAddr>,
     desired_auth: Auth,
     ctxswp: ArcSwap<Option<ClientCtx>>,
