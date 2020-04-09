@@ -22,28 +22,13 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+use fxhash::FxBuildHasher;
 
 static TTL: u64 = 600;
 static LINGER: u64 = 10;
 
 type FromCon = oneshot::Sender<resolver::From>;
 type ToCon = (resolver::To, FromCon);
-
-pub trait Readable {}
-pub trait Writeable {}
-pub trait ReadableOrWritable {}
-
-#[derive(Debug, Clone)]
-pub struct ReadOnly {}
-
-impl Readable for ReadOnly {}
-impl ReadableOrWritable for ReadOnly {}
-
-#[derive(Debug, Clone)]
-pub struct WriteOnly {}
-
-impl Writeable for WriteOnly {}
-impl ReadableOrWritable for WriteOnly {}
 
 type Result<T> = result::Result<T, Error>;
 
@@ -56,17 +41,17 @@ pub enum Auth {
 #[derive(Debug, Clone)]
 pub struct Answer {
     pub krb5_principals: HashMap<SocketAddr, String>,
+    pub resolver: SocketAddr,
     pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Resolver<R> {
+pub struct ResolverRead {
     sender: mpsc::UnboundedSender<ToCon>,
-    ctx: ArcSwap<Option<ClientCtx>>,
-    kind: PhantomData<R>,
+    ctx: ArcSwap<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>,
 }
 
-impl<R: ReadableOrWritable> Resolver<R> {
+impl ResolverRead {
     async fn send(&mut self, m: resolver::To) -> Result<resolver::From> {
         let (tx, rx) = oneshot::channel();
         self.sender.send((m, tx))?;
@@ -76,40 +61,15 @@ impl<R: ReadableOrWritable> Resolver<R> {
         }
     }
 
-    pub fn new_w(
-        resolver: config::resolver::Config,
-        publisher: SocketAddr,
-        desired_auth: Auth,
-    ) -> Result<Resolver<WriteOnly>> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let ctx = ArcSwap::from(Arc::new(None));
-        let ctx_c = ctx.clone();
-
-        task::spawn(async move {
-            let _ = connection(
-                receiver,
-                resolver,
-                Some(publisher),
-                desired_auth,
-                ctx_c,
-            );
-        });
-        Ok(Resolver {
-            sender,
-            kind: PhantomData,
-            ctx,
-        })
-    }
-
-    pub fn new_r(
+    pub fn new(
         resolver: config::resolver::Config,
         desired_auth: Auth,
-    ) -> Result<Resolver<ReadOnly>> {
+    ) -> Result<ResolverRead> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let ctx = ArcSwap::from(Arc::new(None));
         let ctx_c = ctx.clone();
         task::spawn(async move {
-            let _ = connection(receiver, resolver, None, desired_auth, ctx_c);
+            let _ = connection(receiver, resolver, None, desired_auth, ctx_c, 0);
         });
         Ok(Resolver {
             sender,

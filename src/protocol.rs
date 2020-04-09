@@ -36,49 +36,87 @@ pub mod resolver {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum ClientAuth {
+    pub enum ClientAuthRead {
         Anonymous,
-        Reuse(Option<CtxId>),
+        Reuse(CtxId),
         Token(Vec<u8>),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum ServerAuth {
+    pub enum ClientAuthWrite {
         Anonymous,
-        Reused,
-        Accepted(Vec<u8>, Option<CtxId>),
+        Reuse,
+        Token(Vec<u8>),
     }
 
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct ClientHelloWrite {
+        pub write_addr: SocketAddr,
+        pub auth: ClientAuthWrite,
+    }
+    
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientHello {
         /// Instruct the resolver server that this connection will not
         /// publish paths.
-        ReadOnly(ClientAuth),
+        ReadOnly(ClientAuthRead),
         /// Instruct the resolver server that this connection will
         /// only publish paths. All published paths will use the
         /// specified address `write_addr`, and the publisher must
         /// send a heartbeat at least every `ttl` seconds or the
         /// resolver server will purge all paths published by
         /// `write_addr`.
-        WriteOnly {
-            ttl: u64,
-            write_addr: SocketAddr,
-            auth: ClientAuth,
-        },
+        WriteOnly(ClientHelloWrite),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct ServerHello {
+    pub enum ServerHelloRead {
+        Anonymous,
+        Reused,
+        Accepted(Vec<u8>, CtxId)
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub enum ServerAuthWrite {
+        Anonymous,
+        Reused,
+        Accepted(Vec<u8>),
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct ServerHelloWrite {
         pub ttl_expired: bool,
-        pub auth: ServerAuth,
+        pub auth: ServerAuthWrite,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum To {
+    pub enum ToRead {
         /// Resolve the list of paths to addresses/ports
         Resolve(Vec<Path>),
         /// List the paths published under the specified root path
         List(Path),
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub enum FromRead {
+        Resolved {
+            krb5_principals: HashMap<SocketAddr, String>,
+            addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
+        },
+        List(Vec<Path>),
+        Error(String),
+    }
+
+    /// This is the format of the Vec<u8> passed back with each
+    /// Resolved msg, however it is encrypted with the publisher's
+    /// resolver security context. This allows the subscriber to prove
+    /// to the publisher that it is allowed to subscribe to the
+    /// specified path.
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct PermissionToken<'a>(pub &'a str, pub u64);
+    
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub enum ToWrite {
         /// Publish the list of paths
         Publish(Vec<Path>),
         /// Stop publishing the list of paths
@@ -90,24 +128,11 @@ pub mod resolver {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum From {
-        Resolved {
-            krb5_principals: HashMap<SocketAddr, String>,
-            addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
-        },
-        List(Vec<Path>),
+    pub enum FromWrite {
         Published,
         Unpublished,
         Error(String),
     }
-
-    /// This is the format of the Vec<u8> passed back with each
-    /// Resolved msg, however it is encrypted with the publisher's
-    /// security context. This allows the subscriber to prove to the
-    /// publisher that it is allowed to subscribe to the specified
-    /// path.
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct PermissionToken<'a>(pub &'a str, pub u64);
 }
 
 /// The protocol between the publisher and the subscriber. Messages in
@@ -124,6 +149,7 @@ pub mod resolver {
 /// encoding, and will not be interpreted at this layer.
 pub mod publisher {
     use crate::path::Path;
+    use std::net::SocketAddr;
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -171,7 +197,11 @@ pub mod publisher {
         /// token is a proof from the resolver server that this
         /// subscription is permitted. In the case of an anonymous
         /// connection this proof will be empty.
-        Subscribe(Path, Vec<u8>),
+        Subscribe {
+            path: Path,
+            resolver: SocketAddr,
+            token: Vec<u8>,
+        },
         /// Unsubscribe from the specified value, this will always result
         /// in an Unsubscibed message even if you weren't ever subscribed
         /// to the value, or it doesn't exist.

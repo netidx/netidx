@@ -16,6 +16,7 @@ use failure::Error;
 use futures::{prelude::*, select};
 use rand::Rng;
 use std::{
+    collections::HashMap,
     convert::TryFrom,
     mem,
     net::SocketAddr,
@@ -24,7 +25,6 @@ use std::{
         Arc,
     },
     time::{Duration, SystemTime},
-    collections::HashMap,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -63,26 +63,30 @@ fn handle_batch(
                                 .duration_since(SystemTime::UNIX_EPOCH)?
                                 .as_secs();
                             con.queue_send(&match sec {
-                                None => {
-                                    From::Resolved {
-                                        krb5_principals: HashMap::new(),
-                                        addrs: paths.iter()
-                                            .map(|p| s.resolve(p))
-                                            .collect::<Vec<_>>()
-                                    }
-                                }
+                                None => From::Resolved {
+                                    krb5_principals: HashMap::new(),
+                                    addrs: paths
+                                        .iter()
+                                        .map(|p| s.resolve(p))
+                                        .collect::<Vec<_>>(),
+                                },
                                 Some(ref sec) => {
                                     let mut krb5_principals = HashMap::new();
                                     let addrs = paths
                                         .iter()
-                                        .map(|p| Ok(s.resolve_and_sign(
-                                            &**sec,
-                                            &mut krb5_principals,
-                                            now,
-                                            p
-                                        )?))
+                                        .map(|p| {
+                                            Ok(s.resolve_and_sign(
+                                                &**sec,
+                                                &mut krb5_principals,
+                                                now,
+                                                p,
+                                            )?)
+                                        })
                                         .collect::<Result<Vec<_>, Error>>()?;
-                                    From::Resolved { krb5_principals, addrs }
+                                    From::Resolved {
+                                        krb5_principals,
+                                        addrs,
+                                    }
                                 }
                             })?
                         } else {
@@ -160,7 +164,7 @@ struct ClientState {
     ttl: Duration,
 }
 
-async fn hello_client(
+async fn hello_client_(
     store: &Store<ClientInfo>,
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
@@ -428,6 +432,199 @@ async fn client_loop(
     }
 }
 
+fn allowed_for(
+    secstore: Option<&SecStore>,
+    uifo: &Arc<UserInfo>,
+    paths: &Vec<Path>,
+    perm: Permissions,
+) -> bool {
+    secstore
+        .map(|s| {
+            let mut paths = paths.iter().map(|p| p.as_ref());
+            s.pmap().allowed_forall(paths, perm, uifo)
+        })
+        .unwrap_or(true)
+}
+
+async fn hello_client_write(
+    store: Store<ClientInfo>,
+    mut con: Channel<ServerCtx>,
+    server_stop: oneshot::Receiver<()>,
+    secstore: Option<SecStore>,
+    hello: ClientHelloWrite,
+) -> Result<(), Error> {
+    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
+        Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
+    }
+    let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
+    match hello.auth {
+        ClientAuthWrite::Anonymous => send(
+            &mut con,
+            ServerHelloWrite {
+                ttl_expired,
+                auth: ServerAuthWrite::Anonymous,
+            },
+        ),
+        
+    }
+}
+
+fn handle_batch_read(
+    store: &Store<ClientInfo>,
+    con: &mut Channel<ServerCtx>,
+    secstore: Option<&SecStore>,
+    uifo: &Arc<UserInfo>,
+    msgs: impl Iterator<Item = ToRead>,
+) -> Result<(), Error> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs();
+    let s = store.read();
+    let sec = secstore.map(|s| s.store.read());
+    for m in msgs {
+        match m {
+            ToRead::Resolve(paths) => {
+                if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
+                    con.queue_send(&match sec {
+                        None => From::Resolved {
+                            krb5_principals: HashMap::new(),
+                            addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
+                        },
+                        Some(ref sec) => {
+                            let mut krb5_principals = HashMap::new();
+                            let addrs = paths
+                                .iter()
+                                .map(|p| {
+                                    Ok(s.resolve_and_sign(
+                                        &**sec,
+                                        &mut krb5_principals,
+                                        now,
+                                        p,
+                                    )?)
+                                })
+                                .collect::<Result<Vec<_>, Error>>()?;
+                            From::Resolved {
+                                krb5_principals,
+                                addrs,
+                            }
+                        }
+                    })?
+                } else {
+                    con.queue_send(&From::Error("denied".into()))?
+                }
+            }
+            ToRead::List(path) => {
+                let allowed = secstore
+                    .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
+                    .unwrap_or(true);
+                if allowed {
+                    con.queue_send(&From::List(s.list(&path)))?
+                } else {
+                    con.queue_send(&From::Error("denied".into()))?
+                }
+            }
+        }
+    }
+}
+
+async fn client_loop_read(
+    store: Store<ClientInfo>,
+    mut con: Channel<ServerCtx>,
+    server_stop: oneshot::Receiver<()>,
+    secstore: Option<SecStore>,
+    uifo: Arc<UserInfo>,
+) -> Result<(), Error> {
+    let mut batch: Vec<ToRead> = Vec::new();
+    let mut server_stop = server_stop.fuse();
+    let mut act = false;
+    let mut timeout = time::interval_at(Instant::now() + READER_TTL, READER_TTL).fuse();
+    loop {
+        select! {
+            _ = server_stop => break Ok(()),
+            m = con.receive_batch(&mut batch).fuse() => {
+                m?;
+                act = true;
+                handle_batch_read(
+                    &store,
+                    &mut con,
+                    &secstore,
+                    &uifo,
+                    batch.drain()
+                ).await?;
+                con.flush().await?;
+            },
+            _ = timeout.next() => {
+                if act {
+                    act = false;
+                } else {
+                    bail!("client timed out");
+                }
+            }
+        }
+    }
+}
+
+async fn hello_client_read(
+    store: Store<ClientInfo>,
+    mut con: Channel<ServerCtx>,
+    server_stop: oneshot::Receiver<()>,
+    secstore: Option<SecStore>,
+    hello: ClientAuthRead,
+) -> Result<(), Error> {
+    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
+        Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
+    }
+    match hello {
+        ClientAuthRead::Anonymous => {
+            send(&mut con, &ServerHelloRead::Anonymous).await?;
+            let uifo = ANONYMOUS.clone();
+            Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+        }
+        ClientAuthRead::Reuse(id) => match secstore {
+            None => bail!("authentication requested but not supported"),
+            Some(secstore) => match secstore.get_read(&id) {
+                None => bail!("ctx id not found"),
+                Some(ctx) => {
+                    let uifo = secstore.ifo(Some(&ctx.client()?))?;
+                    con.set_ctx(Some(ctx));
+                    send(&mut con, &ServerHelloRead::Reused).await?;
+                    Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+                }
+            },
+        },
+        ClientAuthRead::Token(tok) => match secstore {
+            None => bail!("authentication requested but not supported"),
+            Some(secstore) => {
+                let (ctx, tok) = secstore.create(&tok)?;
+                let uifo = secstore.ifo(Some(&ctx.client()?))?;
+                let id = secstore.store_read(ctx.clone());
+                con.set_ctx(Some(ctx));
+                send(con, &ServerHelloRead::Accepted(tok, id)).await?;
+                Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+            }
+        },
+    }
+}
+
+async fn hello_client(
+    store: Store<ClientInfo>,
+    s: TcpStream,
+    server_stop: oneshot::Receiver<()>,
+    secstore: Option<SecStore>,
+) -> Result<(), Error> {
+    s.set_nodelay(true)?;
+    let mut con = Channel::new(s);
+    let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
+    match hello {
+        ClientHello::ReadOnly(hello) => {
+            Ok(hello_client_read(store, con, server_stop, secstore, hello).await?)
+        }
+        ClientHello::WriteOnly(hello) => {
+            Ok(hello_client_write(store, con, server_stop, secstore, hello).await?)
+        }
+    }
+}
+
 async fn server_loop(
     cfg: config::resolver_server::Config,
     stop: oneshot::Receiver<()>,
@@ -443,8 +640,8 @@ async fn server_loop(
         } => Some(SecStore::new(principal.clone(), permissions)?),
     };
     let addr = match cfg.kind {
-        config::resolver_server::Kind::Master {addr} => addr,
-        config::resolver_server::Kind::Replica {addr, ..} => addr
+        config::resolver_server::Kind::Master { addr } => addr,
+        config::resolver_server::Kind::Replica { addr, .. } => addr,
     };
     let mut listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
