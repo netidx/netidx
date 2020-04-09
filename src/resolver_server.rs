@@ -35,127 +35,9 @@ use tokio::{
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn handle_batch(
-    store: &Store<ClientInfo>,
-    secstore: Option<&SecStore>,
-    state: &ClientState,
-    msgs: impl Iterator<Item = To>,
-    con: &mut Channel<ServerCtx>,
-) -> Result<(), Error> {
-    let allowed_for = |paths: &Vec<Path>, perm: Permissions| -> bool {
-        secstore
-            .map(|s| s.pmap())
-            .map(|pm| {
-                pm.allowed_forall(paths.iter().map(|p| p.as_ref()), perm, &state.uifo)
-            })
-            .unwrap_or(true)
-    };
-    match state.write_addr {
-        None => {
-            let s = store.read();
-            let sec = secstore.map(|s| s.store.read());
-            for m in msgs {
-                match m {
-                    To::Heartbeat => (),
-                    To::Resolve(paths) => {
-                        if allowed_for(&paths, Permissions::SUBSCRIBE) {
-                            let now = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)?
-                                .as_secs();
-                            con.queue_send(&match sec {
-                                None => From::Resolved {
-                                    krb5_principals: HashMap::new(),
-                                    addrs: paths
-                                        .iter()
-                                        .map(|p| s.resolve(p))
-                                        .collect::<Vec<_>>(),
-                                },
-                                Some(ref sec) => {
-                                    let mut krb5_principals = HashMap::new();
-                                    let addrs = paths
-                                        .iter()
-                                        .map(|p| {
-                                            Ok(s.resolve_and_sign(
-                                                &**sec,
-                                                &mut krb5_principals,
-                                                now,
-                                                p,
-                                            )?)
-                                        })
-                                        .collect::<Result<Vec<_>, Error>>()?;
-                                    From::Resolved {
-                                        krb5_principals,
-                                        addrs,
-                                    }
-                                }
-                            })?
-                        } else {
-                            con.queue_send(&From::Error("denied".into()))?
-                        }
-                    }
-                    To::List(path) => {
-                        let allowed = secstore
-                            .map(|s| s.pmap())
-                            .map(|pm| pm.allowed(&*path, Permissions::LIST, &state.uifo))
-                            .unwrap_or(true);
-                        if allowed {
-                            con.queue_send(&From::List(s.list(&path)))?
-                        } else {
-                            con.queue_send(&From::Error("denied".into()))?
-                        }
-                    }
-                    To::Publish(_) | To::Unpublish(_) | To::Clear => {
-                        con.queue_send(&From::Error("read only".into()))?
-                    }
-                }
-            }
-        }
-        Some(write_addr) => {
-            let mut s = store.write();
-            for m in msgs {
-                match m {
-                    To::Heartbeat => (),
-                    To::Resolve(_) | To::List(_) => {
-                        con.queue_send(&From::Error("write only".into()))?
-                    }
-                    To::Publish(paths) => {
-                        if !paths.iter().all(Path::is_absolute) {
-                            con.queue_send(&From::Error(
-                                "absolute paths required".into(),
-                            ))?
-                        } else {
-                            if allowed_for(&paths, Permissions::PUBLISH) {
-                                for path in paths {
-                                    s.publish(path, write_addr);
-                                }
-                                con.queue_send(&From::Published)?
-                            } else {
-                                con.queue_send(&From::Error("denied".into()))?
-                            }
-                        }
-                    }
-                    To::Unpublish(paths) => {
-                        for path in paths {
-                            s.unpublish(path, write_addr);
-                        }
-                        con.queue_send(&From::Unpublished)?
-                    }
-                    To::Clear => {
-                        s.unpublish_addr(write_addr);
-                        s.gc();
-                        con.queue_send(&From::Unpublished)?
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-static READER_TTL: Duration = Duration::from_secs(120);
-static MIN_TTL: u64 = 60;
-static MAX_TTL: u64 = 3600;
+static READER_TTL: Duration = Duration::from_secs(60);
+static WRITER_TTL: Duration = Duration::from_secs(120);
 
 struct ClientState {
     ctxid: Option<CtxId>,
@@ -164,209 +46,78 @@ struct ClientState {
     ttl: Duration,
 }
 
-async fn hello_client_(
+fn allowed_for(
+    secstore: Option<&SecStore>,
+    uifo: &Arc<UserInfo>,
+    paths: &Vec<Path>,
+    perm: Permissions,
+) -> bool {
+    secstore
+        .map(|s| {
+            let mut paths = paths.iter().map(|p| p.as_ref());
+            s.pmap().allowed_forall(paths, perm, uifo)
+        })
+        .unwrap_or(true)
+}
+
+fn handle_batch_write(
     store: &Store<ClientInfo>,
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
-    tx_stop: oneshot::Sender<()>,
-) -> Result<ClientState, Error> {
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
-        Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
-    }
-    fn salt() -> u64 {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(0, u64::max_value() - 2)
-    }
-    let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
-    match hello {
-        ClientHello::ReadOnly(ClientAuth::Anonymous) => Ok(ClientState {
-            ctxid: None,
-            uifo: ANONYMOUS.clone(),
-            write_addr: None,
-            ttl: READER_TTL,
-        }),
-        ClientHello::ReadOnly(ClientAuth::Reuse(None)) => {
-            bail!("protocol error, expected auth token id")
-        }
-        ClientHello::ReadOnly(ClientAuth::Reuse(Some(id))) => match secstore {
-            None => bail!("authentication not supported"),
-            Some(secstore) => match secstore.get_read(&id) {
-                None => bail!("id not recognized"),
-                Some(ctx) => {
-                    let uifo = secstore.ifo(Some(&ctx.client()?))?;
-                    con.set_ctx(Some(ctx));
-                    send(
-                        con,
-                        ServerHello {
-                            ttl_expired: false,
-                            auth: ServerAuth::Reused,
-                        },
-                    )
-                    .await?;
-                    Ok(ClientState {
-                        ctxid: Some(id),
-                        uifo,
-                        write_addr: None,
-                        ttl: READER_TTL,
-                    })
-                }
-            },
-        },
-        ClientHello::ReadOnly(ClientAuth::Token(tok)) => match secstore {
-            None => bail!("authentication not supported"),
-            Some(secstore) => {
-                let (ctx, tok) = secstore.create(&tok)?;
-                let uifo = secstore.ifo(Some(&ctx.client()?))?;
-                let id = secstore.store_read(ctx.clone());
-                let h = ServerHello {
-                    ttl_expired: false,
-                    auth: ServerAuth::Accepted(tok, Some(id)),
-                };
-                con.set_ctx(Some(ctx));
-                match send(con, h).await {
-                    Ok(()) => (),
-                    Err(e) => {
-                        secstore.delete_read(&id);
-                        return Err(e);
-                    }
-                }
-                Ok(ClientState {
-                    ctxid: Some(id),
-                    uifo,
-                    write_addr: None,
-                    ttl: READER_TTL,
-                })
-            }
-        },
-        ClientHello::WriteOnly {
-            ttl,
-            write_addr,
-            auth,
-        } => {
-            if ttl < MIN_TTL || ttl > MAX_TTL {
-                bail!("invalid ttl")
-            }
-            let ttl = Duration::from_secs(ttl);
-            // this is a race, but if it races it'll resolve by the next heartbeat
-            let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
-            let client_state = match auth {
-                ClientAuth::Anonymous => {
-                    let h = ServerHello {
-                        ttl_expired,
-                        auth: ServerAuth::Anonymous,
-                    };
-                    send(con, h).await?;
-                    ClientState {
-                        ctxid: None,
-                        uifo: ANONYMOUS.clone(),
-                        write_addr: Some(write_addr),
-                        ttl,
-                    }
-                }
-                ClientAuth::Reuse(Some(_)) => {
-                    bail!("protocol error: id's are not used for write only clients")
-                }
-                ClientAuth::Reuse(None) => match secstore {
-                    None => bail!("authentication not supported"),
-                    Some(secstore) => match secstore.get_write(&write_addr) {
-                        None => bail!("session does not exist"),
-                        Some(ctx) => {
-                            let uifo = secstore.ifo(Some(&ctx.client()?))?;
-                            let h = ServerHello {
-                                ttl_expired,
-                                auth: ServerAuth::Reused,
-                            };
-                            con.set_ctx(Some(ctx));
-                            send(con, h).await?;
-                            ClientState {
-                                ctxid: None,
-                                uifo,
-                                write_addr: Some(write_addr),
-                                ttl,
-                            }
+    uifo: &Arc<UserInfo>,
+    write_addr: SocketAddr,
+    msgs: impl Iterator<Item = ToWrite>,
+) -> Result<(), Error> {
+    let mut s = store.write();
+    for m in msgs {
+        match m {
+            ToWrite::Publish(paths) => {
+                if !paths.iter().all(Path::is_absolute) {
+                    con.queue_send(&From::Error("absolute paths required".into()))?
+                } else {
+                    if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
+                        for path in paths {
+                            s.publish(path, write_addr);
                         }
-                    },
-                },
-                ClientAuth::Token(tok) => match secstore {
-                    None => bail!("authentication not supported"),
-                    Some(secstore) => {
-                        let (ctx, tok) = secstore.create(&tok)?;
-                        let uifo = secstore.ifo(Some(&ctx.client()?))?;
-                        let h = ServerHello {
-                            ttl_expired,
-                            auth: ServerAuth::Accepted(tok, None),
-                        };
-                        con.set_ctx(Some(ctx.clone()));
-                        send(con, h).await?;
-                        let mut con: Channel<ServerCtx> = Channel::new(
-                            time::timeout(HELLO_TIMEOUT, TcpStream::connect(write_addr))
-                                .await??,
-                        );
-                        let salt = salt();
-                        let tok = Vec::from(&*ctx.wrap(true, &salt.to_be_bytes())?);
-                        time::timeout(
-                            HELLO_TIMEOUT,
-                            con.send_one(&publisher::Hello::ResolverAuthenticate(tok)),
-                        )
-                        .await??;
-                        match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
-                            publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
-                                bail!("denied")
-                            }
-                            publisher::Hello::ResolverAuthenticate(tok) => {
-                                let d = Vec::from(&*ctx.unwrap(&tok)?);
-                                let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
-                                if dsalt != salt + 2 {
-                                    bail!("denied")
-                                }
-                                secstore.store_write(write_addr, ctx.clone());
-                                ClientState {
-                                    ctxid: None,
-                                    uifo,
-                                    write_addr: Some(write_addr),
-                                    ttl,
-                                }
-                            }
-                        }
-                    }
-                },
-            };
-            let mut store = store.write();
-            let clinfos = store.clinfo_mut();
-            match clinfos.get_mut(&write_addr) {
-                None => {
-                    clinfos.insert(write_addr, Some(tx_stop));
-                }
-                Some(cl) => {
-                    if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
-                        let _ = old_stop.send(());
+                        con.queue_send(&FromWrite::Published)?
+                    } else {
+                        con.queue_send(&FromWrite::Error("denied".into()))?
                     }
                 }
             }
-            Ok(client_state)
+            ToWrite::Unpublish(paths) => {
+                for path in paths {
+                    s.unpublish(path, write_addr);
+                }
+                con.queue_send(&FromWrite::Unpublished)?
+            }
+            ToWrite::Clear => {
+                s.unpublish_addr(write_addr);
+                s.gc();
+                con.queue_send(&FromWrite::Unpublished)?
+            }
         }
     }
 }
 
-async fn client_loop(
+async fn client_loop_write(
     store: Store<ClientInfo>,
-    s: TcpStream,
+    con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    rx_stop: oneshot::Receiver<()>,
+    uifo: Arc<UserInfo>,
+    write_addr: SocketAddr,
 ) -> Result<(), Error> {
-    s.set_nodelay(true)?;
-    let mut con = Channel::new(s);
-    let (tx_stop, rx_stop) = oneshot::channel();
-    let state = hello_client(&store, &mut con, secstore.as_ref(), tx_stop).await?;
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
     let mut batch = Vec::new();
     let mut act = false;
-    let mut timeout = time::interval_at(Instant::now() + state.ttl, state.ttl).fuse();
+    let mut timeout = time::interval_at(Instant::now() + WRITER_TTL, WRITER_TTL).fuse();
     async fn receive_batch(
         con: &mut Option<Channel<ServerCtx>>,
-        batch: &mut Vec<To>,
+        batch: &mut Vec<ToWrite>,
     ) -> Result<(), Error> {
         match con {
             Some(ref mut con) => con.receive_batch(batch).await,
@@ -387,12 +138,13 @@ async fn client_loop(
                 Ok(()) => {
                     act = true;
                     let c = con.as_mut().unwrap();
-                    let r = handle_batch(
+                    let r = handle_batch_write(
                         &store,
+                        c,
                         secstore.as_ref(),
-                        &state,
-                        batch.drain(..),
-                        c
+                        &uifo,
+                        write_addr,
+                        batch.drain(..)
                     );
                     match r {
                         Err(_) => { con = None },
@@ -407,43 +159,19 @@ async fn client_loop(
                 if act {
                     act = false;
                 } else {
-                    if let Some(ref secstore) = secstore {
-                        if let Some(id) = state.ctxid {
-                            secstore.delete_read(&id);
-                        }
-                        if let Some(id) = state.write_addr {
-                            secstore.delete_write(&id);
+                    let mut store = store.write();
+                    if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
+                        if let Some(stop) = mem::replace(cl, None) {
+                            let _ = stop.send(());
                         }
                     }
-                    if let Some(write_addr) = state.write_addr {
-                        let mut store = store.write();
-                        if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
-                            if let Some(stop) = mem::replace(cl, None) {
-                                let _ = stop.send(());
-                            }
-                        }
-                        store.unpublish_addr(write_addr);
-                        store.gc();
-                    }
+                    store.unpublish_addr(write_addr);
+                    store.gc();
                     bail!("client timed out");
                 }
             },
         }
     }
-}
-
-fn allowed_for(
-    secstore: Option<&SecStore>,
-    uifo: &Arc<UserInfo>,
-    paths: &Vec<Path>,
-    perm: Permissions,
-) -> bool {
-    secstore
-        .map(|s| {
-            let mut paths = paths.iter().map(|p| p.as_ref());
-            s.pmap().allowed_forall(paths, perm, uifo)
-        })
-        .unwrap_or(true)
 }
 
 async fn hello_client_write(
@@ -456,17 +184,89 @@ async fn hello_client_write(
     async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
+    fn salt() -> u64 {
+        let mut rng = rand::thread_rng();
+        rng.gen_range(0, u64::max_value() - 2)
+    }
     let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
-    match hello.auth {
-        ClientAuthWrite::Anonymous => send(
-            &mut con,
-            ServerHelloWrite {
+    let uifo = match hello.auth {
+        ClientAuthWrite::Anonymous => {
+            let h = ServerHelloWrite {
                 ttl_expired,
                 auth: ServerAuthWrite::Anonymous,
+            };
+            send(&mut con, h).await?;
+            ANONYMOUS.clone()
+        }
+        ClientAuthWrite::Reuse => match secstore {
+            None => bail!("authentication not supported"),
+            Some(secstore) => match secstore.get_write(&hello.write_addr) {
+                None => bail!("session not found"),
+                Some(ctx) => {
+                    let h = ServerHello {
+                        ttl_expired,
+                        auth: ServerAuthWrite::Reused,
+                    };
+                    con.set_ctx(Some(ctx.clone()));
+                    send(con, h).await?;
+                    secstore.ifo(Some(&ctx.client()?))?
+                }
             },
-        ),
-        
+        },
+        ClientAuth::Token(tok) => match secstore {
+            None => bail!("authentication not supported"),
+            Some(secstore) => {
+                let (ctx, tok) = secstore.create(&tok)?;
+                let h = ServerHello {
+                    ttl_expired,
+                    auth: ServerAuthWrite::Accepted(tok),
+                };
+                con.set_ctx(Some(ctx.clone()));
+                send(con, h).await?;
+                let mut con: Channel<ServerCtx> = Channel::new(
+                    time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
+                        .await??,
+                );
+                let salt = salt();
+                let tok = Vec::from(&*ctx.wrap(true, &salt.to_be_bytes())?);
+                time::timeout(
+                    HELLO_TIMEOUT,
+                    con.send_one(&publisher::Hello::ResolverAuthenticate(tok)),
+                )
+                .await??;
+                match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
+                    publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
+                        bail!("denied")
+                    }
+                    publisher::Hello::ResolverAuthenticate(tok) => {
+                        let d = Vec::from(&*ctx.unwrap(&tok)?);
+                        let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
+                        if dsalt != salt + 2 {
+                            bail!("denied")
+                        }
+                        secstore.store_write(hello.write_addr, ctx.clone());
+                        secstore.ifo(Some(&ctx.client()?))?
+                    }
+                }
+            }
+        },
+    };
+    let (tx_stop, rx_stop) = oneshot::channel();
+    {
+        let mut store = store.write();
+        let clinfos = store.clinfo_mut();
+        match clinfos.get_mut(&write_addr) {
+            None => {
+                clinfos.insert(write_addr, Some(tx_stop));
+            }
+            Some(cl) => {
+                if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
+                    let _ = old_stop.send(());
+                }
+            }
+        }
     }
+    Ok(client_loop_write(store, con, secstore, rx_stop, uifo, hello.write_addr).await?)
 }
 
 fn handle_batch_read(
@@ -574,21 +374,19 @@ async fn hello_client_read(
     async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
-    match hello {
+    let uifo = match hello {
         ClientAuthRead::Anonymous => {
             send(&mut con, &ServerHelloRead::Anonymous).await?;
-            let uifo = ANONYMOUS.clone();
-            Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+            ANONYMOUS.clone()
         }
         ClientAuthRead::Reuse(id) => match secstore {
             None => bail!("authentication requested but not supported"),
             Some(secstore) => match secstore.get_read(&id) {
                 None => bail!("ctx id not found"),
                 Some(ctx) => {
-                    let uifo = secstore.ifo(Some(&ctx.client()?))?;
-                    con.set_ctx(Some(ctx));
+                    con.set_ctx(Some(ctx.clone()));
                     send(&mut con, &ServerHelloRead::Reused).await?;
-                    Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+                    secstore.ifo(Some(&ctx.client()?))?
                 }
             },
         },
@@ -596,14 +394,14 @@ async fn hello_client_read(
             None => bail!("authentication requested but not supported"),
             Some(secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
-                let uifo = secstore.ifo(Some(&ctx.client()?))?;
                 let id = secstore.store_read(ctx.clone());
-                con.set_ctx(Some(ctx));
+                con.set_ctx(Some(ctx.clone()));
                 send(con, &ServerHelloRead::Accepted(tok, id)).await?;
-                Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+                secstore.ifo(Some(&ctx.client()?))?
             }
         },
-    }
+    };
+    Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
 }
 
 async fn hello_client(
