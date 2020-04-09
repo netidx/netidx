@@ -7,7 +7,11 @@ use crate::{
     path::Path,
     protocol::{
         publisher,
-        resolver::{ClientAuth, ClientHello, CtxId, From, ServerAuth, ServerHello, To},
+        resolver::{
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromRead, FromWrite, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
+        },
     },
     resolver_store::Store,
     secstore::SecStore,
@@ -54,7 +58,7 @@ fn allowed_for(
 ) -> bool {
     secstore
         .map(|s| {
-            let mut paths = paths.iter().map(|p| p.as_ref());
+            let paths = paths.iter().map(|p| p.as_ref());
             s.pmap().allowed_forall(paths, perm, uifo)
         })
         .unwrap_or(true)
@@ -71,9 +75,10 @@ fn handle_batch_write(
     let mut s = store.write();
     for m in msgs {
         match m {
+            ToWrite::Heartbeat => (),
             ToWrite::Publish(paths) => {
                 if !paths.iter().all(Path::is_absolute) {
-                    con.queue_send(&From::Error("absolute paths required".into()))?
+                    con.queue_send(&FromWrite::Error("absolute paths required".into()))?
                 } else {
                     if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
                         for path in paths {
@@ -98,13 +103,14 @@ fn handle_batch_write(
             }
         }
     }
+    Ok(())
 }
 
 async fn client_loop_write(
     store: Store<ClientInfo>,
     con: Channel<ServerCtx>,
-    server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    server_stop: oneshot::Receiver<()>,
     rx_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
     write_addr: SocketAddr,
@@ -181,14 +187,17 @@ async fn hello_client_write(
     secstore: Option<SecStore>,
     hello: ClientHelloWrite,
 ) -> Result<(), Error> {
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
+    async fn send(
+        con: &mut Channel<ServerCtx>,
+        hello: ServerHelloWrite,
+    ) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
     fn salt() -> u64 {
         let mut rng = rand::thread_rng();
         rng.gen_range(0, u64::max_value() - 2)
     }
-    let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
+    let ttl_expired = !store.read().clinfo().contains_key(&hello.write_addr);
     let uifo = match hello.auth {
         ClientAuthWrite::Anonymous => {
             let h = ServerHelloWrite {
@@ -200,29 +209,29 @@ async fn hello_client_write(
         }
         ClientAuthWrite::Reuse => match secstore {
             None => bail!("authentication not supported"),
-            Some(secstore) => match secstore.get_write(&hello.write_addr) {
+            Some(ref secstore) => match secstore.get_write(&hello.write_addr) {
                 None => bail!("session not found"),
                 Some(ctx) => {
-                    let h = ServerHello {
+                    let h = ServerHelloWrite {
                         ttl_expired,
                         auth: ServerAuthWrite::Reused,
                     };
                     con.set_ctx(Some(ctx.clone()));
-                    send(con, h).await?;
+                    send(&mut con, h).await?;
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
         },
-        ClientAuth::Token(tok) => match secstore {
+        ClientAuthWrite::Token(tok) => match secstore {
             None => bail!("authentication not supported"),
-            Some(secstore) => {
+            Some(ref secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
-                let h = ServerHello {
+                let h = ServerHelloWrite {
                     ttl_expired,
                     auth: ServerAuthWrite::Accepted(tok),
                 };
                 con.set_ctx(Some(ctx.clone()));
-                send(con, h).await?;
+                send(&mut con, h).await?;
                 let mut con: Channel<ServerCtx> = Channel::new(
                     time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
                         .await??,
@@ -255,9 +264,9 @@ async fn hello_client_write(
     {
         let mut store = store.write();
         let clinfos = store.clinfo_mut();
-        match clinfos.get_mut(&write_addr) {
+        match clinfos.get_mut(&hello.write_addr) {
             None => {
-                clinfos.insert(write_addr, Some(tx_stop));
+                clinfos.insert(hello.write_addr, Some(tx_stop));
             }
             Some(cl) => {
                 if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
@@ -266,7 +275,16 @@ async fn hello_client_write(
             }
         }
     }
-    Ok(client_loop_write(store, con, secstore, rx_stop, uifo, hello.write_addr).await?)
+    Ok(client_loop_write(
+        store,
+        con,
+        secstore,
+        server_stop,
+        rx_stop,
+        uifo,
+        hello.write_addr,
+    )
+    .await?)
 }
 
 fn handle_batch_read(
@@ -286,7 +304,7 @@ fn handle_batch_read(
             ToRead::Resolve(paths) => {
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
-                        None => From::Resolved {
+                        None => FromRead::Resolved {
                             krb5_principals: HashMap::new(),
                             addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
                         },
@@ -303,14 +321,14 @@ fn handle_batch_read(
                                     )?)
                                 })
                                 .collect::<Result<Vec<_>, Error>>()?;
-                            From::Resolved {
+                            FromRead::Resolved {
                                 krb5_principals,
                                 addrs,
                             }
                         }
                     })?
                 } else {
-                    con.queue_send(&From::Error("denied".into()))?
+                    con.queue_send(&FromRead::Error("denied".into()))?
                 }
             }
             ToRead::List(path) => {
@@ -318,13 +336,14 @@ fn handle_batch_read(
                     .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
                     .unwrap_or(true);
                 if allowed {
-                    con.queue_send(&From::List(s.list(&path)))?
+                    con.queue_send(&FromRead::List(s.list(&path)))?
                 } else {
-                    con.queue_send(&From::Error("denied".into()))?
+                    con.queue_send(&FromRead::Error("denied".into()))?
                 }
             }
         }
     }
+    Ok(())
 }
 
 async fn client_loop_read(
@@ -347,10 +366,10 @@ async fn client_loop_read(
                 handle_batch_read(
                     &store,
                     &mut con,
-                    &secstore,
+                    secstore.as_ref(),
                     &uifo,
-                    batch.drain()
-                ).await?;
+                    batch.drain(0..)
+                )?;
                 con.flush().await?;
             },
             _ = timeout.next() => {
@@ -371,32 +390,35 @@ async fn hello_client_read(
     secstore: Option<SecStore>,
     hello: ClientAuthRead,
 ) -> Result<(), Error> {
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHello) -> Result<(), Error> {
+    async fn send(
+        con: &mut Channel<ServerCtx>,
+        hello: ServerHelloRead,
+    ) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
     let uifo = match hello {
         ClientAuthRead::Anonymous => {
-            send(&mut con, &ServerHelloRead::Anonymous).await?;
+            send(&mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
         }
         ClientAuthRead::Reuse(id) => match secstore {
             None => bail!("authentication requested but not supported"),
-            Some(secstore) => match secstore.get_read(&id) {
+            Some(ref secstore) => match secstore.get_read(&id) {
                 None => bail!("ctx id not found"),
                 Some(ctx) => {
                     con.set_ctx(Some(ctx.clone()));
-                    send(&mut con, &ServerHelloRead::Reused).await?;
+                    send(&mut con, ServerHelloRead::Reused).await?;
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
         },
         ClientAuthRead::Token(tok) => match secstore {
             None => bail!("authentication requested but not supported"),
-            Some(secstore) => {
+            Some(ref secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
                 let id = secstore.store_read(ctx.clone());
                 con.set_ctx(Some(ctx.clone()));
-                send(con, &ServerHelloRead::Accepted(tok, id)).await?;
+                send(&mut con, ServerHelloRead::Accepted(tok, id)).await?;
                 secstore.ifo(Some(&ctx.client()?))?
             }
         },
@@ -437,11 +459,7 @@ async fn server_loop(
             permissions,
         } => Some(SecStore::new(principal.clone(), permissions)?),
     };
-    let addr = match cfg.kind {
-        config::resolver_server::Kind::Master { addr } => addr,
-        config::resolver_server::Kind::Replica { addr, .. } => addr,
-    };
-    let mut listener = TcpListener::bind(addr).await?;
+    let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops = Vec::new();
@@ -458,7 +476,7 @@ async fn server_loop(
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = client_loop(published, client, rx, secstore).await;
+                            let _ = hello_client(published, client, rx, secstore).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
