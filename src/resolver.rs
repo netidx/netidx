@@ -4,9 +4,9 @@ use crate::{
         Krb5, Krb5Ctx,
     },
     channel::Channel,
-    config,
+    config::{self, resolver::Auth as CAuth},
     path::Path,
-    protocol::resolver::{self, CtxId},
+    protocol::resolver::{self, CtxId, ClientAuthRead, ClientHello, ServerHelloRead},
 };
 use arc_swap::ArcSwap;
 use failure::Error;
@@ -27,9 +27,6 @@ use fxhash::FxBuildHasher;
 static TTL: u64 = 600;
 static LINGER: u64 = 10;
 
-type FromCon = oneshot::Sender<resolver::From>;
-type ToCon = (resolver::To, FromCon);
-
 type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
@@ -45,10 +42,13 @@ pub struct Answer {
     pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
 }
 
+type FromReadCon = oneshot::Sender<resolver::FromRead>;
+type ToReadCon = (resolver::ToRead, FromReadCon);
+
 #[derive(Debug, Clone)]
 pub struct ResolverRead {
-    sender: mpsc::UnboundedSender<ToCon>,
-    ctx: ArcSwap<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>,
+    sender: mpsc::UnboundedSender<ToReadCon>,
+    ctx: ArcSwap<Option<(CtxId, ClientCtx)>>,
 }
 
 impl ResolverRead {
@@ -69,13 +69,108 @@ impl ResolverRead {
         let ctx = ArcSwap::from(Arc::new(None));
         let ctx_c = ctx.clone();
         task::spawn(async move {
-            let _ = connection(receiver, resolver, None, desired_auth, ctx_c, 0);
+            let _ = connection_read(receiver, resolver, desired_auth, ctx_c);
         });
         Ok(Resolver {
             sender,
-            kind: PhantomData,
             ctx,
         })
+    }
+}
+
+fn create_ctx(
+    principal: Option<&[u8]>,
+    target_principal: &[u8],
+) -> Result<(ClientCtx, Vec<u8>)> {
+    let ctx = SYS_KRB5.create_client_ctx(principal, target_principal)?;
+    match ctx.step(None)? {
+        None => bail!("client ctx first step produced no token"),
+        Some(tok) => Ok((ctx, Vec::from(&*tok))),
+    }
+}
+
+fn choose_read_addr(resolver: &config::resolver::Config) -> SocketAddr {
+    use rand::{self, Rng};
+    resolver.servers[rand::thread_rng().gen_range(0, resolver.servers.len())]
+}
+
+async fn connect_read(
+    resolver: &config::resolver::Config,
+    cs: &ArcSwap<Option<(CtxId, ClientCtx)>>,
+    desired_auth: &Auth,
+) -> Result<Channel<ClientCtx>> {
+    let mut backoff = 0;
+    loop {
+        if backoff > 0 {
+            time::delay_for(Duration::from_secs(backoff)).await;
+        }
+        backoff += 1;
+        let addr = choose_read_addr(resolver);
+        let con = try_cont!("connect", TcpStream::connect(&addr).await);
+        let mut con = Channel::new(con);
+        let (auth, ctx) = match (desired_auth, &resolver.auth) {
+            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
+            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication not supported"),
+            (Auth::Krb5 {ref principal}, CAuth::Krb5 {principal: t}) => match &**cs.load() {
+                Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
+                None => {
+                    let p = principal.as_ref().map(|s| s.as_bytes());
+                    let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t.as_bytes()));
+                    (ClientAuthRead::Token(tok), Some(ctx))
+                }
+            },
+        };
+        try_cont!("hello", con.send_one(&ClientHello::ReadOnly(auth)).await);
+        con.set_ctx(ctx.clone());
+        let r: ServerHelloRead = try_cont!("hello reply", con.receive().await);
+        // CR estokes: replace this with proper logging
+        match (desired_auth, r) {
+            (Auth::Anonymous, ServerHelloRead::Anonymous) => { cs.store(Arc::new(None)); },
+            (Auth::Anonymous, _) => {
+                println!("server requires authentication");
+                continue;
+            }
+            (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
+                println!("could not authenticate resolver server");
+                continue;
+            }
+            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
+            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
+                try_cont!("resolver tok", ctx.step(Some(&tok)));
+                cs.store(Arc::new(Some((id, ctx))));
+            }
+        }
+        break Ok(con);
+    }
+}
+
+async fn connection_read(
+    mut receiver: mpsc::UnboundedReceiver<ToReadCon>,
+    resolver: config::resolver::Config,
+    publisher: Option<SocketAddr>,
+    desired_auth: Auth,
+    ctxswp: ArcSwap<Option<(CtxId, ClientCtx)>>,
+) -> Result<()> {
+    let mut con: Option<Channel<ClientCtx>> = None;
+    while let Some((m, reply)) = receiver.next() {
+        let m_r = &m;
+        let r = loop {
+            let c = match con {
+                Some(ref mut c) => c,
+                None => {
+                    con = Some(connect_read(&resolver, &ctxswp, &desired_auth).await?);
+                    con.as_mut().unwrap()
+                }
+            };
+            match c.send_one(m_r).await {
+                Err(_) => { con = None; }
+                Ok(()) => match c.receive().await {
+                    Err(_) => { con = None; }
+                    Ok(r) => break r,
+                }
+            }
+        };
+        let _ = reply.send(r);
     }
 }
 
@@ -122,36 +217,6 @@ impl<R: Writeable + ReadableOrWritable> Resolver<R> {
         match self.send(resolver::To::Clear).await? {
             resolver::From::Unpublished => Ok(()),
             _ => bail!("unexpected response"),
-        }
-    }
-}
-
-fn create_ctx(
-    principal: Option<&[u8]>,
-    target_principal: &[u8],
-) -> Result<(ClientCtx, Vec<u8>)> {
-    let ctx = SYS_KRB5.create_client_ctx(principal, target_principal)?;
-    match ctx.step(None)? {
-        None => bail!("client ctx first step produced no token"),
-        Some(tok) => Ok((ctx, Vec::from(&*tok))),
-    }
-}
-
-fn choose_addr(
-    resolver: &config::resolver::Config,
-    publisher: &Option<SocketAddr>
-) -> SocketAddr {
-    match publisher {
-        Some(_) => resolver.master,
-        None => {
-            use rand::{self, Rng};
-            let mut rng = rand::thread_rng();
-            let i = rng.gen_range(0usize, resolver.replicas.len() + 1);
-            if i == 0 {
-                resolver.master
-            } else {
-                resolver.replicas[i - 1]
-            }
         }
     }
 }
