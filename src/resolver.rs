@@ -110,8 +110,8 @@ async fn connect_read(
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
-            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication not supported"),
-            (Auth::Krb5 {ref principal}, CAuth::Krb5 {principal: t}) => match &**cs.load() {
+            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
+            (Auth::Krb5 {principal}, CAuth::Krb5 {principal: t}) => match &**cs.load() {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
                     let p = principal.as_ref().map(|s| s.as_bytes());
@@ -125,7 +125,9 @@ async fn connect_read(
         let r: ServerHelloRead = try_cont!("hello reply", con.receive().await);
         // CR estokes: replace this with proper logging
         match (desired_auth, r) {
-            (Auth::Anonymous, ServerHelloRead::Anonymous) => { cs.store(Arc::new(None)); },
+            (Auth::Anonymous, ServerHelloRead::Anonymous) => {
+                cs.store(Arc::new(None));
+            },
             (Auth::Anonymous, _) => {
                 println!("server requires authentication");
                 continue;
