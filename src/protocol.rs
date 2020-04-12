@@ -21,6 +21,7 @@
 pub mod resolver {
     use crate::path::Path;
     use std::{net::SocketAddr, collections::HashMap};
+    use fxhash::FxBuildHasher,
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -34,6 +35,11 @@ pub mod resolver {
             CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
         }
     }
+
+    #[derive(
+        Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    )]
+    pub struct ResolverId(u64);
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientAuthRead {
@@ -52,7 +58,6 @@ pub mod resolver {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct ClientHelloWrite {
         pub write_addr: SocketAddr,
-        pub resolver_addr: SocketAddr,
         pub auth: ClientAuthWrite,
     }
     
@@ -87,6 +92,7 @@ pub mod resolver {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct ServerHelloWrite {
         pub ttl_expired: bool,
+        pub id: ResolverId,
         pub auth: ServerAuthWrite,
     }
 
@@ -99,11 +105,15 @@ pub mod resolver {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct Resolved {
+        krb5_principals: HashMap<SocketAddr, String, FxBuildHasher>,
+        resolver: ResolverId,
+        addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum FromRead {
-        Resolved {
-            krb5_principals: HashMap<SocketAddr, String>,
-            addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
-        },
+        Resolved(Resolved),
         List(Vec<Path>),
         Error(String),
     }
@@ -149,6 +159,7 @@ pub mod resolver {
 /// order. The optional payload, if present, has a user specified
 /// encoding, and will not be interpreted at this layer.
 pub mod publisher {
+    use super::resolver::ResolverId;
     use crate::path::Path;
     use std::net::SocketAddr;
 
@@ -188,7 +199,7 @@ pub mod publisher {
         /// context will replace any old one, if it fails the new
         /// context will be thrown away and the old one will continue
         /// to be associated with the write address.
-        ResolverAuthenticate(SocketAddr, Vec<u8>),
+        ResolverAuthenticate(ResolverId, Vec<u8>),
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -200,7 +211,7 @@ pub mod publisher {
         /// connection this proof will be empty.
         Subscribe {
             path: Path,
-            resolver: SocketAddr,
+            resolver: ResolverId,
             token: Vec<u8>,
         },
         /// Unsubscribe from the specified value, this will always result

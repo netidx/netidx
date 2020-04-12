@@ -41,13 +41,6 @@ pub enum Auth {
     Krb5 { principal: Option<String> },
 }
 
-#[derive(Debug, Clone)]
-pub struct Answer {
-    pub krb5_principals: HashMap<SocketAddr, String>,
-    pub resolver: SocketAddr,
-    pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
-}
-
 type FromCon<F> = oneshot::Sender<F>;
 type ToCon<T, F> = (T, FromCon<F>);
 

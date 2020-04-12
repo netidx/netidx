@@ -1,5 +1,5 @@
 pub mod resolver_server {
-    use crate::path::Path;
+    use crate::{path::Path, protocol::resolver::ResolverId};
     use failure::Error;
     use serde_json::from_str;
     use std::{
@@ -9,6 +9,7 @@ pub mod resolver_server {
     use tokio::fs::read_to_string;
 
     mod file {
+        use crate::protocol::resolver::ResolverId;
         use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,7 @@ pub mod resolver_server {
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
+            pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
             pub(super) auth: Auth,
@@ -45,6 +47,7 @@ pub mod resolver_server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
+        pub id: ResolverId,
         pub addr: SocketAddr,
         pub max_connections: usize,
         pub auth: Auth,
@@ -68,6 +71,7 @@ pub mod resolver_server {
                 }
             };
             Ok(Config {
+                id: cfg.id,
                 addr: cfg.addr,
                 max_connections: cfg.max_connections,
                 auth,

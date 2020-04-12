@@ -9,8 +9,8 @@ use crate::{
         publisher,
         resolver::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite,
-            ToRead, ToWrite,
+            FromRead, FromWrite, ResolverId, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
         },
     },
     resolver_store::Store,
@@ -185,6 +185,7 @@ async fn hello_client_write(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    id: ResolverId,
     hello: ClientHelloWrite,
 ) -> Result<(), Error> {
     async fn send(
@@ -202,6 +203,7 @@ async fn hello_client_write(
         ClientAuthWrite::Anonymous => {
             let h = ServerHelloWrite {
                 ttl_expired,
+                id,
                 auth: ServerAuthWrite::Anonymous,
             };
             send(&mut con, h).await?;
@@ -214,6 +216,7 @@ async fn hello_client_write(
                 Some(ctx) => {
                     let h = ServerHelloWrite {
                         ttl_expired,
+                        id,
                         auth: ServerAuthWrite::Reused,
                     };
                     con.set_ctx(Some(ctx.clone()));
@@ -228,6 +231,7 @@ async fn hello_client_write(
                 let (ctx, tok) = secstore.create(&tok)?;
                 let h = ServerHelloWrite {
                     ttl_expired,
+                    id,
                     auth: ServerAuthWrite::Accepted(tok),
                 };
                 con.set_ctx(Some(ctx.clone()));
@@ -238,7 +242,7 @@ async fn hello_client_write(
                 );
                 let salt = salt();
                 let tok = Vec::from(&*ctx.wrap(true, &salt.to_be_bytes())?);
-                let m = publisher::Hello::ResolverAuthenticate(hello.resolver_addr, tok);
+                let m = publisher::Hello::ResolverAuthenticate(id, tok);
                 time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
                 match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
                     publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
@@ -289,6 +293,7 @@ fn handle_batch_read(
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
+    id: ResolverId,
     msgs: impl Iterator<Item = ToRead>,
 ) -> Result<(), Error> {
     let now = SystemTime::now()
@@ -302,11 +307,15 @@ fn handle_batch_read(
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
                         None => FromRead::Resolved {
-                            krb5_principals: HashMap::new(),
+                            krb5_principals: HashMap::with_hasher(
+                                FxBuildHasher::default(),
+                            ),
+                            resolver: id,
                             addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
                         },
                         Some(ref sec) => {
-                            let mut krb5_principals = HashMap::new();
+                            let mut krb5_principals =
+                                HashMap::with_hasher(FxBuildHasher::new());
                             let addrs = paths
                                 .iter()
                                 .map(|p| {
@@ -320,6 +329,7 @@ fn handle_batch_read(
                                 .collect::<Result<Vec<_>, Error>>()?;
                             FromRead::Resolved {
                                 krb5_principals,
+                                resolver: id,
                                 addrs,
                             }
                         }
@@ -348,6 +358,7 @@ async fn client_loop_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    id: ResolverId,
     uifo: Arc<UserInfo>,
 ) -> Result<(), Error> {
     let mut batch: Vec<ToRead> = Vec::new();
@@ -365,6 +376,7 @@ async fn client_loop_read(
                     &mut con,
                     secstore.as_ref(),
                     &uifo,
+                    id,
                     batch.drain(0..)
                 )?;
                 con.flush().await?;
@@ -385,6 +397,7 @@ async fn hello_client_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    id: ResolverId,
     hello: ClientAuthRead,
 ) -> Result<(), Error> {
     async fn send(
@@ -420,7 +433,7 @@ async fn hello_client_read(
             }
         },
     };
-    Ok(client_loop_read(store, con, server_stop, secstore, uifo).await?)
+    Ok(client_loop_read(store, con, server_stop, secstore, id, uifo).await?)
 }
 
 async fn hello_client(
@@ -428,16 +441,17 @@ async fn hello_client(
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
+    id: ResolverId,
 ) -> Result<(), Error> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
     match hello {
         ClientHello::ReadOnly(hello) => {
-            Ok(hello_client_read(store, con, server_stop, secstore, hello).await?)
+            Ok(hello_client_read(store, con, server_stop, secstore, id, hello).await?)
         }
         ClientHello::WriteOnly(hello) => {
-            Ok(hello_client_write(store, con, server_stop, secstore, hello).await?)
+            Ok(hello_client_write(store, con, server_stop, secstore, id, hello).await?)
         }
     }
 }
@@ -473,7 +487,9 @@ async fn server_loop(
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = hello_client(published, client, rx, secstore).await;
+                            let _ = hello_client(
+                                published, client, rx, secstore, cfg.id
+                            ).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
