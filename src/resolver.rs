@@ -8,7 +8,7 @@ use crate::{
     path::Path,
     protocol::resolver::{
         self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, ServerHelloRead,
-        ToRead, ToWrite,
+        ToRead, ToWrite, Resolved,
     },
 };
 use failure::Error;
@@ -166,15 +166,9 @@ impl ResolverRead {
         Ok(ResolverWrite(sender))
     }
 
-    pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Answer> {
+    pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Resolved> {
         match send(&self.0, resolver::ToRead::Resolve(paths)).await? {
-            resolver::FromRead::Resolved {
-                krb5_principals,
-                addrs,
-            } => Ok(Answer {
-                krb5_principals,
-                addrs,
-            }),
+            resolver::FromRead::Resolved(r) => Ok(r),
             _ => bail!("unexpected response"),
         }
     }
