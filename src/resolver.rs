@@ -9,6 +9,7 @@ use crate::{
     protocol::resolver::{
         self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, Resolved,
         ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+        ClientAuthWrite, ClientHelloWrite,
     },
 };
 use failure::Error;
@@ -21,6 +22,7 @@ use std::{
     result,
     sync::Arc,
     time::Duration,
+    fmt::Debug,
 };
 use tokio::{
     net::TcpStream,
@@ -43,7 +45,7 @@ pub enum Auth {
 type FromCon<F> = oneshot::Sender<F>;
 type ToCon<T, F> = (T, FromCon<F>);
 
-async fn send<T: Send + Sync + 'static, F: Send + Sync + 'static>(
+async fn send<T: Send + Sync + Debug + 'static, F: Send + Sync + Debug + 'static>(
     sender: &mpsc::UnboundedSender<ToCon<T, F>>,
     m: T,
 ) -> Result<F> {
@@ -122,12 +124,11 @@ async fn connect_read(
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ToCon<ToRead, FromRead>>,
     resolver: config::resolver::Config,
-    publisher: Option<SocketAddr>,
     desired_auth: Auth,
 ) -> Result<()> {
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
     let mut con: Option<Channel<ClientCtx>> = None;
-    while let Some((m, reply)) = receiver.next()? {
+    while let Some((m, reply)) = receiver.next().await {
         let m_r = &m;
         let r = loop {
             let c = match con {
@@ -201,25 +202,24 @@ async fn connect_write(
         let con = try_cont!("connect", TcpStream::connect(&resolver_addr).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
+            (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
             (Auth::Krb5 { principal }, CAuth::Krb5 { principal: t }) => {
                 match ctxts.read().get(&resolver_addr) {
-                    Some(ctx) => (ClientAuthRead::Reuse, Some(ctx.clone())),
+                    Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                     None => {
                         let p = principal.as_ref().map(|s| s.as_bytes());
                         let (ctx, tok) =
                             try_cont!("create ctx", create_ctx(p, t.as_bytes()));
-                        (ClientAuthRead::Token(tok), Some(ctx))
+                        (ClientAuthWrite::Token(tok), Some(ctx))
                     }
                 }
             }
         };
-        let h = ClientHello::WriteOnly {
+        let h = ClientHello::WriteOnly(ClientHelloWrite {
             write_addr,
-            resolver_addr,
             auth,
-        };
+        });
         try_cont!("hello", con.send_one(&h).await);
         con.set_ctx(ctx.clone());
         let r: ServerHelloWrite = try_cont!("hello reply", con.receive().await);
@@ -332,7 +332,7 @@ async fn connection_write(
 }
 
 async fn write_mgr(
-    receiver: mpsc::UnboundedReceiver<ToCon>,
+    mut receiver: mpsc::UnboundedReceiver<ToCon<ToWrite, FromWrite>>,
     resolver: config::resolver::Config,
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
@@ -343,6 +343,7 @@ async fn write_mgr(
         let mut senders = Vec::new();
         for addr in &resolver.servers {
             let (sender, receiver) = mpsc::unbounded_channel();
+            let addr = *addr;
             let resolver = resolver.clone();
             let published = published.clone();
             let desired_auth = desired_auth.clone();
@@ -352,7 +353,7 @@ async fn write_mgr(
                 let _ = connection_write(
                     receiver,
                     resolver,
-                    *addr,
+                    addr,
                     write_addr,
                     published,
                     desired_auth.clone(),
@@ -364,23 +365,25 @@ async fn write_mgr(
         }
         senders
     };
-    while let Some((m, reply)) = receiver.next() {
+    while let Some((m, reply)) = receiver.next().await {
         let m = Arc::new(m);
         let r = select_ok(senders.iter().map(|s| {
             let (tx, rx) = oneshot::channel();
-            let _ = s.send((m.clone(), tx));
+            let _ = s.send((Arc::clone(&m), tx));
             rx
         }))
-        .await?;
+        .await?.0;
         if let ToWrite::Publish(paths) = &*m {
-            if let FromWrite::Published = &r {
-                for p in paths {
+            match r {
+                FromWrite::Published => for p in paths {
                     published.write().insert(p.clone());
                 }
+                _ => (),
             }
         }
         let _ = reply.send(r);
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

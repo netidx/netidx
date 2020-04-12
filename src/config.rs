@@ -84,7 +84,7 @@ pub mod resolver {
     use failure::Error;
     use serde_json::from_str;
     use std::{
-        collections::HashSet, convert::AsRef, net::SocketAddr, path::Path, result::Result,
+        convert::AsRef, net::SocketAddr, path::Path, result::Result,
     };
     use tokio::fs::read_to_string;
 
@@ -96,7 +96,7 @@ pub mod resolver {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Config {
-        pub servers: HashSet<SocketAddr>,
+        pub servers: Vec<SocketAddr>,
         pub auth: Auth,
     }
 

@@ -10,7 +10,7 @@ use crate::{
         resolver::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
             FromRead, FromWrite, ResolverId, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            ServerHelloWrite, ToRead, ToWrite, Resolved,
         },
     },
     resolver_store::Store,
@@ -307,16 +307,16 @@ fn handle_batch_read(
             ToRead::Resolve(paths) => {
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
-                        None => FromRead::Resolved {
+                        None => FromRead::Resolved(Resolved {
                             krb5_principals: HashMap::with_hasher(
                                 FxBuildHasher::default(),
                             ),
                             resolver: id,
                             addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
-                        },
+                        }),
                         Some(ref sec) => {
                             let mut krb5_principals =
-                                HashMap::with_hasher(FxBuildHasher::new());
+                                HashMap::with_hasher(FxBuildHasher::default());
                             let addrs = paths
                                 .iter()
                                 .map(|p| {
@@ -328,11 +328,11 @@ fn handle_batch_read(
                                     )?)
                                 })
                                 .collect::<Result<Vec<_>, Error>>()?;
-                            FromRead::Resolved {
+                            FromRead::Resolved(Resolved {
                                 krb5_principals,
                                 resolver: id,
                                 addrs,
-                            }
+                            })
                         }
                     })?
                 } else {
@@ -464,24 +464,26 @@ async fn server_loop(
 ) -> Result<SocketAddr, Error> {
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let secstore = match cfg.auth {
+    let secstore = match &cfg.auth {
         config::resolver_server::Auth::Anonymous => None,
         config::resolver_server::Auth::Krb5 {
             principal,
             permissions,
-        } => Some(SecStore::new(principal.clone(), permissions)?),
+        } => Some(SecStore::new(principal.clone(), permissions.clone())?),
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops = Vec::new();
+    let max_connections = cfg.max_connections;
+    let id = cfg.id;
     let _ = ready.send(local_addr);
     loop {
         select! {
             cl = listener.accept().fuse() => match cl {
                 Err(_) => (),
                 Ok((client, _)) => {
-                    if connections.fetch_add(1, Ordering::Relaxed) < cfg.max_connections {
+                    if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
                         let connections = connections.clone();
                         let published = published.clone();
                         let secstore = secstore.clone();
@@ -489,7 +491,7 @@ async fn server_loop(
                         client_stops.push(tx);
                         task::spawn(async move {
                             let _ = hello_client(
-                                published, client, rx, secstore, cfg.id
+                                published, client, rx, secstore, id
                             ).await;
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });

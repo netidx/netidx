@@ -106,9 +106,9 @@ pub mod resolver {
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct Resolved {
-        krb5_principals: HashMap<SocketAddr, String, FxBuildHasher>,
-        resolver: ResolverId,
-        addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
+        pub krb5_principals: HashMap<SocketAddr, String, FxBuildHasher>,
+        pub resolver: ResolverId,
+        pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
