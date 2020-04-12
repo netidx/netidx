@@ -21,7 +21,7 @@
 pub mod resolver {
     use crate::path::Path;
     use std::{net::SocketAddr, collections::HashMap};
-    use fxhash::FxBuildHasher,
+    use fxhash::FxBuildHasher;
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -161,7 +161,6 @@ pub mod resolver {
 pub mod publisher {
     use super::resolver::ResolverId;
     use crate::path::Path;
-    use std::net::SocketAddr;
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,

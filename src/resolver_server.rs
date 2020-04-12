@@ -36,6 +36,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+use fxhash::FxBuildHasher;
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 

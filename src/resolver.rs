@@ -7,17 +7,16 @@ use crate::{
     config::{self, resolver::Auth as CAuth},
     path::Path,
     protocol::resolver::{
-        self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, ServerHelloRead,
-        ToRead, ToWrite, Resolved,
+        self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, Resolved,
+        ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
     },
 };
 use failure::Error;
-use futures::{prelude::*, select, select_ok};
+use futures::{future::select_ok, prelude::*, select};
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
-    marker::PhantomData,
     net::SocketAddr,
     result,
     sync::Arc,
@@ -44,7 +43,10 @@ pub enum Auth {
 type FromCon<F> = oneshot::Sender<F>;
 type ToCon<T, F> = (T, FromCon<F>);
 
-async fn send<T, F>(sender: &UnboundedSender<ToCon<T, F>>, m: T) -> Result<F> {
+async fn send<T: Send + Sync + 'static, F: Send + Sync + 'static>(
+    sender: &mpsc::UnboundedSender<ToCon<T, F>>,
+    m: T,
+) -> Result<F> {
     let (tx, rx) = oneshot::channel();
     sender.send((m, tx))?;
     Ok(rx.await?)
@@ -125,7 +127,7 @@ async fn connection_read(
 ) -> Result<()> {
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
     let mut con: Option<Channel<ClientCtx>> = None;
-    while let Some((m, reply)) = receiver.next() {
+    while let Some((m, reply)) = receiver.next()? {
         let m_r = &m;
         let r = loop {
             let c = match con {
@@ -149,6 +151,7 @@ async fn connection_read(
         };
         let _ = reply.send(r);
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +166,7 @@ impl ResolverRead {
         task::spawn(async move {
             let _ = connection_read(receiver, resolver, desired_auth);
         });
-        Ok(ResolverWrite(sender))
+        Ok(ResolverRead(sender))
     }
 
     pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Resolved> {
@@ -198,17 +201,16 @@ async fn connect_write(
         let con = try_cont!("connect", TcpStream::connect(&resolver_addr).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuth::Anonymous, None),
+            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
             (Auth::Krb5 { principal }, CAuth::Krb5 { principal: t }) => {
                 match ctxts.read().get(&resolver_addr) {
-                    Some(ctx) => (resolver::ClientAuth::Reuse, Some(ctx.clone())),
+                    Some(ctx) => (ClientAuthRead::Reuse, Some(ctx.clone())),
                     None => {
                         let p = principal.as_ref().map(|s| s.as_bytes());
-                        let t = target.as_bytes();
                         let (ctx, tok) =
                             try_cont!("create ctx", create_ctx(p, t.as_bytes()));
-                        (ClientAuth::Token(tok), Some(ctx))
+                        (ClientAuthRead::Token(tok), Some(ctx))
                     }
                 }
             }
@@ -220,20 +222,20 @@ async fn connect_write(
         };
         try_cont!("hello", con.send_one(&h).await);
         con.set_ctx(ctx.clone());
-        let r: resolver::ServerHello = try_cont!("hello reply", con.receive().await);
+        let r: ServerHelloWrite = try_cont!("hello reply", con.receive().await);
         // CR estokes: replace this with proper logging
         match (desired_auth, r.auth) {
-            (Auth::Anonymous, ServerAuth::Anonymous) => (),
+            (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
             (Auth::Anonymous, _) => {
                 println!("server requires authentication");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerAuth::Anonymous) => {
+            (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous) => {
                 println!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerAuth::Reused) => (),
-            (Auth::Krb5 { .. }, ServerAuth::Accepted(tok, id)) => {
+            (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => (),
+            (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
                 let ctx = ctx.unwrap();
                 try_cont!("resolver tok", ctx.step(Some(&tok)));
                 ctxts.write().insert(resolver_addr, ctx.clone());
@@ -306,7 +308,7 @@ async fn connection_write(
                         let c = match con {
                             Some(ref mut c) => c,
                             None => {
-                                con = Some(connect(
+                                con = Some(connect_write(
                                     &resolver, resolver_addr, write_addr, &published,
                                     &ctxts, &desired_auth
                                 ).await?);
@@ -340,7 +342,7 @@ async fn write_mgr(
     let senders = {
         let mut senders = Vec::new();
         for addr in &resolver.servers {
-            let (sender, receiver) = mpsc::unbounded_sender();
+            let (sender, receiver) = mpsc::unbounded_channel();
             let resolver = resolver.clone();
             let published = published.clone();
             let desired_auth = desired_auth.clone();
@@ -383,7 +385,7 @@ async fn write_mgr(
 
 #[derive(Debug, Clone)]
 pub struct ResolverWrite {
-    sender: mpsc::UnboundedSender<ToWriteCon>,
+    sender: mpsc::UnboundedSender<ToCon<ToWrite, FromWrite>>,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
 }
 
@@ -393,32 +395,33 @@ impl ResolverWrite {
         desired_auth: Auth,
         write_addr: SocketAddr,
     ) -> Result<ResolverWrite> {
-        let (sender, receiver) = mpsc::unbounded_sender();
+        let (sender, receiver) = mpsc::unbounded_channel();
         let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let ctxts_c = ctxts.clone();
         task::spawn(async move {
-            let _ = write_mgr(receiver, resolver, desired_auth, ctx_c, write_addr).await;
+            let _ =
+                write_mgr(receiver, resolver, desired_auth, ctxts_c, write_addr).await;
         });
         Ok(ResolverWrite { sender, ctxts })
     }
 
     pub async fn publish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Publish(paths)).await? {
-            resolver::From::Published => Ok(()),
+            FromWrite::Published => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn unpublish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Unpublish(paths)).await? {
-            resolver::From::Unpublished => Ok(()),
+            FromWrite::Unpublished => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn clear(&self) -> Result<()> {
         match send(&self.sender, ToWrite::Clear).await? {
-            resolver::From::Unpublished => Ok(()),
+            FromWrite::Unpublished => Ok(()),
             _ => bail!("unexpected response"),
         }
     }
