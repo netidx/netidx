@@ -9,8 +9,8 @@ use crate::{
         publisher,
         resolver::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            FromRead, FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite,
+            ToRead, ToWrite,
         },
     },
     resolver_store::Store,
@@ -238,16 +238,13 @@ async fn hello_client_write(
                 );
                 let salt = salt();
                 let tok = Vec::from(&*ctx.wrap(true, &salt.to_be_bytes())?);
-                time::timeout(
-                    HELLO_TIMEOUT,
-                    con.send_one(&publisher::Hello::ResolverAuthenticate(tok)),
-                )
-                .await??;
+                let m = publisher::Hello::ResolverAuthenticate(hello.resolver_addr, tok);
+                time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
                 match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
                     publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
                         bail!("denied")
                     }
-                    publisher::Hello::ResolverAuthenticate(tok) => {
+                    publisher::Hello::ResolverAuthenticate(_, tok) => {
                         let d = Vec::from(&*ctx.unwrap(&tok)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
                         if dsalt != salt + 2 {

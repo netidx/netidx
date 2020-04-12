@@ -52,6 +52,7 @@ pub mod resolver {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct ClientHelloWrite {
         pub write_addr: SocketAddr,
+        pub resolver_addr: SocketAddr,
         pub auth: ClientAuthWrite,
     }
     
@@ -187,7 +188,7 @@ pub mod publisher {
         /// context will replace any old one, if it fails the new
         /// context will be thrown away and the old one will continue
         /// to be associated with the write address.
-        ResolverAuthenticate(Vec<u8>),
+        ResolverAuthenticate(SocketAddr, Vec<u8>),
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
