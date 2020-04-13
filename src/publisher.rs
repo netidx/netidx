@@ -6,8 +6,8 @@ use crate::{
     channel::Channel,
     config,
     path::Path,
-    protocol::{publisher, Id},
-    resolver::{Auth, Resolver, WriteOnly},
+    protocol::{resolver::ResolverId, publisher::{self, Id}},
+    resolver::{Auth, ResolverWrite},
     utils::mp_encode,
 };
 use bytes::Bytes;
@@ -15,7 +15,7 @@ use crossbeam::queue::SegQueue;
 use failure::Error;
 use futures::{prelude::*, select};
 use fxhash::FxBuildHasher;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use serde::Serialize;
 use std::{
@@ -27,7 +27,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     result::Result,
     sync::{Arc, Weak},
-    time::Duration,
+    time::{Duration, SystemTime}
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -161,11 +161,10 @@ struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
-    next_id: Id,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, PublishedUVal, FxBuildHasher>,
     updates: Arc<SegQueue<(Id, Update)>>,
-    resolver: Resolver<WriteOnly>,
+    resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
     wait_any_client: Vec<oneshot::Sender<()>>,
@@ -196,7 +195,7 @@ impl PublisherInner {
 impl Drop for PublisherInner {
     fn drop(&mut self) {
         if self.cleanup() {
-            let mut resolver = self.resolver.clone();
+            let resolver = self.resolver.clone();
             tokio::spawn(async move {
                 let _ = resolver.clear().await;
             });
@@ -255,7 +254,7 @@ impl Publisher {
 
     /// Create a new publisher using the specified resolver and bind config.
     pub async fn new(
-        resolver: config::Resolver,
+        resolver: config::resolver::Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher, Error> {
@@ -293,13 +292,12 @@ impl Publisher {
             }
         };
         let resolver =
-            Resolver::<WriteOnly>::new_w(resolver, addr, desired_auth.clone())?;
+            ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
             stop: Some(stop),
             clients: HashMap::with_hasher(FxBuildHasher::default()),
-            next_id: Id::zero(),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             updates: Arc::new(SegQueue::new()),
@@ -361,7 +359,7 @@ impl Publisher {
         } else if pb.by_path.contains_key(&path) {
             Err(format_err!("already published"))
         } else {
-            let id = pb.next_id.take();
+            let id = Id::new();
             let header = mp_encode(&publisher::From::Message(id))?;
             pb.by_path.insert(path.clone(), id);
             pb.by_id.insert(
@@ -449,7 +447,7 @@ impl Publisher {
         let mut flushes = Vec::<oneshot::Receiver<()>>::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
-        let mut resolver = {
+        let resolver = {
             let mut pb = self.0.lock();
             to_publish.extend(pb.to_publish.drain());
             to_unpublish.extend(pb.to_unpublish.drain());
@@ -557,6 +555,7 @@ impl Publisher {
 fn subscribe(
     t: &mut PublisherInner,
     con: &mut Channel<ServerCtx>,
+    addr: SocketAddr,
     path: Path,
 ) -> Result<(), Error> {
     match t.by_path.get(&path) {
@@ -567,7 +566,7 @@ fn subscribe(
             cl.subscribed.insert(id);
             let sender = cl.to_client.clone();
             let ut = t.by_id.get_mut(&id).unwrap();
-            ut.subscribed.insert(*addr, sender);
+            ut.subscribed.insert(addr, sender);
             let mut msg = con.begin_msg();
             msg.pack(&publisher::From::Subscribed(path, id))?;
             msg.pack_ut(&ut.current);
@@ -589,7 +588,7 @@ fn handle_batch(
     auth: &Auth,
     now: u64,
 ) -> Result<(), Error> {
-    use protocol::{
+    use crate::protocol::{
         publisher::{From, To::*},
         resolver::PermissionToken,
     };
@@ -600,8 +599,8 @@ fn handle_batch(
     for msg in msgs {
         match msg {
             Subscribe { path, resolver, token } => match auth {
-                Auth::Anonymous => subscribe(&mut *pb, con, path)?,
-                Auth::Krb5 { .. } => match ctxts.get(resolver) {
+                Auth::Anonymous => subscribe(&mut *pb, con, *addr, path)?,
+                Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                     None => con.queue_send(&From::Denied(path))?,
                     Some(ctx) => match ctx.unwrap(&token) {
                         Err(_) => con.queue_send(&From::Denied(path))?,
@@ -610,14 +609,14 @@ fn handle_batch(
                             match tok {
                                 Err(_) => con.queue_send(&From::Denied(path))?,
                                 Ok(PermissionToken(a_path, ts)) => {
-                                    let age = max(
+                                    let age = std::cmp::max(
                                         u64::saturating_sub(now, ts),
                                         u64::saturating_sub(ts, now)
                                     );
                                     if age > 300 || a_path != &*path {
                                         con.queue_send(&From::Denied(path))?
                                     } else {
-                                        subscribe(&mut *pb, con, path)?
+                                        subscribe(&mut *pb, con, *addr, path)?
                                     }
                                 }
                             }
@@ -640,41 +639,49 @@ fn handle_batch(
 const HB: Duration = Duration::from_secs(5);
 
 async fn hello_client(
-    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx>>>,
+    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<(), Error> {
-    use protocol::publisher::Hello::*;
+    use crate::{
+        protocol::publisher::Hello::{self, *},
+        auth::Krb5,
+    };
     let hello: Hello = con.receive().await?;
     match hello {
-        Anonymous => Ok(con.send_one(&Anonymous).await?),
-        Token(tok) => match desired_auth {
+        Anonymous => con.send_one(&Anonymous).await?,
+        Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { principal } => {
-                let ctx = SYS_KRB5.create_server_ctx(principal.map(|p| p.as_bytes()))?;
+                let p = principal.as_ref().map(|p| p.as_bytes());
+                let ctx = SYS_KRB5.create_server_ctx(p)?;
                 let tok = ctx
-                    .step(Some(&*tok))
+                    .step(Some(&*tok))?
                     .map(|b| Vec::from(&*b))
                     .ok_or_else(|| format_err!("expected step to generate a token"))?;
                 con.set_ctx(Some(ctx));
                 con.send_one(&Token(tok)).await?;
             }
         },
-        ResolverAuthenticate(id, tok) => match ctxts.read().get(id).cloned() {
-            None => bail!("no security context"),
-            Some(ctx) => {
-                let n = ctx.unwrap(&*tok)?;
-                let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-                let tok = Vec::from(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
-                Ok(con.send_one(&ResolverAuthenticate(id, tok)).await?)
+        ResolverAuthenticate(id, tok) => {
+            let ctx = ctxts.read().get(&id).cloned();
+            match ctx {
+                None => bail!("no security context"),
+                Some(ctx) => {
+                    let n = ctx.unwrap(&*tok)?;
+                    let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+                    let tok = Vec::from(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+                    con.send_one(&ResolverAuthenticate(id, tok)).await?;
+                }
             }
         },
     }
+    Ok(())
 }
 
 async fn client_loop(
     t: PublisherWeak,
-    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx>>>,
+    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     addr: SocketAddr,
     msgs: Receiver<ToClient>,
     s: TcpStream,
@@ -698,7 +705,13 @@ async fn client_loop(
             from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
                 Err(e) => return Err(Error::from(e)),
                 Ok(()) => {
-                    handle_batch(&t, &ctxts, &addr, batch.drain(..), &mut con)?;
+                    let now = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)?
+                        .as_secs();
+                    handle_batch(
+                        &t, &addr, batch.drain(..), &mut con,
+                        &ctxts, &desired_auth, now,
+                    )?;
                     con.flush().await?
                 }
             },

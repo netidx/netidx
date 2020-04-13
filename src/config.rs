@@ -87,6 +87,7 @@ pub mod resolver {
         convert::AsRef, net::SocketAddr, path::Path, result::Result,
     };
     use tokio::fs::read_to_string;
+    use crate::protocol::resolver::ResolverId;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {
@@ -96,7 +97,7 @@ pub mod resolver {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Config {
-        pub servers: Vec<SocketAddr>,
+        pub servers: Vec<(ResolverId, SocketAddr)>,
         pub auth: Auth,
     }
 

@@ -65,7 +65,7 @@ fn create_ctx(
     }
 }
 
-fn choose_read_addr(resolver: &config::resolver::Config) -> SocketAddr {
+fn choose_read_addr(resolver: &config::resolver::Config) -> (ResolverId, SocketAddr) {
     use rand::{thread_rng, Rng};
     resolver.servers[thread_rng().gen_range(0, resolver.servers.len())]
 }
@@ -82,7 +82,7 @@ async fn connect_read(
         }
         backoff += 1;
         let addr = choose_read_addr(resolver);
-        let con = try_cont!("connect", TcpStream::connect(&addr).await);
+        let con = try_cont!("connect", TcpStream::connect(&addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
@@ -187,7 +187,7 @@ impl ResolverRead {
 
 async fn connect_write(
     resolver: &config::resolver::Config,
-    resolver_addr: SocketAddr,
+    resolver_addr: (ResolverId, SocketAddr),
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
@@ -199,13 +199,13 @@ async fn connect_write(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con = try_cont!("connect", TcpStream::connect(&resolver_addr).await);
+        let con = try_cont!("connect", TcpStream::connect(&resolver_addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
             (Auth::Krb5 { principal }, CAuth::Krb5 { principal: t }) => {
-                match ctxts.read().get(&resolver_addr) {
+                match ctxts.read().get(&resolver_addr.0) {
                     Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                     None => {
                         let p = principal.as_ref().map(|s| s.as_bytes());
@@ -238,6 +238,9 @@ async fn connect_write(
             (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
                 let ctx = ctx.unwrap();
                 try_cont!("resolver tok", ctx.step(Some(&tok)));
+                if r.id != resolver_addr.0 {
+                    bail!("resolver id mismatch, bad configuration");
+                }
                 ctxts.write().insert(r.id, ctx.clone());
             }
         }
@@ -257,7 +260,7 @@ async fn connect_write(
 async fn connection_write(
     receiver: mpsc::UnboundedReceiver<ToCon<Arc<ToWrite>, FromWrite>>,
     resolver: config::resolver::Config,
-    resolver_addr: SocketAddr,
+    resolver_addr: (ResolverId, SocketAddr),
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
     desired_auth: Auth,
@@ -335,7 +338,7 @@ async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<ToCon<ToWrite, FromWrite>>,
     resolver: config::resolver::Config,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
     let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
@@ -389,7 +392,7 @@ async fn write_mgr(
 #[derive(Debug, Clone)]
 pub struct ResolverWrite {
     sender: mpsc::UnboundedSender<ToCon<ToWrite, FromWrite>>,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
 }
 
 impl ResolverWrite {
