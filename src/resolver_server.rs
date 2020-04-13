@@ -9,8 +9,8 @@ use crate::{
         publisher,
         resolver::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ResolverId, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite, Resolved,
+            FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
         },
     },
     resolver_store::Store,
@@ -18,6 +18,7 @@ use crate::{
 };
 use failure::Error;
 use futures::{prelude::*, select};
+use fxhash::FxBuildHasher;
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -36,7 +37,6 @@ use tokio::{
     task,
     time::{self, Instant},
 };
-use fxhash::FxBuildHasher;
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 

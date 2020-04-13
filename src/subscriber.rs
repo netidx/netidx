@@ -1,45 +1,55 @@
 use crate::{
-    path::Path,
-    utils::{BatchItem, Batched},
-    resolver::{Auth, Resolver, ReadOnly},
+    auth::{
+        syskrb5::{ClientCtx, SYS_KRB5},
+        Krb5, Krb5Ctx,
+    },
     channel::{Channel, ReadChannel},
-    protocol::{Id, publisher},
     config,
+    path::Path,
+    protocol::{
+        publisher::{self, Id},
+        resolver::{Resolved, ResolverId},
+    },
+    resolver::{Auth, ResolverRead},
+    utils::{BatchItem, Batched},
 };
+use bytes::{Buf, Bytes};
+use failure::Error;
+use futures::{
+    channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
+    future::Fuse,
+    prelude::*,
+    select,
+};
+use fxhash::FxBuildHasher;
+use parking_lot::Mutex;
+use rand::Rng;
+use serde::de::DeserializeOwned;
 use std::{
-    mem, iter, io,
-    result::Result,
-    marker::PhantomData,
-    collections::{HashMap, hash_map::Entry},
-    net::SocketAddr,
-    sync::{Arc, Weak},
     cmp::max,
+    collections::{hash_map::Entry, HashMap},
+    io, iter,
+    marker::PhantomData,
+    mem,
+    net::SocketAddr,
+    result::Result,
+    sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::{
-    task,
-    sync::oneshot,
     net::TcpStream,
-    time::{self, Instant, Delay},
+    sync::oneshot,
+    task,
+    time::{self, Delay, Instant},
 };
-use fxhash::FxBuildHasher;
-use futures::{
-    prelude::*,
-    select,
-    channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
-    future::Fuse,
-};
-use rand::Rng;
-use serde::de::DeserializeOwned;
-use failure::Error;
-use bytes::{Bytes, Buf};
-use parking_lot::Mutex;
 
 const BATCH: usize = 100_000;
 
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
+    token: Vec<u8>,
+    resolver: ResolverId,
     finished: oneshot::Sender<Result<UVal, Error>>,
     con: UnboundedSender<ToCon>,
     deadline: Option<Instant>,
@@ -54,7 +64,7 @@ enum ToCon {
         id: Id,
         tx: Sender<Bytes>,
         last: bool,
-    }
+    },
 }
 
 #[derive(Debug)]
@@ -103,7 +113,7 @@ impl UVal {
         let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
         match rx.await {
             Ok(b) => Some(b),
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
@@ -115,12 +125,13 @@ impl UVal {
     /// only receive new values.
     ///
     /// If the subscription dies the stream will end.
-    pub fn updates(
-        &self,
-        begin_with_last: bool
-    ) -> impl Stream<Item = Bytes> {
+    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
         let (tx, rx) = mpsc::channel(10);
-        let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
+        let m = ToCon::Stream {
+            tx,
+            last: begin_with_last,
+            id: self.0.id,
+        };
         let _ = self.0.connection.unbounded_send(m);
         rx
     }
@@ -138,15 +149,20 @@ impl<T: DeserializeOwned> Val<T> {
     /// Get and decode the last published value, or None if the
     /// subscription is dead.
     pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
-        self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
+        self.0
+            .last()
+            .await
+            .map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
     }
 
     /// Same as `SubscriptionUt::updates` but it decodes the value
     pub fn updates(
         &self,
-        begin_with_last: bool
+        begin_with_last: bool,
     ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
-        self.0.updates(begin_with_last).map(|v| rmp_serde::decode::from_read(&*v))
+        self.0
+            .updates(begin_with_last)
+            .map(|v| rmp_serde::decode::from_read(&*v))
     }
 }
 
@@ -179,7 +195,7 @@ impl DUValWeak {
 /// attempt to resubscribe. The resubscription process goes through
 /// the entire resolution and connection process again, so `DUVal` is
 /// robust to many failures. For example,
-/// 
+///
 /// - multiple publishers are publishing on a path and one of them dies.
 ///   `DUVal` will transparently move to another one.
 ///
@@ -220,7 +236,7 @@ impl DUVal {
         let sub = self.0.lock().sub.clone();
         match sub {
             None => None,
-            Some(sub) => sub.last().await
+            Some(sub) => sub.last().await,
         }
     }
 
@@ -255,16 +271,17 @@ impl DUVal {
     /// the stream will not end when the subscription dies, it will
     /// just stop producing values, and will start again if
     /// resubscription is successful.
-    pub fn updates(
-        &self,
-        begin_with_last: bool
-    ) -> impl Stream<Item = Bytes> {
+    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Bytes> {
         let mut t = self.0.lock();
         let (tx, rx) = mpsc::channel(10);
         t.streams.retain(|c| !c.is_closed());
         t.streams.push(tx.clone());
         if let Some(ref sub) = t.sub {
-            let m = ToCon::Stream {tx, last: begin_with_last, id: sub.0.id };
+            let m = ToCon::Stream {
+                tx,
+                last: begin_with_last,
+                id: sub.0.id,
+            };
             let _ = sub.0.connection.unbounded_send(m);
         }
         rx
@@ -281,7 +298,10 @@ impl<T: DeserializeOwned> DVal<T> {
     }
 
     pub async fn last(&self) -> Option<Result<T, rmp_serde::decode::Error>> {
-        self.0.last().await.map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
+        self.0
+            .last()
+            .await
+            .map(|v| Ok(rmp_serde::decode::from_read(&*v)?))
     }
 
     pub fn state_updates(&self, include_current: bool) -> impl Stream<Item = DVState> {
@@ -294,9 +314,11 @@ impl<T: DeserializeOwned> DVal<T> {
 
     pub fn updates(
         &self,
-        begin_with_last: bool
+        begin_with_last: bool,
     ) -> impl Stream<Item = Result<T, rmp_serde::decode::Error>> {
-        self.0.updates(begin_with_last).map(|v| rmp_serde::decode::from_read(&*v))
+        self.0
+            .updates(begin_with_last)
+            .map(|v| rmp_serde::decode::from_read(&*v))
     }
 }
 
@@ -306,12 +328,13 @@ enum SubStatus {
 }
 
 struct SubscriberInner {
-    resolver: Resolver<ReadOnly>,
+    resolver: ResolverRead,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DUValWeak>,
     durable_alive: HashMap<Path, DUValWeak>,
     trigger_resub: UnboundedSender<()>,
+    desired_auth: Auth,
 }
 
 struct SubscriberWeak(Weak<Mutex<SubscriberInner>>);
@@ -327,12 +350,14 @@ pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
     pub fn new(
-        resolver: config::Resolver,
-        desired_auth: Auth
+        resolver: config::resolver::Config,
+        desired_auth: Auth,
     ) -> Result<Subscriber, Error> {
         let (tx, rx) = mpsc::unbounded();
+        let resolver = ResolverRead::new(resolver, desired_auth.clone())?;
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
-            resolver: Resolver::<ReadOnly>::new_r(resolver, desired_auth)?,
+            resolver,
+            desired_auth,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
             durable_dead: HashMap::new(),
@@ -355,15 +380,19 @@ impl Subscriber {
             }
         }
         fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
-            *retry = subscriber.durable_dead.values()
+            *retry = subscriber
+                .durable_dead
+                .values()
                 .filter_map(|w| w.upgrade())
                 .map(|ds| ds.0.lock().next_try)
                 .fold(None, |min, v| match min {
                     None => Some(v),
-                    Some(min) => if v < min {
-                        Some(v)
-                    } else {
-                        Some(min)
+                    Some(min) => {
+                        if v < min {
+                            Some(v)
+                        } else {
+                            Some(min)
+                        }
                     }
                 })
                 .map(|t| time::delay_until(t + Duration::from_secs(1)));
@@ -378,7 +407,9 @@ impl Subscriber {
                     let mut max_tries = 0;
                     for (p, w) in &subscriber.durable_dead {
                         match w.upgrade() {
-                            None => { gc.push(p.clone()); }
+                            None => {
+                                gc.push(p.clone());
+                            }
                             Some(s) => {
                                 let (next_try, tries) = {
                                     let s = s.0.lock();
@@ -400,41 +431,46 @@ impl Subscriber {
                     let mut subscriber = subscriber.0.lock();
                     update_retry(&mut *subscriber, retry);
                 } else {
-                    let r = subscriber.subscribe_vals_ut(
-                        batch.keys().cloned(),
-                        Some(timeout)
-                    ).await;
+                    let r = subscriber
+                        .subscribe_vals_ut(batch.keys().cloned(), Some(timeout))
+                        .await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
-                            Err(_) => { // CR estokes: log this error?
+                            Err(_) => {
+                                // CR estokes: log this error?
                                 ds.tries += 1;
                                 ds.next_try = now + Duration::from_secs(ds.tries as u64);
-                            },
+                            }
                             Ok(sub) => {
                                 ds.tries = 0;
                                 let mut i = 0;
                                 while i < ds.states.len() {
-                                    match
-                                        ds.states[i].unbounded_send(DVState::Subscribed)
+                                    match ds.states[i].unbounded_send(DVState::Subscribed)
                                     {
-                                        Ok(()) => { i += 1; }
-                                        Err(_) => { ds.states.remove(i); }
+                                        Ok(()) => {
+                                            i += 1;
+                                        }
+                                        Err(_) => {
+                                            ds.states.remove(i);
+                                        }
                                     }
                                 }
                                 ds.streams.retain(|c| !c.is_closed());
                                 for tx in ds.streams.iter().cloned() {
                                     let _ =
                                         sub.0.connection.unbounded_send(ToCon::Stream {
-                                        tx, last: true, id: sub.0.id
-                                    });
+                                            tx,
+                                            last: true,
+                                            id: sub.0.id,
+                                        });
                                 }
                                 ds.sub = Some(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
                                 subscriber.durable_alive.insert(p.clone(), w.clone());
-                            },
+                            }
                         }
                     }
                     update_retry(&mut *subscriber, retry);
@@ -461,7 +497,7 @@ impl Subscriber {
             }
         });
     }
-    
+
     /// Subscribe to the specified set of values.
     ///
     /// Path resolution and subscription are done in parallel, so the
@@ -488,7 +524,9 @@ impl Subscriber {
     /// timeout is specified, `subscribe_vals_ut` is guaranteed to
     /// complete no later than `now + timeout`.
     pub async fn subscribe_vals_ut(
-        &self, batch: impl IntoIterator<Item = Path>, timeout: Option<Duration>
+        &self,
+        batch: impl IntoIterator<Item = Path>,
+        timeout: Option<Duration>,
     ) -> Vec<(Path, Result<UVal, Error>)> {
         enum St {
             Resolve,
@@ -500,7 +538,8 @@ impl Subscriber {
         let now = Instant::now();
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
-        let mut r = { // Init
+        let mut r = {
+            // Init
             let mut t = self.0.lock();
             for p in paths.clone() {
                 match t.subscribed.entry(p.clone()) {
@@ -515,13 +554,15 @@ impl Subscriber {
                             pending.insert(p, St::WaitingOther(rx));
                         }
                         SubStatus::Subscribed(r) => match r.upgrade() {
-                            Some(r) => { pending.insert(p, St::Subscribed(r)); }
+                            Some(r) => {
+                                pending.insert(p, St::Subscribed(r));
+                            }
                             None => {
                                 e.insert(SubStatus::Pending(vec![]));
                                 pending.insert(p, St::Resolve);
                             }
                         },
-                    }
+                    },
                 }
             }
             t.resolver.clone()
@@ -530,59 +571,90 @@ impl Subscriber {
             let mut rng = rand::thread_rng();
             rng.gen_range(0, n)
         }
-        { // Resolve, Connect, Subscribe
-            let to_resolve =
-                pending.iter()
-                .filter(|(_, s)| match s { St::Resolve => true, _ => false })
+        {
+            // Resolve, Connect, Subscribe
+            let to_resolve = pending
+                .iter()
+                .filter(|(_, s)| match s {
+                    St::Resolve => true,
+                    _ => false,
+                })
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
             let r = match timeout {
                 None => Ok(r.resolve(to_resolve.clone()).await),
-                Some(d) => time::timeout(d, r.resolve(to_resolve.clone())).await
+                Some(d) => time::timeout(d, r.resolve(to_resolve.clone())).await,
             };
             match r {
-                Err(_) => for p in to_resolve {
-                    pending.insert(p.clone(), St::Error(
-                        format_err!("resolving path: {} failed: request timed out", p)
-                    ));
-                },
-                Ok(Err(e)) => for p in to_resolve {
-                    pending.insert(p.clone(), St::Error(
-                        format_err!("resolving path: {} failed: {}", p, e)
-                    ));
+                Err(_) => {
+                    for p in to_resolve {
+                        pending.insert(
+                            p.clone(),
+                            St::Error(format_err!(
+                                "resolving path: {} failed: request timed out",
+                                p
+                            )),
+                        );
+                    }
                 }
-                Ok(Ok(addrs)) => {
+                Ok(Err(e)) => {
+                    for p in to_resolve {
+                        pending.insert(
+                            p.clone(),
+                            St::Error(format_err!("resolving path: {} failed: {}", p, e)),
+                        );
+                    }
+                }
+                Ok(Ok(Resolved {
+                    addrs,
+                    resolver,
+                    krb5_principals,
+                })) => {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
+                    let desired_auth = t.desired_auth.clone();
                     for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
                         if addrs.len() == 0 {
                             pending.insert(p, St::Error(format_err!("path not found")));
                         } else {
                             let addr = {
                                 if addrs.len() == 1 {
-                                    addrs[0]
+                                    addrs[0].clone()
                                 } else {
-                                    addrs[pick(addrs.len())]
+                                    addrs[pick(addrs.len())].clone()
                                 }
                             };
-                            let con =
-                                t.connections.entry(addr)
-                                .or_insert_with(|| {
-                                    let (tx, rx) = mpsc::unbounded();
-                                    task::spawn(connection(self.downgrade(), addr, rx));
-                                    tx
-                                });
+                            let con = t.connections.entry(addr.0).or_insert_with(|| {
+                                let (tx, rx) = mpsc::unbounded();
+                                let principal = match krb5_principals.get(&addr.0) {
+                                    None => String::new(),
+                                    Some(p) => p.clone(),
+                                };
+                                task::spawn(connection(
+                                    self.downgrade(),
+                                    addr.0,
+                                    principal,
+                                    rx,
+                                    desired_auth.clone(),
+                                ));
+                                tx
+                            });
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
-                            let r =
-                                con.unbounded_send(ToCon::Subscribe(SubscribeValRequest {
-                                    con: con_,
+                            let r = con.unbounded_send(ToCon::Subscribe(
+                                SubscribeValRequest {
                                     path: p.clone(),
+                                    token: addr.1,
+                                    resolver,
                                     finished: tx,
+                                    con: con_,
                                     deadline,
-                                }));
+                                },
+                            ));
                             match r {
-                                Ok(()) => { pending.insert(p, St::Subscribing(rx)); }
+                                Ok(()) => {
+                                    pending.insert(p, St::Subscribing(rx));
+                                }
                                 Err(e) => {
                                     pending.insert(p, St::Error(Error::from(e)));
                                 }
@@ -610,12 +682,12 @@ impl Subscriber {
                             }
                         }
                     }
-                },
+                }
                 St::WaitingOther(w) => match w.await {
                     Err(_) => *st = St::Error(format_err!("other side died")),
                     Ok(Err(e)) => *st = St::Error(e),
                     Ok(Ok(raw)) => *st = St::Subscribed(raw),
-                }
+                },
                 St::Subscribing(w) => {
                     let res = match w.await {
                         Err(_) => Err(format_err!("connection died")),
@@ -635,11 +707,11 @@ impl Subscriber {
                                     }
                                     *st = St::Error(err);
                                 }
-                            }
+                            },
                             Ok(raw) => {
                                 let s = mem::replace(
                                     e.get_mut(),
-                                    SubStatus::Subscribed(raw.downgrade())
+                                    SubStatus::Subscribed(raw.downgrade()),
                                 );
                                 match s {
                                     SubStatus::Subscribed(_) => unreachable!(),
@@ -651,16 +723,19 @@ impl Subscriber {
                                     }
                                 }
                             }
-                        }
+                        },
                     }
                 }
             }
         }
-        paths.into_iter().map(|p| match pending.remove(&p).unwrap() {
-            St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
-            St::Subscribed(raw) => (p, Ok(raw)),
-            St::Error(e) => (p, Err(e))
-        }).collect()
+        paths
+            .into_iter()
+            .map(|p| match pending.remove(&p).unwrap() {
+                St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
+                St::Subscribed(raw) => (p, Ok(raw)),
+                St::Error(e) => (p, Err(e)),
+            })
+            .collect()
     }
 
     /// Subscribe to one value. This is sufficient for a small number
@@ -669,27 +744,37 @@ impl Subscriber {
     pub async fn subscribe_val_ut(
         &self,
         path: Path,
-        timeout: Option<Duration>
+        timeout: Option<Duration>,
     ) -> Result<UVal, Error> {
-        self.subscribe_vals_ut(iter::once(path), timeout).await.pop().unwrap().1
+        self.subscribe_vals_ut(iter::once(path), timeout)
+            .await
+            .pop()
+            .unwrap()
+            .1
     }
 
     /// Same as `subscribe_vals_ut`, but typed.
     pub async fn subscribe_vals<T: DeserializeOwned>(
-        &self, batch: impl IntoIterator<Item = Path>, timeout: Option<Duration>
+        &self,
+        batch: impl IntoIterator<Item = Path>,
+        timeout: Option<Duration>,
     ) -> Vec<(Path, Result<Val<T>, Error>)> {
-        self.subscribe_vals_ut(batch, timeout).await.into_iter().map(|(p, r)| {
-            (p, r.map(|r| r.typed()))
-        }).collect()
+        self.subscribe_vals_ut(batch, timeout)
+            .await
+            .into_iter()
+            .map(|(p, r)| (p, r.map(|r| r.typed())))
+            .collect()
     }
 
     /// Same as `subscribe_val_ut` but typed.
     pub async fn subscribe_val<T: DeserializeOwned>(
         &self,
         path: Path,
-        timeout: Option<Duration>
+        timeout: Option<Duration>,
     ) -> Result<Val<T>, Error> {
-        self.subscribe_val_ut(path, timeout).await.map(|v| v.typed())
+        self.subscribe_val_ut(path, timeout)
+            .await
+            .map(|v| v.typed())
     }
 
     /// Create a durable untyped value subscription to `path`.
@@ -705,8 +790,10 @@ impl Subscriber {
     /// return another pointer to it.
     pub fn durable_subscribe_val_ut(&self, path: Path) -> DUVal {
         let mut t = self.0.lock();
-        if let Some(s) =
-            t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
+        if let Some(s) = t
+            .durable_dead
+            .get(&path)
+            .or_else(|| t.durable_alive.get(&path))
         {
             if let Some(s) = s.upgrade() {
                 return s;
@@ -743,14 +830,17 @@ impl<R: io::Read> io::Read for CReader<R> {
 #[derive(Debug)]
 enum AugFP {
     NoSuchValue(Path),
+    Denied(Path),
     Unsubscribed(Id),
     Subscribed(Path, Id, Bytes),
     Message(Id, Bytes),
-    Heartbeat
+    Heartbeat,
 }
 
 impl AugFP {
-    fn decode(con: &mut ReadChannel) -> Option<Result<AugFP, rmp_serde::decode::Error>> {
+    fn decode(
+        con: &mut ReadChannel<ClientCtx>,
+    ) -> Option<Result<AugFP, rmp_serde::decode::Error>> {
         use byteorder::{BigEndian, ByteOrder};
         let u32s = mem::size_of::<u32>();
         let buf = con.buffer_mut();
@@ -778,12 +868,11 @@ impl AugFP {
                 };
                 Some(Ok(match head {
                     publisher::From::NoSuchValue(p) => AugFP::NoSuchValue(p),
+                    publisher::From::Denied(p) => AugFP::Denied(p),
                     publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
                     publisher::From::Heartbeat => AugFP::Heartbeat,
                     publisher::From::Subscribed(p, id) => {
-                        AugFP::Subscribed(
-                            p, id, buf.split_to(len - sz).freeze()
-                        )
+                        AugFP::Subscribed(p, id, buf.split_to(len - sz).freeze())
                     }
                     publisher::From::Message(id) => {
                         AugFP::Message(id, buf.split_to(len - sz).freeze())
@@ -800,12 +889,7 @@ struct Sub {
     last: Bytes,
 }
 
-fn unsubscribe(
-    subscriber: &mut SubscriberInner,
-    sub: Sub,
-    id: Id,
-    addr: SocketAddr,
-) {
+fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketAddr) {
     if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
@@ -813,8 +897,12 @@ fn unsubscribe(
             let mut i = 0;
             while i < inner.states.len() {
                 match inner.states[i].unbounded_send(DVState::Unsubscribed) {
-                    Ok(()) => { i+= 1; }
-                    Err(_) => { inner.states.remove(i); }
+                    Ok(()) => {
+                        i += 1;
+                    }
+                    Err(_) => {
+                        inner.states.remove(i);
+                    }
                 }
             }
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
@@ -826,10 +914,16 @@ fn unsubscribe(
         Entry::Occupied(e) => match e.get() {
             SubStatus::Pending(_) => (),
             SubStatus::Subscribed(s) => match s.upgrade() {
-                None => { e.remove(); }
-                Some(s) => if s.0.id == id && s.0.addr == addr { e.remove(); }
-            }
-        }
+                None => {
+                    e.remove();
+                }
+                Some(s) => {
+                    if s.0.id == id && s.0.addr == addr {
+                        e.remove();
+                    }
+                }
+            },
+        },
     }
 }
 
@@ -837,9 +931,9 @@ macro_rules! brk {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => break Err(Error::from(e))
+            Err(e) => break Err(Error::from(e)),
         }
-    }
+    };
 }
 
 macro_rules! brkm {
@@ -851,16 +945,55 @@ macro_rules! brkm {
     }
 }
 
-type Flush = Option<Fuse<oneshot::Receiver<Result<(), std::io::Error>>>>;
+type Flush = Option<Fuse<oneshot::Receiver<Result<(), Error>>>>;
 
 async fn wait_flush(flush: &mut Flush) -> Result<(), Error> {
     match flush {
         None => future::pending().await,
         Some(f) => match f.await {
             Err(_) => bail!("failed to read result of flush"),
-            Ok(r) => Ok(r?)
+            Ok(r) => Ok(r?),
+        },
+    }
+}
+
+async fn hello_publisher(
+    con: &mut Channel<ClientCtx>,
+    auth: &Auth,
+    target_principal: &str,
+) -> Result<(), Error> {
+    use crate::protocol::publisher::Hello;
+    match auth {
+        Auth::Anonymous => {
+            con.send_one(&Hello::Anonymous).await?;
+            let reply: Hello = con.receive().await?;
+            match reply {
+                Hello::Anonymous => (),
+                _ => bail!("unexpected response from publisher"),
+            }
+        }
+        Auth::Krb5 { principal } => {
+            let p = principal.as_ref().map(|p| p.as_bytes());
+            let ctx = SYS_KRB5.create_client_ctx(p, target_principal.as_bytes())?;
+            let tok = ctx
+                .step(None)?
+                .map(|b| Vec::from(&*b))
+                .ok_or_else(|| format_err!("expected step to generate a token"))?;
+            con.send_one(&Hello::Token(tok)).await?;
+            con.set_ctx(Some(ctx.clone()));
+            let reply: Hello = con.receive().await?;
+            match reply {
+                Hello::Anonymous => bail!("publisher failed mutual authentication"),
+                Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
+                Hello::Token(tok) => {
+                    if ctx.step(Some(&*tok))?.is_some() {
+                        bail!("unexpected second token from step");
+                    }
+                }
+            }
         }
     }
+    Ok(())
 }
 
 const PERIOD: Duration = Duration::from_secs(10);
@@ -868,7 +1001,9 @@ const PERIOD: Duration = Duration::from_secs(10);
 async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
-    from_sub: UnboundedReceiver<ToCon>
+    target_principal: String,
+    from_sub: UnboundedReceiver<ToCon>,
+    auth: Auth,
 ) -> Result<(), Error> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
@@ -876,7 +1011,8 @@ async fn connection(
     let mut idle: usize = 0;
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
-    let con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
+    let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
+    hello_publisher(&mut con, &auth, target_principal.as_str()).await?;
     let (mut read_con, mut write_con) = con.split();
     let mut flush: Flush = None;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
@@ -956,6 +1092,12 @@ async fn connection(
                                         Err(format_err!("no such value"))
                                     );
                                 },
+                            AugFP::Denied(path) =>
+                                if let Some(r) = pending.remove(&path) {
+                                    let _ = r.finished.send(
+                                        Err(format_err!("access denied"))
+                                    );
+                                }
                             AugFP::Unsubscribed(id) => {
                                 if let Some(s) = subscriptions.remove(&id) {
                                     let mut t = subscriber.0.lock();
@@ -1002,10 +1144,16 @@ async fn connection(
                         flush = Some(write_con.flush().fuse());
                     }
                 }
-                Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
+                Some(BatchItem::InBatch(ToCon::Subscribe(mut req))) => {
                     let path = req.path.clone();
+                    let resolver = req.resolver;
+                    let token = mem::replace(&mut req.token, Vec::new());
                     pending.insert(path.clone(), req);
-                    brk!(write_con.queue_send(&publisher::To::Subscribe(path)))
+                    brk!(write_con.queue_send(&publisher::To::Subscribe {
+                        path,
+                        resolver,
+                        token,
+                    }))
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
                     brk!(write_con.queue_send(&publisher::To::Unsubscribe(id)))
@@ -1046,18 +1194,18 @@ async fn connection(
 
 #[cfg(test)]
 mod test {
-    use std::{
-        net::SocketAddr,
-        time::Duration,
-    };
-    use tokio::{task, time, sync::oneshot, runtime::Runtime};
-    use futures::{prelude::*, future::{self, Either}};
     use crate::{
-        resolver_server::Server,
-        publisher::{Publisher, BindCfg},
-        subscriber::Subscriber,
         config,
+        publisher::{BindCfg, Publisher},
+        resolver_server::Server,
+        subscriber::Subscriber,
     };
+    use futures::{
+        future::{self, Either},
+        prelude::*,
+    };
+    use std::{net::SocketAddr, time::Duration};
+    use tokio::{runtime::Runtime, sync::oneshot, task, time};
 
     async fn init_server() -> Server {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1074,45 +1222,70 @@ mod test {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
             let server = init_server().await;
-            let cfg = config::Resolver { addr: *server.local_addr()};
+            let cfg = config::Resolver {
+                addr: *server.local_addr(),
+            };
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
                 let publisher = Publisher::new(cfg, BindCfg::Local).await.unwrap();
-                let vp0 = publisher.publish_val(
-                    "/app/v0".into(),
-                    &V {id: 0, v: "foo".into()}
-                ).unwrap();
-                let vp1 = publisher.publish_val(
-                    "/app/v1".into(),
-                    &V {id: 0, v: "bar".into()}
-                ).unwrap();
+                let vp0 = publisher
+                    .publish_val(
+                        "/app/v0".into(),
+                        &V {
+                            id: 0,
+                            v: "foo".into(),
+                        },
+                    )
+                    .unwrap();
+                let vp1 = publisher
+                    .publish_val(
+                        "/app/v1".into(),
+                        &V {
+                            id: 0,
+                            v: "bar".into(),
+                        },
+                    )
+                    .unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
-                    vp0.update(&V {id: c, v: "foo".into()})
-                        .unwrap();
-                    vp1.update(&V {id: c, v: "bar".into()})
-                        .unwrap();
+                    vp0.update(&V {
+                        id: c,
+                        v: "foo".into(),
+                    })
+                    .unwrap();
+                    vp1.update(&V {
+                        id: c,
+                        v: "bar".into(),
+                    })
+                    .unwrap();
                     publisher.flush(None).await.unwrap();
                     c += 1
                 }
             });
-            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+            time::timeout(Duration::from_secs(1), ready)
+                .await
+                .unwrap()
+                .unwrap();
             let subscriber = Subscriber::new(cfg).unwrap();
-            let vs0 =
-                subscriber.subscribe_val::<V>("/app/v0".into(), None).await.unwrap();
-            let vs1 =
-                subscriber.subscribe_val::<V>("/app/v1".into(), None).await.unwrap();
+            let vs0 = subscriber
+                .subscribe_val::<V>("/app/v0".into(), None)
+                .await
+                .unwrap();
+            let vs1 = subscriber
+                .subscribe_val::<V>("/app/v1".into(), None)
+                .await
+                .unwrap();
             let mut c0: Option<usize> = None;
             let mut c1: Option<usize> = None;
             let mut vs0s = vs0.updates(true);
             let mut vs1s = vs1.updates(true);
             loop {
-                let r = Either::factor_first(
-                    future::select(vs0s.next(), vs1s.next()).await
-                ).0;
+                let r =
+                    Either::factor_first(future::select(vs0s.next(), vs1s.next()).await)
+                        .0;
                 match r {
                     None => panic!("publishers died"),
                     Some(Err(e)) => panic!("publisher error: {}", e),
@@ -1123,7 +1296,9 @@ mod test {
                             _ => panic!("unexpected v"),
                         };
                         match c {
-                            None => { *c = Some(v.id); },
+                            None => {
+                                *c = Some(v.id);
+                            }
                             Some(c_id) => {
                                 assert_eq!(*c_id + 1, v.id);
                                 if *c_id >= 50 {

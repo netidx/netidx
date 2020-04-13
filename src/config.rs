@@ -81,13 +81,11 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
+    use crate::protocol::resolver::ResolverId;
     use failure::Error;
     use serde_json::from_str;
-    use std::{
-        convert::AsRef, net::SocketAddr, path::Path, result::Result,
-    };
+    use std::{convert::AsRef, net::SocketAddr, path::Path, result::Result};
     use tokio::fs::read_to_string;
-    use crate::protocol::resolver::ResolverId;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {

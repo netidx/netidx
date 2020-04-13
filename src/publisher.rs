@@ -6,7 +6,10 @@ use crate::{
     channel::Channel,
     config,
     path::Path,
-    protocol::{resolver::ResolverId, publisher::{self, Id}},
+    protocol::{
+        publisher::{self, Id},
+        resolver::ResolverId,
+    },
     resolver::{Auth, ResolverWrite},
     utils::mp_encode,
 };
@@ -27,7 +30,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     result::Result,
     sync::{Arc, Weak},
-    time::{Duration, SystemTime}
+    time::{Duration, SystemTime},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -291,8 +294,7 @@ impl Publisher {
                 }
             }
         };
-        let resolver =
-            ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
+        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
@@ -598,7 +600,11 @@ fn handle_batch(
     let ctxts = ctxts.read();
     for msg in msgs {
         match msg {
-            Subscribe { path, resolver, token } => match auth {
+            Subscribe {
+                path,
+                resolver,
+                token,
+            } => match auth {
                 Auth::Anonymous => subscribe(&mut *pb, con, *addr, path)?,
                 Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                     None => con.queue_send(&From::Denied(path))?,
@@ -611,7 +617,7 @@ fn handle_batch(
                                 Ok(PermissionToken(a_path, ts)) => {
                                     let age = std::cmp::max(
                                         u64::saturating_sub(now, ts),
-                                        u64::saturating_sub(ts, now)
+                                        u64::saturating_sub(ts, now),
                                     );
                                     if age > 300 || a_path != &*path {
                                         con.queue_send(&From::Denied(path))?
@@ -621,8 +627,8 @@ fn handle_batch(
                                 }
                             }
                         }
-                    }
-                }
+                    },
+                },
             },
             Unsubscribe(id) => {
                 if let Some(ut) = pb.by_id.get_mut(&id) {
@@ -644,8 +650,8 @@ async fn hello_client(
     auth: &Auth,
 ) -> Result<(), Error> {
     use crate::{
-        protocol::publisher::Hello::{self, *},
         auth::Krb5,
+        protocol::publisher::Hello::{self, *},
     };
     let hello: Hello = con.receive().await?;
     match hello {
@@ -674,7 +680,7 @@ async fn hello_client(
                     con.send_one(&ResolverAuthenticate(id, tok)).await?;
                 }
             }
-        },
+        }
     }
     Ok(())
 }

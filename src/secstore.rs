@@ -1,18 +1,18 @@
 use crate::{
-    config,
     auth::{
         sysgmapper::Mapper,
-        syskrb5::{SYS_KRB5, ServerCtx},
+        syskrb5::{ServerCtx, SYS_KRB5},
         Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
     },
+    config,
     protocol::resolver::CtxId,
 };
+use arc_swap::{ArcSwap, Guard};
+use failure::Error;
 use fxhash::FxBuildHasher;
+use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use failure::Error;
-use parking_lot::RwLock;
-use arc_swap::{ArcSwap, Guard};
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
@@ -84,7 +84,7 @@ pub(crate) struct SecStore {
 impl SecStore {
     pub(crate) fn new(
         principal: String,
-        pmap: config::resolver_server::PMap
+        pmap: config::resolver_server::PMap,
     ) -> Result<Self, Error> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb)?;

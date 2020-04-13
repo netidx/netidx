@@ -1,23 +1,19 @@
-use crate::{utils::BytesWriter, auth::Krb5Ctx};
+use crate::{auth::Krb5Ctx, utils::BytesWriter};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use failure::Error;
+use futures::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
-use std::{
-    mem,
-    result::Result,
-    ops::Drop,
-};
+use std::{mem, ops::Drop, result::Result};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{
-        mpsc::{self, UnboundedSender, UnboundedReceiver},
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
         oneshot,
     },
     task,
 };
-use failure::Error;
-use futures::prelude::*;
 
 const BUF: usize = 4096;
 const LEN_MASK: u32 = 0x7FFFFFFF;
@@ -48,7 +44,7 @@ impl<'a, C: Krb5Ctx + Clone> Msg<'a, C> {
 
     pub(crate) fn pack<T: Serialize>(
         &mut self,
-        msg: &T
+        msg: &T,
     ) -> Result<(), rmp_serde::encode::Error> {
         rmp_serde::encode::write_named(&mut BytesWriter(&mut self.body), msg)
     }
@@ -98,7 +94,7 @@ fn flush_task(
 pub(crate) struct WriteChannel<C> {
     to_flush: UnboundedSender<(Bytes, oneshot::Sender<Result<(), Error>>)>,
     buf: BytesMut,
-    ctx: Option<C>
+    ctx: Option<C>,
 }
 
 impl<C: Krb5Ctx + Clone> WriteChannel<C> {
@@ -113,7 +109,7 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
     pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
         self.ctx = ctx;
     }
-    
+
     /// Queue outgoing messages. This ONLY queues the messages, use
     /// flush to initiate sending. It will fail if the message is
     /// larger then `u32::max_value()`.
@@ -130,7 +126,7 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
         let mut msgbuf = self.begin_msg();
         match msgbuf.pack(msg) {
             Ok(()) => msgbuf.finish(),
-            Err(e) => bail!("can't encode message {}", e)
+            Err(e) => bail!("can't encode message {}", e),
         }
     }
 
@@ -144,7 +140,12 @@ impl<C: Krb5Ctx + Clone> WriteChannel<C> {
         body.put_u32(0);
         let mut head = body.split_to(body.len());
         head.clear();
-        Msg { head, body, con: self, finished: false }
+        Msg {
+            head,
+            body,
+            con: self,
+            finished: false,
+        }
     }
 
     pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
@@ -172,7 +173,7 @@ pub(crate) struct ReadChannel<C> {
     decrypted: BytesMut,
     ctx: Option<C>,
 }
-    
+
 impl<C: Krb5Ctx + Clone> ReadChannel<C> {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         ReadChannel {
@@ -186,7 +187,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
     pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
         self.ctx = ctx;
     }
-    
+
     /// Read a load of bytes from the socket into the read buffer
     pub(crate) async fn fill_buffer(&mut self) -> Result<(), Error> {
         if self.buf.remaining_mut() < BUF {
@@ -234,14 +235,16 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
     pub(crate) fn buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.buf
     }
-    
+
     /// Receive one message, potentially waiting for one to arrive if
     /// none are presently in the buffer.
     pub(crate) async fn receive_ut(&mut self) -> Result<Bytes, Error> {
         loop {
             match self.decode_from_buffer()? {
                 Some(msg) => break Ok(msg),
-                None => { self.fill_buffer().await?; }
+                None => {
+                    self.fill_buffer().await?;
+                }
             }
         }
     }

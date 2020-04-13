@@ -1,7 +1,4 @@
-use crate::{
-    config,
-    path::Path,
-};
+use crate::{config, path::Path};
 use failure::Error;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
@@ -145,7 +142,8 @@ impl PMap {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
                 entry.insert(
-                    ent.as_ref().map(|ent| db.entity(ent))
+                    ent.as_ref()
+                        .map(|ent| db.entity(ent))
                         .unwrap_or_else(|| ANONYMOUS.id),
                     Permissions::try_from(perm.as_str())?,
                 );
@@ -225,7 +223,7 @@ pub(crate) trait Krb5 {
 
     fn create_server_ctx(
         &self,
-        principal: Option<&[u8]>
+        principal: Option<&[u8]>,
     ) -> Result<Self::Krb5ServerCtx, Error>;
 }
 
@@ -370,10 +368,12 @@ pub(crate) mod syskrb5 {
             principal: Option<&[u8]>,
         ) -> Result<Self::Krb5ServerCtx, Error> {
             task::block_in_place(|| {
-                let name = principal.map(|principal| -> Result<Name, Error> {
-                    Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                       .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?)
-                }).transpose()?;
+                let name = principal
+                    .map(|principal| -> Result<Name, Error> {
+                        Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                            .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?)
+                    })
+                    .transpose()?;
                 let cred = {
                     let mut s = OidSet::new()?;
                     s.add(&GSS_MECH_KRB5)?;
