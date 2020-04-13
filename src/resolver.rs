@@ -9,7 +9,7 @@ use crate::{
     protocol::resolver::{
         self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, Resolved,
         ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
-        ClientAuthWrite, ClientHelloWrite,
+        ClientAuthWrite, ClientHelloWrite, ResolverId,
     },
 };
 use failure::Error;
@@ -190,7 +190,7 @@ async fn connect_write(
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
-    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
     let mut backoff = 0;
@@ -238,7 +238,7 @@ async fn connect_write(
             (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
                 let ctx = ctx.unwrap();
                 try_cont!("resolver tok", ctx.step(Some(&tok)));
-                ctxts.write().insert(resolver_addr, ctx.clone());
+                ctxts.write().insert(r.id, ctx.clone());
             }
         }
         if !r.ttl_expired {
@@ -261,7 +261,7 @@ async fn connection_write(
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
 ) -> Result<()> {
     let mut con: Option<Channel<ClientCtx>> = None;
     let ttl = Duration::from_secs(TTL / 2);
@@ -431,7 +431,7 @@ impl ResolverWrite {
 
     pub(crate) fn ctxts(
         &self,
-    ) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
+    ) -> Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>> {
         self.ctxts.clone()
     }
 }

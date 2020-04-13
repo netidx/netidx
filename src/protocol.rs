@@ -121,8 +121,10 @@ pub mod resolver {
     /// This is the format of the Vec<u8> passed back with each
     /// Resolved msg, however it is encrypted with the publisher's
     /// resolver security context. This allows the subscriber to prove
-    /// to the publisher that it is allowed to subscribe to the
-    /// specified path.
+    /// to the publisher that the resolver authorized it to subscribe
+    /// to the specified path (because the subsciber can't decrypt or
+    /// fabricate the token without the session key shared by the
+    /// resolver server and the publisher).
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct PermissionToken<'a>(pub &'a str, pub u64);
     
