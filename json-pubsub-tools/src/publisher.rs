@@ -3,7 +3,8 @@ use json_pubsub::{
     utils::{self, Batched, BatchItem},
     path::Path,
     publisher::{BindCfg, Publisher, UVal},
-    config,
+    resolver::Auth,
+    config::resolver::Config,
 };
 use futures::prelude::*;
 use tokio::{
@@ -44,12 +45,12 @@ fn from_json(s: &str) -> Result<Bytes, Error> {
 
 fn e() -> Error { format_err!("") }
 
-pub(crate) fn run(config: config::Resolver, json: bool, timeout: Option<u64>) {
+pub(crate) fn run(config: Config, json: bool, timeout: Option<u64>, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
         let mut published: HashMap<Path, UVal> = HashMap::new();
-        let publisher = Publisher::new(config, BindCfg::Any).await
+        let publisher = Publisher::new(config, auth, BindCfg::Any).await
             .expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
         let mut batch = Vec::new();

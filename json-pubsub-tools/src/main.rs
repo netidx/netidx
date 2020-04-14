@@ -4,6 +4,7 @@
 #[macro_use] extern crate failure;
 use json_pubsub::{
     path::Path,
+    resolver::Auth,
     config,
 };
 use std::{fs::read, path::PathBuf, net::SocketAddr};
@@ -42,12 +43,22 @@ enum Sub {
     },
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver {
+        #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
+        krb5: bool,
+        #[structopt(short = "p", long = "principal",
+                    help = "use the specified krb5 principal")]
+        principal: Option<String>
         #[structopt(subcommand)]
         cmd: ResolverCmd
     },
     #[structopt(name = "publisher",
                 about = "publish path|data lines from stdin")]
     Publisher {
+        #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
+        krb5: bool,
+        #[structopt(short = "p", long = "principal",
+                    help = "use the specified krb5 principal")]
+        principal: Option<String>
         #[structopt(short = "j", long = "json", help = "interpret data as json")]
         json: bool,
         #[structopt(
@@ -58,11 +69,21 @@ enum Sub {
     },
     #[structopt(name = "subscriber", about = "subscribe and print values")]
     Subscriber {
+        #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
+        krb5: bool,
+        #[structopt(short = "p", long = "principal",
+                    help = "use the specified krb5 principal")]
+        principal: Option<String>
         #[structopt(name = "path")]
         paths: Vec<String>
     },
     #[structopt(name = "stress", about = "stress test")]
     Stress {
+        #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
+        krb5: bool,
+        #[structopt(short = "p", long = "principal",
+                    help = "use the specified krb5 principal")]
+        principal: Option<String>
         #[structopt(subcommand)]
         cmd: Stress
     },
@@ -108,21 +129,32 @@ enum Stress {
     Subscriber
 }
 
+fn auth(krb5: bool, principal: Option<String>) -> Auth {
+    if !krb5 {
+        Auth::Anonymous
+    } else {
+        Auth::Krb5 {principal}
+    }
+}
+
 fn main() {
     let opt = Opt::from_args();
-    let cfg: config::Resolver =
+    let cfg: config::resolver::Config =
         serde_json::from_slice(&*read(opt.config).expect("reading config"))
         .expect("parsing config");
     match opt.cmd {
         Sub::ResolverServer {foreground, config} =>
             resolver_server::run(config, !foreground),
-        Sub::Resolver {cmd} => resolver::run(cfg, cmd),
-        Sub::Publisher {json, timeout} => publisher::run(cfg, json, timeout),
-        Sub::Subscriber {paths} => subscriber::run(cfg, paths),
-        Sub::Stress {cmd} => match cmd {
-            Stress::Subscriber => stress_subscriber::run(cfg),
+        Sub::Resolver {krb5, principal, cmd} =>
+            resolver::run(cfg, cmd, auth(krb5, principal)),
+        Sub::Publisher {krb5, principal, json, timeout} =>
+            publisher::run(cfg, json, timeout, auth(krb5, principal)),
+        Sub::Subscriber {krb5, principal, paths} =>
+            subscriber::run(cfg, paths, auth(krb5, principal)),
+        Sub::Stress {krb5, principal, cmd} => match cmd {
+            Stress::Subscriber => stress_subscriber::run(cfg, auth(krb5, principal)),
             Stress::Publisher {nvals, vsize} =>
-                stress_publisher::run(cfg, nvals, vsize),
+                stress_publisher::run(cfg, nvals, vsize, auth(krb5, principal)),
         }
     }
 }

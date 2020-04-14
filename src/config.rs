@@ -4,9 +4,8 @@ pub mod resolver_server {
     use serde_json::from_str;
     use std::{
         collections::HashMap, convert::AsRef, net::SocketAddr, path::Path as FsPath,
-        result::Result,
+        result::Result, fs::read_to_string,
     };
-    use tokio::fs::read_to_string;
 
     mod file {
         use crate::protocol::resolver::ResolverId;
@@ -23,6 +22,7 @@ pub mod resolver_server {
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
+            pub(super) pid_file: String,
             pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
@@ -47,6 +47,7 @@ pub mod resolver_server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
+        pub pid_file: String,
         pub id: ResolverId,
         pub addr: SocketAddr,
         pub max_connections: usize,
@@ -54,8 +55,8 @@ pub mod resolver_server {
     }
 
     impl Config {
-        async fn load<P: AsRef<FsPath>>(file: P) -> Result<Config, Error> {
-            let cfg: file::Config = from_str(&read_to_string(file).await?)?;
+        fn load<P: AsRef<FsPath>>(file: P) -> Result<Config, Error> {
+            let cfg: file::Config = from_str(&read_to_string(file)?)?;
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,
                 file::Auth::Krb5 {
@@ -63,7 +64,7 @@ pub mod resolver_server {
                     permissions,
                 } => {
                     let permissions: PMap =
-                        from_str(&read_to_string(&permissions).await?)?;
+                        from_str(&read_to_string(&permissions)?)?;
                     Auth::Krb5 {
                         principal,
                         permissions,
@@ -71,6 +72,7 @@ pub mod resolver_server {
                 }
             };
             Ok(Config {
+                pid_file: cfg.pid_file,
                 id: cfg.id,
                 addr: cfg.addr,
                 max_connections: cfg.max_connections,
