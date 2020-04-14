@@ -55,7 +55,7 @@ pub mod resolver_server {
     }
 
     impl Config {
-        fn load<P: AsRef<FsPath>>(file: P) -> Result<Config, Error> {
+        pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config, Error> {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,

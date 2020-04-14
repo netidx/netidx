@@ -47,7 +47,7 @@ enum Sub {
         krb5: bool,
         #[structopt(short = "p", long = "principal",
                     help = "use the specified krb5 principal")]
-        principal: Option<String>
+        principal: Option<String>,
         #[structopt(subcommand)]
         cmd: ResolverCmd
     },
@@ -58,7 +58,7 @@ enum Sub {
         krb5: bool,
         #[structopt(short = "p", long = "principal",
                     help = "use the specified krb5 principal")]
-        principal: Option<String>
+        principal: Option<String>,
         #[structopt(short = "j", long = "json", help = "interpret data as json")]
         json: bool,
         #[structopt(
@@ -73,7 +73,7 @@ enum Sub {
         krb5: bool,
         #[structopt(short = "p", long = "principal",
                     help = "use the specified krb5 principal")]
-        principal: Option<String>
+        principal: Option<String>,
         #[structopt(name = "path")]
         paths: Vec<String>
     },
@@ -83,7 +83,7 @@ enum Sub {
         krb5: bool,
         #[structopt(short = "p", long = "principal",
                     help = "use the specified krb5 principal")]
-        principal: Option<String>
+        principal: Option<String>,
         #[structopt(subcommand)]
         cmd: Stress
     },

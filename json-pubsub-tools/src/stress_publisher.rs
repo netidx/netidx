@@ -1,7 +1,8 @@
 use json_pubsub::{
     path::Path,
     publisher::{BindCfg, Publisher},
-    config
+    resolver::Auth,
+    config::resolver::Config
 };
 use tokio::{
     runtime::Runtime,
@@ -30,8 +31,8 @@ impl DerefMut for Data {
     }
 }
 
-async fn run_publisher(config: config::Resolver, nvals: usize, vsize: usize) {
-    let publisher = Publisher::new(config, BindCfg::Any).await
+async fn run_publisher(config: Config, nvals: usize, vsize: usize, auth: Auth) {
+    let publisher = Publisher::new(config, auth, BindCfg::Any).await
         .expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut vals = Data((0..vsize).into_iter().collect::<Vec<_>>());
@@ -65,10 +66,10 @@ async fn run_publisher(config: config::Resolver, nvals: usize, vsize: usize) {
     }
 }
 
-pub(crate) fn run(config: config::Resolver, nvals: usize, vsize: usize) {
+pub(crate) fn run(config: Config, nvals: usize, vsize: usize, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        run_publisher(config, nvals, vsize).await;
+        run_publisher(config, nvals, vsize, auth).await;
         // Allow the publisher time to send the clear message
         time::delay_for(Duration::from_secs(1)).await;
     });

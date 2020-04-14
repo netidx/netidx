@@ -1,25 +1,30 @@
 use json_pubsub::{
     path::Path,
-    resolver::{Resolver, ReadOnly, WriteOnly},
-    config,
+    resolver::{ResolverRead, ResolverWrite, Auth},
+    config::resolver::Config,
 };
 use tokio::runtime::Runtime;
 use super::ResolverCmd;
 
-pub(crate) fn run(config: config::Resolver, cmd: ResolverCmd) {
+pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         match cmd {
             ResolverCmd::Resolve { path } => {
-                let mut resolver = Resolver::<ReadOnly>::new_r(config).unwrap();
-                for addrs in resolver.resolve(vec![path]).await.unwrap() {
-                    for addr in addrs {
+                let mut resolver = ResolverRead::new(config, auth).unwrap();
+                let resolved = resolver.resolve(vec![path]).await.unwrap();
+                println!("resolver: {:?}", resolved.resolver);
+                for (addr, principal) in resolved.krb5_principals.iter() {
+                    println!("{}: {}", addr, principal);
+                }
+                for addrs in &resolved.addrs {
+                    for (addr, _) in addrs {
                         println!("{}", addr);
                     }
                 }
             }
             ResolverCmd::List { path } => {
-                let mut resolver = Resolver::<ReadOnly>::new_r(config).unwrap();
+                let mut resolver = ResolverRead::new(config, auth).unwrap();
                 let path = path.unwrap_or_else(|| Path::from("/"));
                 for p in resolver.list(path).await.unwrap() {
                     println!("{}", p);
@@ -27,12 +32,12 @@ pub(crate) fn run(config: config::Resolver, cmd: ResolverCmd) {
             },
             ResolverCmd::Add {path, socketaddr} => {
                 let mut resolver =
-                    Resolver::<WriteOnly>::new_w(config, socketaddr).unwrap();
+                    ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.publish(vec![path]).await.unwrap();
             },
             ResolverCmd::Remove {path, socketaddr} => {
                 let mut resolver =
-                    Resolver::<WriteOnly>::new_w(config, socketaddr).unwrap();
+                    ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.unpublish(vec![path]).await.unwrap();
             },
         }

@@ -1,8 +1,9 @@
 use json_pubsub::{
     path::Path,
     subscriber::{Subscriber, DUVal},
+    resolver::Auth,
     utils::{Batched, BatchItem, BytesWriter},
-    config,
+    config::resolver::Config,
 };
 use futures::{
     prelude::*,
@@ -121,11 +122,11 @@ impl Out {
     }
 }
 
-pub(crate) fn run(cfg: config::Resolver, paths: Vec<String>) {
+pub(crate) fn run(cfg: Config, paths: Vec<String>, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let mut subscriptions: HashMap::<Path, DUVal> = HashMap::new();
-        let subscriber = Subscriber::new(cfg).expect("create subscriber");
+        let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
         let mut requests:
         Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin> = {
             let stdin = BufReader::new(io::stdin()).lines();

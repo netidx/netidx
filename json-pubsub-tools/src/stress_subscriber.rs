@@ -2,19 +2,19 @@ use crate::stress_publisher::Data;
 use futures::prelude::*;
 use json_pubsub::{
     path::Path,
-    resolver::{ReadOnly, Resolver},
+    resolver::{ResolverRead, Auth},
     subscriber::{Subscriber, DVal, DVState},
-    config,
+    config::resolver::Config,
 };
 use std::time::Duration;
 use tokio::{runtime::Runtime, time::Instant};
 
-pub(crate) fn run(config: config::Resolver) {
+pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
-        let mut r = Resolver::<ReadOnly>::new_r(config).expect("resolver");
+        let mut r = ResolverRead::new(config.clone(), auth.clone()).expect("resolver");
         let paths = r.list(Path::from("/bench")).await.expect("list");
-        let subscriber = Subscriber::new(config).unwrap();
+        let subscriber = Subscriber::new(config, auth).unwrap();
         let subs =
             paths.into_iter().map(|path| subscriber.durable_subscribe_val(path))
             .collect::<Vec<DVal<Data>>>();
