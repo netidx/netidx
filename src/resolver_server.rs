@@ -8,8 +8,8 @@ use crate::{
     protocol::{
         publisher,
         resolver::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
+            FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
@@ -43,13 +43,6 @@ type ClientInfo = Option<oneshot::Sender<()>>;
 static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 static READER_TTL: Duration = Duration::from_secs(60);
 static WRITER_TTL: Duration = Duration::from_secs(120);
-
-struct ClientState {
-    ctxid: Option<CtxId>,
-    uifo: Arc<UserInfo>,
-    write_addr: Option<SocketAddr>,
-    ttl: Duration,
-}
 
 fn allowed_for(
     secstore: Option<&SecStore>,

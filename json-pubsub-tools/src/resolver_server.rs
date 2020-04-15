@@ -5,11 +5,7 @@ use json_pubsub::{
 use futures::future;
 use tokio::runtime::Runtime;
 use daemonize::Daemonize;
-use std::{
-    path::PathBuf,
-    fs::read,
-    net::SocketAddr,
-};
+use std::path::PathBuf;
 
 pub(crate) fn run(config: PathBuf, daemonize: bool) {
     let cfg = Config::load(&config).expect("failed to load config");

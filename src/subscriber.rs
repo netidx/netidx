@@ -538,7 +538,7 @@ impl Subscriber {
         let now = Instant::now();
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
-        let mut r = {
+        let r = {
             // Init
             let mut t = self.0.lock();
             for p in paths.clone() {

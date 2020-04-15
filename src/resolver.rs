@@ -170,14 +170,14 @@ impl ResolverRead {
         Ok(ResolverRead(sender))
     }
 
-    pub async fn resolve(&mut self, paths: Vec<Path>) -> Result<Resolved> {
+    pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
         match send(&self.0, resolver::ToRead::Resolve(paths)).await? {
             resolver::FromRead::Resolved(r) => Ok(r),
             _ => bail!("unexpected response"),
         }
     }
 
-    pub async fn list(&mut self, p: Path) -> Result<Vec<Path>> {
+    pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
         match send(&self.0, resolver::ToRead::List(p)).await? {
             resolver::FromRead::List(v) => Ok(v),
             _ => bail!("unexpected response"),

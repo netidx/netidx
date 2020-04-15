@@ -12,7 +12,7 @@ use tokio::{runtime::Runtime, time::Instant};
 pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
-        let mut r = ResolverRead::new(config.clone(), auth.clone()).expect("resolver");
+        let r = ResolverRead::new(config.clone(), auth.clone()).expect("resolver");
         let paths = r.list(Path::from("/bench")).await.expect("list");
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs =

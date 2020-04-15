@@ -11,7 +11,7 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
     rt.block_on(async {
         match cmd {
             ResolverCmd::Resolve { path } => {
-                let mut resolver = ResolverRead::new(config, auth).unwrap();
+                let resolver = ResolverRead::new(config, auth).unwrap();
                 let resolved = resolver.resolve(vec![path]).await.unwrap();
                 println!("resolver: {:?}", resolved.resolver);
                 for (addr, principal) in resolved.krb5_principals.iter() {
@@ -24,19 +24,19 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                 }
             }
             ResolverCmd::List { path } => {
-                let mut resolver = ResolverRead::new(config, auth).unwrap();
+                let resolver = ResolverRead::new(config, auth).unwrap();
                 let path = path.unwrap_or_else(|| Path::from("/"));
                 for p in resolver.list(path).await.unwrap() {
                     println!("{}", p);
                 }
             },
             ResolverCmd::Add {path, socketaddr} => {
-                let mut resolver =
+                let resolver =
                     ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.publish(vec![path]).await.unwrap();
             },
             ResolverCmd::Remove {path, socketaddr} => {
-                let mut resolver =
+                let resolver =
                     ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.unpublish(vec![path]).await.unwrap();
             },
