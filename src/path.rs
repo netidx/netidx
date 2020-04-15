@@ -112,28 +112,40 @@ fn is_escaped(s: &str, i: usize) -> bool {
     })
 }
 
-struct BaseNames<'a> {
-    cur: &'a str,
-    all: &'a str,
-    base: usize,
+enum BaseNames<'a> {
+    Root(bool),
+    Path {
+        cur: &'a str,
+        all: &'a str,
+        base: usize,
+    }
 }
 
 impl<'a> Iterator for BaseNames<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.base == self.all.len() {
-            None
-        } else {
-            match Path::find_sep(self.cur) {
-                None => {
-                    self.base = self.all.len();
-                    Some(self.all)
-                }
-                Some(p) => {
-                    self.base += p + 1;
-                    self.cur = &self.all[self.base..];
-                    Some(&self.all[0..self.base - 1])
+        match self {
+            BaseNames::Root(false) => None,
+            BaseNames::Root(true) => {
+                *self = BaseNames::Root(false);
+                Some("/")
+            }
+            BaseNames::Path {ref mut cur, ref all, ref mut base} => {
+                if *base == all.len() {
+                    None
+                } else {
+                    match Path::find_sep(cur) {
+                        None => {
+                            *base = all.len();
+                            Some(all)
+                        }
+                        Some(p) => {
+                            *base += p + 1;
+                            *cur = &all[*base..];
+                            Some(&all[0..*base - 1])
+                        }
+                    }
                 }
             }
         }
@@ -218,10 +230,14 @@ impl Path {
     /// assert_eq!(bn.next(), None);
     /// ```
     pub fn basenames(s: &str) -> impl Iterator<Item=&str> {
-        BaseNames {
-            cur: s,
-            all: s,
-            base: 1,
+        if s == "/" {
+            BaseNames::Root(true)
+        } else {
+            BaseNames::Path {
+                cur: s,
+                all: s,
+                base: 1,
+            }
         }
     }
 

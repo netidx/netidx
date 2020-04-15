@@ -213,8 +213,8 @@ async fn hello_client_write(
                         id,
                         auth: ServerAuthWrite::Reused,
                     };
-                    con.set_ctx(Some(ctx.clone()));
                     send(&mut con, h).await?;
+                    con.set_ctx(Some(ctx.clone()));
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
@@ -228,8 +228,8 @@ async fn hello_client_write(
                     id,
                     auth: ServerAuthWrite::Accepted(tok),
                 };
-                con.set_ctx(Some(ctx.clone()));
                 send(&mut con, h).await?;
+                con.set_ctx(Some(ctx.clone()));
                 let mut con: Channel<ServerCtx> = Channel::new(
                     time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
                         .await??,
@@ -333,12 +333,14 @@ fn handle_batch_read(
                 }
             }
             ToRead::List(path) => {
+                dbg!(());
                 let allowed = secstore
                     .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
                     .unwrap_or(true);
                 if allowed {
                     con.queue_send(&FromRead::List(s.list(&path)))?
                 } else {
+                    dbg!(());
                     con.queue_send(&FromRead::Error("denied".into()))?
                 }
             }
@@ -400,7 +402,7 @@ async fn hello_client_read(
     ) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
-    let uifo = match hello {
+    let uifo = match dbg!(hello) {
         ClientAuthRead::Anonymous => {
             send(&mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
@@ -410,8 +412,8 @@ async fn hello_client_read(
             Some(ref secstore) => match secstore.get_read(&id) {
                 None => bail!("ctx id not found"),
                 Some(ctx) => {
-                    con.set_ctx(Some(ctx.clone()));
                     send(&mut con, ServerHelloRead::Reused).await?;
+                    con.set_ctx(Some(ctx.clone()));
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
@@ -421,8 +423,8 @@ async fn hello_client_read(
             Some(ref secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
                 let id = secstore.store_read(ctx.clone());
-                con.set_ctx(Some(ctx.clone()));
                 send(&mut con, ServerHelloRead::Accepted(tok, id)).await?;
+                con.set_ctx(Some(ctx.clone()));
                 secstore.ifo(Some(&ctx.client()?))?
             }
         },

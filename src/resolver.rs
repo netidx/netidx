@@ -7,9 +7,9 @@ use crate::{
     config::{self, resolver::Auth as CAuth},
     path::Path,
     protocol::resolver::{
-        self, ClientAuthRead, ClientHello, CtxId, FromRead, FromWrite, Resolved,
-        ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
-        ClientAuthWrite, ClientHelloWrite, ResolverId,
+        self, ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+        FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+        ServerHelloWrite, ToRead, ToWrite,
     },
 };
 use failure::Error;
@@ -18,11 +18,11 @@ use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
     net::SocketAddr,
     result,
     sync::Arc,
     time::Duration,
-    fmt::Debug,
 };
 use tokio::{
     net::TcpStream,
@@ -87,18 +87,19 @@ async fn connect_read(
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { principal }, CAuth::Krb5 { principal: t }) => match sc {
+            (Auth::Krb5 { principal }, CAuth::Krb5 { target }) => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
                     let p = principal.as_ref().map(|s| s.as_bytes());
-                    let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t.as_bytes()));
+                    let t = target.as_bytes();
+                    let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t));
                     (ClientAuthRead::Token(tok), Some(ctx))
                 }
             },
         };
         try_cont!("hello", con.send_one(&ClientHello::ReadOnly(auth)).await);
-        con.set_ctx(ctx.clone());
         let r: ServerHelloRead = try_cont!("hello reply", con.receive().await);
+        con.set_ctx(ctx.clone());
         // CR estokes: replace this with proper logging
         match (desired_auth, r) {
             (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
@@ -165,7 +166,7 @@ impl ResolverRead {
     ) -> Result<ResolverRead> {
         let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(async move {
-            let _ = connection_read(receiver, resolver, desired_auth);
+            let _ = dbg!(connection_read(receiver, resolver, desired_auth).await);
         });
         Ok(ResolverRead(sender))
     }
@@ -178,7 +179,7 @@ impl ResolverRead {
     }
 
     pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
-        match send(&self.0, resolver::ToRead::List(p)).await? {
+        match dbg!(send(&self.0, resolver::ToRead::List(p)).await?) {
             resolver::FromRead::List(v) => Ok(v),
             _ => bail!("unexpected response"),
         }
@@ -204,22 +205,19 @@ async fn connect_write(
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { principal }, CAuth::Krb5 { principal: t }) => {
+            (Auth::Krb5 { principal }, CAuth::Krb5 { target }) => {
                 match ctxts.read().get(&resolver_addr.0) {
                     Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                     None => {
                         let p = principal.as_ref().map(|s| s.as_bytes());
-                        let (ctx, tok) =
-                            try_cont!("create ctx", create_ctx(p, t.as_bytes()));
+                        let t = target.as_bytes();
+                        let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t));
                         (ClientAuthWrite::Token(tok), Some(ctx))
                     }
                 }
             }
         };
-        let h = ClientHello::WriteOnly(ClientHelloWrite {
-            write_addr,
-            auth,
-        });
+        let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
         try_cont!("hello", con.send_one(&h).await);
         con.set_ctx(ctx.clone());
         let r: ServerHelloWrite = try_cont!("hello reply", con.receive().await);
@@ -353,7 +351,7 @@ async fn write_mgr(
             let ctxts = ctxts.clone();
             senders.push(sender);
             task::spawn(async move {
-                let _ = connection_write(
+                let _ = dbg!(connection_write(
                     receiver,
                     resolver,
                     addr,
@@ -362,7 +360,7 @@ async fn write_mgr(
                     desired_auth.clone(),
                     ctxts.clone(),
                 )
-                .await;
+                .await);
                 // CR estokes: handle failure
             });
         }
@@ -375,11 +373,14 @@ async fn write_mgr(
             let _ = s.send((Arc::clone(&m), tx));
             rx
         }))
-        .await?.0;
+        .await?
+        .0;
         if let ToWrite::Publish(paths) = &*m {
             match r {
-                FromWrite::Published => for p in paths {
-                    published.write().insert(p.clone());
+                FromWrite::Published => {
+                    for p in paths {
+                        published.write().insert(p.clone());
+                    }
                 }
                 _ => (),
             }

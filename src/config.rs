@@ -34,7 +34,7 @@ pub mod resolver_server {
     type Entity = String;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PMap(pub HashMap<Path, HashMap<Option<Entity>, Permissions>>);
+    pub struct PMap(pub HashMap<Path, HashMap<Entity, Permissions>>);
 
     #[derive(Debug, Clone)]
     pub enum Auth {
@@ -92,7 +92,7 @@ pub mod resolver {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {
         Anonymous,
-        Krb5 { principal: String },
+        Krb5 { target: String },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -107,19 +107,19 @@ impl<M: GMapper> UserDb<M> {
     }
 
     pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
-        match user {
+        match dbg!(user) {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
                 Some(user) => Ok(user.clone()),
                 None => {
                     let ifo = Arc::new(UserInfo {
                         id: self.entity(user),
-                        groups: self
+                        groups: dbg!(self
                             .mapper
                             .groups(user)?
                             .into_iter()
                             .map(|b| self.entity(&b))
-                            .collect::<Vec<_>>(),
+                            .collect::<Vec<_>>()),
                     });
                     self.users.insert(String::from(user), ifo.clone());
                     Ok(ifo)
@@ -141,12 +141,12 @@ impl PMap {
         for (path, tbl) in file.0.iter() {
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
-                entry.insert(
-                    ent.as_ref()
-                        .map(|ent| db.entity(ent))
-                        .unwrap_or_else(|| ANONYMOUS.id),
-                    Permissions::try_from(perm.as_str())?,
-                );
+                let entity = if ent == "" {
+                    ANONYMOUS.id
+                } else {
+                    db.entity(ent)
+                };
+                entry.insert(entity, Permissions::try_from(perm.as_str())?);
             }
             pmap.insert(path.clone(), entry);
         }
@@ -171,8 +171,10 @@ impl PMap {
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
+        dbg!(self);
+        dbg!(user);
         let actual_rights = self.permissions(path, user);
-        actual_rights & desired_rights == desired_rights
+        dbg!(dbg!(actual_rights) & dbg!(desired_rights) == desired_rights)
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
@@ -344,11 +346,11 @@ pub(crate) mod syskrb5 {
                 let name = principal
                     .map(|n| {
                         Name::new(n, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                            .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))
+                            .canonicalize(Some(&GSS_MECH_KRB5))
                     })
                     .transpose()?;
                 let target = Name::new(target_principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                    .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?;
+                    .canonicalize(Some(&GSS_MECH_KRB5))?;
                 let cred = {
                     let mut s = OidSet::new()?;
                     s.add(&GSS_MECH_KRB5)?;
@@ -371,7 +373,7 @@ pub(crate) mod syskrb5 {
                 let name = principal
                     .map(|principal| -> Result<Name, Error> {
                         Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
-                            .canonicalize(Some(&GSS_NT_KRB5_PRINCIPAL))?)
+                            .canonicalize(Some(&GSS_MECH_KRB5))?)
                     })
                     .transpose()?;
                 let cred = {
