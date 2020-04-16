@@ -16,7 +16,7 @@ use crate::{
 use bytes::Bytes;
 use crossbeam::queue::SegQueue;
 use failure::Error;
-use futures::{prelude::*, select};
+use futures::{prelude::*, select, select_biased};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
@@ -653,20 +653,20 @@ async fn hello_client(
         auth::Krb5,
         protocol::publisher::Hello::{self, *},
     };
-    let hello: Hello = con.receive().await?;
+    let hello: Hello = dbg!(con.receive().await)?;
     match hello {
         Anonymous => con.send_one(&Anonymous).await?,
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { principal } => {
-                let p = principal.as_ref().map(|p| p.as_bytes());
-                let ctx = SYS_KRB5.create_server_ctx(p)?;
+                //let p = principal.as_ref().map(|p| p.as_bytes());
+                let ctx = SYS_KRB5.create_server_ctx(Some("publish/ken-ohki.ryu-oh.org@RYU-OH.ORG".as_bytes()))?;
                 let tok = ctx
                     .step(Some(&*tok))?
                     .map(|b| Vec::from(&*b))
                     .ok_or_else(|| format_err!("expected step to generate a token"))?;
-                con.set_ctx(Some(ctx));
                 con.send_one(&Token(tok)).await?;
+                con.set_ctx(Some(ctx));
             }
         },
         ResolverAuthenticate(id, tok) => {
@@ -700,14 +700,7 @@ async fn client_loop(
     let mut msg_sent = false;
     hello_client(&ctxts, &mut con, &desired_auth).await?;
     loop {
-        select! {
-            _ = hb.next() => {
-                if !msg_sent {
-                    con.queue_send(&publisher::From::Heartbeat)?;
-                    con.flush().await?;
-                }
-                msg_sent = false;
-            },
+        select_biased! {
             from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
                 Err(e) => return Err(Error::from(e)),
                 Ok(()) => {
@@ -742,7 +735,14 @@ async fn client_loop(
                     }
                     let _ = m.done.send(());
                 }
-            }
+            },
+            _ = hb.next() => {
+                if !msg_sent {
+                    con.queue_send(&publisher::From::Heartbeat)?;
+                    con.flush().await?;
+                }
+                msg_sent = false;
+            },
         }
     }
 }
@@ -755,7 +755,7 @@ async fn accept_loop(
 ) {
     let mut stop = stop.fuse();
     loop {
-        select! {
+        select_biased! {
             _ = stop => break,
             cl = serv.accept().fuse() => match cl {
                 Err(_) => (), // CR estokes: log this? exit the loop?
@@ -779,9 +779,9 @@ async fn accept_loop(
                         }
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
-                            let _ = client_loop(
+                            let _ = dbg!(client_loop(
                                 t_weak.clone(), ctxts, addr, rx, s, desired_auth
-                            ).await;
+                            ).await);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();
                                 if let Some(cl) = pb.clients.remove(&addr) {

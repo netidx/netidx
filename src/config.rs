@@ -102,7 +102,7 @@ pub mod resolver {
     }
 
     impl Config {
-        async fn load<P: AsRef<Path>>(file: P) -> Result<Config, Error> {
+        pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config, Error> {
             Ok(from_str(&read_to_string(file).await?)?)
         }
     }

@@ -66,8 +66,8 @@ impl<'a, C: Krb5Ctx + Clone> Msg<'a, C> {
                     }
                     self.head.put_u32(buf.len() as u32 | ENC_MASK);
                     self.body.clear();
+                    self.body.extend_from_slice(&*buf);
                     self.head.unsplit(self.body.split());
-                    self.head.extend_from_slice(&*buf);
                     self.con.buf.unsplit(self.head.split());
                 }
             }
@@ -198,7 +198,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
         })
     }
 
-    fn decode_from_buffer(&mut self) -> Result<Option<Bytes>, Error> {
+    pub(crate) fn decode_from_buffer(&mut self) -> Result<Option<Bytes>, Error> {
         if self.buf.remaining() < mem::size_of::<u32>() {
             Ok(None)
         } else {
@@ -229,11 +229,6 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
                 }
             }
         }
-    }
-
-    /// Direct access to the read buffer
-    pub(crate) fn buffer_mut(&mut self) -> &mut BytesMut {
-        &mut self.buf
     }
 
     /// Receive one message, potentially waiting for one to arrive if

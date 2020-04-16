@@ -166,7 +166,7 @@ impl ResolverRead {
     ) -> Result<ResolverRead> {
         let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(async move {
-            let _ = dbg!(connection_read(receiver, resolver, desired_auth).await);
+            let _ = connection_read(receiver, resolver, desired_auth).await;
         });
         Ok(ResolverRead(sender))
     }
@@ -179,7 +179,7 @@ impl ResolverRead {
     }
 
     pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
-        match dbg!(send(&self.0, resolver::ToRead::List(p)).await?) {
+        match send(&self.0, resolver::ToRead::List(p)).await? {
             resolver::FromRead::List(v) => Ok(v),
             _ => bail!("unexpected response"),
         }
@@ -351,7 +351,7 @@ async fn write_mgr(
             let ctxts = ctxts.clone();
             senders.push(sender);
             task::spawn(async move {
-                let _ = dbg!(connection_write(
+                let _ = connection_write(
                     receiver,
                     resolver,
                     addr,
@@ -360,7 +360,7 @@ async fn write_mgr(
                     desired_auth.clone(),
                     ctxts.clone(),
                 )
-                .await);
+                .await;
                 // CR estokes: handle failure
             });
         }

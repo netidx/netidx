@@ -19,7 +19,7 @@ use futures::{
     channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
     future::Fuse,
     prelude::*,
-    select,
+    select, select_biased
 };
 use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
@@ -838,45 +838,24 @@ enum AugFP {
 }
 
 impl AugFP {
-    fn decode(
-        con: &mut ReadChannel<ClientCtx>,
-    ) -> Option<Result<AugFP, rmp_serde::decode::Error>> {
-        use byteorder::{BigEndian, ByteOrder};
-        let u32s = mem::size_of::<u32>();
-        let buf = con.buffer_mut();
-        if buf.remaining() < u32s {
-            None
-        } else {
-            let len = BigEndian::read_u32(&*buf) as usize;
-            if buf.remaining() - u32s < len {
-                None
-            } else {
-                buf.advance(u32s);
+    fn decode(con: &mut ReadChannel<ClientCtx>) -> Result<Option<AugFP>, Error> {
+        match con.decode_from_buffer()? {
+            None => Ok(None),
+            Some(mut buf) => {
                 let (head, sz) = {
                     let mut cr = CReader(buf.as_ref(), 0);
-                    match rmp_serde::decode::from_read(&mut cr) {
-                        Ok(m) => {
-                            let read = cr.1;
-                            buf.advance(read);
-                            (m, read)
-                        }
-                        Err(e) => {
-                            buf.advance(len);
-                            return Some(Err(e));
-                        }
-                    }
+                    let m = rmp_serde::decode::from_read(&mut cr)?;
+                    let read = cr.1;
+                    buf.advance(read);
+                    (m, read)
                 };
-                Some(Ok(match head {
+                Ok(Some(match head {
                     publisher::From::NoSuchValue(p) => AugFP::NoSuchValue(p),
                     publisher::From::Denied(p) => AugFP::Denied(p),
                     publisher::From::Unsubscribed(id) => AugFP::Unsubscribed(id),
                     publisher::From::Heartbeat => AugFP::Heartbeat,
-                    publisher::From::Subscribed(p, id) => {
-                        AugFP::Subscribed(p, id, buf.split_to(len - sz).freeze())
-                    }
-                    publisher::From::Message(id) => {
-                        AugFP::Message(id, buf.split_to(len - sz).freeze())
-                    }
+                    publisher::From::Subscribed(p, id) => AugFP::Subscribed(p, id, buf),
+                    publisher::From::Message(id) => AugFP::Message(id, buf),
                 }))
             }
         }
@@ -973,15 +952,16 @@ async fn hello_publisher(
             }
         }
         Auth::Krb5 { principal } => {
-            let p = principal.as_ref().map(|p| p.as_bytes());
+            let p = dbg!(principal).as_ref().map(|p| p.as_bytes());
+            let target_principal = "publish/ken-ohki.ryu-oh.org@RYU-OH.ORG";
             let ctx = SYS_KRB5.create_client_ctx(p, target_principal.as_bytes())?;
             let tok = ctx
                 .step(None)?
                 .map(|b| Vec::from(&*b))
                 .ok_or_else(|| format_err!("expected step to generate a token"))?;
             con.send_one(&Hello::Token(tok)).await?;
-            con.set_ctx(Some(ctx.clone()));
             let reply: Hello = con.receive().await?;
+            con.set_ctx(Some(ctx.clone()));
             match reply {
                 Hello::Anonymous => bail!("publisher failed mutual authentication"),
                 Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
@@ -1012,127 +992,19 @@ async fn connection(
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
     let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
-    hello_publisher(&mut con, &auth, target_principal.as_str()).await?;
+    dbg!(hello_publisher(&mut con, &auth, target_principal.as_str()).await)?;
     let (mut read_con, mut write_con) = con.split();
     let mut flush: Flush = None;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let mut batch = Vec::new();
     let res = 'main: loop {
-        select! {
+        select_biased! {
             r = wait_flush(&mut flush).fuse() => match r {
                 Err(e) => break Err(e),
                 Ok(()) => {
                     if write_con.bytes_queued() == 0 {
                         flush = None;
                     } else {
-                        flush = Some(write_con.flush().fuse());
-                    }
-                }
-            },
-            now = periodic.next() => if let Some(now) = now {
-                if !msg_recvd {
-                    break 'main Err(format_err!("hung publisher"));
-                } else {
-                    msg_recvd = false;
-                }
-                if subscriptions.len() == 0 && pending.len() == 0 {
-                    idle += 1;
-                    if idle == 2 { break 'main Ok(()); }
-                } else {
-                    idle = 0;
-                }
-                let mut timed_out = Vec::new();
-                for (path, req) in pending.iter() {
-                    if let Some(deadline) = req.deadline {
-                        if deadline < now {
-                            timed_out.push(path.clone());
-                        }
-                    }
-                }
-                for path in timed_out {
-                    if let Some(req) = pending.remove(&path) {
-                        let _ = req.finished.send(Err(format_err!("timed out")));
-                    }
-                }
-            },
-            r = read_con.fill_buffer().fuse() => match r {
-                Err(e) => break Err(Error::from(e)),
-                Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
-                    msg_recvd = true;
-                    // 2020-02-19 estokes: this is faster as two seperate loops.
-                    while let Some(m) = AugFP::decode(&mut read_con) {
-                        batch.push(m);
-                    }
-                    for m in batch.drain(..) {
-                        match brkm!('main, m) {
-                            AugFP::Message(i, m) => match subscriptions.get_mut(&i) {
-                                None => {
-                                    brkm!('main, write_con.queue_send(
-                                        &publisher::To::Unsubscribe(i))
-                                    );
-                                }
-                                Some(sub) => {
-                                    let mut gc = false;
-                                    for c in sub.streams.iter_mut() {
-                                        match c.send(m.clone()).await {
-                                            Ok(()) => (),
-                                            Err(_) => { gc = true; }
-                                        }
-                                    }
-                                    if gc {
-                                        sub.streams.retain(|c| !c.is_closed());
-                                    }
-                                    sub.last = m;
-                                }
-                            },
-                            AugFP::Heartbeat => (),
-                            AugFP::NoSuchValue(path) =>
-                                if let Some(r) = pending.remove(&path) {
-                                    let _ = r.finished.send(
-                                        Err(format_err!("no such value"))
-                                    );
-                                },
-                            AugFP::Denied(path) =>
-                                if let Some(r) = pending.remove(&path) {
-                                    let _ = r.finished.send(
-                                        Err(format_err!("access denied"))
-                                    );
-                                }
-                            AugFP::Unsubscribed(id) => {
-                                if let Some(s) = subscriptions.remove(&id) {
-                                    let mut t = subscriber.0.lock();
-                                    unsubscribe(&mut *t, s, id, addr);
-                                }
-                            },
-                            AugFP::Subscribed(p, id, m) => match pending.remove(&p) {
-                                None => {
-                                    brkm!('main, write_con.queue_send(
-                                        &publisher::To::Unsubscribe(id))
-                                    );
-                                }
-                                Some(req) => {
-                                    let s = Ok(UVal(Arc::new(UValInner {
-                                        id, addr, connection: req.con
-                                    })));
-                                    match req.finished.send(s) {
-                                        Err(_) => {
-                                            brkm!('main, write_con.queue_send(
-                                                &publisher::To::Unsubscribe(id)
-                                            ));
-                                        }
-                                        Ok(()) => {
-                                            subscriptions.insert(id, Sub {
-                                                path: req.path,
-                                                last: m,
-                                                streams: Vec::new(),
-                                            });
-                                        }
-                                    }
-                                }
-                            },
-                        }
-                    }
-                    if write_con.bytes_queued() > 0 && flush.is_none() {
                         flush = Some(write_con.flush().fuse());
                     }
                 }
@@ -1177,6 +1049,117 @@ async fn connection(
                     }
                 }
             },
+            now = periodic.next() => if let Some(now) = now {
+                if !msg_recvd {
+                    break 'main Err(format_err!("hung publisher"));
+                } else {
+                    msg_recvd = false;
+                }
+                if subscriptions.len() == 0 && pending.len() == 0 {
+                    idle += 1;
+                    if idle == 2 { break 'main Ok(()); }
+                } else {
+                    idle = 0;
+                }
+                let mut timed_out = Vec::new();
+                for (path, req) in pending.iter() {
+                    if let Some(deadline) = req.deadline {
+                        if deadline < now {
+                            timed_out.push(path.clone());
+                        }
+                    }
+                }
+                for path in timed_out {
+                    if let Some(req) = pending.remove(&path) {
+                        let _ = req.finished.send(Err(format_err!("timed out")));
+                    }
+                }
+            },
+            r = read_con.fill_buffer().fuse() => match r {
+                Err(e) => break Err(Error::from(e)),
+                Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
+                    msg_recvd = true;
+                    loop {
+                        match AugFP::decode(&mut read_con) {
+                            Ok(Some(m)) => batch.push(m),
+                            Ok(None) => break,
+                            Err(e) => break 'main Err(e),
+                        }
+                    }
+                    for m in batch.drain(..) {
+                        match m {
+                            AugFP::Message(i, m) => match subscriptions.get_mut(&i) {
+                                Some(sub) => {
+                                    let mut gc = false;
+                                    for c in sub.streams.iter_mut() {
+                                        match c.send(m.clone()).await {
+                                            Ok(()) => (),
+                                            Err(_) => { gc = true; }
+                                        }
+                                    }
+                                    if gc {
+                                        sub.streams.retain(|c| !c.is_closed());
+                                    }
+                                    sub.last = m;
+                                }
+                                None => {
+                                    brkm!('main, write_con.queue_send(
+                                        &publisher::To::Unsubscribe(i))
+                                    );
+                                }
+                            },
+                            AugFP::Heartbeat => (),
+                            AugFP::NoSuchValue(path) =>
+                                if let Some(r) = pending.remove(&path) {
+                                    let _ = r.finished.send(
+                                        Err(format_err!("no such value"))
+                                    );
+                                },
+                            AugFP::Denied(path) =>
+                                if let Some(r) = pending.remove(&path) {
+                                    let _ = r.finished.send(
+                                        Err(format_err!("access denied"))
+                                    );
+                                }
+                            AugFP::Unsubscribed(id) => {
+                                if let Some(s) = subscriptions.remove(&id) {
+                                    let mut t = subscriber.0.lock();
+                                    unsubscribe(&mut *t, s, id, addr);
+                                }
+                            },
+                            AugFP::Subscribed(p, id, m) => match pending.remove(&p) {
+                                None => {
+                                    brkm!('main, write_con.queue_send(
+                                        &publisher::To::Unsubscribe(id))
+                                    );
+                                }
+                                Some(req) => {
+                                    let s = Ok(UVal(Arc::new(UValInner {
+                                        id, addr, connection: req.con
+                                    })));
+                                    match req.finished.send(s) {
+                                        Ok(()) => {
+                                            subscriptions.insert(id, Sub {
+                                                path: req.path,
+                                                last: m,
+                                                streams: Vec::new(),
+                                            });
+                                        }
+                                        Err(_) => {
+                                            brkm!('main, write_con.queue_send(
+                                                &publisher::To::Unsubscribe(id)
+                                            ));
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                    if write_con.bytes_queued() > 0 && flush.is_none() {
+                        flush = Some(write_con.flush().fuse());
+                    }
+                }
+            },
         }
     };
     if let Some(subscriber) = subscriber.upgrade() {
@@ -1189,7 +1172,7 @@ async fn connection(
             let _ = req.finished.send(Err(format_err!("connection died")));
         }
     }
-    res
+    dbg!(res)
 }
 
 #[cfg(test)]
