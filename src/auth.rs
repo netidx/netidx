@@ -107,19 +107,19 @@ impl<M: GMapper> UserDb<M> {
     }
 
     pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
-        match dbg!(user) {
+        match user {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
                 Some(user) => Ok(user.clone()),
                 None => {
                     let ifo = Arc::new(UserInfo {
                         id: self.entity(user),
-                        groups: dbg!(self
+                        groups: self
                             .mapper
                             .groups(user)?
                             .into_iter()
                             .map(|b| self.entity(&b))
-                            .collect::<Vec<_>>()),
+                            .collect::<Vec<_>>(),
                     });
                     self.users.insert(String::from(user), ifo.clone());
                     Ok(ifo)
@@ -171,10 +171,8 @@ impl PMap {
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
-        dbg!(self);
-        dbg!(user);
         let actual_rights = self.permissions(path, user);
-        dbg!(dbg!(actual_rights) & dbg!(desired_rights) == desired_rights)
+        actual_rights & desired_rights == desired_rights
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {

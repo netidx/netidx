@@ -333,14 +333,12 @@ fn handle_batch_read(
                 }
             }
             ToRead::List(path) => {
-                dbg!(());
                 let allowed = secstore
                     .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
                     .unwrap_or(true);
                 if allowed {
                     con.queue_send(&FromRead::List(s.list(&path)))?
                 } else {
-                    dbg!(());
                     con.queue_send(&FromRead::Error("denied".into()))?
                 }
             }
@@ -402,7 +400,7 @@ async fn hello_client_read(
     ) -> Result<(), Error> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
-    let uifo = match dbg!(hello) {
+    let uifo = match hello {
         ClientAuthRead::Anonymous => {
             send(&mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
