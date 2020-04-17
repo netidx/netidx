@@ -659,8 +659,8 @@ async fn hello_client(
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { principal } => {
-                //let p = principal.as_ref().map(|p| p.as_bytes());
-                let ctx = SYS_KRB5.create_server_ctx(Some("publish/ken-ohki.ryu-oh.org@RYU-OH.ORG".as_bytes()))?;
+                let p = principal.as_ref().map(|p| p.as_bytes());
+                let ctx = SYS_KRB5.create_server_ctx(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?
                     .map(|b| Vec::from(&*b))

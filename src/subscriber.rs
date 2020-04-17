@@ -952,8 +952,7 @@ async fn hello_publisher(
             }
         }
         Auth::Krb5 { principal } => {
-            let p = dbg!(principal).as_ref().map(|p| p.as_bytes());
-            let target_principal = "publish/ken-ohki.ryu-oh.org@RYU-OH.ORG";
+            let p = principal.as_ref().map(|p| p.as_bytes());
             let ctx = SYS_KRB5.create_client_ctx(p, target_principal.as_bytes())?;
             let tok = ctx
                 .step(None)?
