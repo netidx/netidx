@@ -115,42 +115,60 @@ message ServerHelloWrite {
   }
 }
 
+// sent to the server by read only clients
 message ReadClientRequest {
+  // request to resolve the specified paths into publisher addresses
   message Resolve {
     repeated string path = 1;
   }
+
+  // request to list immediate children of the specified path
   message List {
     string path = 1;
   }
+
   oneof request {
     Resolve resolve_request = 1;
     List list_request = 2;
   }
 }
 
+// sent by the server to read only clients
 message ReadServerResponse {
+  // mapping of the publisher address to the krb5 service principal
+  // name needed for gssapi session initiation to the publisher.
   message Krb5SpnMapping {
     SocketAddr addr = 1;
     string spn = 2;
   }
+
   message AddrAndAuthToken {
-    SocketAddr addr = 1;
-    bytes token = 2;
+    SocketAddr addr = 1; // publisher address
+    bytes token = 2; // encrypted permission token, when decrypted type is PermissionToken
   }
+
+  // each path can have multiple publishers publishing it
   message Resolution {
     repeated AddrAndAuthToken addrs = 1;
   }
+
+  // this is the response to a successful Resolve request
   message Resolved {
-    uint64 resolver_id = 1;
+    uint64 resolver_id = 1; // the id of this resolver
     repeated Krb5SpnMapping krb5_spns = 2;
     repeated Resolution results = 3;
   }
+
+  // this is the response to a successful List request
   message List {
     repeated string path = 1;
   }
+
+  // this the response to any request that is not successful
   message Error {
-    string error = 1;
+    string description = 1;
   }
+
   oneof response {
     Resolved resolution = 1;
     List list = 2;
@@ -158,19 +176,47 @@ message ReadServerResponse {
   }
 }
 
+// sent by write only clients to the resolver server
 message WriteClientRequest {
+  // request to publish one or more paths
   message Publish {
     repeated string path = 1;
   }
+
+  // request to stop publishing one or more paths
   message Unpublish {
     repeated string path = 1;
   }
+
+  // clear all paths published by this client
   message Clear {}
+
   message Heartbeat {}
+
   oneof request {
     Publish publish = 1;
     Unpublish unpublish = 2;
     Clear clear = 3;
     Heartbeat heartbeat = 4;
+  }
+}
+
+// sent by the server to write only clients
+message WriteServerResponse {
+  // indicates the request to publish was successful
+  message Published {}
+
+  // indicates the request to unpublish was successful
+  message Unpublished {}
+
+  // the previous request was not successful
+  message Error {
+    string description = 1;
+  }
+
+  oneof response {
+    Published published = 1;
+    Unpublished unpublished = 2;
+    Error error = 3;
   }
 }

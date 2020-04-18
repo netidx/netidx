@@ -16,3 +16,14 @@ message SocketAddr {
     SocketAddrV6 v6 = 2;
   }
 }
+
+// permission tokens are returned by the resolver in the resolved
+// message for each path that the client has permission to subscribe
+// to. However they are encrypted such that only the publisher can
+// decrypt them. To the resolver client they are opaque bytes.
+message PermissionToken {
+  // the path authorized by this permission token
+  string path = 1;
+  // the time in seconds since jan 1 1970 that this permission was given
+  uint64 timestamp = 2;
+}
