@@ -34,9 +34,9 @@ message Hello {
   }
 
   oneof hello {
-    Anonymous anonymous = 1;
-    InitiateSession initiate = 2;
-    ResolverAuthenticate resolver_authenticate = 3;
+    Anonymous Anonymous = 1;
+    InitiateSession Initiate = 2;
+    ResolverAuthenticate ResolverAuthenticate = 3;
   }
 }
 
@@ -64,8 +64,8 @@ message Request {
   }
 
   oneof request {
-    Subscribe subscribe = 1;
-    Unsubscribe unsubscribe = 2;
+    Subscribe Subscribe = 1;
+    Unsubscribe Unsubscribe = 2;
   }
 }
 
@@ -91,36 +91,58 @@ message Response {
 
   message Heartbeat {}
 
-  // The value of the subscription specified by id has been updated
-  message Value {
-    uint64 id = 1;
-    oneof value {
-      uint32 val_uint32 = 2;
-      uint64 val_uint64 = 3;
-      sint32 val_sint32 = 4;
-      sint64 val_sint64 = 5;
-      float  val_float  = 6;
-      double val_double = 7;
-      bool   val_bool   = 8;
-      string val_string = 9;
-      bytes  val_bytes  = 10;
-    }
+  enum ValueType {
+    DYNAMIC = 0;
+    UINT32  = 1;
+    UINT64  = 2;
+    SINT32  = 3;
+    SINT64  = 4;
+    FLOAT   = 5;
+    DOUBLE  = 6;
+    BOOL    = 7;
+    STRING  = 8;
+    BYTES   = 9;
   }
 
   // You are now subscribed to path. The id of the current_value field
   // is the id of this subscription. From now on this subscription
-  // will only be referred to with this id.
+  // will only be referred to with this id. The typ field indicates
+  // how this value and future values should be interpreted. In the
+  // case of DYNAMIC, the type is allowed to change from value to
+  // value, and as such each value is tagged.
   message Subscribed {
     string path = 1;
-    Value current_value = 2;
+    uint64 id = 2;
+    ValueType typ = 3;
+    bytes current = 4;
+  }
+
+  message Value {
+    uint64 id = 1;
+    bytes current = 2;
   }
 
   oneof response {
-    NoSuchValue no_such_value = 1;
-    Denied denied = 2;
-    Subscribed subscribed = 3;
-    Unsubscribed unsubscribed = 4;
-    Heartbeat heartbeat = 5;
-    Value value = 6;
+    NoSuchValue NoSuchValue = 1;
+    Denied Denied = 2;
+    Subscribed Subscribed = 3;
+    Unsubscribed Unsubscribed = 4;
+    Heartbeat Heartbeat = 5;
+    Value Value = 6;
+  }
+}
+
+// The type of a dynamic value
+message DynamicValue {
+  oneof value {
+    uint32 Uint32 = 2;
+    uint64 Uint64 = 3;
+    sint32 Sint32 = 4;
+    sint64 Sint64 = 5;
+    float  Float  = 6;
+    double Double = 7;
+    bool   Bool   = 8;
+    string String = 9;
+    bytes  Bytes  = 10;
   }
 }

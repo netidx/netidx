@@ -12,8 +12,8 @@ message SocketAddr {
     uint32 scope_id = 4;
   }
   oneof addr {
-    SocketAddrV4 v4 = 1;
-    SocketAddrV6 v6 = 2;
+    SocketAddrV4 V4 = 1;
+    SocketAddrV6 V6 = 2;
   }
 }
 
