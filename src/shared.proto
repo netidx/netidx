@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+message SocketAddr {
+  message SocketAddrV4 {
+    uint32 port = 1;
+    uint32 octets = 2;
+  }
+  message SocketAddrV6 {
+    uint32 port = 1;
+    bytes octets = 2;
+    uint32 flowinfo = 3;
+    uint32 scope_id = 4;
+  }
+  oneof addr {
+    SocketAddrV4 v4 = 1;
+    SocketAddrV6 v6 = 2;
+  }
+}

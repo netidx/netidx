@@ -1,0 +1,176 @@
+syntax = "proto3";
+import "shared.proto";
+
+// This is the first message sent by the client after it initiates a
+// transport session with the server. It is always sent in the
+// clear. Clients must decide at hello time whether they will be read
+// only, or write only, this determines what protocol the server
+// speaks to them. There is no read/write form.
+message ClientHello {
+  // this variant marks the client as read only. The server will
+  // respond with a ServerHelloRead message, and speak the read
+  // protocol thereafter.
+  message HelloRead {
+    // the client wishes to remain anonymous.
+    message Anonymous {}
+
+    // the client wishes to reuse an existing gssapi session named by
+    // the session_id parameter.
+    message Reuse {
+      uint64 session_id = 1;
+    }
+
+    // the client wishes to initiate a new gssapi session with the
+    // specified token.
+    message Initiate {
+      bytes token = 1;
+    }
+
+    oneof auth {
+      Anonymous anonymous = 1;
+      Reuse reuse = 2;
+      Initiate initiate = 3;
+    }
+  }
+
+  // this variant marks the client as write only. The server will
+  // respond with a ServerHelloWrite message, and thereafter speak the
+  // write protocol.
+  message HelloWrite {
+    message Auth {
+      // the publisher wants to remain anonymous
+      message Anonymous {}
+
+      // the publisher wants to reuse an existing gssapi session
+      message ReuseSession {}
+
+      // the publisher wants to initiate a new gssapi session
+      message InitiateSession {
+        string spn = 1; // the publisher's service principal name
+        bytes token = 2; // gssapi auth token
+      }
+
+      oneof auth {
+        Anonymous anonymous = 1;
+        ReuseSession reuse_session = 2; // the socketaddr identifies the session
+        InitiateSession initiate_session = 3;
+      }
+    }
+
+    // the publishers listener address, all published values will
+    // point to this address
+    SocketAddr write_addr = 1;
+    Auth auth = 2;
+  }
+
+  oneof hello {
+    HelloRead read_only = 1;
+    HelloWrite write_only = 2;
+  }
+}
+
+// first server message sent to read only clients
+message ServerHelloRead {
+  // the server will remain anonymous
+  message Anonymous {}
+
+  // the server has accepted the client's request to reuse a gssapi session
+  message Reused {}
+
+  // the server has accepted the client's request to initiate a new gssapi session
+  message Accepted {
+    uint64 context_id = 1; // the session may be reused by referencing this id
+    bytes token = 2; // gssapi mutual auth token, authenticating the server to the client
+  }
+
+  oneof auth {
+    Anonymous anonymous = 1;
+    Reused reused = 2;
+    Accepted accepted = 3;
+  }
+}
+
+// first server message sent to write only clients
+message ServerHelloWrite {
+  // the server will remain anonymous
+  message Anonymous {}
+
+  // the server has accepted the client's request to reuse a gssapi session
+  message Reused {}
+
+  // the server has accepted the client's request to initiate a new gssapi session
+  message Accepted {
+    bytes token = 1; // gssapi mutual auth token, authenticating the server to the client
+  }
+
+  // previous entries that may have been published by this publisher
+  // have expired and have been purged. If such entries exist the
+  // publisher should publish them again.
+  bool ttl_expired = 1;
+  uint64 resolver_id = 2; // the unique id of this resolver server
+  oneof auth {
+    Anonymous anonymous = 3;
+    Reused reused = 4;
+    Accepted accepted = 5;
+  }
+}
+
+message ReadClientRequest {
+  message Resolve {
+    repeated string path = 1;
+  }
+  message List {
+    string path = 1;
+  }
+  oneof request {
+    Resolve resolve_request = 1;
+    List list_request = 2;
+  }
+}
+
+message ReadServerResponse {
+  message Krb5SpnMapping {
+    SocketAddr addr = 1;
+    string spn = 2;
+  }
+  message AddrAndAuthToken {
+    SocketAddr addr = 1;
+    bytes token = 2;
+  }
+  message Resolution {
+    repeated AddrAndAuthToken addrs = 1;
+  }
+  message Resolved {
+    uint64 resolver_id = 1;
+    repeated Krb5SpnMapping krb5_spns = 2;
+    repeated Resolution results = 3;
+  }
+  message List {
+    repeated string path = 1;
+  }
+  message Error {
+    string error = 1;
+  }
+  oneof response {
+    Resolved resolution = 1;
+    List list = 2;
+    Error error = 3;
+  }
+}
+
+message WriteClientRequest {
+  message Publish {
+    repeated string path = 1;
+  }
+  message Unpublish {
+    repeated string path = 1;
+  }
+  message Clear {}
+  message Heartbeat {}
+  oneof request {
+    Publish publish = 1;
+    Unpublish unpublish = 2;
+    Clear clear = 3;
+    Heartbeat heartbeat = 4;
+  }
+}
