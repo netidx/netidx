@@ -91,35 +91,28 @@ message Response {
 
   message Heartbeat {}
 
-  enum ValueType {
-    DYNAMIC = 0;
-    UINT32  = 1;
-    UINT64  = 2;
-    SINT32  = 3;
-    SINT64  = 4;
-    FLOAT   = 5;
-    DOUBLE  = 6;
-    BOOL    = 7;
-    STRING  = 8;
-    BYTES   = 9;
+  // The value of the subscription specified by id has been updated
+  message Value {
+    uint64 id = 1;
+    oneof value {
+      uint32 Uint32 = 2;
+      uint64 Uint64 = 3;
+      sint32 Sint32 = 4;
+      sint64 Sint64 = 5;
+      float  Float  = 6;
+      double Double = 7;
+      bool   Bool   = 8;
+      string String = 9;
+      bytes  Bytes  = 10;
+    }
   }
 
   // You are now subscribed to path. The id of the current_value field
   // is the id of this subscription. From now on this subscription
-  // will only be referred to with this id. The typ field indicates
-  // how this value and future values should be interpreted. In the
-  // case of DYNAMIC, the type is allowed to change from value to
-  // value, and as such each value is tagged.
+  // will only be referred to with this id.
   message Subscribed {
     string path = 1;
-    uint64 id = 2;
-    ValueType typ = 3;
-    bytes current = 4;
-  }
-
-  message Value {
-    uint64 id = 1;
-    bytes current = 2;
+    Value current_value = 2;
   }
 
   oneof response {
@@ -129,20 +122,5 @@ message Response {
     Unsubscribed Unsubscribed = 4;
     Heartbeat Heartbeat = 5;
     Value Value = 6;
-  }
-}
-
-// The type of a dynamic value
-message DynamicValue {
-  oneof value {
-    uint32 Uint32 = 2;
-    uint64 Uint64 = 3;
-    sint32 Sint32 = 4;
-    sint64 Sint64 = 5;
-    float  Float  = 6;
-    double Double = 7;
-    bool   Bool   = 8;
-    string String = 9;
-    bytes  Bytes  = 10;
   }
 }
