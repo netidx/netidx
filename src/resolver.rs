@@ -39,7 +39,7 @@ type Result<T> = result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
-    Krb5 { principal: Option<String> },
+    Krb5 { upn: Option<String>, spn: Option<String> },
 }
 
 type FromCon<F> = oneshot::Sender<F>;
@@ -55,10 +55,10 @@ async fn send<T: Send + Sync + Debug + 'static, F: Send + Sync + Debug + 'static
 }
 
 fn create_ctx(
-    principal: Option<&[u8]>,
-    target_principal: &[u8],
+    upn: Option<&[u8]>,
+    target_spn: &[u8],
 ) -> Result<(ClientCtx, Vec<u8>)> {
-    let ctx = SYS_KRB5.create_client_ctx(principal, target_principal)?;
+    let ctx = SYS_KRB5.create_client_ctx(upn, target_spn)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
         Some(tok) => Ok((ctx, Vec::from(&*tok))),
@@ -87,12 +87,12 @@ async fn connect_read(
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { principal }, CAuth::Krb5 { target }) => match sc {
+            (Auth::Krb5 { upn, .. }, CAuth::Krb5 { target_spn }) => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
-                    let p = principal.as_ref().map(|s| s.as_bytes());
-                    let t = target.as_bytes();
-                    let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t));
+                    let upn = upn.as_ref().map(|s| s.as_bytes());
+                    let target_spn = target_spn.as_bytes();
+                    let (ctx, tok) = try_cont!("create ctx", create_ctx(upn, target_spn));
                     (ClientAuthRead::Token(tok), Some(ctx))
                 }
             },
@@ -205,14 +205,15 @@ async fn connect_write(
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { principal }, CAuth::Krb5 { target }) => {
+            (Auth::Krb5 { upn, spn }, CAuth::Krb5 { target_spn }) => {
                 match ctxts.read().get(&resolver_addr.0) {
                     Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                     None => {
-                        let p = principal.as_ref().map(|s| s.as_bytes());
-                        let t = target.as_bytes();
-                        let (ctx, tok) = try_cont!("create ctx", create_ctx(p, t));
-                        (ClientAuthWrite::Token(tok), Some(ctx))
+                        let upnr = upn.as_ref().map(|s| s.as_bytes());
+                        let target_spn = target_spn.as_bytes();
+                        let (ctx, token) = try_cont!("ctx", create_ctx(upnr, target_spn));
+                        let spn = spn.as_ref().or(upn.as_ref()).cloned();
+                        (ClientAuthWrite::Token { spn, token }, Some(ctx))
                     }
                 }
             }

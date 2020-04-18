@@ -14,7 +14,7 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                 let resolver = ResolverRead::new(config, auth).unwrap();
                 let resolved = resolver.resolve(vec![path]).await.unwrap();
                 println!("resolver: {:?}", resolved.resolver);
-                for (addr, principal) in resolved.krb5_principals.iter() {
+                for (addr, principal) in resolved.krb5_spns.iter() {
                     println!("{}: {}", addr, principal);
                 }
                 for addrs in &resolved.addrs {

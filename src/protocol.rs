@@ -20,8 +20,8 @@
 /// order.
 pub mod resolver {
     use crate::path::Path;
-    use std::{net::SocketAddr, collections::HashMap};
     use fxhash::FxBuildHasher;
+    use std::{collections::HashMap, net::SocketAddr};
 
     #[derive(
         Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -52,7 +52,7 @@ pub mod resolver {
     pub enum ClientAuthWrite {
         Anonymous,
         Reuse,
-        Token(Vec<u8>),
+        Token { spn: Option<String>, token: Vec<u8> },
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -60,7 +60,7 @@ pub mod resolver {
         pub write_addr: SocketAddr,
         pub auth: ClientAuthWrite,
     }
-    
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ClientHello {
         /// Instruct the resolver server that this connection will not
@@ -79,7 +79,7 @@ pub mod resolver {
     pub enum ServerHelloRead {
         Anonymous,
         Reused,
-        Accepted(Vec<u8>, CtxId)
+        Accepted(Vec<u8>, CtxId),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -106,7 +106,7 @@ pub mod resolver {
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct Resolved {
-        pub krb5_principals: HashMap<SocketAddr, String, FxBuildHasher>,
+        pub krb5_spns: HashMap<SocketAddr, String, FxBuildHasher>,
         pub resolver: ResolverId,
         pub addrs: Vec<Vec<(SocketAddr, Vec<u8>)>>,
     }
@@ -127,7 +127,7 @@ pub mod resolver {
     /// resolver server and the publisher).
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct PermissionToken<'a>(pub &'a str, pub u64);
-    
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum ToWrite {
         /// Publish the list of paths

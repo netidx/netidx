@@ -15,7 +15,7 @@ pub mod resolver_server {
         pub(super) enum Auth {
             Anonymous,
             Krb5 {
-                principal: String,
+                spn: String,
                 permissions: String,
             },
         }
@@ -40,7 +40,7 @@ pub mod resolver_server {
     pub enum Auth {
         Anonymous,
         Krb5 {
-            principal: String,
+            spn: String,
             permissions: PMap,
         },
     }
@@ -60,13 +60,13 @@ pub mod resolver_server {
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,
                 file::Auth::Krb5 {
-                    principal,
+                    spn,
                     permissions,
                 } => {
                     let permissions: PMap =
                         from_str(&read_to_string(&permissions)?)?;
                     Auth::Krb5 {
-                        principal,
+                        spn,
                         permissions,
                     }
                 }
@@ -92,7 +92,7 @@ pub mod resolver {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {
         Anonymous,
-        Krb5 { target: String },
+        Krb5 { target_spn: String },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

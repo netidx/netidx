@@ -16,7 +16,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, ServerCtx, FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, (String, ServerCtx), FxBuildHasher>,
     userdb: UserDb<Mapper>,
 }
 
@@ -28,15 +28,11 @@ impl SecStoreInner {
         })
     }
 
-    fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        self.write_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
+    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(String, ServerCtx)> {
+        self.write_ctxts.get(id).and_then(|r| match r.1.ttl() {
+            Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
         })
-    }
-
-    pub(crate) fn get_write_ref(&self, id: &SocketAddr) -> Option<&ServerCtx> {
-        self.write_ctxts.get(id)
     }
 
     fn delete_read(&mut self, id: &CtxId) {
@@ -55,7 +51,7 @@ impl SecStoreInner {
                 read_delete.push(*id);
             }
         }
-        for (id, ctx) in self.write_ctxts.iter() {
+        for (id, (_, ctx)) in self.write_ctxts.iter() {
             if ctx.ttl()?.as_secs() == 0 {
                 write_delete.push(*id);
             }
@@ -76,20 +72,20 @@ impl SecStoreInner {
 
 #[derive(Clone)]
 pub(crate) struct SecStore {
-    principal: Arc<String>,
+    spn: Arc<String>,
     pmap: ArcSwap<PMap>,
     pub(crate) store: Arc<RwLock<SecStoreInner>>,
 }
 
 impl SecStore {
     pub(crate) fn new(
-        principal: String,
+        spn: String,
         pmap: config::resolver_server::PMap,
     ) -> Result<Self, Error> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb)?;
         Ok(SecStore {
-            principal: Arc::new(principal),
+            spn: Arc::new(spn),
             pmap: ArcSwap::from(Arc::new(pmap)),
             store: Arc::new(RwLock::new(SecStoreInner {
                 read_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
@@ -114,7 +110,7 @@ impl SecStore {
 
     pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
         let inner = self.store.read();
-        inner.get_write(id)
+        inner.get_write(id).map(|(_, c)| c.clone())
     }
 
     pub(crate) fn delete_read(&self, id: &CtxId) {
@@ -128,7 +124,7 @@ impl SecStore {
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
-        let ctx = SYS_KRB5.create_server_ctx(Some(self.principal.as_bytes()))?;
+        let ctx = SYS_KRB5.create_server_ctx(Some(self.spn.as_bytes()))?;
         let tok = ctx
             .step(Some(tok))?
             .map(|b| Vec::from(&*b))
@@ -145,9 +141,9 @@ impl SecStore {
         id
     }
 
-    pub(crate) fn store_write(&self, addr: SocketAddr, ctx: ServerCtx) {
+    pub(crate) fn store_write(&self, addr: SocketAddr, spn: String, ctx: ServerCtx) {
         let mut inner = self.store.write();
-        inner.write_ctxts.insert(addr, ctx);
+        inner.write_ctxts.insert(addr, (spn, ctx));
     }
 
     pub(crate) fn gc(&self) -> Result<(), Error> {

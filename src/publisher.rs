@@ -658,8 +658,8 @@ async fn hello_client(
         Anonymous => con.send_one(&Anonymous).await?,
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
-            Auth::Krb5 { principal } => {
-                let p = principal.as_ref().map(|p| p.as_bytes());
+            Auth::Krb5 { upn, spn } => {
+                let p = spn.as_ref().or(upn.as_ref()).map(|p| p.as_bytes());
                 let ctx = SYS_KRB5.create_server_ctx(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?

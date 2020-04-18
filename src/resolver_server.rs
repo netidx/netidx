@@ -219,10 +219,10 @@ async fn hello_client_write(
                 }
             },
         },
-        ClientAuthWrite::Token(tok) => match secstore {
+        ClientAuthWrite::Token { spn, token } => match secstore {
             None => bail!("authentication not supported"),
             Some(ref secstore) => {
-                let (ctx, tok) = secstore.create(&tok)?;
+                let (ctx, tok) = secstore.create(&token)?;
                 let h = ServerHelloWrite {
                     ttl_expired,
                     id,
@@ -248,8 +248,11 @@ async fn hello_client_write(
                         if dsalt != salt + 2 {
                             bail!("denied")
                         }
-                        secstore.store_write(hello.write_addr, ctx.clone());
-                        secstore.ifo(Some(&ctx.client()?))?
+                        let client = ctx.client()?;
+                        let uifo = secstore.ifo(Some(&client))?;
+                        let spn = spn.unwrap_or(client);
+                        secstore.store_write(hello.write_addr, spn, ctx.clone());
+                        uifo
                     }
                 }
             }
@@ -301,28 +304,26 @@ fn handle_batch_read(
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
                         None => FromRead::Resolved(Resolved {
-                            krb5_principals: HashMap::with_hasher(
-                                FxBuildHasher::default(),
-                            ),
+                            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
                             resolver: id,
                             addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
                         }),
                         Some(ref sec) => {
-                            let mut krb5_principals =
+                            let mut krb5_spns =
                                 HashMap::with_hasher(FxBuildHasher::default());
                             let addrs = paths
                                 .iter()
                                 .map(|p| {
                                     Ok(s.resolve_and_sign(
                                         &**sec,
-                                        &mut krb5_principals,
+                                        &mut krb5_spns,
                                         now,
                                         p,
                                     )?)
                                 })
                                 .collect::<Result<Vec<_>, Error>>()?;
                             FromRead::Resolved(Resolved {
-                                krb5_principals,
+                                krb5_spns,
                                 resolver: id,
                                 addrs,
                             })
@@ -457,12 +458,11 @@ async fn server_loop(
 ) -> Result<SocketAddr, Error> {
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let secstore = match &cfg.auth {
+    let secstore = match cfg.auth {
         config::resolver_server::Auth::Anonymous => None,
-        config::resolver_server::Auth::Krb5 {
-            principal,
-            permissions,
-        } => Some(SecStore::new(principal.clone(), permissions.clone())?),
+        config::resolver_server::Auth::Krb5 { spn, permissions } => {
+            Some(SecStore::new(spn, permissions)?)
+        }
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;

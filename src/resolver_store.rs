@@ -203,7 +203,7 @@ impl<T> StoreInner<T> {
     pub(crate) fn resolve_and_sign<S: AsRef<str>>(
         &self,
         sec: &SecStoreInner,
-        krb5_principals: &mut HashMap<SocketAddr, String, FxBuildHasher>,
+        krb5_spns: &mut HashMap<SocketAddr, String, FxBuildHasher>,
         now: u64,
         path: &S,
     ) -> Result<Vec<(SocketAddr, Vec<u8>)>, Error> {
@@ -212,11 +212,11 @@ impl<T> StoreInner<T> {
             .map(|addrs| {
                 Ok(addrs
                     .iter()
-                    .map(|addr| match sec.get_write_ref(&addr) {
+                    .map(|addr| match sec.get_write(&addr) {
                         None => Ok((*addr, vec![])),
-                        Some(ctx) => {
-                            if !krb5_principals.contains_key(addr) {
-                                krb5_principals.insert(*addr, ctx.client()?);
+                        Some((spn, ctx)) => {
+                            if !krb5_spns.contains_key(addr) {
+                                krb5_spns.insert(*addr, spn.clone());
                             }
                             let msg = mp_encode(&PermissionToken(path.as_ref(), now))?;
                             let tok = Vec::from(&*ctx.wrap(true, &*msg)?);

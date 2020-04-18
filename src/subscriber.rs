@@ -19,7 +19,7 @@ use futures::{
     channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
     future::Fuse,
     prelude::*,
-    select, select_biased
+    select, select_biased,
 };
 use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
@@ -608,7 +608,7 @@ impl Subscriber {
                 Ok(Ok(Resolved {
                     addrs,
                     resolver,
-                    krb5_principals,
+                    krb5_spns,
                 })) => {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
@@ -626,14 +626,14 @@ impl Subscriber {
                             };
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = mpsc::unbounded();
-                                let principal = match krb5_principals.get(&addr.0) {
+                                let target_spn = match krb5_spns.get(&addr.0) {
                                     None => String::new(),
                                     Some(p) => p.clone(),
                                 };
                                 task::spawn(connection(
                                     self.downgrade(),
                                     addr.0,
-                                    principal,
+                                    target_spn,
                                     rx,
                                     desired_auth.clone(),
                                 ));
@@ -939,7 +939,7 @@ async fn wait_flush(flush: &mut Flush) -> Result<(), Error> {
 async fn hello_publisher(
     con: &mut Channel<ClientCtx>,
     auth: &Auth,
-    target_principal: &str,
+    target_spn: &str,
 ) -> Result<(), Error> {
     use crate::protocol::publisher::Hello;
     match auth {
@@ -951,9 +951,9 @@ async fn hello_publisher(
                 _ => bail!("unexpected response from publisher"),
             }
         }
-        Auth::Krb5 { principal } => {
-            let p = principal.as_ref().map(|p| p.as_bytes());
-            let ctx = SYS_KRB5.create_client_ctx(p, target_principal.as_bytes())?;
+        Auth::Krb5 { upn, .. } => {
+            let p = upn.as_ref().map(|p| p.as_bytes());
+            let ctx = SYS_KRB5.create_client_ctx(p, target_spn.as_bytes())?;
             let tok = ctx
                 .step(None)?
                 .map(|b| Vec::from(&*b))
@@ -980,7 +980,7 @@ const PERIOD: Duration = Duration::from_secs(10);
 async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
-    target_principal: String,
+    target_spn: String,
     from_sub: UnboundedReceiver<ToCon>,
     auth: Auth,
 ) -> Result<(), Error> {
@@ -991,7 +991,7 @@ async fn connection(
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
     let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
-    dbg!(hello_publisher(&mut con, &auth, target_principal.as_str()).await)?;
+    dbg!(hello_publisher(&mut con, &auth, target_spn.as_str()).await)?;
     let (mut read_con, mut write_con) = con.split();
     let mut flush: Flush = None;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
