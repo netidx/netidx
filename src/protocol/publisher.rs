@@ -2764,8 +2764,8 @@ impl<'a> ::std::default::Default for &'a Response_Value {
 pub enum Response_Value_oneof_value {
     Uint32(u32),
     Uint64(u64),
-    Sint32(i32),
-    Sint64(i64),
+    Int32(i32),
+    Int64(i64),
     Float(f32),
     Double(f64),
     Bool(bool),
@@ -2843,54 +2843,54 @@ impl Response_Value {
         self.value = ::std::option::Option::Some(Response_Value_oneof_value::Uint64(v))
     }
 
-    // sint32 Sint32 = 4;
+    // sint32 Int32 = 4;
 
 
-    pub fn get_Sint32(&self) -> i32 {
+    pub fn get_Int32(&self) -> i32 {
         match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Sint32(v)) => v,
+            ::std::option::Option::Some(Response_Value_oneof_value::Int32(v)) => v,
             _ => 0,
         }
     }
-    pub fn clear_Sint32(&mut self) {
+    pub fn clear_Int32(&mut self) {
         self.value = ::std::option::Option::None;
     }
 
-    pub fn has_Sint32(&self) -> bool {
+    pub fn has_Int32(&self) -> bool {
         match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Sint32(..)) => true,
+            ::std::option::Option::Some(Response_Value_oneof_value::Int32(..)) => true,
             _ => false,
         }
     }
 
     // Param is passed by value, moved
-    pub fn set_Sint32(&mut self, v: i32) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Sint32(v))
+    pub fn set_Int32(&mut self, v: i32) {
+        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int32(v))
     }
 
-    // sint64 Sint64 = 5;
+    // sint64 Int64 = 5;
 
 
-    pub fn get_Sint64(&self) -> i64 {
+    pub fn get_Int64(&self) -> i64 {
         match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Sint64(v)) => v,
+            ::std::option::Option::Some(Response_Value_oneof_value::Int64(v)) => v,
             _ => 0,
         }
     }
-    pub fn clear_Sint64(&mut self) {
+    pub fn clear_Int64(&mut self) {
         self.value = ::std::option::Option::None;
     }
 
-    pub fn has_Sint64(&self) -> bool {
+    pub fn has_Int64(&self) -> bool {
         match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Sint64(..)) => true,
+            ::std::option::Option::Some(Response_Value_oneof_value::Int64(..)) => true,
             _ => false,
         }
     }
 
     // Param is passed by value, moved
-    pub fn set_Sint64(&mut self, v: i64) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Sint64(v))
+    pub fn set_Int64(&mut self, v: i64) {
+        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int64(v))
     }
 
     // float Float = 6;
@@ -3099,13 +3099,13 @@ impl ::protobuf::Message for Response_Value {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
-                    self.value = ::std::option::Option::Some(Response_Value_oneof_value::Sint32(is.read_sint32()?));
+                    self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int32(is.read_sint32()?));
                 },
                 5 => {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
-                    self.value = ::std::option::Option::Some(Response_Value_oneof_value::Sint64(is.read_sint64()?));
+                    self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int64(is.read_sint64()?));
                 },
                 6 => {
                     if wire_type != ::protobuf::wire_format::WireTypeFixed32 {
@@ -3160,10 +3160,10 @@ impl ::protobuf::Message for Response_Value {
                 &Response_Value_oneof_value::Uint64(v) => {
                     my_size += ::protobuf::rt::value_size(3, v, ::protobuf::wire_format::WireTypeVarint);
                 },
-                &Response_Value_oneof_value::Sint32(v) => {
+                &Response_Value_oneof_value::Int32(v) => {
                     my_size += ::protobuf::rt::value_varint_zigzag_size(4, v);
                 },
-                &Response_Value_oneof_value::Sint64(v) => {
+                &Response_Value_oneof_value::Int64(v) => {
                     my_size += ::protobuf::rt::value_varint_zigzag_size(5, v);
                 },
                 &Response_Value_oneof_value::Float(v) => {
@@ -3200,10 +3200,10 @@ impl ::protobuf::Message for Response_Value {
                 &Response_Value_oneof_value::Uint64(v) => {
                     os.write_uint64(3, v)?;
                 },
-                &Response_Value_oneof_value::Sint32(v) => {
+                &Response_Value_oneof_value::Int32(v) => {
                     os.write_sint32(4, v)?;
                 },
-                &Response_Value_oneof_value::Sint64(v) => {
+                &Response_Value_oneof_value::Int64(v) => {
                     os.write_sint64(5, v)?;
                 },
                 &Response_Value_oneof_value::Float(v) => {
@@ -3278,14 +3278,14 @@ impl ::protobuf::Message for Response_Value {
                     Response_Value::get_Uint64,
                 ));
                 fields.push(::protobuf::reflect::accessor::make_singular_i32_accessor::<_>(
-                    "Sint32",
-                    Response_Value::has_Sint32,
-                    Response_Value::get_Sint32,
+                    "Int32",
+                    Response_Value::has_Int32,
+                    Response_Value::get_Int32,
                 ));
                 fields.push(::protobuf::reflect::accessor::make_singular_i64_accessor::<_>(
-                    "Sint64",
-                    Response_Value::has_Sint64,
-                    Response_Value::get_Sint64,
+                    "Int64",
+                    Response_Value::has_Int64,
+                    Response_Value::get_Int64,
                 ));
                 fields.push(::protobuf::reflect::accessor::make_singular_f32_accessor::<_>(
                     "Float",
@@ -3590,7 +3590,7 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x01(\x0b2\x14.Request.UnsubscribeH\0B\0\x1aB\n\tSubscribe\x12\x0e\n\x04\
     path\x18\x01\x20\x01(\tB\0\x12\x12\n\x08resolver\x18\x02\x20\x01(\x04B\0\
     \x12\x0f\n\x05token\x18\x03\x20\x01(\x0cB\0:\0\x1a\x1d\n\x0bUnsubscribe\
-    \x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0:\0B\t\n\x07request:\0\"\xa7\x05\
+    \x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0:\0B\t\n\x07request:\0\"\xa5\x05\
     \n\x08Response\x12.\n\x0bNoSuchValue\x18\x01\x20\x01(\x0b2\x15.Response.\
     NoSuchValueH\0B\0\x12$\n\x06Denied\x18\x02\x20\x01(\x0b2\x10.Response.De\
     niedH\0B\0\x12,\n\nSubscribed\x18\x03\x20\x01(\x0b2\x14.Response.Subscri\
@@ -3600,10 +3600,10 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     B\0\x1a\x1f\n\x0bNoSuchValue\x12\x0e\n\x04path\x18\x01\x20\x01(\tB\0:\0\
     \x1a\x1a\n\x06Denied\x12\x0e\n\x04path\x18\x01\x20\x01(\tB\0:\0\x1a\x1e\
     \n\x0cUnsubscribed\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0:\0\x1a\r\n\tH\
-    eartbeat:\0\x1a\xd0\x01\n\x05Value\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
+    eartbeat:\0\x1a\xce\x01\n\x05Value\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
     \0\x12\x12\n\x06Uint32\x18\x02\x20\x01(\rH\0B\0\x12\x12\n\x06Uint64\x18\
-    \x03\x20\x01(\x04H\0B\0\x12\x12\n\x06Sint32\x18\x04\x20\x01(\x11H\0B\0\
-    \x12\x12\n\x06Sint64\x18\x05\x20\x01(\x12H\0B\0\x12\x11\n\x05Float\x18\
+    \x03\x20\x01(\x04H\0B\0\x12\x11\n\x05Int32\x18\x04\x20\x01(\x11H\0B\0\
+    \x12\x11\n\x05Int64\x18\x05\x20\x01(\x12H\0B\0\x12\x11\n\x05Float\x18\
     \x06\x20\x01(\x02H\0B\0\x12\x12\n\x06Double\x18\x07\x20\x01(\x01H\0B\0\
     \x12\x10\n\x04Bool\x18\x08\x20\x01(\x08H\0B\0\x12\x12\n\x06String\x18\t\
     \x20\x01(\tH\0B\0\x12\x11\n\x05Bytes\x18\n\x20\x01(\x0cH\0B\0B\x07\n\x05\

@@ -198,7 +198,7 @@ impl PMap {
 }
 
 pub(crate) trait Krb5Ctx {
-    type Buf: Deref<Target = [u8]>;
+    type Buf: Deref<Target = [u8]> + Send + Sync;
 
     fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error>;
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error>;
@@ -211,7 +211,7 @@ pub(crate) trait Krb5ServerCtx: Krb5Ctx {
 }
 
 pub(crate) trait Krb5 {
-    type Buf: Deref<Target = [u8]>;
+    type Buf: Deref<Target = [u8]> + Send + Sync;
     type Krb5ClientCtx: Krb5Ctx<Buf = Self::Buf>;
     type Krb5ServerCtx: Krb5ServerCtx<Buf = Self::Buf>;
 

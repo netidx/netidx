@@ -1,5 +1,5 @@
 pub mod resolver_server {
-    use crate::{path::Path, protocol::resolver::ResolverId};
+    use crate::path::Path;
     use failure::Error;
     use serde_json::from_str;
     use std::{
@@ -8,7 +8,6 @@ pub mod resolver_server {
     };
 
     mod file {
-        use crate::protocol::resolver::ResolverId;
         use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +22,7 @@ pub mod resolver_server {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
             pub(super) pid_file: String,
-            pub(super) id: ResolverId,
+            pub(super) id: u64,
             pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
             pub(super) auth: Auth,
@@ -48,7 +47,7 @@ pub mod resolver_server {
     #[derive(Debug, Clone)]
     pub struct Config {
         pub pid_file: String,
-        pub id: ResolverId,
+        pub id: u64,
         pub addr: SocketAddr,
         pub max_connections: usize,
         pub auth: Auth,
@@ -83,7 +82,6 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
-    use crate::protocol::resolver::ResolverId;
     use failure::Error;
     use serde_json::from_str;
     use std::{convert::AsRef, net::SocketAddr, path::Path, result::Result};
@@ -97,7 +95,7 @@ pub mod resolver {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Config {
-        pub servers: Vec<(ResolverId, SocketAddr)>,
+        pub servers: Vec<(u64, SocketAddr)>,
         pub auth: Auth,
     }
 

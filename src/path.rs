@@ -1,10 +1,13 @@
 use crate::utils;
+use protobuf::Chars;
 use std::{
-    borrow::Borrow, convert::{AsRef, From}, sync::Arc,
-    cmp::{PartialEq, PartialOrd, Eq, Ord}, iter::Iterator,
+    borrow::Borrow,
+    cmp::{Eq, Ord, PartialEq, PartialOrd},
+    convert::{AsRef, From},
+    fmt,
+    iter::Iterator,
     ops::Deref,
     str::FromStr,
-    fmt
 };
 
 pub static ESC: char = '\\';
@@ -16,8 +19,8 @@ pub static SEP: char = '/';
 /// unicode character may be used. Path lengths are not limited on the
 /// local machine, but may be restricted by maximum message size on
 /// the wire.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Path(Arc<str>);
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Path(Chars);
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -26,11 +29,15 @@ impl fmt::Display for Path {
 }
 
 impl AsRef<str> for Path {
-    fn as_ref(&self) -> &str { &*self.0 }
+    fn as_ref(&self) -> &str {
+        &*self.0
+    }
 }
 
 impl Borrow<str> for Path {
-    fn borrow(&self) -> &str { &*self.0 }
+    fn borrow(&self) -> &str {
+        &*self.0
+    }
 }
 
 impl Deref for Path {
@@ -41,12 +48,22 @@ impl Deref for Path {
     }
 }
 
+impl From<Chars> for Path {
+    fn from(c: Chars) -> Path {
+        if is_canonical(&c) {
+            Path(c)
+        } else {
+            Path(Chars::from(canonize(&c)))
+        }
+    }
+}
+
 impl From<String> for Path {
     fn from(s: String) -> Path {
         if is_canonical(&s) {
-            Path(Arc::from(s.as_str()))
+            Path(Chars::from(s))
         } else {
-            Path(Arc::from(canonize(&s).as_str()))
+            Path(Chars::from(canonize(&s)))
         }
     }
 }
@@ -54,19 +71,19 @@ impl From<String> for Path {
 impl<'a> From<&'a str> for Path {
     fn from(s: &str) -> Path {
         if is_canonical(s) {
-            Path(Arc::from(s))
+            Path(Chars::from(s))
         } else {
-            Path(Arc::from(canonize(s).as_str()))
+            Path(Chars::from(canonize(s)))
         }
     }
 }
 
 impl<'a> From<&'a String> for Path {
-    fn from(s: &String) -> Path {        
+    fn from(s: &String) -> Path {
         if is_canonical(s.as_str()) {
-            Path(Arc::from(s.as_str()))
+            Path(Chars::from(s.as_str()))
         } else {
-            Path(Arc::from(canonize(s.as_str()).as_str()))
+            Path(Chars::from(canonize(s.as_str())))
         }
     }
 }
@@ -89,11 +106,16 @@ fn is_canonical(s: &str) -> bool {
 fn canonize(s: &str) -> String {
     let mut res = String::with_capacity(s.len());
     if s.len() > 0 {
-        if s.starts_with(SEP) { res.push(SEP) }
+        if s.starts_with(SEP) {
+            res.push(SEP)
+        }
         let mut first = true;
         for p in Path::parts(s).filter(|p| *p != "") {
-            if first { first = false; }
-            else { res.push(SEP) }
+            if first {
+                first = false;
+            } else {
+                res.push(SEP)
+            }
             res.push_str(p);
         }
     }
@@ -102,14 +124,18 @@ fn canonize(s: &str) -> String {
 
 fn is_escaped(s: &str, i: usize) -> bool {
     let b = s.as_bytes();
-    !s.is_char_boundary(i) || (b[i] == (SEP as u8) && {
-        let mut res = false;
-        for j in (0..i).rev() {
-            if s.is_char_boundary(j) && b[j] == (ESC as u8) { res = !res; }
-            else { break }
-        }
-        res
-    })
+    !s.is_char_boundary(i)
+        || (b[i] == (SEP as u8) && {
+            let mut res = false;
+            for j in (0..i).rev() {
+                if s.is_char_boundary(j) && b[j] == (ESC as u8) {
+                    res = !res;
+                } else {
+                    break;
+                }
+            }
+            res
+        })
 }
 
 enum BaseNames<'a> {
@@ -118,7 +144,7 @@ enum BaseNames<'a> {
         cur: &'a str,
         all: &'a str,
         base: usize,
-    }
+    },
 }
 
 impl<'a> Iterator for BaseNames<'a> {
@@ -131,7 +157,11 @@ impl<'a> Iterator for BaseNames<'a> {
                 *self = BaseNames::Root(false);
                 Some("/")
             }
-            BaseNames::Path {ref mut cur, ref all, ref mut base} => {
+            BaseNames::Path {
+                ref mut cur,
+                ref all,
+                ref mut base,
+            } => {
                 if *base == all.len() {
                     None
                 } else {
@@ -154,10 +184,14 @@ impl<'a> Iterator for BaseNames<'a> {
 
 impl Path {
     /// returns /
-    pub fn root() -> Path { Path::from("/") }
+    pub fn root() -> Path {
+        Path::from("/")
+    }
 
     /// returns true if the path starts with /, false otherwise
-    pub fn is_absolute(&self) -> bool { self.as_ref().starts_with(SEP) }
+    pub fn is_absolute(&self) -> bool {
+        self.as_ref().starts_with(SEP)
+    }
 
     /// return a new path with the specified string appended as a new
     /// part separated by the pathsep char.
@@ -173,8 +207,9 @@ impl Path {
     /// ```
     pub fn append<T: AsRef<str>>(&self, other: T) -> Self {
         let other = other.as_ref();
-        if other.len() == 0 { self.clone() }
-        else {
+        if other.len() == 0 {
+            self.clone()
+        } else {
             let mut res = String::with_capacity(self.as_ref().len() + other.len());
             res.push_str(self.as_ref());
             res.push(SEP);
@@ -202,7 +237,7 @@ impl Path {
     /// let p = Path::from(r"/foo\\\/bar/baz");
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec![r"foo\\\/bar", "baz"]);
     /// ```
-    pub fn parts(s: &str) -> impl Iterator<Item=&str> {
+    pub fn parts(s: &str) -> impl Iterator<Item = &str> {
         let skip = if s == "/" {
             2
         } else if s.starts_with("/") {
@@ -229,7 +264,7 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
     /// ```
-    pub fn basenames(s: &str) -> impl Iterator<Item=&str> {
+    pub fn basenames(s: &str) -> impl Iterator<Item = &str> {
         if s == "/" {
             BaseNames::Root(true)
         } else {
@@ -273,10 +308,7 @@ impl Path {
     /// assert_eq!(Path::dirname(&p), None);
     /// ```
     pub fn dirname(s: &str) -> Option<&str> {
-        Path::rfind_sep(s).and_then(|i| {
-            if i == 0 { None } 
-            else { Some(&s[0..i]) }
-        })
+        Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i]) })
     }
 
     /// return the last part of the path, or return None if the path
@@ -302,23 +334,33 @@ impl Path {
     /// ```
     pub fn basename(s: &str) -> Option<&str> {
         match Path::rfind_sep(s) {
-            None => if s.len() > 0 { Some(s) } else { None },
+            None => {
+                if s.len() > 0 {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
             Some(i) => {
-                if s.len() <= 1 { None }
-                else { Some(&s[i+1..s.len()]) }
+                if s.len() <= 1 {
+                    None
+                } else {
+                    Some(&s[i + 1..s.len()])
+                }
             }
         }
     }
 
     fn find_sep_int<F: Fn(&str) -> Option<usize>>(mut s: &str, f: F) -> Option<usize> {
-        if s.len() == 0 { None }
-        else {
+        if s.len() == 0 {
+            None
+        } else {
             loop {
                 match f(s) {
                     None => return None,
                     Some(i) => {
                         if !is_escaped(s, i) {
-                            return Some(i)
+                            return Some(i);
                         } else {
                             s = &s[0..i];
                         }

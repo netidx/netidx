@@ -97,8 +97,8 @@ message Response {
     oneof value {
       uint32 Uint32 = 2;
       uint64 Uint64 = 3;
-      sint32 Sint32 = 4;
-      sint64 Sint64 = 5;
+      sint32 Int32 = 4;
+      sint64 Int64 = 5;
       float  Float  = 6;
       double Double = 7;
       bool   Bool   = 8;

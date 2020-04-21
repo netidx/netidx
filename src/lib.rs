@@ -43,14 +43,14 @@
 #[macro_use] extern crate bitflags;
 
 #[macro_use] pub mod utils;
-mod resolver_store;
+//mod resolver_store;
 mod auth;
-mod secstore;
+//mod secstore;
 pub mod path;
 pub mod protocol;
 pub mod config;
 pub mod channel;
-pub mod resolver;
-pub mod resolver_server;
-pub mod publisher;
-pub mod subscriber;
+//pub mod resolver;
+//pub mod resolver_server;
+//pub mod publisher;
+//pub mod subscriber;

@@ -2,76 +2,75 @@ use bytes::{Buf, Bytes, BytesMut};
 use futures::{
     prelude::*,
     sink::Sink,
-    task::{Context, Poll},
     stream::FusedStream,
+    task::{Context, Poll},
 };
+use anyhow::{Result, Error};
 use serde::Serialize;
 use std::pin::Pin;
 use std::{
     cell::RefCell,
-    io::{self, Write, IoSlice},
-    result::Result,
-    ops::{Deref, DerefMut},
-    collections::VecDeque,
     cmp::min,
+    collections::VecDeque,
+    io::{self, IoSlice, Write},
+    ops::{Deref, DerefMut},
+    result::Result,
 };
+use arc_swap::ArcSwap;
+use parking_lot::{Mutex, MutexGuard};
 
-#[macro_export]
-macro_rules! try_cont {
-    ($m:expr, $e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("{}: {}", $m, e);
-                continue;
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! try_brk {
-    ($m:expr, $e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("{}: {}", $m, e);
-                break;
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! try_ret {
-    ($m:expr, $e:expr) => {
-        match $e {
-            Ok(r) => r,
-            Err(e) => {
-                // CR estokes: use a better method
-                eprintln!("{}: {}", $m, e);
-                return;
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! or_ret {
+macro_rules! try_cf {
     ($e:expr) => {
         match $e {
-            Some(r) => r,
-            None => return,
+            Ok(x) => x,
+            Err(e) => {
+                break Err(Error::from(e));
+            }
         }
     };
-}
-
-#[macro_export]
-macro_rules! ret {
-    ($m:expr) => {{
-        eprintln!("{}", $m);
-        return;
-    }};
+    ($msg:expr, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!($msg, e);
+                break Err(Error::from(e));
+            }
+        }
+    };
+    ($id:ident, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                $id Err(Error::from(e));
+            }
+        }
+    };
+    ($msg:expr, $id:ident, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!($msg, e);
+                $id Err(Error::from(e));
+            }
+        }
+    };
+    ($id:ident, $lbl:tt, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                $id $l Err(Error::from(e));
+            }
+        }
+    };
+    ($msg:expr, $id:ident, $lbl:tt, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!($msg, e);
+                $id $l Err(Error::from(e));
+            }
+        }
+    };    
 }
 
 pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
@@ -102,6 +101,58 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
+struct SlotInner<V> {
+    waiters: Vec<oneshot::Sender<()>>,
+    value: Option<V>
+}
+
+pub struct SlotGuard<V>(MutexGuard<V>);
+
+impl<V: 'static> Deref for SlotGuard<V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.value.unwrap()
+    }
+}
+
+/// Waits for something to be put in it when empty, otherwise returns
+/// a reference to the thing it already contains
+pub struct Slot<V>(Arc<Mutex<SlotInner<V>>>);
+
+impl Slot<V: 'static> {
+    fn new() -> Slot<V> {
+        Slot(Arc::new(Mutex::new(SlotInner {
+            waiters: Vec::new(),
+            value: None
+        })))
+    }
+
+    async fn read(&self) -> Result<SlotGuard<V>> {
+        loop {
+            let rx = {
+                let mut inner = self.0.lock();
+                if inner.value.is_some() {
+                    return Ok(SlotGuard(inner));
+                } else {
+                    let (tx, rx) = oneshot::channel();
+                    inner.waiters.push(tx);
+                    rx
+                }
+            };
+            rx.await?;
+        }
+    }
+
+    fn set(&self, v: V) {
+        let mut inner = self.0.lock();
+        inner.value = Some(v);
+        for waiter in waiters.drain(..) {
+            let _ = waiter.send(());
+        }
+    }
+}
+
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
@@ -113,34 +164,6 @@ impl Write for BytesWriter<'_> {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-thread_local! {
-    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
-}
-
-pub fn mp_encode<T: Serialize>(t: &T) -> Result<Bytes, failure::Error> {
-    BUF.with(|buf| {
-        let mut b = buf.borrow_mut();
-        rmp_serde::encode::write_named(&mut BytesWriter(&mut *b), t)?;
-        Ok(b.split().freeze())
-    })
-}
-
-pub fn rmpv_encode(t: &rmpv::Value) -> Result<Bytes, failure::Error> {
-    BUF.with(|buf| {
-        let mut b = buf.borrow_mut();
-        rmpv::encode::write_value(&mut BytesWriter(&mut *b), t)?;
-        Ok(b.split().freeze())
-    })
-}
-
-pub fn str_encode(t: &str) -> Bytes {
-    BUF.with(|buf| {
-        let mut b = buf.borrow_mut();
-        b.extend_from_slice(t.as_bytes());
-        b.split().freeze()
-    })
 }
 
 pub struct BytesDeque(VecDeque<Bytes>);
@@ -181,7 +204,7 @@ impl Buf for BytesDeque {
             self.0[0].bytes()
         }
     }
-    
+
     fn advance(&mut self, mut cnt: usize) {
         while cnt > 0 && self.0.len() > 0 {
             let b = &mut self.0[0];
