@@ -1,4 +1,5 @@
 use crate::{config, path::Path};
+use bytes::BytesMut;
 use failure::Error;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
@@ -202,7 +203,17 @@ pub(crate) trait Krb5Ctx {
 
     fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error>;
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error>;
+    // CR estokes: will header, data, padding, trailer work for SSPI?
+    fn wrap_iov(
+        &self,
+        encrypt: bool,
+        header: &mut BytesMut,
+        data: &mut BytesMut,
+        padding: &mut BytesMut,
+        trailer: &mut BytesMut,
+    ) -> Result<(), Error>;
     fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error>;
+    fn unwrap_iov(&self, msg: BytesMut) -> Result<BytesMut, Error>;
     fn ttl(&self) -> Result<Duration, Error>;
 }
 
@@ -231,6 +242,7 @@ pub(crate) trait Krb5 {
 pub(crate) mod syskrb5 {
     use super::{Krb5, Krb5Ctx, Krb5ServerCtx};
     use failure::Error;
+    use bytes::BytesMut;
     use libgssapi::{
         context::{
             ClientCtx as GssClientCtx, CtxFlags, SecurityContext,
@@ -240,7 +252,7 @@ pub(crate) mod syskrb5 {
         error::{Error as GssError, MajorFlags},
         name::Name,
         oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
-        util::Buf,
+        util::{Buf, GssIov, GssIovFake, GssIovType},
     };
     use std::time::Duration;
     use tokio::task;
@@ -265,10 +277,54 @@ pub(crate) mod syskrb5 {
                 .map_err(|e| Error::from_boxed_compat(Box::new(e)))
         }
 
+        fn wrap_iov(
+            &self,
+            encrypt: bool,
+            header: &mut BytesMut,
+            data: &mut BytesMut,
+            padding: &mut BytesMut,
+            trailer: &mut BytesMut,
+        ) -> Result<(), Error> {
+            let mut len_iovs = [
+                GssIovFake::new(GssIovType::Header),
+                GssIov::new(GssIovType::Data, &mut **data).as_fake(),
+                GssIovFake::new(GssIovType::Padding),
+                GssIovFake::new(GssIovType::Trailer)                                
+            ];
+            self.0.wrap_iov_length(encrypt, &mut len_iovs[..])?;
+            header.resize(len_iovs[0].len(), 0x0);
+            padding.resize(len_iovs[2].len(), 0x0);
+            trailer.resize(len_iovs[3].len(), 0x0);
+            let mut iovs = [
+                GssIov::new(GssIovType::Header, &mut **header),
+                GssIov::new(GssIovType::Data, &mut **data),
+                GssIov::new(GssIovType::Padding, &mut **padding),
+                GssIov::new(GssIovType::Trailer, &mut **trailer)
+            ];
+            self.0.wrap_iov(encrypt, &mut iovs)?;
+        }
+
         fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error> {
             self.0
                 .unwrap(msg)
                 .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        }
+
+        fn unwrap_iov(&self, msg: BytesMut) -> Result<BytesMut, Error> {
+            let (hdr_len, data_len) = {
+                let mut iov = [
+                    GssIov::new(GssIovType::Stream, &mut *msg),
+                    GssIov::new(GssIovType::Data, &mut [])
+                ];
+                self.0.unwrap_iov(&mut iov[..])?;
+                let hdr_len = iov[0].header_length(&iov[1]).unwrap();
+                let data_len = iov[1].len();
+                (hdr_len, data_len)
+            }
+            let mut data = msg.split_off(hdr_len);
+            msg.clear(); // free msg header
+            data.truncate(data_len); // free msg padding and trailer
+            Ok(data) // return the decrypted contents
         }
 
         fn ttl(&self) -> Result<Duration, Error> {

@@ -25,7 +25,7 @@ const MAX_BATCH: u32 = 0x3FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
 
 enum ToFlush<C> {
-    Flush(Byte),
+    Flush(BytesMut),
     SetCtx(Option<C>),
 }
 
@@ -53,6 +53,9 @@ fn flush_task<C: Krb5Ctx + Send + Sync + 'static>(
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(10);
     task::spawn(async move {
         let mut ctx: Option<C> = None;
+        let mut header = BytesMut::new();
+        let mut padding = BytesMut::new();
+        let mut trailer = BytesMut::new();
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
@@ -60,11 +63,20 @@ fn flush_task<C: Krb5Ctx + Send + Sync + 'static>(
                     ToFlush::SetCtx(c) => {
                         ctx = c;
                     }
-                    ToFlush::Flush(mut batch) => match ctx {
-                        None => try_cf!(flush_buf(&mut soc, batch, false)).await,
+                    ToFlush::Flush(mut data) => match ctx {
+                        None => try_cf!(flush_buf(&mut soc, data, false)).await,
                         Some(ref ctx) => {
-                            let ebatch = try_cf!(ctx.wrap(true, &*batch));
-                            try_cf!(flush_buf(&mut soc, &*ebatch, true).await);
+                            try_cf!(ctx.wrap_iov(
+                                true,
+                                &mut header,
+                                &mut data,
+                                &mut padding,
+                                &mut trailer
+                            ));
+                            let msg = header.split().chain(
+                                data.chain(padding.split().chain(trailer.split())),
+                            );
+                            try_cf!(flush_buf(&mut soc, msg, true).await);
                         }
                     },
                 },
