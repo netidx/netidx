@@ -26,7 +26,7 @@ use protobuf::ProtobufEnum as ProtobufEnum_imported_for_functions;
 /// of protobuf runtime.
 // const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_14_0;
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Hello {
     // message oneof groups
     pub hello: ::std::option::Option<Hello_oneof_hello>,
@@ -62,45 +62,6 @@ impl Hello {
             _ => Hello_Anonymous::default_instance(),
         }
     }
-    pub fn clear_Anonymous(&mut self) {
-        self.hello = ::std::option::Option::None;
-    }
-
-    pub fn has_Anonymous(&self) -> bool {
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::Anonymous(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Anonymous(&mut self, v: Hello_Anonymous) {
-        self.hello = ::std::option::Option::Some(Hello_oneof_hello::Anonymous(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Anonymous(&mut self) -> &mut Hello_Anonymous {
-        if let ::std::option::Option::Some(Hello_oneof_hello::Anonymous(_)) = self.hello {
-        } else {
-            self.hello = ::std::option::Option::Some(Hello_oneof_hello::Anonymous(Hello_Anonymous::new()));
-        }
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::Anonymous(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Anonymous(&mut self) -> Hello_Anonymous {
-        if self.has_Anonymous() {
-            match self.hello.take() {
-                ::std::option::Option::Some(Hello_oneof_hello::Anonymous(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Hello_Anonymous::new()
-        }
-    }
 
     // .Hello.InitiateSession Initiate = 2;
 
@@ -111,45 +72,6 @@ impl Hello {
             _ => Hello_InitiateSession::default_instance(),
         }
     }
-    pub fn clear_Initiate(&mut self) {
-        self.hello = ::std::option::Option::None;
-    }
-
-    pub fn has_Initiate(&self) -> bool {
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::Initiate(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Initiate(&mut self, v: Hello_InitiateSession) {
-        self.hello = ::std::option::Option::Some(Hello_oneof_hello::Initiate(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Initiate(&mut self) -> &mut Hello_InitiateSession {
-        if let ::std::option::Option::Some(Hello_oneof_hello::Initiate(_)) = self.hello {
-        } else {
-            self.hello = ::std::option::Option::Some(Hello_oneof_hello::Initiate(Hello_InitiateSession::new()));
-        }
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::Initiate(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Initiate(&mut self) -> Hello_InitiateSession {
-        if self.has_Initiate() {
-            match self.hello.take() {
-                ::std::option::Option::Some(Hello_oneof_hello::Initiate(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Hello_InitiateSession::new()
-        }
-    }
 
     // .Hello.ResolverAuthenticate ResolverAuthenticate = 3;
 
@@ -158,45 +80,6 @@ impl Hello {
         match self.hello {
             ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(ref v)) => v,
             _ => Hello_ResolverAuthenticate::default_instance(),
-        }
-    }
-    pub fn clear_ResolverAuthenticate(&mut self) {
-        self.hello = ::std::option::Option::None;
-    }
-
-    pub fn has_ResolverAuthenticate(&self) -> bool {
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_ResolverAuthenticate(&mut self, v: Hello_ResolverAuthenticate) {
-        self.hello = ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_ResolverAuthenticate(&mut self) -> &mut Hello_ResolverAuthenticate {
-        if let ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(_)) = self.hello {
-        } else {
-            self.hello = ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(Hello_ResolverAuthenticate::new()));
-        }
-        match self.hello {
-            ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_ResolverAuthenticate(&mut self) -> Hello_ResolverAuthenticate {
-        if self.has_ResolverAuthenticate() {
-            match self.hello.take() {
-                ::std::option::Option::Some(Hello_oneof_hello::ResolverAuthenticate(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Hello_ResolverAuthenticate::new()
         }
     }
 }
@@ -330,35 +213,6 @@ impl ::protobuf::Message for Hello {
         Hello::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Hello_Anonymous>(
-                    "Anonymous",
-                    Hello::has_Anonymous,
-                    Hello::get_Anonymous,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Hello_InitiateSession>(
-                    "Initiate",
-                    Hello::has_Initiate,
-                    Hello::get_Initiate,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Hello_ResolverAuthenticate>(
-                    "ResolverAuthenticate",
-                    Hello::has_ResolverAuthenticate,
-                    Hello::get_ResolverAuthenticate,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Hello>(
-                    "Hello",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Hello {
         static mut instance: ::protobuf::lazy::Lazy<Hello> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -376,19 +230,13 @@ impl ::protobuf::Clear for Hello {
     }
 }
 
-impl ::std::fmt::Debug for Hello {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Hello {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Hello_Anonymous {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -468,20 +316,6 @@ impl ::protobuf::Message for Hello_Anonymous {
         Hello_Anonymous::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Hello_Anonymous>(
-                    "Hello.Anonymous",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Hello_Anonymous {
         static mut instance: ::protobuf::lazy::Lazy<Hello_Anonymous> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -496,19 +330,13 @@ impl ::protobuf::Clear for Hello_Anonymous {
     }
 }
 
-impl ::std::fmt::Debug for Hello_Anonymous {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Hello_Anonymous {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Hello_InitiateSession {
     // message fields
     pub token: ::bytes::Bytes,
@@ -533,25 +361,6 @@ impl Hello_InitiateSession {
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -625,25 +434,6 @@ impl ::protobuf::Message for Hello_InitiateSession {
         Hello_InitiateSession::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &Hello_InitiateSession| { &m.token },
-                    |m: &mut Hello_InitiateSession| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Hello_InitiateSession>(
-                    "Hello.InitiateSession",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Hello_InitiateSession {
         static mut instance: ::protobuf::lazy::Lazy<Hello_InitiateSession> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -659,19 +449,13 @@ impl ::protobuf::Clear for Hello_InitiateSession {
     }
 }
 
-impl ::std::fmt::Debug for Hello_InitiateSession {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Hello_InitiateSession {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Hello_ResolverAuthenticate {
     // message fields
     pub resolver_id: u64,
@@ -698,39 +482,12 @@ impl Hello_ResolverAuthenticate {
     pub fn get_resolver_id(&self) -> u64 {
         self.resolver_id
     }
-    pub fn clear_resolver_id(&mut self) {
-        self.resolver_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_resolver_id(&mut self, v: u64) {
-        self.resolver_id = v;
-    }
 
     // bytes token = 2;
 
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -817,30 +574,6 @@ impl ::protobuf::Message for Hello_ResolverAuthenticate {
         Hello_ResolverAuthenticate::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "resolver_id",
-                    |m: &Hello_ResolverAuthenticate| { &m.resolver_id },
-                    |m: &mut Hello_ResolverAuthenticate| { &mut m.resolver_id },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &Hello_ResolverAuthenticate| { &m.token },
-                    |m: &mut Hello_ResolverAuthenticate| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Hello_ResolverAuthenticate>(
-                    "Hello.ResolverAuthenticate",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Hello_ResolverAuthenticate {
         static mut instance: ::protobuf::lazy::Lazy<Hello_ResolverAuthenticate> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -857,19 +590,13 @@ impl ::protobuf::Clear for Hello_ResolverAuthenticate {
     }
 }
 
-impl ::std::fmt::Debug for Hello_ResolverAuthenticate {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Hello_ResolverAuthenticate {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Request {
     // message oneof groups
     pub request: ::std::option::Option<Request_oneof_request>,
@@ -904,45 +631,6 @@ impl Request {
             _ => Request_Subscribe::default_instance(),
         }
     }
-    pub fn clear_Subscribe(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Subscribe(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(Request_oneof_request::Subscribe(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Subscribe(&mut self, v: Request_Subscribe) {
-        self.request = ::std::option::Option::Some(Request_oneof_request::Subscribe(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Subscribe(&mut self) -> &mut Request_Subscribe {
-        if let ::std::option::Option::Some(Request_oneof_request::Subscribe(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(Request_oneof_request::Subscribe(Request_Subscribe::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(Request_oneof_request::Subscribe(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Subscribe(&mut self) -> Request_Subscribe {
-        if self.has_Subscribe() {
-            match self.request.take() {
-                ::std::option::Option::Some(Request_oneof_request::Subscribe(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Request_Subscribe::new()
-        }
-    }
 
     // .Request.Unsubscribe Unsubscribe = 2;
 
@@ -951,45 +639,6 @@ impl Request {
         match self.request {
             ::std::option::Option::Some(Request_oneof_request::Unsubscribe(ref v)) => v,
             _ => Request_Unsubscribe::default_instance(),
-        }
-    }
-    pub fn clear_Unsubscribe(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Unsubscribe(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(Request_oneof_request::Unsubscribe(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Unsubscribe(&mut self, v: Request_Unsubscribe) {
-        self.request = ::std::option::Option::Some(Request_oneof_request::Unsubscribe(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Unsubscribe(&mut self) -> &mut Request_Unsubscribe {
-        if let ::std::option::Option::Some(Request_oneof_request::Unsubscribe(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(Request_oneof_request::Unsubscribe(Request_Unsubscribe::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(Request_oneof_request::Unsubscribe(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Unsubscribe(&mut self) -> Request_Unsubscribe {
-        if self.has_Unsubscribe() {
-            match self.request.take() {
-                ::std::option::Option::Some(Request_oneof_request::Unsubscribe(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Request_Unsubscribe::new()
         }
     }
 }
@@ -1103,30 +752,6 @@ impl ::protobuf::Message for Request {
         Request::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Request_Subscribe>(
-                    "Subscribe",
-                    Request::has_Subscribe,
-                    Request::get_Subscribe,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Request_Unsubscribe>(
-                    "Unsubscribe",
-                    Request::has_Unsubscribe,
-                    Request::get_Unsubscribe,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Request>(
-                    "Request",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Request {
         static mut instance: ::protobuf::lazy::Lazy<Request> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1143,19 +768,13 @@ impl ::protobuf::Clear for Request {
     }
 }
 
-impl ::std::fmt::Debug for Request {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Request {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Request_Subscribe {
     // message fields
     pub path: ::protobuf::Chars,
@@ -1183,25 +802,6 @@ impl Request_Subscribe {
     pub fn get_path(&self) -> &str {
         &self.path
     }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
-    }
 
     // uint64 resolver = 2;
 
@@ -1209,39 +809,12 @@ impl Request_Subscribe {
     pub fn get_resolver(&self) -> u64 {
         self.resolver
     }
-    pub fn clear_resolver(&mut self) {
-        self.resolver = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_resolver(&mut self, v: u64) {
-        self.resolver = v;
-    }
 
     // bytes token = 3;
 
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -1337,35 +910,6 @@ impl ::protobuf::Message for Request_Subscribe {
         Request_Subscribe::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &Request_Subscribe| { &m.path },
-                    |m: &mut Request_Subscribe| { &mut m.path },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "resolver",
-                    |m: &Request_Subscribe| { &m.resolver },
-                    |m: &mut Request_Subscribe| { &mut m.resolver },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &Request_Subscribe| { &m.token },
-                    |m: &mut Request_Subscribe| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Request_Subscribe>(
-                    "Request.Subscribe",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Request_Subscribe {
         static mut instance: ::protobuf::lazy::Lazy<Request_Subscribe> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1383,19 +927,13 @@ impl ::protobuf::Clear for Request_Subscribe {
     }
 }
 
-impl ::std::fmt::Debug for Request_Subscribe {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Request_Subscribe {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Request_Unsubscribe {
     // message fields
     pub id: u64,
@@ -1420,14 +958,6 @@ impl Request_Unsubscribe {
 
     pub fn get_id(&self) -> u64 {
         self.id
-    }
-    pub fn clear_id(&mut self) {
-        self.id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_id(&mut self, v: u64) {
-        self.id = v;
     }
 }
 
@@ -1505,25 +1035,6 @@ impl ::protobuf::Message for Request_Unsubscribe {
         Request_Unsubscribe::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "id",
-                    |m: &Request_Unsubscribe| { &m.id },
-                    |m: &mut Request_Unsubscribe| { &mut m.id },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Request_Unsubscribe>(
-                    "Request.Unsubscribe",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Request_Unsubscribe {
         static mut instance: ::protobuf::lazy::Lazy<Request_Unsubscribe> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1539,19 +1050,13 @@ impl ::protobuf::Clear for Request_Unsubscribe {
     }
 }
 
-impl ::std::fmt::Debug for Request_Unsubscribe {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Request_Unsubscribe {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response {
     // message oneof groups
     pub response: ::std::option::Option<Response_oneof_response>,
@@ -1590,45 +1095,6 @@ impl Response {
             _ => Response_NoSuchValue::default_instance(),
         }
     }
-    pub fn clear_NoSuchValue(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_NoSuchValue(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::NoSuchValue(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_NoSuchValue(&mut self, v: Response_NoSuchValue) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::NoSuchValue(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_NoSuchValue(&mut self) -> &mut Response_NoSuchValue {
-        if let ::std::option::Option::Some(Response_oneof_response::NoSuchValue(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::NoSuchValue(Response_NoSuchValue::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::NoSuchValue(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_NoSuchValue(&mut self) -> Response_NoSuchValue {
-        if self.has_NoSuchValue() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::NoSuchValue(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_NoSuchValue::new()
-        }
-    }
 
     // .Response.Denied Denied = 2;
 
@@ -1637,45 +1103,6 @@ impl Response {
         match self.response {
             ::std::option::Option::Some(Response_oneof_response::Denied(ref v)) => v,
             _ => Response_Denied::default_instance(),
-        }
-    }
-    pub fn clear_Denied(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Denied(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Denied(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Denied(&mut self, v: Response_Denied) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::Denied(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Denied(&mut self) -> &mut Response_Denied {
-        if let ::std::option::Option::Some(Response_oneof_response::Denied(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::Denied(Response_Denied::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Denied(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Denied(&mut self) -> Response_Denied {
-        if self.has_Denied() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::Denied(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_Denied::new()
         }
     }
 
@@ -1688,45 +1115,6 @@ impl Response {
             _ => Response_Subscribed::default_instance(),
         }
     }
-    pub fn clear_Subscribed(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Subscribed(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Subscribed(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Subscribed(&mut self, v: Response_Subscribed) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::Subscribed(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Subscribed(&mut self) -> &mut Response_Subscribed {
-        if let ::std::option::Option::Some(Response_oneof_response::Subscribed(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::Subscribed(Response_Subscribed::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Subscribed(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Subscribed(&mut self) -> Response_Subscribed {
-        if self.has_Subscribed() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::Subscribed(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_Subscribed::new()
-        }
-    }
 
     // .Response.Unsubscribed Unsubscribed = 4;
 
@@ -1735,45 +1123,6 @@ impl Response {
         match self.response {
             ::std::option::Option::Some(Response_oneof_response::Unsubscribed(ref v)) => v,
             _ => Response_Unsubscribed::default_instance(),
-        }
-    }
-    pub fn clear_Unsubscribed(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Unsubscribed(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Unsubscribed(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Unsubscribed(&mut self, v: Response_Unsubscribed) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::Unsubscribed(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Unsubscribed(&mut self) -> &mut Response_Unsubscribed {
-        if let ::std::option::Option::Some(Response_oneof_response::Unsubscribed(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::Unsubscribed(Response_Unsubscribed::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Unsubscribed(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Unsubscribed(&mut self) -> Response_Unsubscribed {
-        if self.has_Unsubscribed() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::Unsubscribed(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_Unsubscribed::new()
         }
     }
 
@@ -1786,45 +1135,6 @@ impl Response {
             _ => Response_Heartbeat::default_instance(),
         }
     }
-    pub fn clear_Heartbeat(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Heartbeat(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Heartbeat(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Heartbeat(&mut self, v: Response_Heartbeat) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::Heartbeat(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Heartbeat(&mut self) -> &mut Response_Heartbeat {
-        if let ::std::option::Option::Some(Response_oneof_response::Heartbeat(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::Heartbeat(Response_Heartbeat::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Heartbeat(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Heartbeat(&mut self) -> Response_Heartbeat {
-        if self.has_Heartbeat() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::Heartbeat(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_Heartbeat::new()
-        }
-    }
 
     // .Response.Value Value = 6;
 
@@ -1833,45 +1143,6 @@ impl Response {
         match self.response {
             ::std::option::Option::Some(Response_oneof_response::Value(ref v)) => v,
             _ => Response_Value::default_instance(),
-        }
-    }
-    pub fn clear_Value(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Value(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Value(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Value(&mut self, v: Response_Value) {
-        self.response = ::std::option::Option::Some(Response_oneof_response::Value(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Value(&mut self) -> &mut Response_Value {
-        if let ::std::option::Option::Some(Response_oneof_response::Value(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(Response_oneof_response::Value(Response_Value::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(Response_oneof_response::Value(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Value(&mut self) -> Response_Value {
-        if self.has_Value() {
-            match self.response.take() {
-                ::std::option::Option::Some(Response_oneof_response::Value(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            Response_Value::new()
         }
     }
 }
@@ -2065,50 +1336,6 @@ impl ::protobuf::Message for Response {
         Response::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_NoSuchValue>(
-                    "NoSuchValue",
-                    Response::has_NoSuchValue,
-                    Response::get_NoSuchValue,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_Denied>(
-                    "Denied",
-                    Response::has_Denied,
-                    Response::get_Denied,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_Subscribed>(
-                    "Subscribed",
-                    Response::has_Subscribed,
-                    Response::get_Subscribed,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_Unsubscribed>(
-                    "Unsubscribed",
-                    Response::has_Unsubscribed,
-                    Response::get_Unsubscribed,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_Heartbeat>(
-                    "Heartbeat",
-                    Response::has_Heartbeat,
-                    Response::get_Heartbeat,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, Response_Value>(
-                    "Value",
-                    Response::has_Value,
-                    Response::get_Value,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response>(
-                    "Response",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response {
         static mut instance: ::protobuf::lazy::Lazy<Response> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2129,19 +1356,13 @@ impl ::protobuf::Clear for Response {
     }
 }
 
-impl ::std::fmt::Debug for Response {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_NoSuchValue {
     // message fields
     pub path: ::protobuf::Chars,
@@ -2166,25 +1387,6 @@ impl Response_NoSuchValue {
 
     pub fn get_path(&self) -> &str {
         &self.path
-    }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
     }
 }
 
@@ -2258,25 +1460,6 @@ impl ::protobuf::Message for Response_NoSuchValue {
         Response_NoSuchValue::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &Response_NoSuchValue| { &m.path },
-                    |m: &mut Response_NoSuchValue| { &mut m.path },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_NoSuchValue>(
-                    "Response.NoSuchValue",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_NoSuchValue {
         static mut instance: ::protobuf::lazy::Lazy<Response_NoSuchValue> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2292,19 +1475,13 @@ impl ::protobuf::Clear for Response_NoSuchValue {
     }
 }
 
-impl ::std::fmt::Debug for Response_NoSuchValue {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_NoSuchValue {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_Denied {
     // message fields
     pub path: ::protobuf::Chars,
@@ -2329,25 +1506,6 @@ impl Response_Denied {
 
     pub fn get_path(&self) -> &str {
         &self.path
-    }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
     }
 }
 
@@ -2421,25 +1579,6 @@ impl ::protobuf::Message for Response_Denied {
         Response_Denied::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &Response_Denied| { &m.path },
-                    |m: &mut Response_Denied| { &mut m.path },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_Denied>(
-                    "Response.Denied",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_Denied {
         static mut instance: ::protobuf::lazy::Lazy<Response_Denied> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2455,19 +1594,13 @@ impl ::protobuf::Clear for Response_Denied {
     }
 }
 
-impl ::std::fmt::Debug for Response_Denied {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_Denied {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_Unsubscribed {
     // message fields
     pub id: u64,
@@ -2492,14 +1625,6 @@ impl Response_Unsubscribed {
 
     pub fn get_id(&self) -> u64 {
         self.id
-    }
-    pub fn clear_id(&mut self) {
-        self.id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_id(&mut self, v: u64) {
-        self.id = v;
     }
 }
 
@@ -2577,25 +1702,6 @@ impl ::protobuf::Message for Response_Unsubscribed {
         Response_Unsubscribed::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "id",
-                    |m: &Response_Unsubscribed| { &m.id },
-                    |m: &mut Response_Unsubscribed| { &mut m.id },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_Unsubscribed>(
-                    "Response.Unsubscribed",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_Unsubscribed {
         static mut instance: ::protobuf::lazy::Lazy<Response_Unsubscribed> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2611,19 +1717,13 @@ impl ::protobuf::Clear for Response_Unsubscribed {
     }
 }
 
-impl ::std::fmt::Debug for Response_Unsubscribed {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_Unsubscribed {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_Heartbeat {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -2703,20 +1803,6 @@ impl ::protobuf::Message for Response_Heartbeat {
         Response_Heartbeat::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_Heartbeat>(
-                    "Response.Heartbeat",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_Heartbeat {
         static mut instance: ::protobuf::lazy::Lazy<Response_Heartbeat> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2731,19 +1817,13 @@ impl ::protobuf::Clear for Response_Heartbeat {
     }
 }
 
-impl ::std::fmt::Debug for Response_Heartbeat {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_Heartbeat {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_Value {
     // message fields
     pub id: u64,
@@ -2784,14 +1864,6 @@ impl Response_Value {
     pub fn get_id(&self) -> u64 {
         self.id
     }
-    pub fn clear_id(&mut self) {
-        self.id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_id(&mut self, v: u64) {
-        self.id = v;
-    }
 
     // uint32 Uint32 = 2;
 
@@ -2801,21 +1873,6 @@ impl Response_Value {
             ::std::option::Option::Some(Response_Value_oneof_value::Uint32(v)) => v,
             _ => 0,
         }
-    }
-    pub fn clear_Uint32(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Uint32(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Uint32(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Uint32(&mut self, v: u32) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Uint32(v))
     }
 
     // uint64 Uint64 = 3;
@@ -2827,21 +1884,6 @@ impl Response_Value {
             _ => 0,
         }
     }
-    pub fn clear_Uint64(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Uint64(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Uint64(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Uint64(&mut self, v: u64) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Uint64(v))
-    }
 
     // sint32 Int32 = 4;
 
@@ -2851,21 +1893,6 @@ impl Response_Value {
             ::std::option::Option::Some(Response_Value_oneof_value::Int32(v)) => v,
             _ => 0,
         }
-    }
-    pub fn clear_Int32(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Int32(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Int32(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Int32(&mut self, v: i32) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int32(v))
     }
 
     // sint64 Int64 = 5;
@@ -2877,21 +1904,6 @@ impl Response_Value {
             _ => 0,
         }
     }
-    pub fn clear_Int64(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Int64(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Int64(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Int64(&mut self, v: i64) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Int64(v))
-    }
 
     // float Float = 6;
 
@@ -2901,21 +1913,6 @@ impl Response_Value {
             ::std::option::Option::Some(Response_Value_oneof_value::Float(v)) => v,
             _ => 0.,
         }
-    }
-    pub fn clear_Float(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Float(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Float(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Float(&mut self, v: f32) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Float(v))
     }
 
     // double Double = 7;
@@ -2927,21 +1924,6 @@ impl Response_Value {
             _ => 0.,
         }
     }
-    pub fn clear_Double(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Double(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Double(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Double(&mut self, v: f64) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Double(v))
-    }
 
     // bool Bool = 8;
 
@@ -2951,21 +1933,6 @@ impl Response_Value {
             ::std::option::Option::Some(Response_Value_oneof_value::Bool(v)) => v,
             _ => false,
         }
-    }
-    pub fn clear_Bool(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Bool(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Bool(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Bool(&mut self, v: bool) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Bool(v))
     }
 
     // string String = 9;
@@ -2977,45 +1944,6 @@ impl Response_Value {
             _ => "",
         }
     }
-    pub fn clear_String(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_String(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::String(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_String(&mut self, v: ::protobuf::Chars) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::String(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_String(&mut self) -> &mut ::protobuf::Chars {
-        if let ::std::option::Option::Some(Response_Value_oneof_value::String(_)) = self.value {
-        } else {
-            self.value = ::std::option::Option::Some(Response_Value_oneof_value::String(::protobuf::Chars::new()));
-        }
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::String(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_String(&mut self) -> ::protobuf::Chars {
-        if self.has_String() {
-            match self.value.take() {
-                ::std::option::Option::Some(Response_Value_oneof_value::String(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ::protobuf::Chars::new()
-        }
-    }
 
     // bytes Bytes = 10;
 
@@ -3024,45 +1952,6 @@ impl Response_Value {
         match self.value {
             ::std::option::Option::Some(Response_Value_oneof_value::Bytes(ref v)) => v,
             _ => &[],
-        }
-    }
-    pub fn clear_Bytes(&mut self) {
-        self.value = ::std::option::Option::None;
-    }
-
-    pub fn has_Bytes(&self) -> bool {
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Bytes(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Bytes(&mut self, v: ::bytes::Bytes) {
-        self.value = ::std::option::Option::Some(Response_Value_oneof_value::Bytes(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Bytes(&mut self) -> &mut ::bytes::Bytes {
-        if let ::std::option::Option::Some(Response_Value_oneof_value::Bytes(_)) = self.value {
-        } else {
-            self.value = ::std::option::Option::Some(Response_Value_oneof_value::Bytes(::bytes::Bytes::new()));
-        }
-        match self.value {
-            ::std::option::Option::Some(Response_Value_oneof_value::Bytes(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Bytes(&mut self) -> ::bytes::Bytes {
-        if self.has_Bytes() {
-            match self.value.take() {
-                ::std::option::Option::Some(Response_Value_oneof_value::Bytes(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ::bytes::Bytes::new()
         }
     }
 }
@@ -3257,70 +2146,6 @@ impl ::protobuf::Message for Response_Value {
         Response_Value::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "id",
-                    |m: &Response_Value| { &m.id },
-                    |m: &mut Response_Value| { &mut m.id },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_u32_accessor::<_>(
-                    "Uint32",
-                    Response_Value::has_Uint32,
-                    Response_Value::get_Uint32,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_u64_accessor::<_>(
-                    "Uint64",
-                    Response_Value::has_Uint64,
-                    Response_Value::get_Uint64,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_i32_accessor::<_>(
-                    "Int32",
-                    Response_Value::has_Int32,
-                    Response_Value::get_Int32,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_i64_accessor::<_>(
-                    "Int64",
-                    Response_Value::has_Int64,
-                    Response_Value::get_Int64,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_f32_accessor::<_>(
-                    "Float",
-                    Response_Value::has_Float,
-                    Response_Value::get_Float,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_f64_accessor::<_>(
-                    "Double",
-                    Response_Value::has_Double,
-                    Response_Value::get_Double,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_bool_accessor::<_>(
-                    "Bool",
-                    Response_Value::has_Bool,
-                    Response_Value::get_Bool,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_string_accessor::<_>(
-                    "String",
-                    Response_Value::has_String,
-                    Response_Value::get_String,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_bytes_accessor::<_>(
-                    "Bytes",
-                    Response_Value::has_Bytes,
-                    Response_Value::get_Bytes,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_Value>(
-                    "Response.Value",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_Value {
         static mut instance: ::protobuf::lazy::Lazy<Response_Value> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3345,19 +2170,13 @@ impl ::protobuf::Clear for Response_Value {
     }
 }
 
-impl ::std::fmt::Debug for Response_Value {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_Value {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Response_Subscribed {
     // message fields
     pub path: ::protobuf::Chars,
@@ -3384,57 +2203,12 @@ impl Response_Subscribed {
     pub fn get_path(&self) -> &str {
         &self.path
     }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
-    }
 
     // .Response.Value current_value = 2;
 
 
     pub fn get_current_value(&self) -> &Response_Value {
         self.current_value.as_ref().unwrap_or_else(|| Response_Value::default_instance())
-    }
-    pub fn clear_current_value(&mut self) {
-        self.current_value.clear();
-    }
-
-    pub fn has_current_value(&self) -> bool {
-        self.current_value.is_some()
-    }
-
-    // Param is passed by value, moved
-    pub fn set_current_value(&mut self, v: Response_Value) {
-        self.current_value = ::protobuf::SingularPtrField::some(v);
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_current_value(&mut self) -> &mut Response_Value {
-        if self.current_value.is_none() {
-            self.current_value.set_default();
-        }
-        self.current_value.as_mut().unwrap()
-    }
-
-    // Take field
-    pub fn take_current_value(&mut self) -> Response_Value {
-        self.current_value.take().unwrap_or_else(|| Response_Value::new())
     }
 }
 
@@ -3525,30 +2299,6 @@ impl ::protobuf::Message for Response_Subscribed {
         Response_Subscribed::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &Response_Subscribed| { &m.path },
-                    |m: &mut Response_Subscribed| { &mut m.path },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Response_Value>>(
-                    "current_value",
-                    |m: &Response_Subscribed| { &m.current_value },
-                    |m: &mut Response_Subscribed| { &mut m.current_value },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<Response_Subscribed>(
-                    "Response.Subscribed",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static Response_Subscribed {
         static mut instance: ::protobuf::lazy::Lazy<Response_Subscribed> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3565,63 +2315,8 @@ impl ::protobuf::Clear for Response_Subscribed {
     }
 }
 
-impl ::std::fmt::Debug for Response_Subscribed {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Response_Subscribed {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
-    }
-}
-
-static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fpublisher.proto\x12\0\"\x9f\x02\n\x05Hello\x12'\n\tAnonymous\x18\
-    \x01\x20\x01(\x0b2\x10.Hello.AnonymousH\0B\0\x12,\n\x08Initiate\x18\x02\
-    \x20\x01(\x0b2\x16.Hello.InitiateSessionH\0B\0\x12=\n\x14ResolverAuthent\
-    icate\x18\x03\x20\x01(\x0b2\x1b.Hello.ResolverAuthenticateH\0B\0\x1a\r\n\
-    \tAnonymous:\0\x1a$\n\x0fInitiateSession\x12\x0f\n\x05token\x18\x01\x20\
-    \x01(\x0cB\0:\0\x1a@\n\x14ResolverAuthenticate\x12\x15\n\x0bresolver_id\
-    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05token\x18\x02\x20\x01(\x0cB\0:\0B\
-    \x07\n\x05hello:\0\"\xd3\x01\n\x07Request\x12)\n\tSubscribe\x18\x01\x20\
-    \x01(\x0b2\x12.Request.SubscribeH\0B\0\x12-\n\x0bUnsubscribe\x18\x02\x20\
-    \x01(\x0b2\x14.Request.UnsubscribeH\0B\0\x1aB\n\tSubscribe\x12\x0e\n\x04\
-    path\x18\x01\x20\x01(\tB\0\x12\x12\n\x08resolver\x18\x02\x20\x01(\x04B\0\
-    \x12\x0f\n\x05token\x18\x03\x20\x01(\x0cB\0:\0\x1a\x1d\n\x0bUnsubscribe\
-    \x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0:\0B\t\n\x07request:\0\"\xa5\x05\
-    \n\x08Response\x12.\n\x0bNoSuchValue\x18\x01\x20\x01(\x0b2\x15.Response.\
-    NoSuchValueH\0B\0\x12$\n\x06Denied\x18\x02\x20\x01(\x0b2\x10.Response.De\
-    niedH\0B\0\x12,\n\nSubscribed\x18\x03\x20\x01(\x0b2\x14.Response.Subscri\
-    bedH\0B\0\x120\n\x0cUnsubscribed\x18\x04\x20\x01(\x0b2\x16.Response.Unsu\
-    bscribedH\0B\0\x12*\n\tHeartbeat\x18\x05\x20\x01(\x0b2\x13.Response.Hear\
-    tbeatH\0B\0\x12\"\n\x05Value\x18\x06\x20\x01(\x0b2\x0f.Response.ValueH\0\
-    B\0\x1a\x1f\n\x0bNoSuchValue\x12\x0e\n\x04path\x18\x01\x20\x01(\tB\0:\0\
-    \x1a\x1a\n\x06Denied\x12\x0e\n\x04path\x18\x01\x20\x01(\tB\0:\0\x1a\x1e\
-    \n\x0cUnsubscribed\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0:\0\x1a\r\n\tH\
-    eartbeat:\0\x1a\xce\x01\n\x05Value\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
-    \0\x12\x12\n\x06Uint32\x18\x02\x20\x01(\rH\0B\0\x12\x12\n\x06Uint64\x18\
-    \x03\x20\x01(\x04H\0B\0\x12\x11\n\x05Int32\x18\x04\x20\x01(\x11H\0B\0\
-    \x12\x11\n\x05Int64\x18\x05\x20\x01(\x12H\0B\0\x12\x11\n\x05Float\x18\
-    \x06\x20\x01(\x02H\0B\0\x12\x12\n\x06Double\x18\x07\x20\x01(\x01H\0B\0\
-    \x12\x10\n\x04Bool\x18\x08\x20\x01(\x08H\0B\0\x12\x12\n\x06String\x18\t\
-    \x20\x01(\tH\0B\0\x12\x11\n\x05Bytes\x18\n\x20\x01(\x0cH\0B\0B\x07\n\x05\
-    value:\0\x1aH\n\nSubscribed\x12\x0e\n\x04path\x18\x01\x20\x01(\tB\0\x12(\
-    \n\rcurrent_value\x18\x02\x20\x01(\x0b2\x0f.Response.ValueB\0:\0B\n\n\
-    \x08response:\0B\0b\x06proto3\
-";
-
-static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy::INIT;
-
-fn parse_descriptor_proto() -> ::protobuf::descriptor::FileDescriptorProto {
-    ::protobuf::parse_from_bytes(file_descriptor_proto_data).unwrap()
-}
-
-pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescriptorProto {
-    unsafe {
-        file_descriptor_proto_lazy.get(|| {
-            parse_descriptor_proto()
-        })
     }
 }

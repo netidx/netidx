@@ -119,7 +119,7 @@ message ServerHelloWrite {
 message ReadClientRequest {
   // request to resolve the specified paths into publisher addresses
   message Resolve {
-    repeated string path = 1;
+    repeated string paths = 1;
   }
 
   // request to list immediate children of the specified path

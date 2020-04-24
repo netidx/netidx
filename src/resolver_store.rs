@@ -1,10 +1,13 @@
 use crate::{
     auth::Krb5Ctx, path::Path, protocol::shared::PermissionToken, secstore::SecStoreInner,
+    protocol::resolver::ReadServerResponse_AddrAndAuthToken as AddrAndAuthToken,
+    utils::std_socketaddr_to_protobuf,
 };
 use anyhow::Result;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
-use protobuf::{Chars, Message};
+use protobuf::{Chars, Message, RepeatedField, SingularPtrField};
+use bytes::Bytes;
 use std::{
     clone::Clone,
     collections::{
@@ -190,11 +193,15 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Vec<u8>)> {
+    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> RepeatedField<AddrAndAuthToken> {
         self.by_path
             .get(path.as_ref())
-            .map(|a| a.iter().map(|addr| (*addr, vec![])).collect())
-            .unwrap_or_else(|| Vec::new())
+            .map(|a| a.iter().map(|addr| AddrAndAuthToken {
+                addr: SingularPtrField::some(std_socketaddr_to_protobuf(*addr)),
+                token: Bytes::new(),
+                .. AddrAndAuthToken::default()
+            }).collect())
+            .unwrap_or_else(|| RepeatedField::from_vec(vec![]))
     }
 
     pub(crate) fn resolve_and_sign<S: AsRef<str>>(

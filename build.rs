@@ -13,6 +13,8 @@ fn main() {
             carllerche_bytes_for_string: Some(true),
             expose_oneof: Some(true),
             expose_fields: Some(true),
+            generate_accessors: Some(false),
+            lite_runtime: Some(true),
             ..Default::default()
         })
         .include("protocol")

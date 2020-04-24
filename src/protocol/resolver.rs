@@ -26,7 +26,7 @@ use protobuf::ProtobufEnum as ProtobufEnum_imported_for_functions;
 /// of protobuf runtime.
 // const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_14_0;
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello {
     // message oneof groups
     pub hello: ::std::option::Option<ClientHello_oneof_hello>,
@@ -61,45 +61,6 @@ impl ClientHello {
             _ => ClientHello_Read::default_instance(),
         }
     }
-    pub fn clear_ReadOnly(&mut self) {
-        self.hello = ::std::option::Option::None;
-    }
-
-    pub fn has_ReadOnly(&self) -> bool {
-        match self.hello {
-            ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_ReadOnly(&mut self, v: ClientHello_Read) {
-        self.hello = ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_ReadOnly(&mut self) -> &mut ClientHello_Read {
-        if let ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(_)) = self.hello {
-        } else {
-            self.hello = ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(ClientHello_Read::new()));
-        }
-        match self.hello {
-            ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_ReadOnly(&mut self) -> ClientHello_Read {
-        if self.has_ReadOnly() {
-            match self.hello.take() {
-                ::std::option::Option::Some(ClientHello_oneof_hello::ReadOnly(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Read::new()
-        }
-    }
 
     // .ClientHello.Write WriteOnly = 2;
 
@@ -108,45 +69,6 @@ impl ClientHello {
         match self.hello {
             ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(ref v)) => v,
             _ => ClientHello_Write::default_instance(),
-        }
-    }
-    pub fn clear_WriteOnly(&mut self) {
-        self.hello = ::std::option::Option::None;
-    }
-
-    pub fn has_WriteOnly(&self) -> bool {
-        match self.hello {
-            ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_WriteOnly(&mut self, v: ClientHello_Write) {
-        self.hello = ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_WriteOnly(&mut self) -> &mut ClientHello_Write {
-        if let ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(_)) = self.hello {
-        } else {
-            self.hello = ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(ClientHello_Write::new()));
-        }
-        match self.hello {
-            ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_WriteOnly(&mut self) -> ClientHello_Write {
-        if self.has_WriteOnly() {
-            match self.hello.take() {
-                ::std::option::Option::Some(ClientHello_oneof_hello::WriteOnly(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Write::new()
         }
     }
 }
@@ -260,30 +182,6 @@ impl ::protobuf::Message for ClientHello {
         ClientHello::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Read>(
-                    "ReadOnly",
-                    ClientHello::has_ReadOnly,
-                    ClientHello::get_ReadOnly,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Write>(
-                    "WriteOnly",
-                    ClientHello::has_WriteOnly,
-                    ClientHello::get_WriteOnly,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello>(
-                    "ClientHello",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -300,19 +198,13 @@ impl ::protobuf::Clear for ClientHello {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Read {
     // message oneof groups
     pub auth: ::std::option::Option<ClientHello_Read_oneof_auth>,
@@ -348,45 +240,6 @@ impl ClientHello_Read {
             _ => ClientHello_Read_Anonymous::default_instance(),
         }
     }
-    pub fn clear_Anonymous(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Anonymous(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Anonymous(&mut self, v: ClientHello_Read_Anonymous) {
-        self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Anonymous(&mut self) -> &mut ClientHello_Read_Anonymous {
-        if let ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(ClientHello_Read_Anonymous::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Anonymous(&mut self) -> ClientHello_Read_Anonymous {
-        if self.has_Anonymous() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Read_oneof_auth::Anonymous(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Read_Anonymous::new()
-        }
-    }
 
     // .ClientHello.Read.Reuse Reuse = 2;
 
@@ -397,45 +250,6 @@ impl ClientHello_Read {
             _ => ClientHello_Read_Reuse::default_instance(),
         }
     }
-    pub fn clear_Reuse(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Reuse(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Reuse(&mut self, v: ClientHello_Read_Reuse) {
-        self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Reuse(&mut self) -> &mut ClientHello_Read_Reuse {
-        if let ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(ClientHello_Read_Reuse::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Reuse(&mut self) -> ClientHello_Read_Reuse {
-        if self.has_Reuse() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Read_oneof_auth::Reuse(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Read_Reuse::new()
-        }
-    }
 
     // .ClientHello.Read.Initiate Initiate = 3;
 
@@ -444,45 +258,6 @@ impl ClientHello_Read {
         match self.auth {
             ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(ref v)) => v,
             _ => ClientHello_Read_Initiate::default_instance(),
-        }
-    }
-    pub fn clear_Initiate(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Initiate(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Initiate(&mut self, v: ClientHello_Read_Initiate) {
-        self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Initiate(&mut self) -> &mut ClientHello_Read_Initiate {
-        if let ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(ClientHello_Read_Initiate::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Initiate(&mut self) -> ClientHello_Read_Initiate {
-        if self.has_Initiate() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Read_oneof_auth::Initiate(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Read_Initiate::new()
         }
     }
 }
@@ -616,35 +391,6 @@ impl ::protobuf::Message for ClientHello_Read {
         ClientHello_Read::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Read_Anonymous>(
-                    "Anonymous",
-                    ClientHello_Read::has_Anonymous,
-                    ClientHello_Read::get_Anonymous,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Read_Reuse>(
-                    "Reuse",
-                    ClientHello_Read::has_Reuse,
-                    ClientHello_Read::get_Reuse,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Read_Initiate>(
-                    "Initiate",
-                    ClientHello_Read::has_Initiate,
-                    ClientHello_Read::get_Initiate,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Read>(
-                    "ClientHello.Read",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Read {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Read> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -662,19 +408,13 @@ impl ::protobuf::Clear for ClientHello_Read {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Read {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Read {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Read_Anonymous {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -754,20 +494,6 @@ impl ::protobuf::Message for ClientHello_Read_Anonymous {
         ClientHello_Read_Anonymous::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Read_Anonymous>(
-                    "ClientHello.Read.Anonymous",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Read_Anonymous {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Read_Anonymous> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -782,19 +508,13 @@ impl ::protobuf::Clear for ClientHello_Read_Anonymous {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Read_Anonymous {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Read_Anonymous {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Read_Reuse {
     // message fields
     pub session_id: u64,
@@ -819,14 +539,6 @@ impl ClientHello_Read_Reuse {
 
     pub fn get_session_id(&self) -> u64 {
         self.session_id
-    }
-    pub fn clear_session_id(&mut self) {
-        self.session_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_session_id(&mut self, v: u64) {
-        self.session_id = v;
     }
 }
 
@@ -904,25 +616,6 @@ impl ::protobuf::Message for ClientHello_Read_Reuse {
         ClientHello_Read_Reuse::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "session_id",
-                    |m: &ClientHello_Read_Reuse| { &m.session_id },
-                    |m: &mut ClientHello_Read_Reuse| { &mut m.session_id },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Read_Reuse>(
-                    "ClientHello.Read.Reuse",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Read_Reuse {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Read_Reuse> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -938,19 +631,13 @@ impl ::protobuf::Clear for ClientHello_Read_Reuse {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Read_Reuse {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Read_Reuse {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Read_Initiate {
     // message fields
     pub token: ::bytes::Bytes,
@@ -975,25 +662,6 @@ impl ClientHello_Read_Initiate {
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -1067,25 +735,6 @@ impl ::protobuf::Message for ClientHello_Read_Initiate {
         ClientHello_Read_Initiate::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &ClientHello_Read_Initiate| { &m.token },
-                    |m: &mut ClientHello_Read_Initiate| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Read_Initiate>(
-                    "ClientHello.Read.Initiate",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Read_Initiate {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Read_Initiate> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1101,19 +750,13 @@ impl ::protobuf::Clear for ClientHello_Read_Initiate {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Read_Initiate {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Read_Initiate {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Write {
     // message fields
     pub write_addr: ::protobuf::SingularPtrField<super::shared::SocketAddr>,
@@ -1140,64 +783,12 @@ impl ClientHello_Write {
     pub fn get_write_addr(&self) -> &super::shared::SocketAddr {
         self.write_addr.as_ref().unwrap_or_else(|| super::shared::SocketAddr::default_instance())
     }
-    pub fn clear_write_addr(&mut self) {
-        self.write_addr.clear();
-    }
-
-    pub fn has_write_addr(&self) -> bool {
-        self.write_addr.is_some()
-    }
-
-    // Param is passed by value, moved
-    pub fn set_write_addr(&mut self, v: super::shared::SocketAddr) {
-        self.write_addr = ::protobuf::SingularPtrField::some(v);
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_write_addr(&mut self) -> &mut super::shared::SocketAddr {
-        if self.write_addr.is_none() {
-            self.write_addr.set_default();
-        }
-        self.write_addr.as_mut().unwrap()
-    }
-
-    // Take field
-    pub fn take_write_addr(&mut self) -> super::shared::SocketAddr {
-        self.write_addr.take().unwrap_or_else(|| super::shared::SocketAddr::new())
-    }
 
     // .ClientHello.Write.Auth auth = 2;
 
 
     pub fn get_auth(&self) -> &ClientHello_Write_Auth {
         self.auth.as_ref().unwrap_or_else(|| ClientHello_Write_Auth::default_instance())
-    }
-    pub fn clear_auth(&mut self) {
-        self.auth.clear();
-    }
-
-    pub fn has_auth(&self) -> bool {
-        self.auth.is_some()
-    }
-
-    // Param is passed by value, moved
-    pub fn set_auth(&mut self, v: ClientHello_Write_Auth) {
-        self.auth = ::protobuf::SingularPtrField::some(v);
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_auth(&mut self) -> &mut ClientHello_Write_Auth {
-        if self.auth.is_none() {
-            self.auth.set_default();
-        }
-        self.auth.as_mut().unwrap()
-    }
-
-    // Take field
-    pub fn take_auth(&mut self) -> ClientHello_Write_Auth {
-        self.auth.take().unwrap_or_else(|| ClientHello_Write_Auth::new())
     }
 }
 
@@ -1296,30 +887,6 @@ impl ::protobuf::Message for ClientHello_Write {
         ClientHello_Write::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::shared::SocketAddr>>(
-                    "write_addr",
-                    |m: &ClientHello_Write| { &m.write_addr },
-                    |m: &mut ClientHello_Write| { &mut m.write_addr },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ClientHello_Write_Auth>>(
-                    "auth",
-                    |m: &ClientHello_Write| { &m.auth },
-                    |m: &mut ClientHello_Write| { &mut m.auth },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Write>(
-                    "ClientHello.Write",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Write {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Write> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1336,19 +903,13 @@ impl ::protobuf::Clear for ClientHello_Write {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Write {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Write {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Write_Auth {
     // message oneof groups
     pub auth: ::std::option::Option<ClientHello_Write_Auth_oneof_auth>,
@@ -1384,45 +945,6 @@ impl ClientHello_Write_Auth {
             _ => ClientHello_Write_Auth_Anonymous::default_instance(),
         }
     }
-    pub fn clear_Anonymous(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Anonymous(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Anonymous(&mut self, v: ClientHello_Write_Auth_Anonymous) {
-        self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Anonymous(&mut self) -> &mut ClientHello_Write_Auth_Anonymous {
-        if let ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(ClientHello_Write_Auth_Anonymous::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Anonymous(&mut self) -> ClientHello_Write_Auth_Anonymous {
-        if self.has_Anonymous() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Anonymous(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Write_Auth_Anonymous::new()
-        }
-    }
 
     // .ClientHello.Write.Auth.Reuse Reuse = 2;
 
@@ -1433,45 +955,6 @@ impl ClientHello_Write_Auth {
             _ => ClientHello_Write_Auth_Reuse::default_instance(),
         }
     }
-    pub fn clear_Reuse(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Reuse(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Reuse(&mut self, v: ClientHello_Write_Auth_Reuse) {
-        self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Reuse(&mut self) -> &mut ClientHello_Write_Auth_Reuse {
-        if let ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(ClientHello_Write_Auth_Reuse::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Reuse(&mut self) -> ClientHello_Write_Auth_Reuse {
-        if self.has_Reuse() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Reuse(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Write_Auth_Reuse::new()
-        }
-    }
 
     // .ClientHello.Write.Auth.Initiate Initiate = 3;
 
@@ -1480,45 +963,6 @@ impl ClientHello_Write_Auth {
         match self.auth {
             ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(ref v)) => v,
             _ => ClientHello_Write_Auth_Initiate::default_instance(),
-        }
-    }
-    pub fn clear_Initiate(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Initiate(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Initiate(&mut self, v: ClientHello_Write_Auth_Initiate) {
-        self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Initiate(&mut self) -> &mut ClientHello_Write_Auth_Initiate {
-        if let ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(ClientHello_Write_Auth_Initiate::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Initiate(&mut self) -> ClientHello_Write_Auth_Initiate {
-        if self.has_Initiate() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ClientHello_Write_Auth_oneof_auth::Initiate(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ClientHello_Write_Auth_Initiate::new()
         }
     }
 }
@@ -1652,35 +1096,6 @@ impl ::protobuf::Message for ClientHello_Write_Auth {
         ClientHello_Write_Auth::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Write_Auth_Anonymous>(
-                    "Anonymous",
-                    ClientHello_Write_Auth::has_Anonymous,
-                    ClientHello_Write_Auth::get_Anonymous,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Write_Auth_Reuse>(
-                    "Reuse",
-                    ClientHello_Write_Auth::has_Reuse,
-                    ClientHello_Write_Auth::get_Reuse,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ClientHello_Write_Auth_Initiate>(
-                    "Initiate",
-                    ClientHello_Write_Auth::has_Initiate,
-                    ClientHello_Write_Auth::get_Initiate,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Write_Auth>(
-                    "ClientHello.Write.Auth",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Write_Auth {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Write_Auth> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1698,19 +1113,13 @@ impl ::protobuf::Clear for ClientHello_Write_Auth {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Write_Auth {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Write_Auth {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Write_Auth_Anonymous {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -1790,20 +1199,6 @@ impl ::protobuf::Message for ClientHello_Write_Auth_Anonymous {
         ClientHello_Write_Auth_Anonymous::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Write_Auth_Anonymous>(
-                    "ClientHello.Write.Auth.Anonymous",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Write_Auth_Anonymous {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Write_Auth_Anonymous> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1818,19 +1213,13 @@ impl ::protobuf::Clear for ClientHello_Write_Auth_Anonymous {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Write_Auth_Anonymous {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Write_Auth_Anonymous {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Write_Auth_Reuse {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -1910,20 +1299,6 @@ impl ::protobuf::Message for ClientHello_Write_Auth_Reuse {
         ClientHello_Write_Auth_Reuse::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Write_Auth_Reuse>(
-                    "ClientHello.Write.Auth.Reuse",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Write_Auth_Reuse {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Write_Auth_Reuse> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -1938,19 +1313,13 @@ impl ::protobuf::Clear for ClientHello_Write_Auth_Reuse {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Write_Auth_Reuse {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Write_Auth_Reuse {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ClientHello_Write_Auth_Initiate {
     // message fields
     pub spn: ::protobuf::Chars,
@@ -1977,50 +1346,12 @@ impl ClientHello_Write_Auth_Initiate {
     pub fn get_spn(&self) -> &str {
         &self.spn
     }
-    pub fn clear_spn(&mut self) {
-        ::protobuf::Clear::clear(&mut self.spn);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_spn(&mut self, v: ::protobuf::Chars) {
-        self.spn = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_spn(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.spn
-    }
-
-    // Take field
-    pub fn take_spn(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.spn, ::protobuf::Chars::new())
-    }
 
     // bytes token = 2;
 
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -2103,30 +1434,6 @@ impl ::protobuf::Message for ClientHello_Write_Auth_Initiate {
         ClientHello_Write_Auth_Initiate::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "spn",
-                    |m: &ClientHello_Write_Auth_Initiate| { &m.spn },
-                    |m: &mut ClientHello_Write_Auth_Initiate| { &mut m.spn },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &ClientHello_Write_Auth_Initiate| { &m.token },
-                    |m: &mut ClientHello_Write_Auth_Initiate| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ClientHello_Write_Auth_Initiate>(
-                    "ClientHello.Write.Auth.Initiate",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ClientHello_Write_Auth_Initiate {
         static mut instance: ::protobuf::lazy::Lazy<ClientHello_Write_Auth_Initiate> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2143,19 +1450,13 @@ impl ::protobuf::Clear for ClientHello_Write_Auth_Initiate {
     }
 }
 
-impl ::std::fmt::Debug for ClientHello_Write_Auth_Initiate {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ClientHello_Write_Auth_Initiate {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloRead {
     // message oneof groups
     pub auth: ::std::option::Option<ServerHelloRead_oneof_auth>,
@@ -2191,45 +1492,6 @@ impl ServerHelloRead {
             _ => ServerHelloRead_Anonymous::default_instance(),
         }
     }
-    pub fn clear_Anonymous(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Anonymous(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Anonymous(&mut self, v: ServerHelloRead_Anonymous) {
-        self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Anonymous(&mut self) -> &mut ServerHelloRead_Anonymous {
-        if let ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(ServerHelloRead_Anonymous::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Anonymous(&mut self) -> ServerHelloRead_Anonymous {
-        if self.has_Anonymous() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloRead_oneof_auth::Anonymous(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloRead_Anonymous::new()
-        }
-    }
 
     // .ServerHelloRead.Reused Reused = 2;
 
@@ -2240,45 +1502,6 @@ impl ServerHelloRead {
             _ => ServerHelloRead_Reused::default_instance(),
         }
     }
-    pub fn clear_Reused(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Reused(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Reused(&mut self, v: ServerHelloRead_Reused) {
-        self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Reused(&mut self) -> &mut ServerHelloRead_Reused {
-        if let ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(ServerHelloRead_Reused::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Reused(&mut self) -> ServerHelloRead_Reused {
-        if self.has_Reused() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloRead_oneof_auth::Reused(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloRead_Reused::new()
-        }
-    }
 
     // .ServerHelloRead.Accepted Accepted = 3;
 
@@ -2287,45 +1510,6 @@ impl ServerHelloRead {
         match self.auth {
             ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(ref v)) => v,
             _ => ServerHelloRead_Accepted::default_instance(),
-        }
-    }
-    pub fn clear_Accepted(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Accepted(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Accepted(&mut self, v: ServerHelloRead_Accepted) {
-        self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Accepted(&mut self) -> &mut ServerHelloRead_Accepted {
-        if let ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(ServerHelloRead_Accepted::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Accepted(&mut self) -> ServerHelloRead_Accepted {
-        if self.has_Accepted() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloRead_oneof_auth::Accepted(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloRead_Accepted::new()
         }
     }
 }
@@ -2459,35 +1643,6 @@ impl ::protobuf::Message for ServerHelloRead {
         ServerHelloRead::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloRead_Anonymous>(
-                    "Anonymous",
-                    ServerHelloRead::has_Anonymous,
-                    ServerHelloRead::get_Anonymous,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloRead_Reused>(
-                    "Reused",
-                    ServerHelloRead::has_Reused,
-                    ServerHelloRead::get_Reused,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloRead_Accepted>(
-                    "Accepted",
-                    ServerHelloRead::has_Accepted,
-                    ServerHelloRead::get_Accepted,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloRead>(
-                    "ServerHelloRead",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloRead {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloRead> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2505,19 +1660,13 @@ impl ::protobuf::Clear for ServerHelloRead {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloRead {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloRead {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloRead_Anonymous {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -2597,20 +1746,6 @@ impl ::protobuf::Message for ServerHelloRead_Anonymous {
         ServerHelloRead_Anonymous::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloRead_Anonymous>(
-                    "ServerHelloRead.Anonymous",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloRead_Anonymous {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloRead_Anonymous> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2625,19 +1760,13 @@ impl ::protobuf::Clear for ServerHelloRead_Anonymous {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloRead_Anonymous {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloRead_Anonymous {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloRead_Reused {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -2717,20 +1846,6 @@ impl ::protobuf::Message for ServerHelloRead_Reused {
         ServerHelloRead_Reused::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloRead_Reused>(
-                    "ServerHelloRead.Reused",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloRead_Reused {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloRead_Reused> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2745,19 +1860,13 @@ impl ::protobuf::Clear for ServerHelloRead_Reused {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloRead_Reused {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloRead_Reused {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloRead_Accepted {
     // message fields
     pub context_id: u64,
@@ -2784,39 +1893,12 @@ impl ServerHelloRead_Accepted {
     pub fn get_context_id(&self) -> u64 {
         self.context_id
     }
-    pub fn clear_context_id(&mut self) {
-        self.context_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_context_id(&mut self, v: u64) {
-        self.context_id = v;
-    }
 
     // bytes token = 2;
 
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -2903,30 +1985,6 @@ impl ::protobuf::Message for ServerHelloRead_Accepted {
         ServerHelloRead_Accepted::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "context_id",
-                    |m: &ServerHelloRead_Accepted| { &m.context_id },
-                    |m: &mut ServerHelloRead_Accepted| { &mut m.context_id },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &ServerHelloRead_Accepted| { &m.token },
-                    |m: &mut ServerHelloRead_Accepted| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloRead_Accepted>(
-                    "ServerHelloRead.Accepted",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloRead_Accepted {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloRead_Accepted> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -2943,19 +2001,13 @@ impl ::protobuf::Clear for ServerHelloRead_Accepted {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloRead_Accepted {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloRead_Accepted {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloWrite {
     // message fields
     pub ttl_expired: bool,
@@ -2991,28 +2043,12 @@ impl ServerHelloWrite {
     pub fn get_ttl_expired(&self) -> bool {
         self.ttl_expired
     }
-    pub fn clear_ttl_expired(&mut self) {
-        self.ttl_expired = false;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_ttl_expired(&mut self, v: bool) {
-        self.ttl_expired = v;
-    }
 
     // uint64 resolver_id = 2;
 
 
     pub fn get_resolver_id(&self) -> u64 {
         self.resolver_id
-    }
-    pub fn clear_resolver_id(&mut self) {
-        self.resolver_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_resolver_id(&mut self, v: u64) {
-        self.resolver_id = v;
     }
 
     // .ServerHelloWrite.Anonymous Anonymous = 3;
@@ -3022,45 +2058,6 @@ impl ServerHelloWrite {
         match self.auth {
             ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(ref v)) => v,
             _ => ServerHelloWrite_Anonymous::default_instance(),
-        }
-    }
-    pub fn clear_Anonymous(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Anonymous(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Anonymous(&mut self, v: ServerHelloWrite_Anonymous) {
-        self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Anonymous(&mut self) -> &mut ServerHelloWrite_Anonymous {
-        if let ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(ServerHelloWrite_Anonymous::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Anonymous(&mut self) -> ServerHelloWrite_Anonymous {
-        if self.has_Anonymous() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Anonymous(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloWrite_Anonymous::new()
         }
     }
 
@@ -3073,45 +2070,6 @@ impl ServerHelloWrite {
             _ => ServerHelloWrite_Reused::default_instance(),
         }
     }
-    pub fn clear_Reused(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Reused(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Reused(&mut self, v: ServerHelloWrite_Reused) {
-        self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Reused(&mut self) -> &mut ServerHelloWrite_Reused {
-        if let ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(ServerHelloWrite_Reused::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Reused(&mut self) -> ServerHelloWrite_Reused {
-        if self.has_Reused() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Reused(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloWrite_Reused::new()
-        }
-    }
 
     // .ServerHelloWrite.Accepted Accepted = 5;
 
@@ -3120,45 +2078,6 @@ impl ServerHelloWrite {
         match self.auth {
             ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(ref v)) => v,
             _ => ServerHelloWrite_Accepted::default_instance(),
-        }
-    }
-    pub fn clear_Accepted(&mut self) {
-        self.auth = ::std::option::Option::None;
-    }
-
-    pub fn has_Accepted(&self) -> bool {
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Accepted(&mut self, v: ServerHelloWrite_Accepted) {
-        self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Accepted(&mut self) -> &mut ServerHelloWrite_Accepted {
-        if let ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(_)) = self.auth {
-        } else {
-            self.auth = ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(ServerHelloWrite_Accepted::new()));
-        }
-        match self.auth {
-            ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Accepted(&mut self) -> ServerHelloWrite_Accepted {
-        if self.has_Accepted() {
-            match self.auth.take() {
-                ::std::option::Option::Some(ServerHelloWrite_oneof_auth::Accepted(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ServerHelloWrite_Accepted::new()
         }
     }
 }
@@ -3318,45 +2237,6 @@ impl ::protobuf::Message for ServerHelloWrite {
         ServerHelloWrite::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
-                    "ttl_expired",
-                    |m: &ServerHelloWrite| { &m.ttl_expired },
-                    |m: &mut ServerHelloWrite| { &mut m.ttl_expired },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "resolver_id",
-                    |m: &ServerHelloWrite| { &m.resolver_id },
-                    |m: &mut ServerHelloWrite| { &mut m.resolver_id },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloWrite_Anonymous>(
-                    "Anonymous",
-                    ServerHelloWrite::has_Anonymous,
-                    ServerHelloWrite::get_Anonymous,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloWrite_Reused>(
-                    "Reused",
-                    ServerHelloWrite::has_Reused,
-                    ServerHelloWrite::get_Reused,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ServerHelloWrite_Accepted>(
-                    "Accepted",
-                    ServerHelloWrite::has_Accepted,
-                    ServerHelloWrite::get_Accepted,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloWrite>(
-                    "ServerHelloWrite",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloWrite {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloWrite> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3376,19 +2256,13 @@ impl ::protobuf::Clear for ServerHelloWrite {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloWrite {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloWrite {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloWrite_Anonymous {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -3468,20 +2342,6 @@ impl ::protobuf::Message for ServerHelloWrite_Anonymous {
         ServerHelloWrite_Anonymous::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloWrite_Anonymous>(
-                    "ServerHelloWrite.Anonymous",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloWrite_Anonymous {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloWrite_Anonymous> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3496,19 +2356,13 @@ impl ::protobuf::Clear for ServerHelloWrite_Anonymous {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloWrite_Anonymous {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloWrite_Anonymous {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloWrite_Reused {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -3588,20 +2442,6 @@ impl ::protobuf::Message for ServerHelloWrite_Reused {
         ServerHelloWrite_Reused::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloWrite_Reused>(
-                    "ServerHelloWrite.Reused",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloWrite_Reused {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloWrite_Reused> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3616,19 +2456,13 @@ impl ::protobuf::Clear for ServerHelloWrite_Reused {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloWrite_Reused {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloWrite_Reused {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ServerHelloWrite_Accepted {
     // message fields
     pub token: ::bytes::Bytes,
@@ -3653,25 +2487,6 @@ impl ServerHelloWrite_Accepted {
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -3745,25 +2560,6 @@ impl ::protobuf::Message for ServerHelloWrite_Accepted {
         ServerHelloWrite_Accepted::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &ServerHelloWrite_Accepted| { &m.token },
-                    |m: &mut ServerHelloWrite_Accepted| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ServerHelloWrite_Accepted>(
-                    "ServerHelloWrite.Accepted",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ServerHelloWrite_Accepted {
         static mut instance: ::protobuf::lazy::Lazy<ServerHelloWrite_Accepted> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -3779,19 +2575,13 @@ impl ::protobuf::Clear for ServerHelloWrite_Accepted {
     }
 }
 
-impl ::std::fmt::Debug for ServerHelloWrite_Accepted {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ServerHelloWrite_Accepted {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadClientRequest {
     // message oneof groups
     pub request: ::std::option::Option<ReadClientRequest_oneof_request>,
@@ -3826,45 +2616,6 @@ impl ReadClientRequest {
             _ => ReadClientRequest_Resolve::default_instance(),
         }
     }
-    pub fn clear_Resolve(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Resolve(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Resolve(&mut self, v: ReadClientRequest_Resolve) {
-        self.request = ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Resolve(&mut self) -> &mut ReadClientRequest_Resolve {
-        if let ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(ReadClientRequest_Resolve::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Resolve(&mut self) -> ReadClientRequest_Resolve {
-        if self.has_Resolve() {
-            match self.request.take() {
-                ::std::option::Option::Some(ReadClientRequest_oneof_request::Resolve(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ReadClientRequest_Resolve::new()
-        }
-    }
 
     // .ReadClientRequest.List List = 2;
 
@@ -3873,45 +2624,6 @@ impl ReadClientRequest {
         match self.request {
             ::std::option::Option::Some(ReadClientRequest_oneof_request::List(ref v)) => v,
             _ => ReadClientRequest_List::default_instance(),
-        }
-    }
-    pub fn clear_List(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_List(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(ReadClientRequest_oneof_request::List(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_List(&mut self, v: ReadClientRequest_List) {
-        self.request = ::std::option::Option::Some(ReadClientRequest_oneof_request::List(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_List(&mut self) -> &mut ReadClientRequest_List {
-        if let ::std::option::Option::Some(ReadClientRequest_oneof_request::List(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(ReadClientRequest_oneof_request::List(ReadClientRequest_List::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(ReadClientRequest_oneof_request::List(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_List(&mut self) -> ReadClientRequest_List {
-        if self.has_List() {
-            match self.request.take() {
-                ::std::option::Option::Some(ReadClientRequest_oneof_request::List(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ReadClientRequest_List::new()
         }
     }
 }
@@ -4025,30 +2737,6 @@ impl ::protobuf::Message for ReadClientRequest {
         ReadClientRequest::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ReadClientRequest_Resolve>(
-                    "Resolve",
-                    ReadClientRequest::has_Resolve,
-                    ReadClientRequest::get_Resolve,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ReadClientRequest_List>(
-                    "List",
-                    ReadClientRequest::has_List,
-                    ReadClientRequest::get_List,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadClientRequest>(
-                    "ReadClientRequest",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadClientRequest {
         static mut instance: ::protobuf::lazy::Lazy<ReadClientRequest> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -4065,22 +2753,16 @@ impl ::protobuf::Clear for ReadClientRequest {
     }
 }
 
-impl ::std::fmt::Debug for ReadClientRequest {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadClientRequest {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadClientRequest_Resolve {
     // message fields
-    pub path: ::std::vec::Vec<::protobuf::Chars>,
+    pub paths: ::std::vec::Vec<::protobuf::Chars>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -4097,29 +2779,11 @@ impl ReadClientRequest_Resolve {
         ::std::default::Default::default()
     }
 
-    // repeated string path = 1;
+    // repeated string paths = 1;
 
 
-    pub fn get_path(&self) -> &[::protobuf::Chars] {
-        &self.path
-    }
-    pub fn clear_path(&mut self) {
-        self.path.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_path(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.path, ::std::vec::Vec::new())
+    pub fn get_paths(&self) -> &[::protobuf::Chars] {
+        &self.paths
     }
 }
 
@@ -4133,7 +2797,7 @@ impl ::protobuf::Message for ReadClientRequest_Resolve {
             let (field_number, wire_type) = is.read_tag_unpack()?;
             match field_number {
                 1 => {
-                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.path)?;
+                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.paths)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -4147,7 +2811,7 @@ impl ::protobuf::Message for ReadClientRequest_Resolve {
     #[allow(unused_variables)]
     fn compute_size(&self) -> u32 {
         let mut my_size = 0;
-        for value in &self.path {
+        for value in &self.paths {
             my_size += ::protobuf::rt::string_size(1, &value);
         };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
@@ -4156,7 +2820,7 @@ impl ::protobuf::Message for ReadClientRequest_Resolve {
     }
 
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
-        for v in &self.path {
+        for v in &self.paths {
             os.write_string(1, &v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
@@ -4193,25 +2857,6 @@ impl ::protobuf::Message for ReadClientRequest_Resolve {
         ReadClientRequest_Resolve::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &ReadClientRequest_Resolve| { &m.path },
-                    |m: &mut ReadClientRequest_Resolve| { &mut m.path },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadClientRequest_Resolve>(
-                    "ReadClientRequest.Resolve",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadClientRequest_Resolve {
         static mut instance: ::protobuf::lazy::Lazy<ReadClientRequest_Resolve> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -4222,14 +2867,8 @@ impl ::protobuf::Message for ReadClientRequest_Resolve {
 
 impl ::protobuf::Clear for ReadClientRequest_Resolve {
     fn clear(&mut self) {
-        self.path.clear();
+        self.paths.clear();
         self.unknown_fields.clear();
-    }
-}
-
-impl ::std::fmt::Debug for ReadClientRequest_Resolve {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
     }
 }
 
@@ -4239,7 +2878,7 @@ impl ::protobuf::reflect::ProtobufValue for ReadClientRequest_Resolve {
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadClientRequest_List {
     // message fields
     pub path: ::protobuf::Chars,
@@ -4264,25 +2903,6 @@ impl ReadClientRequest_List {
 
     pub fn get_path(&self) -> &str {
         &self.path
-    }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
     }
 }
 
@@ -4356,25 +2976,6 @@ impl ::protobuf::Message for ReadClientRequest_List {
         ReadClientRequest_List::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &ReadClientRequest_List| { &m.path },
-                    |m: &mut ReadClientRequest_List| { &mut m.path },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadClientRequest_List>(
-                    "ReadClientRequest.List",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadClientRequest_List {
         static mut instance: ::protobuf::lazy::Lazy<ReadClientRequest_List> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -4390,19 +2991,13 @@ impl ::protobuf::Clear for ReadClientRequest_List {
     }
 }
 
-impl ::std::fmt::Debug for ReadClientRequest_List {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadClientRequest_List {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse {
     // message oneof groups
     pub response: ::std::option::Option<ReadServerResponse_oneof_response>,
@@ -4438,45 +3033,6 @@ impl ReadServerResponse {
             _ => ReadServerResponse_Resolved::default_instance(),
         }
     }
-    pub fn clear_Resolved(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Resolved(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Resolved(&mut self, v: ReadServerResponse_Resolved) {
-        self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Resolved(&mut self) -> &mut ReadServerResponse_Resolved {
-        if let ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(ReadServerResponse_Resolved::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Resolved(&mut self) -> ReadServerResponse_Resolved {
-        if self.has_Resolved() {
-            match self.response.take() {
-                ::std::option::Option::Some(ReadServerResponse_oneof_response::Resolved(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ReadServerResponse_Resolved::new()
-        }
-    }
 
     // .ReadServerResponse.List List = 2;
 
@@ -4487,45 +3043,6 @@ impl ReadServerResponse {
             _ => ReadServerResponse_List::default_instance(),
         }
     }
-    pub fn clear_List(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_List(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::List(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_List(&mut self, v: ReadServerResponse_List) {
-        self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::List(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_List(&mut self) -> &mut ReadServerResponse_List {
-        if let ::std::option::Option::Some(ReadServerResponse_oneof_response::List(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::List(ReadServerResponse_List::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::List(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_List(&mut self) -> ReadServerResponse_List {
-        if self.has_List() {
-            match self.response.take() {
-                ::std::option::Option::Some(ReadServerResponse_oneof_response::List(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ReadServerResponse_List::new()
-        }
-    }
 
     // .ReadServerResponse.Error Error = 3;
 
@@ -4534,45 +3051,6 @@ impl ReadServerResponse {
         match self.response {
             ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(ref v)) => v,
             _ => ReadServerResponse_Error::default_instance(),
-        }
-    }
-    pub fn clear_Error(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Error(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Error(&mut self, v: ReadServerResponse_Error) {
-        self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Error(&mut self) -> &mut ReadServerResponse_Error {
-        if let ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(ReadServerResponse_Error::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Error(&mut self) -> ReadServerResponse_Error {
-        if self.has_Error() {
-            match self.response.take() {
-                ::std::option::Option::Some(ReadServerResponse_oneof_response::Error(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            ReadServerResponse_Error::new()
         }
     }
 }
@@ -4706,35 +3184,6 @@ impl ::protobuf::Message for ReadServerResponse {
         ReadServerResponse::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ReadServerResponse_Resolved>(
-                    "Resolved",
-                    ReadServerResponse::has_Resolved,
-                    ReadServerResponse::get_Resolved,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ReadServerResponse_List>(
-                    "List",
-                    ReadServerResponse::has_List,
-                    ReadServerResponse::get_List,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, ReadServerResponse_Error>(
-                    "Error",
-                    ReadServerResponse::has_Error,
-                    ReadServerResponse::get_Error,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse>(
-                    "ReadServerResponse",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -4752,19 +3201,13 @@ impl ::protobuf::Clear for ReadServerResponse {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_Krb5SpnMapping {
     // message fields
     pub addr: ::protobuf::SingularPtrField<super::shared::SocketAddr>,
@@ -4791,57 +3234,12 @@ impl ReadServerResponse_Krb5SpnMapping {
     pub fn get_addr(&self) -> &super::shared::SocketAddr {
         self.addr.as_ref().unwrap_or_else(|| super::shared::SocketAddr::default_instance())
     }
-    pub fn clear_addr(&mut self) {
-        self.addr.clear();
-    }
-
-    pub fn has_addr(&self) -> bool {
-        self.addr.is_some()
-    }
-
-    // Param is passed by value, moved
-    pub fn set_addr(&mut self, v: super::shared::SocketAddr) {
-        self.addr = ::protobuf::SingularPtrField::some(v);
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_addr(&mut self) -> &mut super::shared::SocketAddr {
-        if self.addr.is_none() {
-            self.addr.set_default();
-        }
-        self.addr.as_mut().unwrap()
-    }
-
-    // Take field
-    pub fn take_addr(&mut self) -> super::shared::SocketAddr {
-        self.addr.take().unwrap_or_else(|| super::shared::SocketAddr::new())
-    }
 
     // string spn = 2;
 
 
     pub fn get_spn(&self) -> &str {
         &self.spn
-    }
-    pub fn clear_spn(&mut self) {
-        ::protobuf::Clear::clear(&mut self.spn);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_spn(&mut self, v: ::protobuf::Chars) {
-        self.spn = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_spn(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.spn
-    }
-
-    // Take field
-    pub fn take_spn(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.spn, ::protobuf::Chars::new())
     }
 }
 
@@ -4932,30 +3330,6 @@ impl ::protobuf::Message for ReadServerResponse_Krb5SpnMapping {
         ReadServerResponse_Krb5SpnMapping::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::shared::SocketAddr>>(
-                    "addr",
-                    |m: &ReadServerResponse_Krb5SpnMapping| { &m.addr },
-                    |m: &mut ReadServerResponse_Krb5SpnMapping| { &mut m.addr },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "spn",
-                    |m: &ReadServerResponse_Krb5SpnMapping| { &m.spn },
-                    |m: &mut ReadServerResponse_Krb5SpnMapping| { &mut m.spn },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_Krb5SpnMapping>(
-                    "ReadServerResponse.Krb5SpnMapping",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_Krb5SpnMapping {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_Krb5SpnMapping> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -4972,19 +3346,13 @@ impl ::protobuf::Clear for ReadServerResponse_Krb5SpnMapping {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_Krb5SpnMapping {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_Krb5SpnMapping {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_AddrAndAuthToken {
     // message fields
     pub addr: ::protobuf::SingularPtrField<super::shared::SocketAddr>,
@@ -5011,57 +3379,12 @@ impl ReadServerResponse_AddrAndAuthToken {
     pub fn get_addr(&self) -> &super::shared::SocketAddr {
         self.addr.as_ref().unwrap_or_else(|| super::shared::SocketAddr::default_instance())
     }
-    pub fn clear_addr(&mut self) {
-        self.addr.clear();
-    }
-
-    pub fn has_addr(&self) -> bool {
-        self.addr.is_some()
-    }
-
-    // Param is passed by value, moved
-    pub fn set_addr(&mut self, v: super::shared::SocketAddr) {
-        self.addr = ::protobuf::SingularPtrField::some(v);
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_addr(&mut self) -> &mut super::shared::SocketAddr {
-        if self.addr.is_none() {
-            self.addr.set_default();
-        }
-        self.addr.as_mut().unwrap()
-    }
-
-    // Take field
-    pub fn take_addr(&mut self) -> super::shared::SocketAddr {
-        self.addr.take().unwrap_or_else(|| super::shared::SocketAddr::new())
-    }
 
     // bytes token = 2;
 
 
     pub fn get_token(&self) -> &[u8] {
         &self.token
-    }
-    pub fn clear_token(&mut self) {
-        self.token.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_token(&mut self, v: ::bytes::Bytes) {
-        self.token = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_token(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.token
-    }
-
-    // Take field
-    pub fn take_token(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.token, ::bytes::Bytes::new())
     }
 }
 
@@ -5152,30 +3475,6 @@ impl ::protobuf::Message for ReadServerResponse_AddrAndAuthToken {
         ReadServerResponse_AddrAndAuthToken::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::shared::SocketAddr>>(
-                    "addr",
-                    |m: &ReadServerResponse_AddrAndAuthToken| { &m.addr },
-                    |m: &mut ReadServerResponse_AddrAndAuthToken| { &mut m.addr },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "token",
-                    |m: &ReadServerResponse_AddrAndAuthToken| { &m.token },
-                    |m: &mut ReadServerResponse_AddrAndAuthToken| { &mut m.token },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_AddrAndAuthToken>(
-                    "ReadServerResponse.AddrAndAuthToken",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_AddrAndAuthToken {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_AddrAndAuthToken> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -5192,19 +3491,13 @@ impl ::protobuf::Clear for ReadServerResponse_AddrAndAuthToken {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_AddrAndAuthToken {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_AddrAndAuthToken {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_Resolution {
     // message fields
     pub addrs: ::protobuf::RepeatedField<ReadServerResponse_AddrAndAuthToken>,
@@ -5229,24 +3522,6 @@ impl ReadServerResponse_Resolution {
 
     pub fn get_addrs(&self) -> &[ReadServerResponse_AddrAndAuthToken] {
         &self.addrs
-    }
-    pub fn clear_addrs(&mut self) {
-        self.addrs.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_addrs(&mut self, v: ::protobuf::RepeatedField<ReadServerResponse_AddrAndAuthToken>) {
-        self.addrs = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_addrs(&mut self) -> &mut ::protobuf::RepeatedField<ReadServerResponse_AddrAndAuthToken> {
-        &mut self.addrs
-    }
-
-    // Take field
-    pub fn take_addrs(&mut self) -> ::protobuf::RepeatedField<ReadServerResponse_AddrAndAuthToken> {
-        ::std::mem::replace(&mut self.addrs, ::protobuf::RepeatedField::new())
     }
 }
 
@@ -5328,25 +3603,6 @@ impl ::protobuf::Message for ReadServerResponse_Resolution {
         ReadServerResponse_Resolution::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ReadServerResponse_AddrAndAuthToken>>(
-                    "addrs",
-                    |m: &ReadServerResponse_Resolution| { &m.addrs },
-                    |m: &mut ReadServerResponse_Resolution| { &mut m.addrs },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_Resolution>(
-                    "ReadServerResponse.Resolution",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_Resolution {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_Resolution> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -5362,19 +3618,13 @@ impl ::protobuf::Clear for ReadServerResponse_Resolution {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_Resolution {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_Resolution {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_Resolved {
     // message fields
     pub resolver_id: u64,
@@ -5402,14 +3652,6 @@ impl ReadServerResponse_Resolved {
     pub fn get_resolver_id(&self) -> u64 {
         self.resolver_id
     }
-    pub fn clear_resolver_id(&mut self) {
-        self.resolver_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_resolver_id(&mut self, v: u64) {
-        self.resolver_id = v;
-    }
 
     // repeated .ReadServerResponse.Krb5SpnMapping krb5_spns = 2;
 
@@ -5417,48 +3659,12 @@ impl ReadServerResponse_Resolved {
     pub fn get_krb5_spns(&self) -> &[ReadServerResponse_Krb5SpnMapping] {
         &self.krb5_spns
     }
-    pub fn clear_krb5_spns(&mut self) {
-        self.krb5_spns.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_krb5_spns(&mut self, v: ::protobuf::RepeatedField<ReadServerResponse_Krb5SpnMapping>) {
-        self.krb5_spns = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_krb5_spns(&mut self) -> &mut ::protobuf::RepeatedField<ReadServerResponse_Krb5SpnMapping> {
-        &mut self.krb5_spns
-    }
-
-    // Take field
-    pub fn take_krb5_spns(&mut self) -> ::protobuf::RepeatedField<ReadServerResponse_Krb5SpnMapping> {
-        ::std::mem::replace(&mut self.krb5_spns, ::protobuf::RepeatedField::new())
-    }
 
     // repeated .ReadServerResponse.Resolution results = 3;
 
 
     pub fn get_results(&self) -> &[ReadServerResponse_Resolution] {
         &self.results
-    }
-    pub fn clear_results(&mut self) {
-        self.results.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_results(&mut self, v: ::protobuf::RepeatedField<ReadServerResponse_Resolution>) {
-        self.results = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_results(&mut self) -> &mut ::protobuf::RepeatedField<ReadServerResponse_Resolution> {
-        &mut self.results
-    }
-
-    // Take field
-    pub fn take_results(&mut self) -> ::protobuf::RepeatedField<ReadServerResponse_Resolution> {
-        ::std::mem::replace(&mut self.results, ::protobuf::RepeatedField::new())
     }
 }
 
@@ -5570,35 +3776,6 @@ impl ::protobuf::Message for ReadServerResponse_Resolved {
         ReadServerResponse_Resolved::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "resolver_id",
-                    |m: &ReadServerResponse_Resolved| { &m.resolver_id },
-                    |m: &mut ReadServerResponse_Resolved| { &mut m.resolver_id },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ReadServerResponse_Krb5SpnMapping>>(
-                    "krb5_spns",
-                    |m: &ReadServerResponse_Resolved| { &m.krb5_spns },
-                    |m: &mut ReadServerResponse_Resolved| { &mut m.krb5_spns },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ReadServerResponse_Resolution>>(
-                    "results",
-                    |m: &ReadServerResponse_Resolved| { &m.results },
-                    |m: &mut ReadServerResponse_Resolved| { &mut m.results },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_Resolved>(
-                    "ReadServerResponse.Resolved",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_Resolved {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_Resolved> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -5616,19 +3793,13 @@ impl ::protobuf::Clear for ReadServerResponse_Resolved {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_Resolved {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_Resolved {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_List {
     // message fields
     pub path: ::std::vec::Vec<::protobuf::Chars>,
@@ -5653,24 +3824,6 @@ impl ReadServerResponse_List {
 
     pub fn get_path(&self) -> &[::protobuf::Chars] {
         &self.path
-    }
-    pub fn clear_path(&mut self) {
-        self.path.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_path(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.path, ::std::vec::Vec::new())
     }
 }
 
@@ -5744,25 +3897,6 @@ impl ::protobuf::Message for ReadServerResponse_List {
         ReadServerResponse_List::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &ReadServerResponse_List| { &m.path },
-                    |m: &mut ReadServerResponse_List| { &mut m.path },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_List>(
-                    "ReadServerResponse.List",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_List {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_List> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -5778,19 +3912,13 @@ impl ::protobuf::Clear for ReadServerResponse_List {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_List {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_List {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_Error {
     // message fields
     pub description: ::protobuf::Chars,
@@ -5815,25 +3943,6 @@ impl ReadServerResponse_Error {
 
     pub fn get_description(&self) -> &str {
         &self.description
-    }
-    pub fn clear_description(&mut self) {
-        ::protobuf::Clear::clear(&mut self.description);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_description(&mut self, v: ::protobuf::Chars) {
-        self.description = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_description(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.description
-    }
-
-    // Take field
-    pub fn take_description(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.description, ::protobuf::Chars::new())
     }
 }
 
@@ -5907,25 +4016,6 @@ impl ::protobuf::Message for ReadServerResponse_Error {
         ReadServerResponse_Error::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "description",
-                    |m: &ReadServerResponse_Error| { &m.description },
-                    |m: &mut ReadServerResponse_Error| { &mut m.description },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReadServerResponse_Error>(
-                    "ReadServerResponse.Error",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static ReadServerResponse_Error {
         static mut instance: ::protobuf::lazy::Lazy<ReadServerResponse_Error> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -5941,19 +4031,13 @@ impl ::protobuf::Clear for ReadServerResponse_Error {
     }
 }
 
-impl ::std::fmt::Debug for ReadServerResponse_Error {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_Error {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteClientRequest {
     // message oneof groups
     pub request: ::std::option::Option<WriteClientRequest_oneof_request>,
@@ -5990,45 +4074,6 @@ impl WriteClientRequest {
             _ => WriteClientRequest_Publish::default_instance(),
         }
     }
-    pub fn clear_Publish(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Publish(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Publish(&mut self, v: WriteClientRequest_Publish) {
-        self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Publish(&mut self) -> &mut WriteClientRequest_Publish {
-        if let ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(WriteClientRequest_Publish::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Publish(&mut self) -> WriteClientRequest_Publish {
-        if self.has_Publish() {
-            match self.request.take() {
-                ::std::option::Option::Some(WriteClientRequest_oneof_request::Publish(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteClientRequest_Publish::new()
-        }
-    }
 
     // .WriteClientRequest.Unpublish Unpublish = 2;
 
@@ -6037,45 +4082,6 @@ impl WriteClientRequest {
         match self.request {
             ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(ref v)) => v,
             _ => WriteClientRequest_Unpublish::default_instance(),
-        }
-    }
-    pub fn clear_Unpublish(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Unpublish(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Unpublish(&mut self, v: WriteClientRequest_Unpublish) {
-        self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Unpublish(&mut self) -> &mut WriteClientRequest_Unpublish {
-        if let ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(WriteClientRequest_Unpublish::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Unpublish(&mut self) -> WriteClientRequest_Unpublish {
-        if self.has_Unpublish() {
-            match self.request.take() {
-                ::std::option::Option::Some(WriteClientRequest_oneof_request::Unpublish(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteClientRequest_Unpublish::new()
         }
     }
 
@@ -6088,45 +4094,6 @@ impl WriteClientRequest {
             _ => WriteClientRequest_Clear::default_instance(),
         }
     }
-    pub fn clear_Clear(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Clear(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Clear(&mut self, v: WriteClientRequest_Clear) {
-        self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Clear(&mut self) -> &mut WriteClientRequest_Clear {
-        if let ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(WriteClientRequest_Clear::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Clear(&mut self) -> WriteClientRequest_Clear {
-        if self.has_Clear() {
-            match self.request.take() {
-                ::std::option::Option::Some(WriteClientRequest_oneof_request::Clear(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteClientRequest_Clear::new()
-        }
-    }
 
     // .WriteClientRequest.Heartbeat Heartbeat = 4;
 
@@ -6135,45 +4102,6 @@ impl WriteClientRequest {
         match self.request {
             ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(ref v)) => v,
             _ => WriteClientRequest_Heartbeat::default_instance(),
-        }
-    }
-    pub fn clear_Heartbeat(&mut self) {
-        self.request = ::std::option::Option::None;
-    }
-
-    pub fn has_Heartbeat(&self) -> bool {
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Heartbeat(&mut self, v: WriteClientRequest_Heartbeat) {
-        self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Heartbeat(&mut self) -> &mut WriteClientRequest_Heartbeat {
-        if let ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(_)) = self.request {
-        } else {
-            self.request = ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(WriteClientRequest_Heartbeat::new()));
-        }
-        match self.request {
-            ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Heartbeat(&mut self) -> WriteClientRequest_Heartbeat {
-        if self.has_Heartbeat() {
-            match self.request.take() {
-                ::std::option::Option::Some(WriteClientRequest_oneof_request::Heartbeat(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteClientRequest_Heartbeat::new()
         }
     }
 }
@@ -6327,40 +4255,6 @@ impl ::protobuf::Message for WriteClientRequest {
         WriteClientRequest::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteClientRequest_Publish>(
-                    "Publish",
-                    WriteClientRequest::has_Publish,
-                    WriteClientRequest::get_Publish,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteClientRequest_Unpublish>(
-                    "Unpublish",
-                    WriteClientRequest::has_Unpublish,
-                    WriteClientRequest::get_Unpublish,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteClientRequest_Clear>(
-                    "Clear",
-                    WriteClientRequest::has_Clear,
-                    WriteClientRequest::get_Clear,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteClientRequest_Heartbeat>(
-                    "Heartbeat",
-                    WriteClientRequest::has_Heartbeat,
-                    WriteClientRequest::get_Heartbeat,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest>(
-                    "WriteClientRequest",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteClientRequest {
         static mut instance: ::protobuf::lazy::Lazy<WriteClientRequest> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -6379,19 +4273,13 @@ impl ::protobuf::Clear for WriteClientRequest {
     }
 }
 
-impl ::std::fmt::Debug for WriteClientRequest {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteClientRequest {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteClientRequest_Publish {
     // message fields
     pub paths: ::std::vec::Vec<::protobuf::Chars>,
@@ -6416,24 +4304,6 @@ impl WriteClientRequest_Publish {
 
     pub fn get_paths(&self) -> &[::protobuf::Chars] {
         &self.paths
-    }
-    pub fn clear_paths(&mut self) {
-        self.paths.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_paths(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.paths = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_paths(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.paths
-    }
-
-    // Take field
-    pub fn take_paths(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.paths, ::std::vec::Vec::new())
     }
 }
 
@@ -6507,25 +4377,6 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
         WriteClientRequest_Publish::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "paths",
-                    |m: &WriteClientRequest_Publish| { &m.paths },
-                    |m: &mut WriteClientRequest_Publish| { &mut m.paths },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Publish>(
-                    "WriteClientRequest.Publish",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteClientRequest_Publish {
         static mut instance: ::protobuf::lazy::Lazy<WriteClientRequest_Publish> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -6541,19 +4392,13 @@ impl ::protobuf::Clear for WriteClientRequest_Publish {
     }
 }
 
-impl ::std::fmt::Debug for WriteClientRequest_Publish {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteClientRequest_Publish {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteClientRequest_Unpublish {
     // message fields
     pub paths: ::std::vec::Vec<::protobuf::Chars>,
@@ -6578,24 +4423,6 @@ impl WriteClientRequest_Unpublish {
 
     pub fn get_paths(&self) -> &[::protobuf::Chars] {
         &self.paths
-    }
-    pub fn clear_paths(&mut self) {
-        self.paths.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_paths(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.paths = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_paths(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.paths
-    }
-
-    // Take field
-    pub fn take_paths(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.paths, ::std::vec::Vec::new())
     }
 }
 
@@ -6669,25 +4496,6 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
         WriteClientRequest_Unpublish::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "paths",
-                    |m: &WriteClientRequest_Unpublish| { &m.paths },
-                    |m: &mut WriteClientRequest_Unpublish| { &mut m.paths },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Unpublish>(
-                    "WriteClientRequest.Unpublish",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteClientRequest_Unpublish {
         static mut instance: ::protobuf::lazy::Lazy<WriteClientRequest_Unpublish> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -6703,19 +4511,13 @@ impl ::protobuf::Clear for WriteClientRequest_Unpublish {
     }
 }
 
-impl ::std::fmt::Debug for WriteClientRequest_Unpublish {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteClientRequest_Unpublish {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteClientRequest_Clear {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -6795,20 +4597,6 @@ impl ::protobuf::Message for WriteClientRequest_Clear {
         WriteClientRequest_Clear::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Clear>(
-                    "WriteClientRequest.Clear",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteClientRequest_Clear {
         static mut instance: ::protobuf::lazy::Lazy<WriteClientRequest_Clear> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -6823,19 +4611,13 @@ impl ::protobuf::Clear for WriteClientRequest_Clear {
     }
 }
 
-impl ::std::fmt::Debug for WriteClientRequest_Clear {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteClientRequest_Clear {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteClientRequest_Heartbeat {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -6915,20 +4697,6 @@ impl ::protobuf::Message for WriteClientRequest_Heartbeat {
         WriteClientRequest_Heartbeat::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Heartbeat>(
-                    "WriteClientRequest.Heartbeat",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteClientRequest_Heartbeat {
         static mut instance: ::protobuf::lazy::Lazy<WriteClientRequest_Heartbeat> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -6943,19 +4711,13 @@ impl ::protobuf::Clear for WriteClientRequest_Heartbeat {
     }
 }
 
-impl ::std::fmt::Debug for WriteClientRequest_Heartbeat {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteClientRequest_Heartbeat {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteServerResponse {
     // message oneof groups
     pub response: ::std::option::Option<WriteServerResponse_oneof_response>,
@@ -6991,45 +4753,6 @@ impl WriteServerResponse {
             _ => WriteServerResponse_Published::default_instance(),
         }
     }
-    pub fn clear_Published(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Published(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Published(&mut self, v: WriteServerResponse_Published) {
-        self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Published(&mut self) -> &mut WriteServerResponse_Published {
-        if let ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(WriteServerResponse_Published::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Published(&mut self) -> WriteServerResponse_Published {
-        if self.has_Published() {
-            match self.response.take() {
-                ::std::option::Option::Some(WriteServerResponse_oneof_response::Published(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteServerResponse_Published::new()
-        }
-    }
 
     // .WriteServerResponse.Unpublished Unpublished = 2;
 
@@ -7040,45 +4763,6 @@ impl WriteServerResponse {
             _ => WriteServerResponse_Unpublished::default_instance(),
         }
     }
-    pub fn clear_Unpublished(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Unpublished(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Unpublished(&mut self, v: WriteServerResponse_Unpublished) {
-        self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Unpublished(&mut self) -> &mut WriteServerResponse_Unpublished {
-        if let ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(WriteServerResponse_Unpublished::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Unpublished(&mut self) -> WriteServerResponse_Unpublished {
-        if self.has_Unpublished() {
-            match self.response.take() {
-                ::std::option::Option::Some(WriteServerResponse_oneof_response::Unpublished(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteServerResponse_Unpublished::new()
-        }
-    }
 
     // .WriteServerResponse.Error Error = 3;
 
@@ -7087,45 +4771,6 @@ impl WriteServerResponse {
         match self.response {
             ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(ref v)) => v,
             _ => WriteServerResponse_Error::default_instance(),
-        }
-    }
-    pub fn clear_Error(&mut self) {
-        self.response = ::std::option::Option::None;
-    }
-
-    pub fn has_Error(&self) -> bool {
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_Error(&mut self, v: WriteServerResponse_Error) {
-        self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_Error(&mut self) -> &mut WriteServerResponse_Error {
-        if let ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(_)) = self.response {
-        } else {
-            self.response = ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(WriteServerResponse_Error::new()));
-        }
-        match self.response {
-            ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_Error(&mut self) -> WriteServerResponse_Error {
-        if self.has_Error() {
-            match self.response.take() {
-                ::std::option::Option::Some(WriteServerResponse_oneof_response::Error(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            WriteServerResponse_Error::new()
         }
     }
 }
@@ -7259,35 +4904,6 @@ impl ::protobuf::Message for WriteServerResponse {
         WriteServerResponse::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteServerResponse_Published>(
-                    "Published",
-                    WriteServerResponse::has_Published,
-                    WriteServerResponse::get_Published,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteServerResponse_Unpublished>(
-                    "Unpublished",
-                    WriteServerResponse::has_Unpublished,
-                    WriteServerResponse::get_Unpublished,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, WriteServerResponse_Error>(
-                    "Error",
-                    WriteServerResponse::has_Error,
-                    WriteServerResponse::get_Error,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteServerResponse>(
-                    "WriteServerResponse",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteServerResponse {
         static mut instance: ::protobuf::lazy::Lazy<WriteServerResponse> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -7305,19 +4921,13 @@ impl ::protobuf::Clear for WriteServerResponse {
     }
 }
 
-impl ::std::fmt::Debug for WriteServerResponse {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteServerResponse {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteServerResponse_Published {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -7397,20 +5007,6 @@ impl ::protobuf::Message for WriteServerResponse_Published {
         WriteServerResponse_Published::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteServerResponse_Published>(
-                    "WriteServerResponse.Published",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteServerResponse_Published {
         static mut instance: ::protobuf::lazy::Lazy<WriteServerResponse_Published> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -7425,19 +5021,13 @@ impl ::protobuf::Clear for WriteServerResponse_Published {
     }
 }
 
-impl ::std::fmt::Debug for WriteServerResponse_Published {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteServerResponse_Published {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteServerResponse_Unpublished {
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -7517,20 +5107,6 @@ impl ::protobuf::Message for WriteServerResponse_Unpublished {
         WriteServerResponse_Unpublished::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let fields = ::std::vec::Vec::new();
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteServerResponse_Unpublished>(
-                    "WriteServerResponse.Unpublished",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteServerResponse_Unpublished {
         static mut instance: ::protobuf::lazy::Lazy<WriteServerResponse_Unpublished> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -7545,19 +5121,13 @@ impl ::protobuf::Clear for WriteServerResponse_Unpublished {
     }
 }
 
-impl ::std::fmt::Debug for WriteServerResponse_Unpublished {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteServerResponse_Unpublished {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct WriteServerResponse_Error {
     // message fields
     pub description: ::protobuf::Chars,
@@ -7582,25 +5152,6 @@ impl WriteServerResponse_Error {
 
     pub fn get_description(&self) -> &str {
         &self.description
-    }
-    pub fn clear_description(&mut self) {
-        ::protobuf::Clear::clear(&mut self.description);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_description(&mut self, v: ::protobuf::Chars) {
-        self.description = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_description(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.description
-    }
-
-    // Take field
-    pub fn take_description(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.description, ::protobuf::Chars::new())
     }
 }
 
@@ -7674,25 +5225,6 @@ impl ::protobuf::Message for WriteServerResponse_Error {
         WriteServerResponse_Error::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "description",
-                    |m: &WriteServerResponse_Error| { &m.description },
-                    |m: &mut WriteServerResponse_Error| { &mut m.description },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteServerResponse_Error>(
-                    "WriteServerResponse.Error",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static WriteServerResponse_Error {
         static mut instance: ::protobuf::lazy::Lazy<WriteServerResponse_Error> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -7708,93 +5240,8 @@ impl ::protobuf::Clear for WriteServerResponse_Error {
     }
 }
 
-impl ::std::fmt::Debug for WriteServerResponse_Error {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for WriteServerResponse_Error {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
-    }
-}
-
-static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0eresolver.proto\x12\0\"\xb7\x05\n\x0bClientHello\x12'\n\x08ReadOnly\
-    \x18\x01\x20\x01(\x0b2\x11.ClientHello.ReadH\0B\0\x12)\n\tWriteOnly\x18\
-    \x02\x20\x01(\x0b2\x12.ClientHello.WriteH\0B\0\x1a\xf1\x01\n\x04Read\x12\
-    2\n\tAnonymous\x18\x01\x20\x01(\x0b2\x1b.ClientHello.Read.AnonymousH\0B\
-    \0\x12*\n\x05Reuse\x18\x02\x20\x01(\x0b2\x17.ClientHello.Read.ReuseH\0B\
-    \0\x120\n\x08Initiate\x18\x03\x20\x01(\x0b2\x1a.ClientHello.Read.Initiat\
-    eH\0B\0\x1a\r\n\tAnonymous:\0\x1a\x1f\n\x05Reuse\x12\x14\n\nsession_id\
-    \x18\x01\x20\x01(\x04B\0:\0\x1a\x1d\n\x08Initiate\x12\x0f\n\x05token\x18\
-    \x01\x20\x01(\x0cB\0:\0B\x06\n\x04auth:\0\x1a\xd4\x02\n\x05Write\x12!\n\
-    \nwrite_addr\x18\x01\x20\x01(\x0b2\x0b.SocketAddrB\0\x12'\n\x04auth\x18\
-    \x02\x20\x01(\x0b2\x17.ClientHello.Write.AuthB\0\x1a\xfc\x01\n\x04Auth\
-    \x128\n\tAnonymous\x18\x01\x20\x01(\x0b2!.ClientHello.Write.Auth.Anonymo\
-    usH\0B\0\x120\n\x05Reuse\x18\x02\x20\x01(\x0b2\x1d.ClientHello.Write.Aut\
-    h.ReuseH\0B\0\x126\n\x08Initiate\x18\x03\x20\x01(\x0b2\x20.ClientHello.W\
-    rite.Auth.InitiateH\0B\0\x1a\r\n\tAnonymous:\0\x1a\t\n\x05Reuse:\0\x1a,\
-    \n\x08Initiate\x12\r\n\x03spn\x18\x01\x20\x01(\tB\0\x12\x0f\n\x05token\
-    \x18\x02\x20\x01(\x0cB\0:\0B\x06\n\x04auth:\0:\0B\x07\n\x05hello:\0\"\
-    \xfc\x01\n\x0fServerHelloRead\x121\n\tAnonymous\x18\x01\x20\x01(\x0b2\
-    \x1a.ServerHelloRead.AnonymousH\0B\0\x12+\n\x06Reused\x18\x02\x20\x01(\
-    \x0b2\x17.ServerHelloRead.ReusedH\0B\0\x12/\n\x08Accepted\x18\x03\x20\
-    \x01(\x0b2\x19.ServerHelloRead.AcceptedH\0B\0\x1a\r\n\tAnonymous:\0\x1a\
-    \n\n\x06Reused:\0\x1a3\n\x08Accepted\x12\x14\n\ncontext_id\x18\x01\x20\
-    \x01(\x04B\0\x12\x0f\n\x05token\x18\x02\x20\x01(\x0cB\0:\0B\x06\n\x04aut\
-    h:\0\"\x98\x02\n\x10ServerHelloWrite\x12\x15\n\x0bttl_expired\x18\x01\
-    \x20\x01(\x08B\0\x12\x15\n\x0bresolver_id\x18\x02\x20\x01(\x04B\0\x122\n\
-    \tAnonymous\x18\x03\x20\x01(\x0b2\x1b.ServerHelloWrite.AnonymousH\0B\0\
-    \x12,\n\x06Reused\x18\x04\x20\x01(\x0b2\x18.ServerHelloWrite.ReusedH\0B\
-    \0\x120\n\x08Accepted\x18\x05\x20\x01(\x0b2\x1a.ServerHelloWrite.Accepte\
-    dH\0B\0\x1a\r\n\tAnonymous:\0\x1a\n\n\x06Reused:\0\x1a\x1d\n\x08Accepted\
-    \x12\x0f\n\x05token\x18\x01\x20\x01(\x0cB\0:\0B\x06\n\x04auth:\0\"\xb3\
-    \x01\n\x11ReadClientRequest\x12/\n\x07Resolve\x18\x01\x20\x01(\x0b2\x1a.\
-    ReadClientRequest.ResolveH\0B\0\x12)\n\x04List\x18\x02\x20\x01(\x0b2\x17\
-    .ReadClientRequest.ListH\0B\0\x1a\x1b\n\x07Resolve\x12\x0e\n\x04path\x18\
-    \x01\x20\x03(\tB\0:\0\x1a\x18\n\x04List\x12\x0e\n\x04path\x18\x01\x20\
-    \x01(\tB\0:\0B\t\n\x07request:\0\"\xc9\x04\n\x12ReadServerResponse\x122\
-    \n\x08Resolved\x18\x01\x20\x01(\x0b2\x1c.ReadServerResponse.ResolvedH\0B\
-    \0\x12*\n\x04List\x18\x02\x20\x01(\x0b2\x18.ReadServerResponse.ListH\0B\
-    \0\x12,\n\x05Error\x18\x03\x20\x01(\x0b2\x19.ReadServerResponse.ErrorH\0\
-    B\0\x1a>\n\x0eKrb5SpnMapping\x12\x1b\n\x04addr\x18\x01\x20\x01(\x0b2\x0b\
-    .SocketAddrB\0\x12\r\n\x03spn\x18\x02\x20\x01(\tB\0:\0\x1aB\n\x10AddrAnd\
-    AuthToken\x12\x1b\n\x04addr\x18\x01\x20\x01(\x0b2\x0b.SocketAddrB\0\x12\
-    \x0f\n\x05token\x18\x02\x20\x01(\x0cB\0:\0\x1aE\n\nResolution\x125\n\x05\
-    addrs\x18\x01\x20\x03(\x0b2$.ReadServerResponse.AddrAndAuthTokenB\0:\0\
-    \x1a\x8f\x01\n\x08Resolved\x12\x15\n\x0bresolver_id\x18\x01\x20\x01(\x04\
-    B\0\x127\n\tkrb5_spns\x18\x02\x20\x03(\x0b2\".ReadServerResponse.Krb5Spn\
-    MappingB\0\x121\n\x07results\x18\x03\x20\x03(\x0b2\x1e.ReadServerRespons\
-    e.ResolutionB\0:\0\x1a\x18\n\x04List\x12\x0e\n\x04path\x18\x01\x20\x03(\
-    \tB\0:\0\x1a\x20\n\x05Error\x12\x15\n\x0bdescription\x18\x01\x20\x01(\tB\
-    \0:\0B\n\n\x08response:\0\"\xc5\x02\n\x12WriteClientRequest\x120\n\x07Pu\
-    blish\x18\x01\x20\x01(\x0b2\x1b.WriteClientRequest.PublishH\0B\0\x124\n\
-    \tUnpublish\x18\x02\x20\x01(\x0b2\x1d.WriteClientRequest.UnpublishH\0B\0\
-    \x12,\n\x05Clear\x18\x03\x20\x01(\x0b2\x19.WriteClientRequest.ClearH\0B\
-    \0\x124\n\tHeartbeat\x18\x04\x20\x01(\x0b2\x1d.WriteClientRequest.Heartb\
-    eatH\0B\0\x1a\x1c\n\x07Publish\x12\x0f\n\x05paths\x18\x01\x20\x03(\tB\0:\
-    \0\x1a\x1e\n\tUnpublish\x12\x0f\n\x05paths\x18\x01\x20\x03(\tB\0:\0\x1a\
-    \t\n\x05Clear:\0\x1a\r\n\tHeartbeat:\0B\t\n\x07request:\0\"\x86\x02\n\
-    \x13WriteServerResponse\x125\n\tPublished\x18\x01\x20\x01(\x0b2\x1e.Writ\
-    eServerResponse.PublishedH\0B\0\x129\n\x0bUnpublished\x18\x02\x20\x01(\
-    \x0b2\x20.WriteServerResponse.UnpublishedH\0B\0\x12-\n\x05Error\x18\x03\
-    \x20\x01(\x0b2\x1a.WriteServerResponse.ErrorH\0B\0\x1a\r\n\tPublished:\0\
-    \x1a\x0f\n\x0bUnpublished:\0\x1a\x20\n\x05Error\x12\x15\n\x0bdescription\
-    \x18\x01\x20\x01(\tB\0:\0B\n\n\x08response:\0B\0b\x06proto3\
-";
-
-static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy::INIT;
-
-fn parse_descriptor_proto() -> ::protobuf::descriptor::FileDescriptorProto {
-    ::protobuf::parse_from_bytes(file_descriptor_proto_data).unwrap()
-}
-
-pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescriptorProto {
-    unsafe {
-        file_descriptor_proto_lazy.get(|| {
-            parse_descriptor_proto()
-        })
     }
 }

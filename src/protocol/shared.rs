@@ -26,7 +26,7 @@ use protobuf::ProtobufEnum as ProtobufEnum_imported_for_functions;
 /// of protobuf runtime.
 // const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_14_0;
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct SocketAddr {
     // message oneof groups
     pub addr: ::std::option::Option<SocketAddr_oneof_addr>,
@@ -61,45 +61,6 @@ impl SocketAddr {
             _ => SocketAddr_SocketAddrV4::default_instance(),
         }
     }
-    pub fn clear_V4(&mut self) {
-        self.addr = ::std::option::Option::None;
-    }
-
-    pub fn has_V4(&self) -> bool {
-        match self.addr {
-            ::std::option::Option::Some(SocketAddr_oneof_addr::V4(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_V4(&mut self, v: SocketAddr_SocketAddrV4) {
-        self.addr = ::std::option::Option::Some(SocketAddr_oneof_addr::V4(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_V4(&mut self) -> &mut SocketAddr_SocketAddrV4 {
-        if let ::std::option::Option::Some(SocketAddr_oneof_addr::V4(_)) = self.addr {
-        } else {
-            self.addr = ::std::option::Option::Some(SocketAddr_oneof_addr::V4(SocketAddr_SocketAddrV4::new()));
-        }
-        match self.addr {
-            ::std::option::Option::Some(SocketAddr_oneof_addr::V4(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_V4(&mut self) -> SocketAddr_SocketAddrV4 {
-        if self.has_V4() {
-            match self.addr.take() {
-                ::std::option::Option::Some(SocketAddr_oneof_addr::V4(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            SocketAddr_SocketAddrV4::new()
-        }
-    }
 
     // .SocketAddr.SocketAddrV6 V6 = 2;
 
@@ -108,45 +69,6 @@ impl SocketAddr {
         match self.addr {
             ::std::option::Option::Some(SocketAddr_oneof_addr::V6(ref v)) => v,
             _ => SocketAddr_SocketAddrV6::default_instance(),
-        }
-    }
-    pub fn clear_V6(&mut self) {
-        self.addr = ::std::option::Option::None;
-    }
-
-    pub fn has_V6(&self) -> bool {
-        match self.addr {
-            ::std::option::Option::Some(SocketAddr_oneof_addr::V6(..)) => true,
-            _ => false,
-        }
-    }
-
-    // Param is passed by value, moved
-    pub fn set_V6(&mut self, v: SocketAddr_SocketAddrV6) {
-        self.addr = ::std::option::Option::Some(SocketAddr_oneof_addr::V6(v))
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_V6(&mut self) -> &mut SocketAddr_SocketAddrV6 {
-        if let ::std::option::Option::Some(SocketAddr_oneof_addr::V6(_)) = self.addr {
-        } else {
-            self.addr = ::std::option::Option::Some(SocketAddr_oneof_addr::V6(SocketAddr_SocketAddrV6::new()));
-        }
-        match self.addr {
-            ::std::option::Option::Some(SocketAddr_oneof_addr::V6(ref mut v)) => v,
-            _ => panic!(),
-        }
-    }
-
-    // Take field
-    pub fn take_V6(&mut self) -> SocketAddr_SocketAddrV6 {
-        if self.has_V6() {
-            match self.addr.take() {
-                ::std::option::Option::Some(SocketAddr_oneof_addr::V6(v)) => v,
-                _ => panic!(),
-            }
-        } else {
-            SocketAddr_SocketAddrV6::new()
         }
     }
 }
@@ -260,30 +182,6 @@ impl ::protobuf::Message for SocketAddr {
         SocketAddr::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, SocketAddr_SocketAddrV4>(
-                    "V4",
-                    SocketAddr::has_V4,
-                    SocketAddr::get_V4,
-                ));
-                fields.push(::protobuf::reflect::accessor::make_singular_message_accessor::<_, SocketAddr_SocketAddrV6>(
-                    "V6",
-                    SocketAddr::has_V6,
-                    SocketAddr::get_V6,
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<SocketAddr>(
-                    "SocketAddr",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static SocketAddr {
         static mut instance: ::protobuf::lazy::Lazy<SocketAddr> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -300,19 +198,13 @@ impl ::protobuf::Clear for SocketAddr {
     }
 }
 
-impl ::std::fmt::Debug for SocketAddr {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for SocketAddr {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct SocketAddr_SocketAddrV4 {
     // message fields
     pub port: u32,
@@ -339,28 +231,12 @@ impl SocketAddr_SocketAddrV4 {
     pub fn get_port(&self) -> u32 {
         self.port
     }
-    pub fn clear_port(&mut self) {
-        self.port = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_port(&mut self, v: u32) {
-        self.port = v;
-    }
 
     // uint32 octets = 2;
 
 
     pub fn get_octets(&self) -> u32 {
         self.octets
-    }
-    pub fn clear_octets(&mut self) {
-        self.octets = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_octets(&mut self, v: u32) {
-        self.octets = v;
     }
 }
 
@@ -451,30 +327,6 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV4 {
         SocketAddr_SocketAddrV4::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "port",
-                    |m: &SocketAddr_SocketAddrV4| { &m.port },
-                    |m: &mut SocketAddr_SocketAddrV4| { &mut m.port },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "octets",
-                    |m: &SocketAddr_SocketAddrV4| { &m.octets },
-                    |m: &mut SocketAddr_SocketAddrV4| { &mut m.octets },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<SocketAddr_SocketAddrV4>(
-                    "SocketAddr.SocketAddrV4",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static SocketAddr_SocketAddrV4 {
         static mut instance: ::protobuf::lazy::Lazy<SocketAddr_SocketAddrV4> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -491,19 +343,13 @@ impl ::protobuf::Clear for SocketAddr_SocketAddrV4 {
     }
 }
 
-impl ::std::fmt::Debug for SocketAddr_SocketAddrV4 {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for SocketAddr_SocketAddrV4 {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct SocketAddr_SocketAddrV6 {
     // message fields
     pub port: u32,
@@ -532,39 +378,12 @@ impl SocketAddr_SocketAddrV6 {
     pub fn get_port(&self) -> u32 {
         self.port
     }
-    pub fn clear_port(&mut self) {
-        self.port = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_port(&mut self, v: u32) {
-        self.port = v;
-    }
 
     // bytes octets = 2;
 
 
     pub fn get_octets(&self) -> &[u8] {
         &self.octets
-    }
-    pub fn clear_octets(&mut self) {
-        self.octets.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_octets(&mut self, v: ::bytes::Bytes) {
-        self.octets = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_octets(&mut self) -> &mut ::bytes::Bytes {
-        &mut self.octets
-    }
-
-    // Take field
-    pub fn take_octets(&mut self) -> ::bytes::Bytes {
-        ::std::mem::replace(&mut self.octets, ::bytes::Bytes::new())
     }
 
     // uint32 flowinfo = 3;
@@ -573,28 +392,12 @@ impl SocketAddr_SocketAddrV6 {
     pub fn get_flowinfo(&self) -> u32 {
         self.flowinfo
     }
-    pub fn clear_flowinfo(&mut self) {
-        self.flowinfo = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_flowinfo(&mut self, v: u32) {
-        self.flowinfo = v;
-    }
 
     // uint32 scope_id = 4;
 
 
     pub fn get_scope_id(&self) -> u32 {
         self.scope_id
-    }
-    pub fn clear_scope_id(&mut self) {
-        self.scope_id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_scope_id(&mut self, v: u32) {
-        self.scope_id = v;
     }
 }
 
@@ -707,40 +510,6 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV6 {
         SocketAddr_SocketAddrV6::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "port",
-                    |m: &SocketAddr_SocketAddrV6| { &m.port },
-                    |m: &mut SocketAddr_SocketAddrV6| { &mut m.port },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheBytes>(
-                    "octets",
-                    |m: &SocketAddr_SocketAddrV6| { &m.octets },
-                    |m: &mut SocketAddr_SocketAddrV6| { &mut m.octets },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "flowinfo",
-                    |m: &SocketAddr_SocketAddrV6| { &m.flowinfo },
-                    |m: &mut SocketAddr_SocketAddrV6| { &mut m.flowinfo },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "scope_id",
-                    |m: &SocketAddr_SocketAddrV6| { &m.scope_id },
-                    |m: &mut SocketAddr_SocketAddrV6| { &mut m.scope_id },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<SocketAddr_SocketAddrV6>(
-                    "SocketAddr.SocketAddrV6",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static SocketAddr_SocketAddrV6 {
         static mut instance: ::protobuf::lazy::Lazy<SocketAddr_SocketAddrV6> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -759,19 +528,13 @@ impl ::protobuf::Clear for SocketAddr_SocketAddrV6 {
     }
 }
 
-impl ::std::fmt::Debug for SocketAddr_SocketAddrV6 {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for SocketAddr_SocketAddrV6 {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct PermissionToken {
     // message fields
     pub path: ::protobuf::Chars,
@@ -798,39 +561,12 @@ impl PermissionToken {
     pub fn get_path(&self) -> &str {
         &self.path
     }
-    pub fn clear_path(&mut self) {
-        ::protobuf::Clear::clear(&mut self.path);
-    }
-
-    // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::protobuf::Chars) {
-        self.path = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_path(&mut self) -> &mut ::protobuf::Chars {
-        &mut self.path
-    }
-
-    // Take field
-    pub fn take_path(&mut self) -> ::protobuf::Chars {
-        ::std::mem::replace(&mut self.path, ::protobuf::Chars::new())
-    }
 
     // uint64 timestamp = 2;
 
 
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
-    }
-    pub fn clear_timestamp(&mut self) {
-        self.timestamp = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_timestamp(&mut self, v: u64) {
-        self.timestamp = v;
     }
 }
 
@@ -917,30 +653,6 @@ impl ::protobuf::Message for PermissionToken {
         PermissionToken::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy::INIT;
-        unsafe {
-            descriptor.get(|| {
-                let mut fields = ::std::vec::Vec::new();
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &PermissionToken| { &m.path },
-                    |m: &mut PermissionToken| { &mut m.path },
-                ));
-                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
-                    "timestamp",
-                    |m: &PermissionToken| { &m.timestamp },
-                    |m: &mut PermissionToken| { &mut m.timestamp },
-                ));
-                ::protobuf::reflect::MessageDescriptor::new_pb_name::<PermissionToken>(
-                    "PermissionToken",
-                    fields,
-                    file_descriptor_proto()
-                )
-            })
-        }
-    }
-
     fn default_instance() -> &'static PermissionToken {
         static mut instance: ::protobuf::lazy::Lazy<PermissionToken> = ::protobuf::lazy::Lazy::INIT;
         unsafe {
@@ -957,40 +669,8 @@ impl ::protobuf::Clear for PermissionToken {
     }
 }
 
-impl ::std::fmt::Debug for PermissionToken {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for PermissionToken {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
-    }
-}
-
-static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0cshared.proto\x12\0\"\xfa\x01\n\nSocketAddr\x12(\n\x02V4\x18\x01\
-    \x20\x01(\x0b2\x18.SocketAddr.SocketAddrV4H\0B\0\x12(\n\x02V6\x18\x02\
-    \x20\x01(\x0b2\x18.SocketAddr.SocketAddrV6H\0B\0\x1a2\n\x0cSocketAddrV4\
-    \x12\x0e\n\x04port\x18\x01\x20\x01(\rB\0\x12\x10\n\x06octets\x18\x02\x20\
-    \x01(\rB\0:\0\x1aZ\n\x0cSocketAddrV6\x12\x0e\n\x04port\x18\x01\x20\x01(\
-    \rB\0\x12\x10\n\x06octets\x18\x02\x20\x01(\x0cB\0\x12\x12\n\x08flowinfo\
-    \x18\x03\x20\x01(\rB\0\x12\x12\n\x08scope_id\x18\x04\x20\x01(\rB\0:\0B\
-    \x06\n\x04addr:\0\"8\n\x0fPermissionToken\x12\x0e\n\x04path\x18\x01\x20\
-    \x01(\tB\0\x12\x13\n\ttimestamp\x18\x02\x20\x01(\x04B\0:\0B\0b\x06proto3\
-";
-
-static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy::INIT;
-
-fn parse_descriptor_proto() -> ::protobuf::descriptor::FileDescriptorProto {
-    ::protobuf::parse_from_bytes(file_descriptor_proto_data).unwrap()
-}
-
-pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescriptorProto {
-    unsafe {
-        file_descriptor_proto_lazy.get(|| {
-            parse_descriptor_proto()
-        })
     }
 }

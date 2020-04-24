@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures::{prelude::*, select};
 use fxhash::FxBuildHasher;
 use log::{debug, error, info};
-use protobuf::{Chars, Message};
+use protobuf::{Chars, Message, RepeatedField};
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -50,7 +50,7 @@ static WRITER_TTL: Duration = Duration::from_secs(120);
 fn allowed_for(
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
-    paths: &Vec<Path>,
+    paths: &Vec<Chars>,
     perm: Permissions,
 ) -> bool {
     secstore
@@ -277,6 +277,8 @@ async fn hello_client_write(
                 };
                 send(&mut con, h).await?;
                 con.set_ctx(ctx.clone());
+                // now the publisher must prove they are actually the one
+                // listening on write_addr
                 let mut con: Channel<ServerCtx> = Channel::new(
                     time::timeout(HELLO_TIMEOUT, TcpStream::connect(write_addr))
                         .await??,
@@ -326,9 +328,9 @@ async fn hello_client_write(
     {
         let mut store = store.write();
         let clinfos = store.clinfo_mut();
-        match clinfos.get_mut(&hello.write_addr) {
+        match clinfos.get_mut(&write_addr) {
             None => {
-                clinfos.insert(hello.write_addr, Some(tx_stop));
+                clinfos.insert(write_addr, Some(tx_stop));
             }
             Some(cl) => {
                 if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
@@ -337,16 +339,10 @@ async fn hello_client_write(
             }
         }
     }
-    Ok(client_loop_write(
-        store,
-        con,
-        secstore,
-        server_stop,
-        rx_stop,
-        uifo,
-        hello.write_addr,
+    Ok(
+        client_loop_write(store, con, secstore, server_stop, rx_stop, uifo, write_addr)
+            .await?,
     )
-    .await?)
 }
 
 fn handle_batch_read(
@@ -355,23 +351,37 @@ fn handle_batch_read(
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
     id: ResolverId,
-    msgs: impl Iterator<Item = ToRead>,
+    msgs: impl Iterator<Item = ReadClientRequest>,
 ) -> Result<()> {
+    use protocol::resolver::{
+        ReadClientRequest_Resolve as Resolve, ReadClientRequest_oneof_request as ToRead,
+        ReadServerResponse, ReadServerResponse_AddrAndAuthToken as AddrAndToken,
+        ReadServerResponse_Resolution as Resolution,
+        ReadServerResponse_oneof_response as FromRead,
+    };
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
     let s = store.read();
     let sec = secstore.map(|s| s.store.read());
     for m in msgs {
-        match m {
-            ToRead::Resolve(paths) => {
+        match m.request {
+            None => (),
+            Some(ToRead::Resolve(Resolve { paths, .. })) => {
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
-                        None => FromRead::Resolved(Resolved {
-                            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
-                            resolver: id,
-                            addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
-                        }),
+                        None => ReadServerResponse {
+                            response: Some(FromRead::Resolved(Resolution {
+                                krb5_spns: RepeatedField::from_vec(vec![]),
+                                resolver_id: id.get(),
+                                addrs: paths
+                                    .iter()
+                                    .map(|p| s.resolve(p))
+                                    .collect::<Vec<_>>(),
+                                .. Resolution::default()
+                            })),
+                            ..ReadServerResponse::default()
+                        },
                         Some(ref sec) => {
                             let mut krb5_spns =
                                 HashMap::with_hasher(FxBuildHasher::default());

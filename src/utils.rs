@@ -98,6 +98,61 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
+
+pub fn protobuf_socketaddr_to_std(p: shared::SocketAddr) -> Option<net::SocketAddr> {
+    p.addr.map(|addr| match addr {
+        Some(shared::SocketAddr_oneof_addr::V4(addr)) => {
+            let octets = addr.octets.to_be_bytes();
+            let ip = net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+            Some(net::SocketAddr::V4(net::SocketAddrV4::new(
+                ip,
+                addr.port as u16,
+            )))
+        }
+        Some(shared::SocketAddr_oneof_addr::V6(addr)) => {
+            if addr.octets.len() != 16 {
+                None
+            } else {
+                let a = addr.octets.get_u16();
+                let b = addr.octets.get_u16();
+                let c = addr.octets.get_u16();
+                let d = addr.octets.get_u16();
+                let e = addr.octets.get_u16();
+                let f = addr.octets.get_u16();
+                let g = addr.octets.get_u16();
+                let h = addr.octets.get_u16();
+                let ip = net::Ipv6Addr::new(a, b, c, d, e, f, g, h);
+                let a =
+                    net::SocketAddrV6::new(ip, addr.port, addr.flowinfo, addr.scope_id);
+                Some(net::SocketAddr::V6(a))
+            }
+        }
+    })
+}
+
+pub fn std_socketaddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
+    match a {
+        net::SocketAddr::V4(v4) => shared::SocketAddr {
+            addr: shared::SocketAddr_oneof_addr::V4(shared::SocketAddr_SocketAddrV4 {
+                octets: u32::from_be_bytes(v4.ip().octets()),
+                port: v4.port() as u32,
+                ..shared::SocketAddr_SocketAddrV4::default()
+            }),
+            ..shared::SocketAddr::default()
+        },
+        net::SocketAddr::V6(v6) => shared::SocketAddr {
+            addr: shared::SocketAddr_oneof_addr::V6(shared::SocketAddr_SocketAddrV6 {
+                octets: Bytes::from(&v6.ip().octets()[..]),
+                port: v6.port() as u16,
+                flowinfo: v6.flowinfo(),
+                scope_id: v6.scope_id(),
+                ..shared::SocketAddr_SocketAddrV6::default()
+            }),
+            ..shared::SocketAddr::default()
+        },
+    }
+}
+
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
