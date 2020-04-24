@@ -146,7 +146,6 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
     task::spawn(async move {
         let mut ctx: Option<C> = None;
         let mut buf = BytesMut::with_capacity(BUF);
-        let mut decrypted = BytesMut::new();
         let res = 'main: loop {
             while buf.len() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
@@ -171,11 +170,8 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
                         }
                     };
                     buf.advance(mem::size_of::<u32>());
-                    decrypted.extend_from_slice(
-                        &*try_cf!(break, 'main, ctx.unwrap(&buf[0..len])),
-                    );
-                    buf.advance(len);
-                    try_cf!(break, 'main, tx.send(decrypted.split().freeze()).await);
+                    let decrypted = try_cf!(break, 'main, ctx.unwrap(len, &mut buf));
+                    try_cf!(break, 'main, tx.send(decrypted.freeze()).await);
                 }
             }
             if buf.remaining_mut() < mem::size_of::<u32>() {
@@ -257,9 +253,7 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
         let res = loop {
             let mut m = T::new();
             match m.merge_from(&mut stream) {
-                Ok(()) => {
-                    batch.push(m);
-                }
+                Ok(()) => batch.push(m),
                 Err(ProtobufError::WireError(WireError::UnexpectedEof)) => break Ok(()),
                 Err(e) => break Err(Error::from(e)),
             }
@@ -274,7 +268,7 @@ pub(crate) struct Channel<C> {
     write: WriteChannel<C>,
 }
 
-impl<C: Krb5Ctx + Clone> Channel<C> {
+impl<C: Krb5Ctx + Send + Sync + 'static> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel {
@@ -292,20 +286,12 @@ impl<C: Krb5Ctx + Clone> Channel<C> {
         (self.read, self.write)
     }
 
-    pub(crate) fn queue_send_ut(&mut self, msg: &[Bytes]) -> Result<(), Error> {
-        self.write.queue_send_ut(msg)
-    }
-
-    pub(crate) fn queue_send<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
+    pub(crate) fn queue_send<T: Message>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.queue_send(msg)
     }
 
-    pub(crate) async fn send_one<T: Serialize>(&mut self, msg: &T) -> Result<(), Error> {
+    pub(crate) async fn send_one<T: Message>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.send_one(msg).await
-    }
-
-    pub(crate) fn begin_msg<'a>(&'a mut self) -> Msg<'a, C> {
-        self.write.begin_msg()
     }
 
     #[allow(dead_code)]
@@ -317,25 +303,11 @@ impl<C: Krb5Ctx + Clone> Channel<C> {
         Ok(self.write.flush().await??)
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn receive_ut(&mut self) -> Result<Bytes, Error> {
-        self.read.receive_ut().await
-    }
-
-    pub(crate) async fn receive<T: DeserializeOwned>(&mut self) -> Result<T, Error> {
+    pub(crate) async fn receive<T: Message>(&mut self) -> Result<T, Error> {
         self.read.receive().await
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn receive_batch_ut(
-        &mut self,
-        batch: &mut Vec<Bytes>,
-    ) -> Result<(), Error> {
-        self.read.receive_batch_ut(batch).await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn receive_batch<T: DeserializeOwned>(
+    pub(crate) async fn receive_batch<T: Message>(
         &mut self,
         batch: &mut Vec<T>,
     ) -> Result<(), Error> {
