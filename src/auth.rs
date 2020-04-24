@@ -1,5 +1,5 @@
 use crate::{config, path::Path};
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
@@ -27,7 +27,7 @@ impl TryFrom<&str> for Permissions {
                     if i == 0 {
                         p |= Permissions::DENY;
                     } else {
-                        bail!("! may only be used as the first character")
+                        return Err(anyhow!("! may only be used as the first character"));
                     }
                 }
                 's' => {
@@ -45,7 +45,12 @@ impl TryFrom<&str> for Permissions {
                 'r' => {
                     p |= Permissions::PUBLISH_REFERRAL;
                 }
-                c => bail!("unrecognized permission bit {}, valid bits are !spldr", c),
+                c => {
+                    return Err(anyhow!(
+                        "unrecognized permission bit {}, valid bits are !spldr",
+                        c
+                    ))
+                }
             }
         }
         Ok(p)
@@ -232,17 +237,14 @@ pub(crate) trait Krb5 {
         target_principal: &[u8],
     ) -> Result<Self::Krb5ClientCtx>;
 
-    fn create_server_ctx(
-        &self,
-        principal: Option<&[u8]>,
-    ) -> Result<Self::Krb5ServerCtx>;
+    fn create_server_ctx(&self, principal: Option<&[u8]>) -> Result<Self::Krb5ServerCtx>;
 }
 
 #[cfg(unix)]
 pub(crate) mod syskrb5 {
     use super::{Krb5, Krb5Ctx, Krb5ServerCtx};
+    use anyhow::{Result, Error};
     use bytes::BytesMut;
-    use failure::Error;
     use libgssapi::{
         context::{
             ClientCtx as GssClientCtx, CtxFlags, SecurityContext,
@@ -264,17 +266,11 @@ pub(crate) mod syskrb5 {
         type Buf = Buf;
 
         fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>> {
-            task::block_in_place(|| {
-                self.0
-                    .step(token)
-                    .map_err(|e| Error::from_boxed_compat(Box::new(e)))
-            })
+            task::block_in_place(|| self.0.step(token).map_err(|e| Error::from(e)))
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf> {
-            self.0
-                .wrap(encrypt, msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.wrap(encrypt, msg).map_err(|e| Error::from(e))
         }
 
         fn wrap_iov(
@@ -449,7 +445,7 @@ pub(crate) mod sysgmapper {
     // but unfortunatly Apple doesn't implement it. Luckily the 'id'
     // command is specified in POSIX.
     use super::GMapper;
-    use failure::Error;
+    use anyhow::{anyhow, Error, Result};
     use std::process::Command;
     use tokio::task;
 
@@ -472,7 +468,7 @@ pub(crate) mod sysgmapper {
                 let path = buf
                     .lines()
                     .next()
-                    .ok_or_else(|| format_err!("can't find the id command"))?;
+                    .ok_or_else(|| anyhow!("can't find the id command"))?;
                 Ok(Mapper(String::from(path)))
             })
         }
@@ -485,7 +481,11 @@ pub(crate) mod sysgmapper {
                     let mut s = &out[i..];
                     while let Some(i_op) = s.find('(') {
                         match s.find(')') {
-                            None => bail!("invalid id command output, expected ')'"),
+                            None => {
+                                return Err(anyhow!(
+                                    "invalid id command output, expected ')'"
+                                ))
+                            }
                             Some(i_cp) => {
                                 groups.push(String::from(&s[i_op + 1..i_cp]));
                                 s = &s[i_cp + 1..];

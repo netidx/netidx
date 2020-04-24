@@ -1,10 +1,10 @@
 pub mod resolver_server {
     use crate::path::Path;
-    use failure::Error;
+    use anyhow::Result;
     use serde_json::from_str;
     use std::{
         collections::HashMap, convert::AsRef, net::SocketAddr, path::Path as FsPath,
-        result::Result, fs::read_to_string,
+        fs::read_to_string,
     };
 
     mod file {
@@ -54,7 +54,7 @@ pub mod resolver_server {
     }
 
     impl Config {
-        pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config, Error> {
+        pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,
@@ -82,9 +82,9 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
-    use failure::Error;
+    use anyhow::Result;
     use serde_json::from_str;
-    use std::{convert::AsRef, net::SocketAddr, path::Path, result::Result};
+    use std::{convert::AsRef, net::SocketAddr, path::Path};
     use tokio::fs::read_to_string;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ pub mod resolver {
     }
 
     impl Config {
-        pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config, Error> {
+        pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
             Ok(from_str(&read_to_string(file).await?)?)
         }
     }

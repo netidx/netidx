@@ -14,17 +14,34 @@ use std::{
     collections::VecDeque,
     io::{self, IoSlice, Write},
     ops::{Deref, DerefMut},
-    result::Result,
 };
 use arc_swap::ArcSwap;
 use parking_lot::{Mutex, MutexGuard};
 
 macro_rules! try_cf {
-    ($e:expr) => {
+    ($msg:expr, $id:ident, $lbl:tt, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                break Err(Error::from(e));
+                log::info!($msg, e);
+                $id $lbl Err(Error::from(e));
+            }
+        }
+    };    
+    ($msg:expr, $id:ident, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!($msg, e);
+                $id Err(Error::from(e));
+            }
+        }
+    };
+    ($id:ident, $lbl:tt, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                $id $lbl Err(Error::from(e));
             }
         }
     };
@@ -45,32 +62,14 @@ macro_rules! try_cf {
             }
         }
     };
-    ($msg:expr, $id:ident, $e:expr) => {
+    ($e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                log::info!($msg, e);
-                $id Err(Error::from(e));
+                break Err(Error::from(e));
             }
         }
     };
-    ($id:ident, $lbl:tt, $e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => {
-                $id $l Err(Error::from(e));
-            }
-        }
-    };
-    ($msg:expr, $id:ident, $lbl:tt, $e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => {
-                log::info!($msg, e);
-                $id $l Err(Error::from(e));
-            }
-        }
-    };    
 }
 
 pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
@@ -99,58 +98,6 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
         let mut esc = false;
         move |c| is_sep(&mut esc, c, escape, sep)
     })
-}
-
-struct SlotInner<V> {
-    waiters: Vec<oneshot::Sender<()>>,
-    value: Option<V>
-}
-
-pub struct SlotGuard<V>(MutexGuard<V>);
-
-impl<V: 'static> Deref for SlotGuard<V> {
-    type Target = V;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0.value.unwrap()
-    }
-}
-
-/// Waits for something to be put in it when empty, otherwise returns
-/// a reference to the thing it already contains
-pub struct Slot<V>(Arc<Mutex<SlotInner<V>>>);
-
-impl Slot<V: 'static> {
-    fn new() -> Slot<V> {
-        Slot(Arc::new(Mutex::new(SlotInner {
-            waiters: Vec::new(),
-            value: None
-        })))
-    }
-
-    async fn read(&self) -> Result<SlotGuard<V>> {
-        loop {
-            let rx = {
-                let mut inner = self.0.lock();
-                if inner.value.is_some() {
-                    return Ok(SlotGuard(inner));
-                } else {
-                    let (tx, rx) = oneshot::channel();
-                    inner.waiters.push(tx);
-                    rx
-                }
-            };
-            rx.await?;
-        }
-    }
-
-    fn set(&self, v: V) {
-        let mut inner = self.0.lock();
-        inner.value = Some(v);
-        for waiter in waiters.drain(..) {
-            let _ = waiter.send(());
-        }
-    }
 }
 
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);

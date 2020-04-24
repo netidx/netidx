@@ -8,7 +8,12 @@ use protobuf::{
     error::WireError, CodedInputStream, CodedOutputStream, Message, ProtobufError,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::{cmp::min, mem, ops::Drop, result::Result};
+use std::{
+    cmp::{max, min},
+    fmt::Debug,
+    mem,
+    ops::Drop,
+};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -21,12 +26,13 @@ use tokio::{
 
 const BUF: usize = 4096;
 const LEN_MASK: u32 = 0x7FFFFFFF;
-const MAX_BATCH: u32 = 0x3FFFFFFF;
+const MAX_BATCH: usize = 0x3FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
 
+#[derive(Debug)]
 enum ToFlush<C> {
     Flush(BytesMut),
-    SetCtx(Option<C>),
+    SetCtx(C),
 }
 
 async fn flush_buf<B: Buf>(
@@ -47,7 +53,7 @@ async fn flush_buf<B: Buf>(
     Ok(())
 }
 
-fn flush_task<C: Krb5Ctx + Send + Sync + 'static>(
+fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
     mut soc: WriteHalf<TcpStream>,
 ) -> Sender<ToFlush<C>> {
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(10);
@@ -61,10 +67,10 @@ fn flush_task<C: Krb5Ctx + Send + Sync + 'static>(
                 None => break Ok(()),
                 Some(m) => match m {
                     ToFlush::SetCtx(c) => {
-                        ctx = c;
+                        ctx = Some(c);
                     }
                     ToFlush::Flush(mut data) => match ctx {
-                        None => try_cf!(flush_buf(&mut soc, data, false)).await,
+                        None => try_cf!(flush_buf(&mut soc, data, false).await),
                         Some(ref ctx) => {
                             try_cf!(ctx.wrap_iov(
                                 true,
@@ -82,7 +88,7 @@ fn flush_task<C: Krb5Ctx + Send + Sync + 'static>(
                 },
             }
         };
-        info!("flush task shutting down {}", res);
+        info!("flush task shutting down {:?}", res)
     });
     tx
 }
@@ -92,7 +98,7 @@ pub(crate) struct WriteChannel<C> {
     buf: BytesMut,
 }
 
-impl<C: Krb5Ctx + Clone + Send + Sync + 'static> WriteChannel<C> {
+impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
         WriteChannel {
             to_flush: flush_task(socket),
@@ -100,14 +106,14 @@ impl<C: Krb5Ctx + Clone + Send + Sync + 'static> WriteChannel<C> {
         }
     }
 
-    pub(crate) fn set_ctx(&mut self, ctx: Option<C>) -> Result<()> {
-        Ok(self.to_flush.send(ctx)?)
+    pub(crate) async fn set_ctx(&mut self, ctx: C) -> Result<()> {
+        Ok(self.to_flush.send(ToFlush::SetCtx(ctx)).await?)
     }
 
     /// Queue a message for sending. This only encodes the message and
     /// writes it to the buffer, you must call flush actually send it.
     pub(crate) fn queue_send<T: Message>(&mut self, msg: &T) -> Result<()> {
-        let len = msg.compute_size();
+        let len = msg.compute_size() as usize;
         if self.buf.remaining_mut() < len {
             self.buf.reserve(max(BUF, len));
         }
@@ -132,13 +138,13 @@ impl<C: Krb5Ctx + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) async fn flush(&mut self) -> Result<()> {
         while self.buf.has_remaining() {
             let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
-            self.to_flush.send(ToFlush::Flush(chunk.freeze())).await?
+            self.to_flush.send(ToFlush::Flush(chunk)).await?
         }
         Ok(())
     }
 }
 
-fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
+fn read_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
     soc: ReadHalf<TcpStream>,
     set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<Bytes> {
@@ -146,7 +152,7 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
     task::spawn(async move {
         let mut ctx: Option<C> = None;
         let mut buf = BytesMut::with_capacity(BUF);
-        let res = 'main: loop {
+        let res: Result<()> = 'main: loop {
             while buf.len() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
                     let hdr = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -160,7 +166,7 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
                     break; // read more
                 } else if !encrypted {
                     buf.advance(mem::size_of::<u32>());
-                    try_cf!(break, 'main, tx.send(buf.split_to(len).freeze()).await)
+                    try_cf!(break, 'main, tx.send(buf.split_to(len).freeze()).await);
                 } else {
                     let ctx = match ctx {
                         Some(ref ctx) => ctx,
@@ -170,7 +176,7 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
                         }
                     };
                     buf.advance(mem::size_of::<u32>());
-                    let decrypted = try_cf!(break, 'main, ctx.unwrap(len, &mut buf));
+                    let decrypted = try_cf!(break, 'main, ctx.unwrap_iov(len, &mut buf));
                     try_cf!(break, 'main, tx.send(decrypted.freeze()).await);
                 }
             }
@@ -181,7 +187,7 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
                 break Err(anyhow!("EOF"));
             }
         };
-        log::info!("read task shutting down {}", res);
+        log::info!("read task shutting down {:?}", res);
     });
     rx
 }
@@ -189,16 +195,16 @@ fn read_task<C: Krb5Ctx + Send + Sync + 'static>(
 pub(crate) struct ReadChannel<C> {
     buf: Bytes,
     set_ctx: Option<oneshot::Sender<C>>,
-    incoming: Receiver<Box<dyn Buf>>,
+    incoming: Receiver<Bytes>,
 }
 
-impl<C: Krb5Ctx + Clone> ReadChannel<C> {
+impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
         ReadChannel {
-            buf: Bytes,
+            buf: Bytes::new(),
             set_ctx: Some(set_ctx),
-            incoming: read_task(socket, set_ctx),
+            incoming: read_task(socket, read_ctx),
         }
     }
 
@@ -217,8 +223,13 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
                 // this should be very rare because a batch must
                 // exceed 1 GB before it can contain a partial
                 // message.
-                buf.extend_from_slice(&*chunk);
+                let len = self.buf.remaining() + chunk.remaining();
+                let mut tmp = BytesMut::with_capacity(len);
+                tmp.extend_from_slice(&*self.buf);
+                tmp.extend_from_slice(&*chunk);
+                self.buf = tmp.freeze();
             }
+            Ok(())
         } else {
             Err(anyhow!("EOF"))
         }
@@ -229,17 +240,22 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
             self.fill_buffer().await?;
         }
         loop {
-            let mut m = T::new();
-            let mut stream = CodedInputStream::from_carllerche_bytes(&self.buf);
-            match m.merge_from(&mut stream) {
-                Ok(()) => {
-                    self.buf.advance(stream.pos());
-                    Ok(m)
+            let (res, used) = {
+                let mut m = T::new();
+                let mut stream = CodedInputStream::from_carllerche_bytes(&self.buf);
+                match m.merge_from(&mut stream) {
+                    Ok(()) => (Ok(m), stream.pos() as usize),
+                    Err(e) => (Err(e), stream.pos() as usize),
                 }
+            };
+            match res {
                 Err(ProtobufError::WireError(WireError::UnexpectedEof)) => {
                     self.fill_buffer().await?
                 }
-                Err(e) => return Err(Error::from(e)),
+                res => {
+                    self.buf.advance(used);
+                    break Ok(res?);
+                }
             }
         }
     }
@@ -248,18 +264,22 @@ impl<C: Krb5Ctx + Clone> ReadChannel<C> {
         &mut self,
         batch: &mut Vec<T>,
     ) -> Result<()> {
-        batch.push(self.receive()?);
-        let mut stream = CodedInputStream::from_carllerche_bytes(&self.buf);
-        let res = loop {
-            let mut m = T::new();
-            match m.merge_from(&mut stream) {
-                Ok(()) => batch.push(m),
-                Err(ProtobufError::WireError(WireError::UnexpectedEof)) => break Ok(()),
-                Err(e) => break Err(Error::from(e)),
+        batch.push(self.receive().await?);
+        let (res, used) = {
+            let mut stream = CodedInputStream::from_carllerche_bytes(&self.buf);
+            loop {
+                let mut m = T::new();
+                match m.merge_from(&mut stream) {
+                    Ok(()) => batch.push(m),
+                    Err(ProtobufError::WireError(WireError::UnexpectedEof)) => {
+                        break (Ok(()), stream.pos() as usize)
+                    }
+                    Err(e) => break (Err(e), stream.pos() as usize),
+                }
             }
         };
-        self.buf.advance(stream.pos());
-        Ok(())
+        self.buf.advance(used);
+        Ok(res?)
     }
 }
 
@@ -268,7 +288,7 @@ pub(crate) struct Channel<C> {
     write: WriteChannel<C>,
 }
 
-impl<C: Krb5Ctx + Send + Sync + 'static> Channel<C> {
+impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel {
@@ -277,7 +297,7 @@ impl<C: Krb5Ctx + Send + Sync + 'static> Channel<C> {
         }
     }
 
-    pub(crate) fn set_ctx(&mut self, ctx: Option<C>) {
+    pub(crate) fn set_ctx(&mut self, ctx: C) {
         self.read.set_ctx(ctx.clone());
         self.write.set_ctx(ctx);
     }
@@ -300,7 +320,7 @@ impl<C: Krb5Ctx + Send + Sync + 'static> Channel<C> {
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
-        Ok(self.write.flush().await??)
+        Ok(self.write.flush().await?)
     }
 
     pub(crate) async fn receive<T: Message>(&mut self) -> Result<T, Error> {
