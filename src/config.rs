@@ -6,8 +6,18 @@ pub mod resolver_server {
         fs::read_to_string,
     };
 
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct ResolverId(u64);
+
+    impl ResolverId {
+        pub fn get(&self) -> u64 {
+            self.0
+        }
+    }
+
     mod file {
         use std::net::SocketAddr;
+        use super::ResolverId;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) enum Auth {
@@ -21,7 +31,7 @@ pub mod resolver_server {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
             pub(super) pid_file: String,
-            pub(super) id: u64,
+            pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
             pub(super) auth: Auth,
@@ -46,7 +56,7 @@ pub mod resolver_server {
     #[derive(Debug, Clone)]
     pub struct Config {
         pub pid_file: String,
-        pub id: u64,
+        pub id: ResolverId,
         pub addr: SocketAddr,
         pub max_connections: usize,
         pub auth: Auth,

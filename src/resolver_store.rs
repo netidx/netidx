@@ -1,13 +1,10 @@
 use crate::{
-    auth::{Krb5Ctx, Krb5ServerCtx},
-    path::Path,
-    protocol::shared::PermissionToken,
-    secstore::SecStoreInner,
+    auth::Krb5Ctx, path::Path, protocol::shared::PermissionToken, secstore::SecStoreInner,
 };
-use protobuf::{Message, Chars};
 use anyhow::Result;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
+use protobuf::{Chars, Message};
 use std::{
     clone::Clone,
     collections::{
@@ -221,8 +218,9 @@ impl<T> StoreInner<T> {
                             let msg = PermissionToken {
                                 path: Chars::from(path.as_ref()),
                                 timestamp: now,
-                                .. PermissionToken::default()
-                            }.write_to_bytes()?;
+                                ..PermissionToken::default()
+                            }
+                            .write_to_bytes()?;
                             let tok = Vec::from(&*ctx.wrap(true, &msg)?);
                             Ok((*addr, tok))
                         }

@@ -180,12 +180,12 @@ message ReadServerResponse {
 message WriteClientRequest {
   // request to publish one or more paths
   message Publish {
-    repeated string path = 1;
+    repeated string paths = 1;
   }
 
   // request to stop publishing one or more paths
   message Unpublish {
-    repeated string path = 1;
+    repeated string paths = 1;
   }
 
   // clear all paths published by this client

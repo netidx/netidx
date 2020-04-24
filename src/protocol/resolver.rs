@@ -6394,7 +6394,7 @@ impl ::protobuf::reflect::ProtobufValue for WriteClientRequest {
 #[derive(PartialEq,Clone,Default)]
 pub struct WriteClientRequest_Publish {
     // message fields
-    pub path: ::std::vec::Vec<::protobuf::Chars>,
+    pub paths: ::std::vec::Vec<::protobuf::Chars>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -6411,29 +6411,29 @@ impl WriteClientRequest_Publish {
         ::std::default::Default::default()
     }
 
-    // repeated string path = 1;
+    // repeated string paths = 1;
 
 
-    pub fn get_path(&self) -> &[::protobuf::Chars] {
-        &self.path
+    pub fn get_paths(&self) -> &[::protobuf::Chars] {
+        &self.paths
     }
-    pub fn clear_path(&mut self) {
-        self.path.clear();
+    pub fn clear_paths(&mut self) {
+        self.paths.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.path = v;
+    pub fn set_paths(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
+        self.paths = v;
     }
 
     // Mutable pointer to the field.
-    pub fn mut_path(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.path
+    pub fn mut_paths(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
+        &mut self.paths
     }
 
     // Take field
-    pub fn take_path(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.path, ::std::vec::Vec::new())
+    pub fn take_paths(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
+        ::std::mem::replace(&mut self.paths, ::std::vec::Vec::new())
     }
 }
 
@@ -6447,7 +6447,7 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
             let (field_number, wire_type) = is.read_tag_unpack()?;
             match field_number {
                 1 => {
-                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.path)?;
+                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.paths)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -6461,7 +6461,7 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
     #[allow(unused_variables)]
     fn compute_size(&self) -> u32 {
         let mut my_size = 0;
-        for value in &self.path {
+        for value in &self.paths {
             my_size += ::protobuf::rt::string_size(1, &value);
         };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
@@ -6470,7 +6470,7 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
     }
 
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
-        for v in &self.path {
+        for v in &self.paths {
             os.write_string(1, &v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
@@ -6513,9 +6513,9 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
             descriptor.get(|| {
                 let mut fields = ::std::vec::Vec::new();
                 fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &WriteClientRequest_Publish| { &m.path },
-                    |m: &mut WriteClientRequest_Publish| { &mut m.path },
+                    "paths",
+                    |m: &WriteClientRequest_Publish| { &m.paths },
+                    |m: &mut WriteClientRequest_Publish| { &mut m.paths },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Publish>(
                     "WriteClientRequest.Publish",
@@ -6536,7 +6536,7 @@ impl ::protobuf::Message for WriteClientRequest_Publish {
 
 impl ::protobuf::Clear for WriteClientRequest_Publish {
     fn clear(&mut self) {
-        self.path.clear();
+        self.paths.clear();
         self.unknown_fields.clear();
     }
 }
@@ -6556,7 +6556,7 @@ impl ::protobuf::reflect::ProtobufValue for WriteClientRequest_Publish {
 #[derive(PartialEq,Clone,Default)]
 pub struct WriteClientRequest_Unpublish {
     // message fields
-    pub path: ::std::vec::Vec<::protobuf::Chars>,
+    pub paths: ::std::vec::Vec<::protobuf::Chars>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -6573,29 +6573,29 @@ impl WriteClientRequest_Unpublish {
         ::std::default::Default::default()
     }
 
-    // repeated string path = 1;
+    // repeated string paths = 1;
 
 
-    pub fn get_path(&self) -> &[::protobuf::Chars] {
-        &self.path
+    pub fn get_paths(&self) -> &[::protobuf::Chars] {
+        &self.paths
     }
-    pub fn clear_path(&mut self) {
-        self.path.clear();
+    pub fn clear_paths(&mut self) {
+        self.paths.clear();
     }
 
     // Param is passed by value, moved
-    pub fn set_path(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
-        self.path = v;
+    pub fn set_paths(&mut self, v: ::std::vec::Vec<::protobuf::Chars>) {
+        self.paths = v;
     }
 
     // Mutable pointer to the field.
-    pub fn mut_path(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
-        &mut self.path
+    pub fn mut_paths(&mut self) -> &mut ::std::vec::Vec<::protobuf::Chars> {
+        &mut self.paths
     }
 
     // Take field
-    pub fn take_path(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
-        ::std::mem::replace(&mut self.path, ::std::vec::Vec::new())
+    pub fn take_paths(&mut self) -> ::std::vec::Vec<::protobuf::Chars> {
+        ::std::mem::replace(&mut self.paths, ::std::vec::Vec::new())
     }
 }
 
@@ -6609,7 +6609,7 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
             let (field_number, wire_type) = is.read_tag_unpack()?;
             match field_number {
                 1 => {
-                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.path)?;
+                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.paths)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -6623,7 +6623,7 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
     #[allow(unused_variables)]
     fn compute_size(&self) -> u32 {
         let mut my_size = 0;
-        for value in &self.path {
+        for value in &self.paths {
             my_size += ::protobuf::rt::string_size(1, &value);
         };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
@@ -6632,7 +6632,7 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
     }
 
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
-        for v in &self.path {
+        for v in &self.paths {
             os.write_string(1, &v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
@@ -6675,9 +6675,9 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
             descriptor.get(|| {
                 let mut fields = ::std::vec::Vec::new();
                 fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeCarllercheChars>(
-                    "path",
-                    |m: &WriteClientRequest_Unpublish| { &m.path },
-                    |m: &mut WriteClientRequest_Unpublish| { &mut m.path },
+                    "paths",
+                    |m: &WriteClientRequest_Unpublish| { &m.paths },
+                    |m: &mut WriteClientRequest_Unpublish| { &mut m.paths },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new_pb_name::<WriteClientRequest_Unpublish>(
                     "WriteClientRequest.Unpublish",
@@ -6698,7 +6698,7 @@ impl ::protobuf::Message for WriteClientRequest_Unpublish {
 
 impl ::protobuf::Clear for WriteClientRequest_Unpublish {
     fn clear(&mut self) {
-        self.path.clear();
+        self.paths.clear();
         self.unknown_fields.clear();
     }
 }
@@ -7769,20 +7769,20 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     MappingB\0\x121\n\x07results\x18\x03\x20\x03(\x0b2\x1e.ReadServerRespons\
     e.ResolutionB\0:\0\x1a\x18\n\x04List\x12\x0e\n\x04path\x18\x01\x20\x03(\
     \tB\0:\0\x1a\x20\n\x05Error\x12\x15\n\x0bdescription\x18\x01\x20\x01(\tB\
-    \0:\0B\n\n\x08response:\0\"\xc3\x02\n\x12WriteClientRequest\x120\n\x07Pu\
+    \0:\0B\n\n\x08response:\0\"\xc5\x02\n\x12WriteClientRequest\x120\n\x07Pu\
     blish\x18\x01\x20\x01(\x0b2\x1b.WriteClientRequest.PublishH\0B\0\x124\n\
     \tUnpublish\x18\x02\x20\x01(\x0b2\x1d.WriteClientRequest.UnpublishH\0B\0\
     \x12,\n\x05Clear\x18\x03\x20\x01(\x0b2\x19.WriteClientRequest.ClearH\0B\
     \0\x124\n\tHeartbeat\x18\x04\x20\x01(\x0b2\x1d.WriteClientRequest.Heartb\
-    eatH\0B\0\x1a\x1b\n\x07Publish\x12\x0e\n\x04path\x18\x01\x20\x03(\tB\0:\
-    \0\x1a\x1d\n\tUnpublish\x12\x0e\n\x04path\x18\x01\x20\x03(\tB\0:\0\x1a\t\
-    \n\x05Clear:\0\x1a\r\n\tHeartbeat:\0B\t\n\x07request:\0\"\x86\x02\n\x13W\
-    riteServerResponse\x125\n\tPublished\x18\x01\x20\x01(\x0b2\x1e.WriteServ\
-    erResponse.PublishedH\0B\0\x129\n\x0bUnpublished\x18\x02\x20\x01(\x0b2\
-    \x20.WriteServerResponse.UnpublishedH\0B\0\x12-\n\x05Error\x18\x03\x20\
-    \x01(\x0b2\x1a.WriteServerResponse.ErrorH\0B\0\x1a\r\n\tPublished:\0\x1a\
-    \x0f\n\x0bUnpublished:\0\x1a\x20\n\x05Error\x12\x15\n\x0bdescription\x18\
-    \x01\x20\x01(\tB\0:\0B\n\n\x08response:\0B\0b\x06proto3\
+    eatH\0B\0\x1a\x1c\n\x07Publish\x12\x0f\n\x05paths\x18\x01\x20\x03(\tB\0:\
+    \0\x1a\x1e\n\tUnpublish\x12\x0f\n\x05paths\x18\x01\x20\x03(\tB\0:\0\x1a\
+    \t\n\x05Clear:\0\x1a\r\n\tHeartbeat:\0B\t\n\x07request:\0\"\x86\x02\n\
+    \x13WriteServerResponse\x125\n\tPublished\x18\x01\x20\x01(\x0b2\x1e.Writ\
+    eServerResponse.PublishedH\0B\0\x129\n\x0bUnpublished\x18\x02\x20\x01(\
+    \x0b2\x20.WriteServerResponse.UnpublishedH\0B\0\x12-\n\x05Error\x18\x03\
+    \x20\x01(\x0b2\x1a.WriteServerResponse.ErrorH\0B\0\x1a\r\n\tPublished:\0\
+    \x1a\x0f\n\x0bUnpublished:\0\x1a\x20\n\x05Error\x12\x15\n\x0bdescription\
+    \x18\x01\x20\x01(\tB\0:\0B\n\n\x08response:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy::INIT;

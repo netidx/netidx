@@ -3,22 +3,25 @@ use crate::{
         syskrb5::ServerCtx, Krb5Ctx, Krb5ServerCtx, Permissions, UserInfo, ANONYMOUS,
     },
     channel::Channel,
-    config,
+    config::{self, resolver_server::ResolverId},
     path::Path,
     protocol::{
-        publisher,
+        self,
         resolver::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            ClientHello, ClientHello_Read as ClientHelloRead,
+            ClientHello_Write as ClientHelloWrite, ReadClientRequest, WriteClientRequest,
         },
     },
     resolver_store::Store,
     secstore::SecStore,
+    utils,
 };
-use failure::Error;
+use anyhow::{anyhow, Error, Result};
+use bytes::Bytes;
 use futures::{prelude::*, select};
 use fxhash::FxBuildHasher;
+use log::{debug, error, info};
+use protobuf::{Chars, Message};
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -64,36 +67,54 @@ fn handle_batch_write(
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
     write_addr: SocketAddr,
-    msgs: impl Iterator<Item = ToWrite>,
-) -> Result<(), Error> {
+    msgs: impl Iterator<Item = WriteClientRequest>,
+) -> Result<()> {
+    use protocol::resolver::{
+        WriteClientRequest_Publish as Publish, WriteClientRequest_Unpublish as Unpublish,
+        WriteClientRequest_oneof_request as ToWrite, WriteServerResponse,
+        WriteServerResponse_Error as FwError, WriteServerResponse_Published as Published,
+        WriteServerResponse_Unpublished as Unpublished,
+        WriteServerResponse_oneof_response as FromWrite,
+    };
+    let resp = |msg| WriteServerResponse {
+        response: msg,
+        ..WriteServerResponse::default()
+    };
+    let err = |msg| {
+        resp(FromWrite::Error(FwError {
+            description: msg,
+            ..FwError::default()
+        }))
+    };
     let mut s = store.write();
     for m in msgs {
-        match m {
-            ToWrite::Heartbeat => (),
-            ToWrite::Publish(paths) => {
+        match m.request {
+            None => (),
+            Some(ToWrite::Heartbeat(_)) => (),
+            Some(ToWrite::Publish(Publish { paths, .. })) => {
                 if !paths.iter().all(Path::is_absolute) {
-                    con.queue_send(&FromWrite::Error("absolute paths required".into()))?
+                    con.queue_send(&err(Chars::from("absolute paths required")))?
                 } else {
                     if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
                         for path in paths {
-                            s.publish(path, write_addr);
+                            s.publish(Path::from(path), write_addr);
                         }
-                        con.queue_send(&FromWrite::Published)?
+                        con.queue_send(&resp(FromWrite::Published(Published::default())))?
                     } else {
-                        con.queue_send(&FromWrite::Error("denied".into()))?
+                        con.queue_send(&err(Chars::from("denied")))?
                     }
                 }
             }
-            ToWrite::Unpublish(paths) => {
+            Some(ToWrite::Unpublish(Unpublish { paths, .. })) => {
                 for path in paths {
-                    s.unpublish(path, write_addr);
+                    s.unpublish(&*path, write_addr);
                 }
-                con.queue_send(&FromWrite::Unpublished)?
+                con.queue_send(&resp(FromWrite::Unpublished(Unpublished::default())))?
             }
-            ToWrite::Clear => {
+            Some(ToWrite::Clear(_)) => {
                 s.unpublish_addr(write_addr);
                 s.gc();
-                con.queue_send(&FromWrite::Unpublished)?
+                con.queue_send(&resp(FromWrite::Unpublished(Unpublished::default())))?
             }
         }
     }
@@ -108,7 +129,7 @@ async fn client_loop_write(
     rx_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
     write_addr: SocketAddr,
-) -> Result<(), Error> {
+) -> Result<()> {
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -117,8 +138,8 @@ async fn client_loop_write(
     let mut timeout = time::interval_at(Instant::now() + WRITER_TTL, WRITER_TTL).fuse();
     async fn receive_batch(
         con: &mut Option<Channel<ServerCtx>>,
-        batch: &mut Vec<ToWrite>,
-    ) -> Result<(), Error> {
+        batch: &mut Vec<WriteClientRequest>,
+    ) -> Result<()> {
         match con {
             Some(ref mut con) => con.receive_batch(batch).await,
             None => future::pending().await,
@@ -132,8 +153,7 @@ async fn client_loop_write(
                 Err(e) => {
                     batch.clear();
                     con = None;
-                    // CR estokes: use proper log module
-                    println!("error reading message: {}", e)
+                    info!("error reading message: {}", e)
                 },
                 Ok(()) => {
                     act = true;
@@ -181,77 +201,121 @@ async fn hello_client_write(
     secstore: Option<SecStore>,
     id: ResolverId,
     hello: ClientHelloWrite,
-) -> Result<(), Error> {
-    async fn send(
-        con: &mut Channel<ServerCtx>,
-        hello: ServerHelloWrite,
-    ) -> Result<(), Error> {
+) -> Result<()> {
+    use protocol::{
+        publisher::{
+            Hello as PHello, Hello_ResolverAuthenticate as PHResolverAuth,
+            Hello_oneof_hello as PHKind,
+        },
+        resolver::{
+            ClientHello_Write_Auth_Initiate as Initiate,
+            ClientHello_Write_Auth_oneof_auth as ClientAuthWrite, ServerHelloWrite,
+            ServerHelloWrite_Accepted as Accepted,
+            ServerHelloWrite_Anonymous as Anonymous, ServerHelloWrite_Reused as Reused,
+            ServerHelloWrite_oneof_auth as ServerAuthWrite,
+        },
+    };
+    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloWrite) -> Result<()> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
     fn salt() -> u64 {
         let mut rng = rand::thread_rng();
         rng.gen_range(0, u64::max_value() - 2)
     }
-    let ttl_expired = !store.read().clinfo().contains_key(&hello.write_addr);
-    let uifo = match hello.auth {
-        ClientAuthWrite::Anonymous => {
+    let write_addr = hello
+        .write_addr
+        .take()
+        .and_then(utils::protobuf_socketaddr_to_std)
+        .ok_or_else(|| anyhow!("protocol error, write addr required"))?;
+    let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
+    let uifo = match hello
+        .auth
+        .take()
+        .ok_or_else(|| anyhow!("auth required"))?
+        .auth
+    {
+        None => return Err(anyhow!("auth required")),
+        Some(ClientAuthWrite::Anonymous(_)) => {
             let h = ServerHelloWrite {
                 ttl_expired,
-                id,
-                auth: ServerAuthWrite::Anonymous,
+                resolver_id: id.get(),
+                auth: Some(ServerAuthWrite::Anonymous(Anonymous::default())),
+                ..ServerHelloWrite::default()
             };
             send(&mut con, h).await?;
             ANONYMOUS.clone()
         }
-        ClientAuthWrite::Reuse => match secstore {
-            None => bail!("authentication not supported"),
-            Some(ref secstore) => match secstore.get_write(&hello.write_addr) {
-                None => bail!("session not found"),
+        Some(ClientAuthWrite::Reuse(_)) => match secstore {
+            None => return Err(anyhow!("authentication not supported")),
+            Some(ref secstore) => match secstore.get_write(&write_addr) {
+                None => return Err(anyhow!("session not found")),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
                         ttl_expired,
-                        id,
-                        auth: ServerAuthWrite::Reused,
+                        resolver_id: id.get(),
+                        auth: Some(ServerAuthWrite::Reused(Reused::default())),
+                        ..ServerHelloWrite::default()
                     };
                     send(&mut con, h).await?;
-                    con.set_ctx(Some(ctx.clone()));
+                    con.set_ctx(ctx.clone());
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
         },
-        ClientAuthWrite::Token { spn, token } => match secstore {
-            None => bail!("authentication not supported"),
+        Some(ClientAuthWrite::Initiate(Initiate { spn, token, .. })) => match secstore {
+            None => return Err(anyhow!("authentication not supported")),
             Some(ref secstore) => {
-                let (ctx, tok) = secstore.create(&token)?;
+                let (ctx, token) = secstore.create(&token)?;
                 let h = ServerHelloWrite {
                     ttl_expired,
-                    id,
-                    auth: ServerAuthWrite::Accepted(tok),
+                    resolver_id: id.get(),
+                    auth: Some(ServerAuthWrite::Accepted(Accepted {
+                        token,
+                        ..Accepted::default()
+                    })),
+                    ..ServerHelloWrite::default()
                 };
                 send(&mut con, h).await?;
-                con.set_ctx(Some(ctx.clone()));
+                con.set_ctx(ctx.clone());
                 let mut con: Channel<ServerCtx> = Channel::new(
-                    time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
+                    time::timeout(HELLO_TIMEOUT, TcpStream::connect(write_addr))
                         .await??,
                 );
                 let salt = salt();
-                let tok = Vec::from(&*ctx.wrap(true, &salt.to_be_bytes())?);
-                let m = publisher::Hello::ResolverAuthenticate(id, tok);
+                let token =
+                    Bytes::copy_from_slice(&*ctx.wrap(true, &salt.to_be_bytes())?);
+                let m = PHello {
+                    hello: Some(PHKind::ResolverAuthenticate(PHResolverAuth {
+                        resolver_id: id.get(),
+                        token,
+                        ..PHResolverAuth::default()
+                    })),
+                    ..PHello::default()
+                };
                 time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
-                match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
-                    publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
-                        bail!("denied")
+                match time::timeout(HELLO_TIMEOUT, con.receive::<PHello>())
+                    .await??
+                    .hello
+                {
+                    None | Some(PHKind::Anonymous(_)) | Some(PHKind::Initiate(_)) => {
+                        return Err(anyhow!("denied"))
                     }
-                    publisher::Hello::ResolverAuthenticate(_, tok) => {
-                        let d = Vec::from(&*ctx.unwrap(&tok)?);
+                    Some(PHKind::ResolverAuthenticate(PHResolverAuth {
+                        token, ..
+                    })) => {
+                        let d = Vec::from(&*ctx.unwrap(&*token)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
                         if dsalt != salt + 2 {
-                            bail!("denied")
+                            return Err(anyhow!("denied"));
                         }
                         let client = ctx.client()?;
                         let uifo = secstore.ifo(Some(&client))?;
-                        let spn = spn.unwrap_or(client);
-                        secstore.store_write(hello.write_addr, spn, ctx.clone());
+                        let spn = if spn.len() == 0 {
+                            client
+                        } else {
+                            String::from(&*spn)
+                        };
+                        secstore.store_write(write_addr, spn, ctx.clone());
                         uifo
                     }
                 }
@@ -292,7 +356,7 @@ fn handle_batch_read(
     uifo: &Arc<UserInfo>,
     id: ResolverId,
     msgs: impl Iterator<Item = ToRead>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
@@ -321,7 +385,7 @@ fn handle_batch_read(
                                         p,
                                     )?)
                                 })
-                                .collect::<Result<Vec<_>, Error>>()?;
+                                .collect::<Result<Vec<_>>>()?;
                             FromRead::Resolved(Resolved {
                                 krb5_spns,
                                 resolver: id,
@@ -355,7 +419,7 @@ async fn client_loop_read(
     secstore: Option<SecStore>,
     id: ResolverId,
     uifo: Arc<UserInfo>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let mut batch: Vec<ToRead> = Vec::new();
     let mut server_stop = server_stop.fuse();
     let mut act = false;
@@ -394,11 +458,8 @@ async fn hello_client_read(
     secstore: Option<SecStore>,
     id: ResolverId,
     hello: ClientAuthRead,
-) -> Result<(), Error> {
-    async fn send(
-        con: &mut Channel<ServerCtx>,
-        hello: ServerHelloRead,
-    ) -> Result<(), Error> {
+) -> Result<()> {
+    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloRead) -> Result<()> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
     let uifo = match hello {
@@ -437,7 +498,7 @@ async fn hello_client(
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
     id: ResolverId,
-) -> Result<(), Error> {
+) -> Result<()> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
@@ -455,7 +516,7 @@ async fn server_loop(
     cfg: config::resolver_server::Config,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
-) -> Result<SocketAddr, Error> {
+) -> Result<SocketAddr> {
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
     let secstore = match cfg.auth {
@@ -516,7 +577,7 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: config::resolver_server::Config) -> Result<Server, Error> {
+    pub async fn new(cfg: config::resolver_server::Config) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, recv_stop, send_ready);

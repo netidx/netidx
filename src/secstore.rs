@@ -12,6 +12,7 @@ use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use bytes::Bytes;
 
 #[derive(
     Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -136,11 +137,11 @@ impl SecStore {
         inner.delete_write(id);
     }
 
-    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>)> {
+    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes)> {
         let ctx = SYS_KRB5.create_server_ctx(Some(self.spn.as_bytes()))?;
         let tok = ctx
             .step(Some(tok))?
-            .map(|b| Vec::from(&*b))
+            .map(|b| Bytes::copy_from_slice(&*b))
             .ok_or_else(|| {
                 anyhow!("step didn't generate a mutual authentication token")
             })?;

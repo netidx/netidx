@@ -1,3 +1,5 @@
+use crate::protocol::shared;
+use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::{
     prelude::*,
@@ -5,12 +7,12 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use anyhow::Result;
 use std::pin::Pin;
 use std::{
     cmp::min,
     collections::VecDeque,
     io::{self, IoSlice, Write},
+    net,
     ops::{Deref, DerefMut},
 };
 
@@ -23,7 +25,7 @@ macro_rules! try_cf {
                 $id $lbl Err(Error::from(e));
             }
         }
-    };    
+    };
     ($msg:expr, $id:ident, $e:expr) => {
         match $e {
             Ok(x) => x,
