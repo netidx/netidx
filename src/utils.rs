@@ -5,18 +5,14 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use anyhow::{Result, Error};
-use serde::Serialize;
+use anyhow::Result;
 use std::pin::Pin;
 use std::{
-    cell::RefCell,
     cmp::min,
     collections::VecDeque,
     io::{self, IoSlice, Write},
     ops::{Deref, DerefMut},
 };
-use arc_swap::ArcSwap;
-use parking_lot::{Mutex, MutexGuard};
 
 macro_rules! try_cf {
     ($msg:expr, $id:ident, $lbl:tt, $e:expr) => {

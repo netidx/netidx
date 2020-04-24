@@ -183,6 +183,10 @@ impl<'a> Iterator for BaseNames<'a> {
 }
 
 impl Path {
+    pub fn as_chars(self) -> Chars {
+        self.0
+    }
+
     /// returns /
     pub fn root() -> Path {
         Path::from("/")

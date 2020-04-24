@@ -5,14 +5,30 @@ use crate::{
         Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
     },
     config,
-    protocol::resolver::CtxId,
 };
+use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
-use failure::Error;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub struct CtxId(u64);
+
+impl CtxId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
@@ -43,7 +59,7 @@ impl SecStoreInner {
         self.write_ctxts.remove(id);
     }
 
-    fn gc(&mut self) -> Result<(), Error> {
+    fn gc(&mut self) -> Result<()> {
         let mut read_delete = SmallVec::<[CtxId; 64]>::new();
         let mut write_delete = SmallVec::<[SocketAddr; 64]>::new();
         for (id, ctx) in self.read_ctxts.iter() {
@@ -65,7 +81,7 @@ impl SecStoreInner {
         Ok(())
     }
 
-    fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
+    fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>> {
         self.userdb.ifo(user)
     }
 }
@@ -78,10 +94,7 @@ pub(crate) struct SecStore {
 }
 
 impl SecStore {
-    pub(crate) fn new(
-        spn: String,
-        pmap: config::resolver_server::PMap,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(spn: String, pmap: config::resolver_server::PMap) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb)?;
         Ok(SecStore {
@@ -123,13 +136,13 @@ impl SecStore {
         inner.delete_write(id);
     }
 
-    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>), Error> {
+    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Vec<u8>)> {
         let ctx = SYS_KRB5.create_server_ctx(Some(self.spn.as_bytes()))?;
         let tok = ctx
             .step(Some(tok))?
             .map(|b| Vec::from(&*b))
             .ok_or_else(|| {
-                format_err!("step didn't generate a mutual authentication token")
+                anyhow!("step didn't generate a mutual authentication token")
             })?;
         Ok((ctx, tok))
     }
@@ -146,12 +159,12 @@ impl SecStore {
         inner.write_ctxts.insert(addr, (spn, ctx));
     }
 
-    pub(crate) fn gc(&self) -> Result<(), Error> {
+    pub(crate) fn gc(&self) -> Result<()> {
         let mut inner = self.store.write();
         Ok(inner.gc()?)
     }
 
-    pub(crate) fn ifo(&self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
+    pub(crate) fn ifo(&self, user: Option<&str>) -> Result<Arc<UserInfo>> {
         let mut inner = self.store.write();
         Ok(inner.ifo(user)?)
     }

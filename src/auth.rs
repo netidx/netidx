@@ -154,7 +154,7 @@ impl PMap {
                 };
                 entry.insert(entity, Permissions::try_from(perm.as_str())?);
             }
-            pmap.insert(path.clone(), entry);
+            pmap.insert(Path::from(path), entry);
         }
         Ok(PMap(pmap))
     }
@@ -243,8 +243,8 @@ pub(crate) trait Krb5 {
 #[cfg(unix)]
 pub(crate) mod syskrb5 {
     use super::{Krb5, Krb5Ctx, Krb5ServerCtx};
-    use anyhow::{Result, Error};
-    use bytes::BytesMut;
+    use anyhow::{Error, Result};
+    use bytes::{Buf as _, BytesMut};
     use libgssapi::{
         context::{
             ClientCtx as GssClientCtx, CtxFlags, SecurityContext,
@@ -258,6 +258,54 @@ pub(crate) mod syskrb5 {
     };
     use std::time::Duration;
     use tokio::task;
+
+    fn wrap_iov(
+        ctx: &impl SecurityContext,
+        encrypt: bool,
+        header: &mut BytesMut,
+        data: &mut BytesMut,
+        padding: &mut BytesMut,
+        trailer: &mut BytesMut,
+    ) -> Result<()> {
+        let mut len_iovs = [
+            GssIovFake::new(GssIovType::Header),
+            GssIov::new(GssIovType::Data, &mut **data).as_fake(),
+            GssIovFake::new(GssIovType::Padding),
+            GssIovFake::new(GssIovType::Trailer),
+        ];
+        ctx.wrap_iov_length(encrypt, &mut len_iovs[..])?;
+        header.resize(len_iovs[0].len(), 0x0);
+        padding.resize(len_iovs[2].len(), 0x0);
+        trailer.resize(len_iovs[3].len(), 0x0);
+        let mut iovs = [
+            GssIov::new(GssIovType::Header, &mut **header),
+            GssIov::new(GssIovType::Data, &mut **data),
+            GssIov::new(GssIovType::Padding, &mut **padding),
+            GssIov::new(GssIovType::Trailer, &mut **trailer),
+        ];
+        Ok(ctx.wrap_iov(encrypt, &mut iovs)?)
+    }
+
+    fn unwrap_iov(
+        ctx: &impl SecurityContext,
+        len: usize,
+        msg: &mut BytesMut,
+    ) -> Result<BytesMut> {
+        let (hdr_len, data_len) = {
+            let mut iov = [
+                GssIov::new(GssIovType::Stream, &mut **msg),
+                GssIov::new(GssIovType::Data, &mut []),
+            ];
+            ctx.unwrap_iov(&mut iov[..])?;
+            let hdr_len = iov[0].header_length(&iov[1]).unwrap();
+            let data_len = iov[1].len();
+            (hdr_len, data_len)
+        };
+        msg.advance(hdr_len);
+        let data = msg.split_to(data_len);
+        msg.advance(len - hdr_len - data_len);
+        Ok(data) // return the decrypted contents
+    }
 
     #[derive(Debug, Clone)]
     pub(crate) struct ClientCtx(GssClientCtx);
@@ -281,52 +329,19 @@ pub(crate) mod syskrb5 {
             padding: &mut BytesMut,
             trailer: &mut BytesMut,
         ) -> Result<()> {
-            let mut len_iovs = [
-                GssIovFake::new(GssIovType::Header),
-                GssIov::new(GssIovType::Data, &mut **data).as_fake(),
-                GssIovFake::new(GssIovType::Padding),
-                GssIovFake::new(GssIovType::Trailer),
-            ];
-            self.0.wrap_iov_length(encrypt, &mut len_iovs[..])?;
-            header.resize(len_iovs[0].len(), 0x0);
-            padding.resize(len_iovs[2].len(), 0x0);
-            trailer.resize(len_iovs[3].len(), 0x0);
-            let mut iovs = [
-                GssIov::new(GssIovType::Header, &mut **header),
-                GssIov::new(GssIovType::Data, &mut **data),
-                GssIov::new(GssIovType::Padding, &mut **padding),
-                GssIov::new(GssIovType::Trailer, &mut **trailer),
-            ];
-            self.0.wrap_iov(encrypt, &mut iovs)?;
+            wrap_iov(&self.0, encrypt, header, data, padding, trailer)
         }
 
         fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf> {
-            self.0
-                .unwrap(msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.unwrap(msg).map_err(|e| Error::from(e))
         }
 
         fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
-            let (hdr_len, data_len) = {
-                let mut iov = [
-                    GssIov::new(GssIovType::Stream, &mut **msg),
-                    GssIov::new(GssIovType::Data, &mut []),
-                ];
-                self.0.unwrap_iov(&mut iov[..])?;
-                let hdr_len = iov[0].header_length(&iov[1]).unwrap();
-                let data_len = iov[1].len();
-                (hdr_len, data_len)
-            };
-            msg.advance(hdr_len);
-            let data = msg.split_to(data_len);
-            msg.advance(len - hdr_len - data_len);
-            Ok(data) // return the decrypted contents
+            unwrap_iov(&self.0, len, msg)
         }
 
         fn ttl(&self) -> Result<Duration> {
-            self.0
-                .lifetime()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.lifetime().map_err(|e| Error::from(e))
         }
     }
 
@@ -345,35 +360,41 @@ pub(crate) mod syskrb5 {
                         minor: 0,
                     }),
                 }
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+                .map_err(|e| Error::from(e))
             })
         }
 
         fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf> {
-            self.0
-                .wrap(encrypt, msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.wrap(encrypt, msg).map_err(|e| Error::from(e))
+        }
+
+        fn wrap_iov(
+            &self,
+            encrypt: bool,
+            header: &mut BytesMut,
+            data: &mut BytesMut,
+            padding: &mut BytesMut,
+            trailer: &mut BytesMut,
+        ) -> Result<()> {
+            wrap_iov(&self.0, encrypt, header, data, padding, trailer)
         }
 
         fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf> {
-            self.0
-                .unwrap(msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.unwrap(msg).map_err(|e| Error::from(e))
+        }
+
+        fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
+            unwrap_iov(&self.0, len, msg)
         }
 
         fn ttl(&self) -> Result<Duration> {
-            self.0
-                .lifetime()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+            self.0.lifetime().map_err(|e| Error::from(e))
         }
     }
 
     impl Krb5ServerCtx for ServerCtx {
         fn client(&self) -> Result<String> {
-            let n = self
-                .0
-                .source_name()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))?;
+            let n = self.0.source_name().map_err(|e| Error::from(e))?;
             Ok(format!("{}", n))
         }
     }

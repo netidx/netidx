@@ -1,24 +1,21 @@
-use crate::{auth::Krb5Ctx, utils::BytesWriter};
+use crate::auth::Krb5Ctx;
 use anyhow::{anyhow, Error, Result};
-use byteorder::{BigEndian, ByteOrder};
 use bytes::{buf::BufExt, Buf, BufMut, Bytes, BytesMut};
 use futures::{prelude::*, select_biased};
 use log::info;
 use protobuf::{
     error::WireError, CodedInputStream, CodedOutputStream, Message, ProtobufError,
 };
-use serde::{de::DeserializeOwned, Serialize};
 use std::{
     cmp::{max, min},
     fmt::Debug,
     mem,
-    ops::Drop,
 };
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{
-        mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        mpsc::{self, Receiver, Sender},
         oneshot,
     },
     task,
@@ -144,11 +141,11 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     }
 }
 
-fn read_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
-    soc: ReadHalf<TcpStream>,
-    set_ctx: oneshot::Receiver<C>,
+fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
+    mut soc: ReadHalf<TcpStream>,
+    mut set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<Bytes> {
-    let (tx, rx) = mpsc::channel(10);
+    let (mut tx, rx) = mpsc::channel(10);
     task::spawn(async move {
         let mut ctx: Option<C> = None;
         let mut buf = BytesMut::with_capacity(BUF);
@@ -172,6 +169,7 @@ fn read_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
                         Some(ref ctx) => ctx,
                         None => {
                             ctx = Some(try_cf!(break, 'main, set_ctx.await));
+                            set_ctx = oneshot::channel().1;
                             ctx.as_ref().unwrap()
                         }
                     };

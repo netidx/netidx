@@ -1,5 +1,4 @@
 pub mod resolver_server {
-    use crate::path::Path;
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
@@ -33,7 +32,7 @@ pub mod resolver_server {
     type Entity = String;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PMap(pub HashMap<Path, HashMap<Entity, Permissions>>);
+    pub struct PMap(pub HashMap<String, HashMap<Entity, Permissions>>);
 
     #[derive(Debug, Clone)]
     pub enum Auth {
