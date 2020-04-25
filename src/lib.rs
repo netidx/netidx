@@ -50,7 +50,7 @@ pub mod protocol;
 //pub mod model;
 pub mod config;
 pub mod channel;
-//pub mod resolver;
+pub mod resolver;
 pub mod resolver_server;
 //pub mod publisher;
 //pub mod subscriber;

@@ -6,15 +6,13 @@ use crate::{
     channel::Channel,
     config::{self, resolver::Auth as CAuth},
     path::Path,
-    protocol::resolver::{
-        self, ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-        FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
-    },
+    protocol,
 };
-use failure::Error;
+use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select};
 use fxhash::FxBuildHasher;
+use log::info;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -34,12 +32,13 @@ use tokio::{
 static TTL: u64 = 120;
 static LINGER: u64 = 10;
 
-type Result<T> = result::Result<T, Error>;
-
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
-    Krb5 { upn: Option<String>, spn: Option<String> },
+    Krb5 {
+        upn: Option<String>,
+        spn: Option<String>,
+    },
 }
 
 type FromCon<F> = oneshot::Sender<F>;
@@ -54,14 +53,11 @@ async fn send<T: Send + Sync + Debug + 'static, F: Send + Sync + Debug + 'static
     Ok(rx.await?)
 }
 
-fn create_ctx(
-    upn: Option<&[u8]>,
-    target_spn: &[u8],
-) -> Result<(ClientCtx, Vec<u8>)> {
+fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes)> {
     let ctx = SYS_KRB5.create_client_ctx(upn, target_spn)?;
     match ctx.step(None)? {
-        None => bail!("client ctx first step produced no token"),
-        Some(tok) => Ok((ctx, Vec::from(&*tok))),
+        None => return Err(anyhow!("client ctx first step produced no token")),
+        Some(tok) => Ok((ctx, Bytes::from(&*tok))),
     }
 }
 
@@ -75,6 +71,14 @@ async fn connect_read(
     sc: &mut Option<(CtxId, ClientCtx)>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
+    use protocol::resolver::{
+        ClientHello, ClientHello_Read as ClientHelloRead,
+        ClientHello_Read_Anonymous as CAnonymous, ClientHello_Read_Initiate as CInitiate,
+        ClientHello_Read_Reuse as CReuse, ClientHello_Read_oneof_auth as ClientAuthRead,
+        ClientHello_oneof_hello as ClientHelloKind, ServerHelloRead,
+        ServerHelloRead_Accepted as Accepted,
+        ServerHelloRead_oneof_auth as ServeHelloKind,
+    };
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -82,40 +86,66 @@ async fn connect_read(
         }
         backoff += 1;
         let addr = choose_read_addr(resolver);
-        let con = try_cont!("connect", TcpStream::connect(&addr.1).await);
+        let con = try_cf!("connect", continue, TcpStream::connect(&addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
-            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
+            (Auth::Anonymous, _) => {
+                (ClientAuthRead::Anonymous(CAnonymous::default()), None)
+            }
+            (Auth::Krb5 { .. }, CAuth::Anonymous) => {
+                return Err(anyhow!("authentication unavailable"))
+            }
             (Auth::Krb5 { upn, .. }, CAuth::Krb5 { target_spn }) => match sc {
-                Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
+                Some((id, ctx)) => (
+                    ClientAuthRead::Reuse(CReuse {
+                        session_id: id.get(),
+                        ..CReuse::default()
+                    }),
+                    Some(ctx.clone()),
+                ),
                 None => {
                     let upn = upn.as_ref().map(|s| s.as_bytes());
                     let target_spn = target_spn.as_bytes();
-                    let (ctx, tok) = try_cont!("create ctx", create_ctx(upn, target_spn));
-                    (ClientAuthRead::Token(tok), Some(ctx))
+                    let (ctx, token) =
+                        try_cf!("ctx", continue, create_ctx(upn, target_spn));
+                    let r = ClientAuthRead::Initiate(CInitiate {
+                        token,
+                        ..CInitiate::default()
+                    });
+                    (r, Some(ctx))
                 }
             },
         };
-        try_cont!("hello", con.send_one(&ClientHello::ReadOnly(auth)).await);
-        let r: ServerHelloRead = try_cont!("hello reply", con.receive().await);
+        try_cf!(
+            "hello",
+            continue,
+            con.send_one(&ClientHello {
+                hello: Some(ClientHelloKind::ReadOnly(auth)),
+                ..ClientHello::default()
+            })
+            .await
+        );
+        let r: ServerHelloRead = try_cf!("hello reply", continue, con.receive().await);
         con.set_ctx(ctx.clone());
-        // CR estokes: replace this with proper logging
-        match (desired_auth, r) {
-            (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
+        match (desired_auth, r.auth) {
+            (_, None) => {
+                info!("protocol error, auth decl required");
+                continue;
+            }
+            (Auth::Anonymous, Some(ServerHelloKind::Anonymous(_))) => (),
             (Auth::Anonymous, _) => {
-                println!("server requires authentication");
+                info!("server requires authentication");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
-                println!("could not authenticate resolver server");
+            (Auth::Krb5 { .. }, Some(ServerHelloKind::Anonymous(_))) => {
+                info!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
-            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
+            (Auth::Krb5 { .. }, Some(ServerHelloRead::Reused(_))) => (),
+            (Auth::Krb5 { .. }, Some(ServerHelloRead::Accepted(acc))) => {
                 let ctx = ctx.unwrap();
-                try_cont!("resolver tok", ctx.step(Some(&tok)));
-                *sc = Some((id, ctx));
+                try_cf!("resolver tok", continue, ctx.step(Some(&acc.token)));
+                *sc = Some((CtxId::from(acc.context_id), ctx));
             }
         }
         break Ok(con);
@@ -174,14 +204,14 @@ impl ResolverRead {
     pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
         match send(&self.0, resolver::ToRead::Resolve(paths)).await? {
             resolver::FromRead::Resolved(r) => Ok(r),
-            _ => bail!("unexpected response"),
+            _ => return Err(anyhow!("unexpected response")),
         }
     }
 
     pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
         match send(&self.0, resolver::ToRead::List(p)).await? {
             resolver::FromRead::List(v) => Ok(v),
-            _ => bail!("unexpected response"),
+            _ => return Err(anyhow!("unexpected response")),
         }
     }
 }
@@ -204,7 +234,9 @@ async fn connect_write(
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
-            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
+            (Auth::Krb5 { .. }, CAuth::Anonymous) => {
+                return Err(anyhow!("authentication unavailable"))
+            }
             (Auth::Krb5 { upn, spn }, CAuth::Krb5 { target_spn }) => {
                 match ctxts.read().get(&resolver_addr.0) {
                     Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
@@ -238,7 +270,7 @@ async fn connect_write(
                 let ctx = ctx.unwrap();
                 try_cont!("resolver tok", ctx.step(Some(&tok)));
                 if r.id != resolver_addr.0 {
-                    bail!("resolver id mismatch, bad configuration");
+                    return Err(anyhow!("resolver id mismatch, bad configuration"));
                 }
                 ctxts.write().insert(r.id, ctx.clone());
             }
@@ -416,21 +448,21 @@ impl ResolverWrite {
     pub async fn publish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Publish(paths)).await? {
             FromWrite::Published => Ok(()),
-            _ => bail!("unexpected response"),
+            _ => return Err(anyhow!("unexpected response")),
         }
     }
 
     pub async fn unpublish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Unpublish(paths)).await? {
             FromWrite::Unpublished => Ok(()),
-            _ => bail!("unexpected response"),
+            _ => return Err(anyhow!("unexpected response")),
         }
     }
 
     pub async fn clear(&self) -> Result<()> {
         match send(&self.sender, ToWrite::Clear).await? {
             FromWrite::Unpublished => Ok(()),
-            _ => bail!("unexpected response"),
+            _ => return Err(anyhow!("unexpected response")),
         }
     }
 
