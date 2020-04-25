@@ -6,13 +6,14 @@ use crate::{
     },
     config,
 };
+use protobuf::Chars;
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
+use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use bytes::Bytes;
 
 #[derive(
     Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -26,14 +27,20 @@ impl CtxId {
         CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 
-    pub fn id(&self) -> u64 {
+    pub fn get(&self) -> u64 {
         self.0
+    }
+}
+
+impl From<u64> for CtxId {
+    fn from(i: u64) -> Self {
+        CtxId(i)
     }
 }
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (String, ServerCtx), FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, (Chars, ServerCtx), FxBuildHasher>,
     userdb: UserDb<Mapper>,
 }
 
@@ -45,7 +52,7 @@ impl SecStoreInner {
         })
     }
 
-    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(String, ServerCtx)> {
+    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, ServerCtx)> {
         self.write_ctxts.get(id).and_then(|r| match r.1.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
@@ -155,7 +162,7 @@ impl SecStore {
         id
     }
 
-    pub(crate) fn store_write(&self, addr: SocketAddr, spn: String, ctx: ServerCtx) {
+    pub(crate) fn store_write(&self, addr: SocketAddr, spn: Chars, ctx: ServerCtx) {
         let mut inner = self.store.write();
         inner.write_ctxts.insert(addr, (spn, ctx));
     }

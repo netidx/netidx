@@ -98,58 +98,65 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
-
-pub fn protobuf_socketaddr_to_std(p: shared::SocketAddr) -> Option<net::SocketAddr> {
+pub fn saddr_from_protobuf(p: shared::SocketAddr) -> Option<net::SocketAddr> {
     p.addr.map(|addr| match addr {
-        Some(shared::SocketAddr_oneof_addr::V4(addr)) => {
+        shared::SocketAddr_oneof_addr::V4(addr) => {
             let octets = addr.octets.to_be_bytes();
             let ip = net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
-            Some(net::SocketAddr::V4(net::SocketAddrV4::new(
+            net::SocketAddr::V4(net::SocketAddrV4::new(ip, addr.port as u16))
+        }
+        shared::SocketAddr_oneof_addr::V6(addr) => {
+            let ip = {
+                let a = addr.octets_a.to_be_bytes();
+                let b = addr.octets_b.to_be_bytes();
+                net::Ipv6Addr::from([
+                    a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2],
+                    b[3], b[4], b[5], b[6], b[7],
+                ])
+            };
+            let a = net::SocketAddrV6::new(
                 ip,
                 addr.port as u16,
-            )))
-        }
-        Some(shared::SocketAddr_oneof_addr::V6(addr)) => {
-            if addr.octets.len() != 16 {
-                None
-            } else {
-                let a = addr.octets.get_u16();
-                let b = addr.octets.get_u16();
-                let c = addr.octets.get_u16();
-                let d = addr.octets.get_u16();
-                let e = addr.octets.get_u16();
-                let f = addr.octets.get_u16();
-                let g = addr.octets.get_u16();
-                let h = addr.octets.get_u16();
-                let ip = net::Ipv6Addr::new(a, b, c, d, e, f, g, h);
-                let a =
-                    net::SocketAddrV6::new(ip, addr.port, addr.flowinfo, addr.scope_id);
-                Some(net::SocketAddr::V6(a))
-            }
+                addr.flowinfo,
+                addr.scope_id,
+            );
+            net::SocketAddr::V6(a)
         }
     })
 }
 
-pub fn std_socketaddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
+pub fn saddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
     match a {
         net::SocketAddr::V4(v4) => shared::SocketAddr {
-            addr: shared::SocketAddr_oneof_addr::V4(shared::SocketAddr_SocketAddrV4 {
-                octets: u32::from_be_bytes(v4.ip().octets()),
-                port: v4.port() as u32,
-                ..shared::SocketAddr_SocketAddrV4::default()
-            }),
+            addr: Some(shared::SocketAddr_oneof_addr::V4(
+                shared::SocketAddr_SocketAddrV4 {
+                    octets: u32::from_be_bytes(v4.ip().octets()),
+                    port: v4.port() as u32,
+                    ..shared::SocketAddr_SocketAddrV4::default()
+                },
+            )),
             ..shared::SocketAddr::default()
         },
-        net::SocketAddr::V6(v6) => shared::SocketAddr {
-            addr: shared::SocketAddr_oneof_addr::V6(shared::SocketAddr_SocketAddrV6 {
-                octets: Bytes::from(&v6.ip().octets()[..]),
-                port: v6.port() as u16,
-                flowinfo: v6.flowinfo(),
-                scope_id: v6.scope_id(),
-                ..shared::SocketAddr_SocketAddrV6::default()
-            }),
-            ..shared::SocketAddr::default()
-        },
+        net::SocketAddr::V6(v6) => {
+            let oc = &v6.ip().octets();
+            let addr =
+                shared::SocketAddr_oneof_addr::V6(shared::SocketAddr_SocketAddrV6 {
+                    octets_a: u64::from_be_bytes([
+                        oc[0], oc[1], oc[2], oc[3], oc[4], oc[5], oc[6], oc[7],
+                    ]),
+                    octets_b: u64::from_be_bytes([
+                        oc[8], oc[9], oc[10], oc[11], oc[12], oc[13], oc[14], oc[15],
+                    ]),
+                    port: v6.port() as u32,
+                    flowinfo: v6.flowinfo(),
+                    scope_id: v6.scope_id(),
+                    ..shared::SocketAddr_SocketAddrV6::default()
+                });
+            shared::SocketAddr {
+                addr: Some(addr),
+                ..shared::SocketAddr::default()
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::auth::Krb5Ctx;
 use anyhow::{anyhow, Error, Result};
 use bytes::{buf::BufExt, Buf, BufMut, Bytes, BytesMut};
-use futures::{prelude::*, select_biased};
+use futures::prelude::*;
 use log::info;
 use protobuf::{
     error::WireError, CodedInputStream, CodedOutputStream, Message, ProtobufError,

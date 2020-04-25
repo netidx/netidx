@@ -193,8 +193,8 @@ impl Path {
     }
 
     /// returns true if the path starts with /, false otherwise
-    pub fn is_absolute(&self) -> bool {
-        self.as_ref().starts_with(SEP)
+    pub fn is_absolute<T: AsRef<str>>(p: T) -> bool {
+        p.as_ref().starts_with(SEP)
     }
 
     /// return a new path with the specified string appended as a new

@@ -1,5 +1,5 @@
 use crate::{config, path::Path};
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result, Error};
 use bytes::BytesMut;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,

@@ -7,9 +7,10 @@ message SocketAddr {
   }
   message SocketAddrV6 {
     uint32 port = 1;
-    bytes octets = 2;
-    uint32 flowinfo = 3;
-    uint32 scope_id = 4;
+    uint32 flowinfo = 2;
+    uint32 scope_id = 3;
+    uint64 octets_a = 4;
+    uint64 octets_b = 5;
   }
   oneof addr {
     SocketAddrV4 V4 = 1;

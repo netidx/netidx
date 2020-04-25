@@ -353,9 +353,10 @@ impl ::protobuf::reflect::ProtobufValue for SocketAddr_SocketAddrV4 {
 pub struct SocketAddr_SocketAddrV6 {
     // message fields
     pub port: u32,
-    pub octets: ::bytes::Bytes,
     pub flowinfo: u32,
     pub scope_id: u32,
+    pub octets_a: u64,
+    pub octets_b: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -379,25 +380,32 @@ impl SocketAddr_SocketAddrV6 {
         self.port
     }
 
-    // bytes octets = 2;
-
-
-    pub fn get_octets(&self) -> &[u8] {
-        &self.octets
-    }
-
-    // uint32 flowinfo = 3;
+    // uint32 flowinfo = 2;
 
 
     pub fn get_flowinfo(&self) -> u32 {
         self.flowinfo
     }
 
-    // uint32 scope_id = 4;
+    // uint32 scope_id = 3;
 
 
     pub fn get_scope_id(&self) -> u32 {
         self.scope_id
+    }
+
+    // uint64 octets_a = 4;
+
+
+    pub fn get_octets_a(&self) -> u64 {
+        self.octets_a
+    }
+
+    // uint64 octets_b = 5;
+
+
+    pub fn get_octets_b(&self) -> u64 {
+        self.octets_b
     }
 }
 
@@ -418,21 +426,32 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV6 {
                     self.port = tmp;
                 },
                 2 => {
-                    ::protobuf::rt::read_singular_proto3_carllerche_bytes_into(wire_type, is, &mut self.octets)?;
-                },
-                3 => {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
                     let tmp = is.read_uint32()?;
                     self.flowinfo = tmp;
                 },
-                4 => {
+                3 => {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
                     let tmp = is.read_uint32()?;
                     self.scope_id = tmp;
+                },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.octets_a = tmp;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.octets_b = tmp;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -449,14 +468,17 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV6 {
         if self.port != 0 {
             my_size += ::protobuf::rt::value_size(1, self.port, ::protobuf::wire_format::WireTypeVarint);
         }
-        if !self.octets.is_empty() {
-            my_size += ::protobuf::rt::bytes_size(2, &self.octets);
-        }
         if self.flowinfo != 0 {
-            my_size += ::protobuf::rt::value_size(3, self.flowinfo, ::protobuf::wire_format::WireTypeVarint);
+            my_size += ::protobuf::rt::value_size(2, self.flowinfo, ::protobuf::wire_format::WireTypeVarint);
         }
         if self.scope_id != 0 {
-            my_size += ::protobuf::rt::value_size(4, self.scope_id, ::protobuf::wire_format::WireTypeVarint);
+            my_size += ::protobuf::rt::value_size(3, self.scope_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.octets_a != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.octets_a, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.octets_b != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.octets_b, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -467,14 +489,17 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV6 {
         if self.port != 0 {
             os.write_uint32(1, self.port)?;
         }
-        if !self.octets.is_empty() {
-            os.write_bytes(2, &self.octets)?;
-        }
         if self.flowinfo != 0 {
-            os.write_uint32(3, self.flowinfo)?;
+            os.write_uint32(2, self.flowinfo)?;
         }
         if self.scope_id != 0 {
-            os.write_uint32(4, self.scope_id)?;
+            os.write_uint32(3, self.scope_id)?;
+        }
+        if self.octets_a != 0 {
+            os.write_uint64(4, self.octets_a)?;
+        }
+        if self.octets_b != 0 {
+            os.write_uint64(5, self.octets_b)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -521,9 +546,10 @@ impl ::protobuf::Message for SocketAddr_SocketAddrV6 {
 impl ::protobuf::Clear for SocketAddr_SocketAddrV6 {
     fn clear(&mut self) {
         self.port = 0;
-        self.octets.clear();
         self.flowinfo = 0;
         self.scope_id = 0;
+        self.octets_a = 0;
+        self.octets_b = 0;
         self.unknown_fields.clear();
     }
 }

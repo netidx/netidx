@@ -3802,7 +3802,7 @@ impl ::protobuf::reflect::ProtobufValue for ReadServerResponse_Resolved {
 #[derive(PartialEq,Clone,Default,Debug)]
 pub struct ReadServerResponse_List {
     // message fields
-    pub path: ::std::vec::Vec<::protobuf::Chars>,
+    pub paths: ::std::vec::Vec<::protobuf::Chars>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -3819,11 +3819,11 @@ impl ReadServerResponse_List {
         ::std::default::Default::default()
     }
 
-    // repeated string path = 1;
+    // repeated string paths = 1;
 
 
-    pub fn get_path(&self) -> &[::protobuf::Chars] {
-        &self.path
+    pub fn get_paths(&self) -> &[::protobuf::Chars] {
+        &self.paths
     }
 }
 
@@ -3837,7 +3837,7 @@ impl ::protobuf::Message for ReadServerResponse_List {
             let (field_number, wire_type) = is.read_tag_unpack()?;
             match field_number {
                 1 => {
-                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.path)?;
+                    ::protobuf::rt::read_repeated_carllerche_string_into(wire_type, is, &mut self.paths)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -3851,7 +3851,7 @@ impl ::protobuf::Message for ReadServerResponse_List {
     #[allow(unused_variables)]
     fn compute_size(&self) -> u32 {
         let mut my_size = 0;
-        for value in &self.path {
+        for value in &self.paths {
             my_size += ::protobuf::rt::string_size(1, &value);
         };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
@@ -3860,7 +3860,7 @@ impl ::protobuf::Message for ReadServerResponse_List {
     }
 
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
-        for v in &self.path {
+        for v in &self.paths {
             os.write_string(1, &v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
@@ -3907,7 +3907,7 @@ impl ::protobuf::Message for ReadServerResponse_List {
 
 impl ::protobuf::Clear for ReadServerResponse_List {
     fn clear(&mut self) {
-        self.path.clear();
+        self.paths.clear();
         self.unknown_fields.clear();
     }
 }

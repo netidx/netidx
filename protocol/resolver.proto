@@ -161,7 +161,7 @@ message ReadServerResponse {
 
   // this is the response to a successful List request
   message List {
-    repeated string path = 1;
+    repeated string paths = 1;
   }
 
   // this the response to any request that is not successful

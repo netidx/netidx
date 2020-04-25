@@ -1,13 +1,19 @@
 use crate::{
-    auth::Krb5Ctx, path::Path, protocol::shared::PermissionToken, secstore::SecStoreInner,
-    protocol::resolver::ReadServerResponse_AddrAndAuthToken as AddrAndAuthToken,
-    utils::std_socketaddr_to_protobuf,
+    auth::Krb5Ctx,
+    path::Path,
+    protocol::resolver::{
+        ReadServerResponse_AddrAndAuthToken as AddrAndAuthToken,
+        ReadServerResponse_Resolution as Resolution,
+    },
+    protocol::shared::PermissionToken,
+    secstore::SecStoreInner,
+    utils::saddr_to_protobuf,
 };
 use anyhow::Result;
+use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use protobuf::{Chars, Message, RepeatedField, SingularPtrField};
-use bytes::Bytes;
 use std::{
     clone::Clone,
     collections::{
@@ -155,29 +161,29 @@ impl<T> StoreInner<T> {
             .insert(path);
     }
 
-    pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
+    pub(crate) fn unpublish<P: AsRef<str>>(&mut self, path: P, addr: SocketAddr) {
         let client_gone = self
             .by_addr
             .get_mut(&addr)
             .map(|s| {
-                s.remove(&path);
+                s.remove(path.as_ref());
                 s.is_empty()
             })
             .unwrap_or(true);
         if client_gone {
             self.by_addr.remove(&addr);
         }
-        match self.by_path.get_mut(&path) {
+        match self.by_path.get_mut(path.as_ref()) {
             None => (),
             Some(addrs) => match self.addrs.remove_address(addrs, addr) {
                 Some(new_addrs) => {
                     *addrs = new_addrs;
                 }
                 None => {
-                    self.by_path.remove(&path);
+                    self.by_path.remove(path.as_ref());
                     let n = Path::levels(path.as_ref());
                     self.by_level.get_mut(&n).into_iter().for_each(|s| {
-                        s.remove(&path);
+                        s.remove(path.as_ref());
                     });
                     self.remove_parents(path.as_ref())
                 }
@@ -193,31 +199,45 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> RepeatedField<AddrAndAuthToken> {
-        self.by_path
-            .get(path.as_ref())
-            .map(|a| a.iter().map(|addr| AddrAndAuthToken {
-                addr: SingularPtrField::some(std_socketaddr_to_protobuf(*addr)),
-                token: Bytes::new(),
-                .. AddrAndAuthToken::default()
-            }).collect())
-            .unwrap_or_else(|| RepeatedField::from_vec(vec![]))
+    pub(crate) fn resolve<S: AsRef<str>>(&self, path: S) -> Resolution {
+        Resolution {
+            addrs: self
+                .by_path
+                .get(path.as_ref())
+                .map(|a| {
+                    a.iter()
+                        .map(|addr| AddrAndAuthToken {
+                            addr: SingularPtrField::some(saddr_to_protobuf(*addr)),
+                            token: Bytes::new(),
+                            ..AddrAndAuthToken::default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| RepeatedField::from_vec(vec![])),
+            ..Resolution::default()
+        }
     }
 
     pub(crate) fn resolve_and_sign<S: AsRef<str>>(
         &self,
         sec: &SecStoreInner,
-        krb5_spns: &mut HashMap<SocketAddr, String, FxBuildHasher>,
+        krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
         now: u64,
-        path: &S,
-    ) -> Result<Vec<(SocketAddr, Vec<u8>)>> {
-        self.by_path
+        path: S,
+    ) -> Result<Resolution> {
+        let sa = saddr_to_protobuf;
+        let addrs: RepeatedField<AddrAndAuthToken> = self
+            .by_path
             .get(path.as_ref())
             .map(|addrs| {
-                Ok(addrs
+                addrs
                     .iter()
                     .map(|addr| match sec.get_write(&addr) {
-                        None => Ok((*addr, vec![])),
+                        None => Ok(AddrAndAuthToken {
+                            addr: SingularPtrField::some(sa(*addr)),
+                            token: Bytes::new(),
+                            ..AddrAndAuthToken::default()
+                        }),
                         Some((spn, ctx)) => {
                             if !krb5_spns.contains_key(addr) {
                                 krb5_spns.insert(*addr, spn.clone());
@@ -228,16 +248,24 @@ impl<T> StoreInner<T> {
                                 ..PermissionToken::default()
                             }
                             .write_to_bytes()?;
-                            let tok = Vec::from(&*ctx.wrap(true, &msg)?);
-                            Ok((*addr, tok))
+                            let token = Bytes::copy_from_slice(&*ctx.wrap(true, &msg)?);
+                            Ok(AddrAndAuthToken {
+                                addr: SingularPtrField::some(sa(*addr)),
+                                token,
+                                ..AddrAndAuthToken::default()
+                            })
                         }
                     })
-                    .collect::<Result<Vec<(SocketAddr, Vec<u8>)>>>()?)
+                    .collect::<Result<RepeatedField<AddrAndAuthToken>>>()
             })
-            .unwrap_or_else(|| Ok(vec![]))
+            .unwrap_or_else(|| Ok(RepeatedField::from_vec(vec![])))?;
+        Ok(Resolution {
+            addrs,
+            ..Resolution::default()
+        })
     }
 
-    pub(crate) fn list<S: AsRef<str>>(&self, parent: &S) -> Vec<Path> {
+    pub(crate) fn list(&self, parent: &Chars) -> Vec<Chars> {
         let parent = parent.as_ref();
         self.by_level
             .get(&(Path::levels(parent) + 1))
@@ -245,6 +273,7 @@ impl<T> StoreInner<T> {
                 l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
                     .take_while(|p| p.as_ref().starts_with(parent))
                     .cloned()
+                    .map(|p| p.as_chars())
                     .collect()
             })
             .unwrap_or_else(Vec::new)

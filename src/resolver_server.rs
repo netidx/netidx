@@ -13,15 +13,15 @@ use crate::{
         },
     },
     resolver_store::Store,
-    secstore::SecStore,
+    secstore::{CtxId, SecStore},
     utils,
 };
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use futures::{prelude::*, select};
+use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
-use log::{debug, error, info};
-use protobuf::{Chars, Message, RepeatedField};
+use log::info;
+use protobuf::{Chars, RepeatedField, SingularPtrField};
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -77,7 +77,7 @@ fn handle_batch_write(
         WriteServerResponse_oneof_response as FromWrite,
     };
     let resp = |msg| WriteServerResponse {
-        response: msg,
+        response: Some(msg),
         ..WriteServerResponse::default()
     };
     let err = |msg| {
@@ -92,7 +92,7 @@ fn handle_batch_write(
             None => (),
             Some(ToWrite::Heartbeat(_)) => (),
             Some(ToWrite::Publish(Publish { paths, .. })) => {
-                if !paths.iter().all(Path::is_absolute) {
+                if !paths.iter().all(|p: &Chars| Path::is_absolute(&**p)) {
                     con.queue_send(&err(Chars::from("absolute paths required")))?
                 } else {
                     if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
@@ -146,7 +146,7 @@ async fn client_loop_write(
         }
     }
     loop {
-        select! {
+        select_biased! {
             _ = server_stop => break Ok(()),
             _ = rx_stop => break Ok(()),
             m = receive_batch(&mut con, &mut batch).fuse() => match m {
@@ -187,7 +187,7 @@ async fn client_loop_write(
                     }
                     store.unpublish_addr(write_addr);
                     store.gc();
-                    bail!("client timed out");
+                    return Err(anyhow!("client timed out"));
                 }
             },
         }
@@ -200,7 +200,7 @@ async fn hello_client_write(
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
     id: ResolverId,
-    hello: ClientHelloWrite,
+    mut hello: ClientHelloWrite,
 ) -> Result<()> {
     use protocol::{
         publisher::{
@@ -225,7 +225,7 @@ async fn hello_client_write(
     let write_addr = hello
         .write_addr
         .take()
-        .and_then(utils::protobuf_socketaddr_to_std)
+        .and_then(utils::saddr_from_protobuf)
         .ok_or_else(|| anyhow!("protocol error, write addr required"))?;
     let ttl_expired = !store.read().clinfo().contains_key(&write_addr);
     let uifo = match hello
@@ -313,9 +313,9 @@ async fn hello_client_write(
                         let client = ctx.client()?;
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = if spn.len() == 0 {
-                            client
+                            Chars::from(client)
                         } else {
-                            String::from(&*spn)
+                            spn
                         };
                         secstore.store_write(write_addr, spn, ctx.clone());
                         uifo
@@ -354,9 +354,11 @@ fn handle_batch_read(
     msgs: impl Iterator<Item = ReadClientRequest>,
 ) -> Result<()> {
     use protocol::resolver::{
-        ReadClientRequest_Resolve as Resolve, ReadClientRequest_oneof_request as ToRead,
-        ReadServerResponse, ReadServerResponse_AddrAndAuthToken as AddrAndToken,
-        ReadServerResponse_Resolution as Resolution,
+        ReadClientRequest_List as ListReq, ReadClientRequest_Resolve as Resolve,
+        ReadClientRequest_oneof_request as ToRead, ReadServerResponse,
+        ReadServerResponse_Error as RsError,
+        ReadServerResponse_Krb5SpnMapping as Krb5SpnMapping,
+        ReadServerResponse_List as List, ReadServerResponse_Resolved as Resolved,
         ReadServerResponse_oneof_response as FromRead,
     };
     let now = SystemTime::now()
@@ -364,57 +366,77 @@ fn handle_batch_read(
         .as_secs();
     let s = store.read();
     let sec = secstore.map(|s| s.store.read());
+    let resp = |r| ReadServerResponse {
+        response: Some(r),
+        ..ReadServerResponse::default()
+    };
+    let err = |m| {
+        resp(FromRead::Error(RsError {
+            description: m,
+            ..RsError::default()
+        }))
+    };
     for m in msgs {
         match m.request {
             None => (),
             Some(ToRead::Resolve(Resolve { paths, .. })) => {
                 if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
                     con.queue_send(&match sec {
-                        None => ReadServerResponse {
-                            response: Some(FromRead::Resolved(Resolution {
-                                krb5_spns: RepeatedField::from_vec(vec![]),
-                                resolver_id: id.get(),
-                                addrs: paths
-                                    .iter()
-                                    .map(|p| s.resolve(p))
-                                    .collect::<Vec<_>>(),
-                                .. Resolution::default()
-                            })),
-                            ..ReadServerResponse::default()
-                        },
+                        None => resp(FromRead::Resolved(Resolved {
+                            krb5_spns: RepeatedField::from_vec(vec![]),
+                            resolver_id: id.get(),
+                            results: paths
+                                .iter()
+                                .map(|p| s.resolve(&**p))
+                                .collect::<RepeatedField<_>>(),
+                            ..Resolved::default()
+                        })),
                         Some(ref sec) => {
                             let mut krb5_spns =
                                 HashMap::with_hasher(FxBuildHasher::default());
-                            let addrs = paths
+                            let results = paths
                                 .iter()
                                 .map(|p| {
                                     Ok(s.resolve_and_sign(
                                         &**sec,
                                         &mut krb5_spns,
                                         now,
-                                        p,
+                                        &**p,
                                     )?)
                                 })
-                                .collect::<Result<Vec<_>>>()?;
-                            FromRead::Resolved(Resolved {
-                                krb5_spns,
-                                resolver: id,
-                                addrs,
-                            })
+                                .collect::<Result<RepeatedField<_>>>()?;
+                            resp(FromRead::Resolved(Resolved {
+                                krb5_spns: krb5_spns
+                                    .into_iter()
+                                    .map(|(addr, spn)| Krb5SpnMapping {
+                                        addr: SingularPtrField::some(
+                                            utils::saddr_to_protobuf(addr),
+                                        ),
+                                        spn,
+                                        ..Krb5SpnMapping::default()
+                                    })
+                                    .collect::<RepeatedField<_>>(),
+                                resolver_id: id.get(),
+                                results,
+                                ..Resolved::default()
+                            }))
                         }
                     })?
                 } else {
-                    con.queue_send(&FromRead::Error("denied".into()))?
+                    con.queue_send(&err(Chars::from("denied")))?
                 }
             }
-            ToRead::List(path) => {
+            Some(ToRead::List(ListReq { path, .. })) => {
                 let allowed = secstore
                     .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
                     .unwrap_or(true);
                 if allowed {
-                    con.queue_send(&FromRead::List(s.list(&path)))?
+                    con.queue_send(&resp(FromRead::List(List {
+                        paths: s.list(&path),
+                        ..List::default()
+                    })))?
                 } else {
-                    con.queue_send(&FromRead::Error("denied".into()))?
+                    con.queue_send(&err(Chars::from("denied")))?
                 }
             }
         }
@@ -430,13 +452,20 @@ async fn client_loop_read(
     id: ResolverId,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
-    let mut batch: Vec<ToRead> = Vec::new();
+    let mut batch: Vec<ReadClientRequest> = Vec::new();
     let mut server_stop = server_stop.fuse();
     let mut act = false;
     let mut timeout = time::interval_at(Instant::now() + READER_TTL, READER_TTL).fuse();
     loop {
-        select! {
+        select_biased! {
             _ = server_stop => break Ok(()),
+            _ = timeout.next() => {
+                if act {
+                    act = false;
+                } else {
+                    return Err(anyhow!("client timed out"));
+                }
+            }
             m = con.receive_batch(&mut batch).fuse() => {
                 m?;
                 act = true;
@@ -450,13 +479,6 @@ async fn client_loop_read(
                 )?;
                 con.flush().await?;
             },
-            _ = timeout.next() => {
-                if act {
-                    act = false;
-                } else {
-                    bail!("client timed out");
-                }
-            }
         }
     }
 }
@@ -467,34 +489,55 @@ async fn hello_client_read(
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
     id: ResolverId,
-    hello: ClientAuthRead,
+    hello: ClientHelloRead,
 ) -> Result<()> {
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloRead) -> Result<()> {
+    use protocol::resolver::{
+        ClientHello_Read_Initiate as Initiate, ClientHello_Read_Reuse as Reuse,
+        ClientHello_Read_oneof_auth as ClientAuthRead,
+        ServerHelloRead_Accepted as Accepted, ServerHelloRead_Anonymous as Anonymous,
+        ServerHelloRead_Reused as Reused, ServerHelloRead_oneof_auth as ServerHelloRead,
+    };
+    async fn send(
+        con: &mut Channel<ServerCtx>,
+        hello: protocol::resolver::ServerHelloRead,
+    ) -> Result<()> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
-    let uifo = match hello {
-        ClientAuthRead::Anonymous => {
-            send(&mut con, ServerHelloRead::Anonymous).await?;
+    let resp = |auth| protocol::resolver::ServerHelloRead {
+        auth: Some(auth),
+        ..protocol::resolver::ServerHelloRead::default()
+    };
+    let uifo = match hello.auth {
+        None => return Err(anyhow!("protocol error")),
+        Some(ClientAuthRead::Anonymous(_)) => {
+            let m = resp(ServerHelloRead::Anonymous(Anonymous::default()));
+            send(&mut con, m).await?;
             ANONYMOUS.clone()
         }
-        ClientAuthRead::Reuse(id) => match secstore {
-            None => bail!("authentication requested but not supported"),
-            Some(ref secstore) => match secstore.get_read(&id) {
-                None => bail!("ctx id not found"),
+        Some(ClientAuthRead::Reuse(Reuse { session_id, .. })) => match secstore {
+            None => return Err(anyhow!("authentication requested but not supported")),
+            Some(ref secstore) => match secstore.get_read(&CtxId::from(session_id)) {
+                None => return Err(anyhow!("ctx id not found")),
                 Some(ctx) => {
-                    send(&mut con, ServerHelloRead::Reused).await?;
-                    con.set_ctx(Some(ctx.clone()));
+                    send(&mut con, resp(ServerHelloRead::Reused(Reused::default())))
+                        .await?;
+                    con.set_ctx(ctx.clone());
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
         },
-        ClientAuthRead::Token(tok) => match secstore {
-            None => bail!("authentication requested but not supported"),
+        Some(ClientAuthRead::Initiate(Initiate { token, .. })) => match secstore {
+            None => return Err(anyhow!("authentication requested but not supported")),
             Some(ref secstore) => {
-                let (ctx, tok) = secstore.create(&tok)?;
+                let (ctx, token) = secstore.create(&*token)?;
                 let id = secstore.store_read(ctx.clone());
-                send(&mut con, ServerHelloRead::Accepted(tok, id)).await?;
-                con.set_ctx(Some(ctx.clone()));
+                let m = resp(ServerHelloRead::Accepted(Accepted {
+                    token,
+                    context_id: id.get(),
+                    ..Accepted::default()
+                }));
+                send(&mut con, m).await?;
+                con.set_ctx(ctx.clone());
                 secstore.ifo(Some(&ctx.client()?))?
             }
         },
@@ -509,14 +552,16 @@ async fn hello_client(
     secstore: Option<SecStore>,
     id: ResolverId,
 ) -> Result<()> {
+    use protocol::resolver::ClientHello_oneof_hello as Hello;
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
-    match hello {
-        ClientHello::ReadOnly(hello) => {
+    match hello.hello {
+        None => return Err(anyhow!("protocol error, hello required")),
+        Some(Hello::ReadOnly(hello)) => {
             Ok(hello_client_read(store, con, server_stop, secstore, id, hello).await?)
         }
-        ClientHello::WriteOnly(hello) => {
+        Some(Hello::WriteOnly(hello)) => {
             Ok(hello_client_write(store, con, server_stop, secstore, id, hello).await?)
         }
     }
@@ -538,12 +583,18 @@ async fn server_loop(
     let mut listener = TcpListener::bind(cfg.addr).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
-    let mut client_stops = Vec::new();
+    let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = cfg.max_connections;
     let id = cfg.id;
     let _ = ready.send(local_addr);
     loop {
-        select! {
+        select_biased! {
+            _ = stop => {
+                for cl in client_stops.drain(..) {
+                    let _ = cl.send(());
+                }
+                return Ok(local_addr)
+            },
             cl = listener.accept().fuse() => match cl {
                 Err(_) => (),
                 Ok((client, _)) => {
@@ -561,12 +612,6 @@ async fn server_loop(
                         });
                     }
                 }
-            },
-            _ = stop => {
-                for cl in client_stops.drain(..) {
-                    let _ = cl.send(());
-                }
-                return Ok(local_addr)
             },
         }
     }
@@ -591,7 +636,7 @@ impl Server {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, recv_stop, send_ready);
-        let local_addr = select! {
+        let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,
         };
