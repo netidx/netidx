@@ -1,184 +1,16 @@
 use crate::utils::{Chars, Pack, PackError};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{
-    collections::HashMap,
-    error, fmt,
-    hash::{BuildHasher, Hash},
-    mem, net, result,
-};
+use std::{collections::HashMap, error, fmt, mem, net, result};
 
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
 
-impl Pack for net::SocketAddr {
-    fn len(&self) -> usize {
-        match self {
-            net::SocketAddr::V4(_) => 7,
-            net::SocketAddr::V6(_) => 27,
-        }
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        match self {
-            net::SocketAddr::V4(v4) => {
-                buf.put_u8(0);
-                buf.put_u32(u32::from_be_bytes(v4.ip().octets()));
-                buf.put_u16(v4.port());
-            }
-            net::SocketAddr::V6(v6) => {
-                buf.put_u8(1);
-                for s in &v6.ip().segments() {
-                    buf.put_u16(*s);
-                }
-                buf.put_u16(v6.port());
-                buf.put_u32(v6.flowinfo());
-                buf.put_u32(v6.scope_id());
-            }
-        }
-        Ok(())
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        match buf.get_u8() {
-            0 => {
-                let ip = net::Ipv4Addr::from(u32::to_be_bytes(buf.get_u32()));
-                let port = buf.get_u16();
-                Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
-            }
-            1 => {
-                let mut segments = [0u16; 8];
-                for i in 0..8 {
-                    segments[i] = buf.get_u16();
-                }
-                let port = buf.get_u16();
-                let flowinfo = buf.get_u32();
-                let scope_id = buf.get_u32();
-                let ip = net::Ipv6Addr::from(segments);
-                let v6 = net::SocketAddrV6::new(ip, port, flowinfo, scope_id);
-                Ok(net::SocketAddr::V6(v6))
-            }
-            _ => return Err(Error::UnknownTag),
-        }
-    }
-}
-
-impl Pack for Bytes {
-    fn len(&self) -> usize {
-        Bytes::len(self) + mem::size_of::<u32>()
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(Bytes::len(self) as u32);
-        Ok(buf.extend_from_slice(&*self))
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        let len = buf.get_u32();
-        Ok(buf.split_to(len as usize).freeze())
-    }
-}
-
-impl Pack for u64 {
-    fn len(&self) -> usize {
-        mem::size_of::<u64>()
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        Ok(buf.put_u64(*self))
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        Ok(buf.get_u64())
-    }
-}
-
-impl<T: Pack> Pack for Vec<T> {
-    fn len(&self) -> usize {
-        self.iter()
-            .fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(Vec::len(self) as u32);
-        for t in self {
-            <T as Pack>::encode(t, buf)?
-        }
-        Ok(())
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        let elts = buf.get_u32() as usize;
-        let mut data = Vec::with_capacity(elts);
-        for _ in 0..elts {
-            data.push(<T as Pack>::decode(buf)?);
-        }
-        Ok(data)
-    }
-}
-
-impl<K, V, R> Pack for HashMap<K, V, R>
-where
-    K: Pack + Hash + Eq,
-    V: Pack + Hash + Eq,
-    R: Default + BuildHasher,
-{
-    fn len(&self) -> usize {
-        self.iter().fold(mem::size_of::<u32>(), |len, (k, v)| {
-            len + <K as Pack>::len(k) + <V as Pack>::len(v)
-        })
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(HashMap::len(self) as u32);
-        for (k, v) in self {
-            <K as Pack>::encode(k, buf)?;
-            <V as Pack>::encode(v, buf)?;
-        }
-        Ok(())
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        let elts = buf.get_u32() as usize;
-        let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
-        for _ in 0..elts {
-            let k = <K as Pack>::decode(buf)?;
-            let v = <V as Pack>::decode(buf)?;
-            data.insert(k, v);
-        }
-        Ok(data)
-    }
-}
-
-impl<T: Pack> Pack for Option<T> {
-    fn len(&self) -> usize {
-        1 + match self {
-            None => 0,
-            Some(v) => <T as Pack>::len(v),
-        }
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        match self {
-            None => Ok(buf.put_u8(0)),
-            Some(v) => {
-                buf.put_u8(1);
-                <T as Pack>::encode(v, buf)
-            }
-        }
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        match buf.get_u8() {
-            0 => Ok(None),
-            1 => Ok(Some(<T as Pack>::decode(buf)?)),
-            _ => return Err(Error::UnknownTag),
-        }
-    }
-}
-
 pub mod resolver {
     use super::*;
-    use crate::{path::Path, utils::{Chars, Pack}};
+    use crate::{
+        path::Path,
+        utils::{Chars, Pack},
+    };
     use bytes::Bytes;
     use fxhash::FxBuildHasher;
     use std::{collections::HashMap, net::SocketAddr};
@@ -469,21 +301,19 @@ pub mod resolver {
 
     impl Pack for ServerHelloWrite {
         fn len(&self) -> usize {
-            1 + ResolverId::len(&self.resolver_id) + ServerAuthWrite::len(&self.auth)
+            <bool as Pack>::len(&self.ttl_expired)
+                + ResolverId::len(&self.resolver_id)
+                + ServerAuthWrite::len(&self.auth)
         }
 
         fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-            buf.put_u8(if self.ttl_expired { 1 } else { 0 });
+            <bool as Pack>::encode(&self.ttl_expired, buf)?;
             ResolverId::encode(&self.resolver_id, buf)?;
             Ok(ServerAuthWrite::encode(&self.auth, buf)?)
         }
 
         fn decode(buf: &mut BytesMut) -> Result<Self> {
-            let ttl_expired = match buf.get_u8() {
-                0 => false,
-                1 => true,
-                _ => return Err(Error::UnknownTag),
-            };
+            let ttl_expired = <bool as Pack>::decode(buf)?;
             let resolver_id = ResolverId::decode(buf)?;
             let auth = ServerAuthWrite::decode(buf)?;
             Ok(ServerHelloWrite {
@@ -511,11 +341,30 @@ pub mod resolver {
         }
 
         fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-            todo!()
+            match self {
+                ToRead::Resolve(paths) => {
+                    buf.put_u8(0);
+                    Ok(<Vec<Path> as Pack>::encode(paths, buf)?)
+                }
+                ToRead::List(path) => {
+                    buf.put_u8(1);
+                    Ok(<Path as Pack>::encode(path, buf)?)
+                }
+            }
         }
 
         fn decode(buf: &mut BytesMut) -> Result<Self> {
-            todo!()
+            match buf.get_u8() {
+                0 => {
+                    let paths = <Vec<Path> as Pack>::decode(buf)?;
+                    Ok(ToRead::Resolve(paths))
+                }
+                1 => {
+                    let path = <Path as Pack>::decode(buf)?;
+                    Ok(ToRead::List(path))
+                }
+                _ => Err(Error::UnknownTag),
+            }
         }
     }
 
@@ -526,11 +375,75 @@ pub mod resolver {
         pub addrs: Vec<Vec<(SocketAddr, Bytes)>>,
     }
 
+    impl Pack for Resolved {
+        fn len(&self) -> usize {
+            <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
+                + ResolverId::len(&self.resolver)
+                + <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::len(&self.addrs)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::encode(
+                &self.krb5_spns,
+                buf,
+            )?;
+            ResolverId::encode(&self.resolver, buf)?;
+            Ok(<Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(
+                &self.addrs,
+                buf,
+            )?)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            let krb5_spns =
+                <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
+            let resolver = ResolverId::decode(buf)?;
+            let addrs = <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
+            Ok(Resolved { krb5_spns, resolver, addrs })
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub enum FromRead {
         Resolved(Resolved),
         List(Vec<Path>),
         Error(Chars),
+    }
+
+    impl Pack for FromRead {
+        fn len(&self) -> usize {
+            1 + match self {
+                FromRead::Resolved(r) => Resolved::len(r),
+                FromRead::List(l) => <Vec<Path> as Pack>::len(l),
+                FromRead::Error(e) => <Chars as Pack>::len(e),
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                FromRead::Resolved(r) => {
+                    buf.put_u8(0);
+                    Ok(Resolved::encode(r, buf)?)
+                }
+                FromRead::List(l) => {
+                    buf.put_u8(1);
+                    Ok(<Vec<Path> as Pack>::encode(l, buf)?)
+                }
+                FromRead::Error(e) => {
+                    buf.put_u8(2);
+                    Ok(<Chars as Pack>::encode(e, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
+                1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
+                2 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
+                _ => Err(Error::UnknownTag)
+            }
+        }
     }
 
     /// This is the format of the Vec<u8> passed back with each
