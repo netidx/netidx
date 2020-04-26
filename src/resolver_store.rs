@@ -1,11 +1,12 @@
 use crate::{
-    auth::{Krb5Ctx, Krb5ServerCtx},
+    auth::Krb5Ctx,
     path::Path,
     protocol::resolver::PermissionToken,
     secstore::SecStoreInner,
-    utils::mp_encode,
+    utils::{self, Pack},
 };
-use failure::Error;
+use bytes::Bytes;
+use anyhow::Result;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use std::{
@@ -193,37 +194,37 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Vec<u8>)> {
+    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Bytes)> {
         self.by_path
             .get(path.as_ref())
-            .map(|a| a.iter().map(|addr| (*addr, vec![])).collect())
+            .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
             .unwrap_or_else(|| Vec::new())
     }
 
-    pub(crate) fn resolve_and_sign<S: AsRef<str>>(
+    pub(crate) fn resolve_and_sign(
         &self,
         sec: &SecStoreInner,
         krb5_spns: &mut HashMap<SocketAddr, String, FxBuildHasher>,
         now: u64,
-        path: &S,
-    ) -> Result<Vec<(SocketAddr, Vec<u8>)>, Error> {
+        path: &Path,
+    ) -> Result<Vec<(SocketAddr, Bytes)>> {
         self.by_path
-            .get(path.as_ref())
+            .get(&*path)
             .map(|addrs| {
                 Ok(addrs
                     .iter()
                     .map(|addr| match sec.get_write(&addr) {
-                        None => Ok((*addr, vec![])),
+                        None => Ok((*addr, Bytes::new())),
                         Some((spn, ctx)) => {
                             if !krb5_spns.contains_key(addr) {
                                 krb5_spns.insert(*addr, spn.clone());
                             }
-                            let msg = mp_encode(&PermissionToken(path.as_ref(), now))?;
-                            let tok = Vec::from(&*ctx.wrap(true, &*msg)?);
+                            let msg = utils::pack(&PermissionToken(path.clone(), now))?;
+                            let tok = utils::bytes(&*ctx.wrap(true, &*msg)?);
                             Ok((*addr, tok))
                         }
                     })
-                    .collect::<Result<Vec<(SocketAddr, Vec<u8>)>, Error>>()?)
+                    .collect::<Result<Vec<(SocketAddr, Bytes)>>>()?)
             })
             .unwrap_or_else(|| Ok(vec![]))
     }

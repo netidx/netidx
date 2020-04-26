@@ -5,8 +5,9 @@ use crate::{
         Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
     },
     config,
+    protocol::resolver::CtxId,
+    utils::Chars,
 };
-use protobuf::Chars;
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
 use bytes::Bytes;
@@ -14,29 +15,6 @@ use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-pub struct CtxId(u64);
-
-impl CtxId {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    pub fn get(&self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for CtxId {
-    fn from(i: u64) -> Self {
-        CtxId(i)
-    }
-}
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
@@ -146,12 +124,9 @@ impl SecStore {
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes)> {
         let ctx = SYS_KRB5.create_server_ctx(Some(self.spn.as_bytes()))?;
-        let tok = ctx
-            .step(Some(tok))?
-            .map(|b| Bytes::copy_from_slice(&*b))
-            .ok_or_else(|| {
-                anyhow!("step didn't generate a mutual authentication token")
-            })?;
+        let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
+            || anyhow!("step didn't generate a mutual authentication token"),
+        )?;
         Ok((ctx, tok))
     }
 

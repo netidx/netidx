@@ -1,4 +1,5 @@
 use crate::{
+    utils::{self, Chars},
     auth::{
         syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
@@ -12,7 +13,9 @@ use crate::{
         ServerHelloWrite, ToRead, ToWrite,
     },
 };
-use failure::Error;
+use log::info;
+use bytes::Bytes;
+use anyhow::Result;
 use futures::{future::select_ok, prelude::*, select};
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
@@ -20,7 +23,6 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
     net::SocketAddr,
-    result,
     sync::Arc,
     time::Duration,
 };
@@ -33,8 +35,6 @@ use tokio::{
 
 static TTL: u64 = 120;
 static LINGER: u64 = 10;
-
-type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -54,14 +54,11 @@ async fn send<T: Send + Sync + Debug + 'static, F: Send + Sync + Debug + 'static
     Ok(rx.await?)
 }
 
-fn create_ctx(
-    upn: Option<&[u8]>,
-    target_spn: &[u8],
-) -> Result<(ClientCtx, Vec<u8>)> {
+fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes)> {
     let ctx = SYS_KRB5.create_client_ctx(upn, target_spn)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
-        Some(tok) => Ok((ctx, Vec::from(&*tok))),
+        Some(tok) => Ok((ctx, utils::bytes(&*tok))),
     }
 }
 
@@ -82,7 +79,7 @@ async fn connect_read(
         }
         backoff += 1;
         let addr = choose_read_addr(resolver);
-        let con = try_cont!("connect", TcpStream::connect(&addr.1).await);
+        let con = try_cf!("connect", continue, TcpStream::connect(&addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
@@ -92,29 +89,29 @@ async fn connect_read(
                 None => {
                     let upn = upn.as_ref().map(|s| s.as_bytes());
                     let target_spn = target_spn.as_bytes();
-                    let (ctx, tok) = try_cont!("create ctx", create_ctx(upn, target_spn));
-                    (ClientAuthRead::Token(tok), Some(ctx))
+                    let (ctx, tok) =
+                        try_cf!("create ctx", continue, create_ctx(upn, target_spn));
+                    (ClientAuthRead::Initiate(tok), Some(ctx))
                 }
             },
         };
-        try_cont!("hello", con.send_one(&ClientHello::ReadOnly(auth)).await);
-        let r: ServerHelloRead = try_cont!("hello reply", con.receive().await);
-        con.set_ctx(ctx.clone());
-        // CR estokes: replace this with proper logging
+        try_cf!("hello", continue, con.send_one(&ClientHello::ReadOnly(auth)).await);
+        let r: ServerHelloRead = try_cf!("hello reply",  continue, con.receive().await);
+        ctx.iter().for_each(|ctx| con.set_ctx(ctx.clone()));
         match (desired_auth, r) {
             (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
             (Auth::Anonymous, _) => {
-                println!("server requires authentication");
+                info!("server requires authentication");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
-                println!("could not authenticate resolver server");
+                info!("could not authenticate resolver server");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
             (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
                 let ctx = ctx.unwrap();
-                try_cont!("resolver tok", ctx.step(Some(&tok)));
+                try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
                 *sc = Some((id, ctx));
             }
         }
@@ -200,7 +197,7 @@ async fn connect_write(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con = try_cont!("connect", TcpStream::connect(&resolver_addr.1).await);
+        let con = try_cf!("connect", continue, TcpStream::connect(&resolver_addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
@@ -211,17 +208,17 @@ async fn connect_write(
                     None => {
                         let upnr = upn.as_ref().map(|s| s.as_bytes());
                         let target_spn = target_spn.as_bytes();
-                        let (ctx, token) = try_cont!("ctx", create_ctx(upnr, target_spn));
-                        let spn = spn.as_ref().or(upn.as_ref()).cloned();
-                        (ClientAuthWrite::Token { spn, token }, Some(ctx))
+                        let (ctx, token) = try_cf!("ctx", continue, create_ctx(upnr, target_spn));
+                        let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                        (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
                     }
                 }
             }
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
-        try_cont!("hello", con.send_one(&h).await);
-        con.set_ctx(ctx.clone());
-        let r: ServerHelloWrite = try_cont!("hello reply", con.receive().await);
+        try_cf!("hello", continue, con.send_one(&h).await);
+        ctx.iter().for_each(|ctx| con.set_ctx(ctx.clone()));
+        let r: ServerHelloWrite = try_cf!("hello reply", continue, con.receive().await);
         // CR estokes: replace this with proper logging
         match (desired_auth, r.auth) {
             (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
@@ -236,19 +233,19 @@ async fn connect_write(
             (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => (),
             (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
                 let ctx = ctx.unwrap();
-                try_cont!("resolver tok", ctx.step(Some(&tok)));
-                if r.id != resolver_addr.0 {
+                try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
+                if r.resolver_id != resolver_addr.0 {
                     bail!("resolver id mismatch, bad configuration");
                 }
-                ctxts.write().insert(r.id, ctx.clone());
+                ctxts.write().insert(r.resolver_id, ctx.clone());
             }
         }
         if !r.ttl_expired {
             break Ok(con);
         } else {
             let m = ToWrite::Publish(published.read().iter().cloned().collect());
-            try_cont!("republish", con.send_one(&m).await);
-            match try_cont!("replublish reply", con.receive().await) {
+            try_cf!("republish", continue, con.send_one(&m).await);
+            match try_cf!("replublish reply", continue, con.receive().await) {
                 FromWrite::Published => break Ok(con),
                 _ => (),
             }

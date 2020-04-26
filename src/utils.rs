@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{self, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{
     prelude::*,
@@ -17,32 +17,65 @@ use std::{
     mem, net,
     ops::{Deref, DerefMut},
     str,
+    cell::RefCell,
 };
 
+macro_rules! bail {
+    ($($msg:expr), +) => {
+        return Err(anyhow::anyhow!($($msg), +))
+    }
+}
+
 macro_rules! try_cf {
-    ($msg:expr, $id:ident, $lbl:tt, $e:expr) => {
+    ($msg:expr, continue, $lbl:tt, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
                 log::info!($msg, e);
-                $id $lbl Err(Error::from(e));
+                continue $lbl;
             }
         }
     };
-    ($msg:expr, $id:ident, $e:expr) => {
+    ($msg:expr, break, $lbl:tt, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
                 log::info!($msg, e);
-                $id Err(Error::from(e));
+                break $lbl Err(Error::from(e));
             }
         }
     };
-    ($id:ident, $lbl:tt, $e:expr) => {
+    ($msg:expr, continue, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                $id $lbl Err(Error::from(e));
+                log::info!("{}: {}", $msg, e);
+                continue;
+            }
+        }
+    };
+    ($msg:expr, break, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!("{}: {}", $msg, e);
+                break Err(Error::from(e));
+            }
+        }
+    };
+    (continue, $lbl:tt, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                continue $lbl;
+            }
+        }
+    };
+    (break, $lbl:tt, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                break $lbl Err(Error::from(e));
             }
         }
     };
@@ -50,16 +83,24 @@ macro_rules! try_cf {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                log::info!($msg, e);
+                log::info!("{}: {}", $msg, e);
                 break Err(Error::from(e));
             }
         }
     };
-    ($id:ident, $e:expr) => {
+    (continue, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                $id Err(Error::from(e));
+                continue;
+            }
+        }
+    };
+    (break, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                break Err(Error::from(e));
             }
         }
     };
@@ -389,6 +430,26 @@ impl fmt::Debug for Chars {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
+}
+
+thread_local! {
+    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
+pub fn pack<T: Pack>(t: &T) -> Result<Bytes, PackError> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        t.encode(&mut *b)?;
+        Ok(b.split().freeze())
+    })
+}
+
+pub fn bytes(t: &[u8]) -> Bytes {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        b.extend_from_slice(t);
+        Ok(b.split().freeze())
+    })
 }
 
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);

@@ -466,7 +466,7 @@ pub(crate) mod sysgmapper {
     // but unfortunatly Apple doesn't implement it. Luckily the 'id'
     // command is specified in POSIX.
     use super::GMapper;
-    use anyhow::{anyhow, Error, Result};
+    use anyhow::{anyhow, Result};
     use std::process::Command;
     use tokio::task;
 

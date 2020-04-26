@@ -1,4 +1,4 @@
-use crate::utils;
+use crate::utils::{self, Chars, Pack, PackError};
 use std::{
     borrow::Borrow,
     cmp::{Eq, Ord, PartialEq, PartialOrd},
@@ -6,10 +6,9 @@ use std::{
     fmt,
     iter::Iterator,
     ops::Deref,
-    str::FromStr,
     result::Result,
+    str::FromStr,
 };
-use utils::{Chars, Pack, PackError};
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -155,11 +154,7 @@ fn is_escaped(s: &str, i: usize) -> bool {
 
 enum BaseNames<'a> {
     Root(bool),
-    Path {
-        cur: &'a str,
-        all: &'a str,
-        base: usize,
-    },
+    Path { cur: &'a str, all: &'a str, base: usize },
 }
 
 impl<'a> Iterator for BaseNames<'a> {
@@ -172,11 +167,7 @@ impl<'a> Iterator for BaseNames<'a> {
                 *self = BaseNames::Root(false);
                 Some("/")
             }
-            BaseNames::Path {
-                ref mut cur,
-                ref all,
-                ref mut base,
-            } => {
+            BaseNames::Path { ref mut cur, ref all, ref mut base } => {
                 if *base == all.len() {
                     None
                 } else {
@@ -287,11 +278,7 @@ impl Path {
         if s == "/" {
             BaseNames::Root(true)
         } else {
-            BaseNames::Path {
-                cur: s,
-                all: s,
-                base: 1,
-            }
+            BaseNames::Path { cur: s, all: s, base: 1 }
         }
     }
 

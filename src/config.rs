@@ -1,19 +1,11 @@
 pub mod resolver_server {
+    use crate::protocol::resolver::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
         collections::HashMap, convert::AsRef, net::SocketAddr, path::Path as FsPath,
         fs::read_to_string,
     };
-
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-    pub struct ResolverId(u64);
-
-    impl ResolverId {
-        pub fn get(&self) -> u64 {
-            self.0
-        }
-    }
 
     mod file {
         use std::net::SocketAddr;
@@ -91,6 +83,7 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
+    use crate::protocol::resolver::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
     use std::{convert::AsRef, net::SocketAddr, path::Path};
@@ -104,7 +97,7 @@ pub mod resolver {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Config {
-        pub servers: Vec<(u64, SocketAddr)>,
+        pub servers: Vec<(ResolverId, SocketAddr)>,
         pub auth: Auth,
     }
 

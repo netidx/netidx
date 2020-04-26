@@ -1,7 +1,7 @@
 use crate::{auth::Krb5Ctx, utils::Pack};
 use byteorder::{ByteOrder, BigEndian};
 use anyhow::{anyhow, Error, Result};
-use bytes::{buf::BufExt, Buf, BufMut, Bytes, BytesMut};
+use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use futures::prelude::*;
 use log::info;
 use std::{
