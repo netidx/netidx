@@ -399,7 +399,11 @@ pub mod resolver {
                 <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
             let resolver = ResolverId::decode(buf)?;
             let addrs = <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
-            Ok(Resolved { krb5_spns, resolver, addrs })
+            Ok(Resolved {
+                krb5_spns,
+                resolver,
+                addrs,
+            })
         }
     }
 
@@ -441,7 +445,7 @@ pub mod resolver {
                 0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
                 1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
                 2 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
-                _ => Err(Error::UnknownTag)
+                _ => Err(Error::UnknownTag),
             }
         }
     }
@@ -454,7 +458,24 @@ pub mod resolver {
     /// fabricate the token without the session key shared by the
     /// resolver server and the publisher).
     #[derive(Clone, Debug)]
-    pub struct PermissionToken(pub Chars, pub u64);
+    pub struct PermissionToken(pub Path, pub u64);
+
+    impl Pack for PermissionToken {
+        fn len(&self) -> usize {
+            <Path as Pack>::len(&self.0) + <u64 as Pack>::len(&self.1)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            <Path as Pack>::encode(&self.0, buf)?;
+            Ok(<u64 as Pack>::encode(&self.1, buf)?)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            let path = <Path as Pack>::decode(buf)?;
+            let time = <u64 as Pack>::decode(buf)?;
+            Ok(PermissionToken(path, time))
+        }
+    }
 
     #[derive(Clone, Debug)]
     pub enum ToWrite {
@@ -468,11 +489,77 @@ pub mod resolver {
         Heartbeat,
     }
 
+    impl Pack for ToWrite {
+        fn len(&self) -> usize {
+            1 + match self {
+                ToWrite::Publish(p) => <Vec<Path> as Pack>::len(p),
+                ToWrite::Unpublish(p) => <Vec<Path> as Pack>::len(p),
+                ToWrite::Clear => 0,
+                ToWrite::Heartbeat => 0,
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                ToWrite::Publish(p) => {
+                    buf.put_u8(0);
+                    Ok(<Vec<Path> as Pack>::encode(p, buf)?)
+                }
+                ToWrite::Unpublish(p) => {
+                    buf.put_u8(1);
+                    Ok(<Vec<Path> as Pack>::encode(p, buf)?)
+                }
+                ToWrite::Clear => Ok(buf.put_u8(2)),
+                ToWrite::Heartbeat => Ok(buf.put_u8(3)),
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(ToWrite::Publish(<Vec<Path> as Pack>::decode(buf)?)),
+                1 => Ok(ToWrite::Unpublish(<Vec<Path> as Pack>::decode(buf)?)),
+                2 => Ok(ToWrite::Clear),
+                3 => Ok(ToWrite::Heartbeat),
+                _ => Err(Error::UnknownTag),
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub enum FromWrite {
         Published,
         Unpublished,
         Error(Chars),
+    }
+
+    impl Pack for FromWrite {
+        fn len(&self) -> usize {
+            1 + match self {
+                FromWrite::Published => 0,
+                FromWrite::Unpublished => 0,
+                FromWrite::Error(c) => <Chars as Pack>::len(c),
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                FromWrite::Published => Ok(buf.put_u8(0)),
+                FromWrite::Unpublished => Ok(buf.put_u8(1)),
+                FromWrite::Error(c) => {
+                    buf.put_u8(2);
+                    Ok(<Chars as Pack>::encode(c, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(FromWrite::Published),
+                1 => Ok(FromWrite::Unpublished),
+                2 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
+                _ => Err(Error::UnknownTag)
+            }
+        }
     }
 }
 
