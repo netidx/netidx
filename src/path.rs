@@ -1,5 +1,4 @@
 use crate::utils;
-use protobuf::Chars;
 use std::{
     borrow::Borrow,
     cmp::{Eq, Ord, PartialEq, PartialOrd},
@@ -8,7 +7,9 @@ use std::{
     iter::Iterator,
     ops::Deref,
     str::FromStr,
+    result::Result,
 };
+use utils::{Chars, Pack, PackError};
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -21,6 +22,20 @@ pub static SEP: char = '/';
 /// the wire.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path(Chars);
+
+impl Pack for Path {
+    fn len(&self) -> usize {
+        <Chars as Pack>::len(&self.0)
+    }
+
+    fn encode(&self, buf: &mut bytes::BytesMut) -> Result<(), PackError> {
+        Ok(<Chars as Pack>::encode(&self.0, buf)?)
+    }
+
+    fn decode(buf: &mut bytes::BytesMut) -> Result<Self, PackError> {
+        Ok(Path(<Chars as Pack>::decode(buf)?))
+    }
+}
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

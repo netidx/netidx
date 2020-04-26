@@ -1,7 +1,3 @@
-use crate::{
-    model::{Error as PackError, Pack, Result as PackResult},
-    protocol::shared,
-};
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::{
@@ -14,7 +10,7 @@ use std::pin::Pin;
 use std::{
     cmp::min,
     collections::VecDeque,
-    fmt,
+    error, fmt,
     io::{self, IoSlice, Write},
     net,
     ops::{Deref, DerefMut},
@@ -103,66 +99,27 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
-pub fn saddr_from_protobuf(p: shared::SocketAddr) -> Option<net::SocketAddr> {
-    p.addr.map(|addr| match addr {
-        shared::SocketAddr_oneof_addr::V4(addr) => {
-            let octets = addr.octets.to_be_bytes();
-            let ip = net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
-            net::SocketAddr::V4(net::SocketAddrV4::new(ip, addr.port as u16))
-        }
-        shared::SocketAddr_oneof_addr::V6(addr) => {
-            let ip = {
-                let a = addr.octets_a.to_be_bytes();
-                let b = addr.octets_b.to_be_bytes();
-                net::Ipv6Addr::from([
-                    a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2],
-                    b[3], b[4], b[5], b[6], b[7],
-                ])
-            };
-            let a = net::SocketAddrV6::new(
-                ip,
-                addr.port as u16,
-                addr.flowinfo,
-                addr.scope_id,
-            );
-            net::SocketAddr::V6(a)
-        }
-    })
+#[derive(Debug, Clone, Copy)]
+pub enum PackError {
+    UnknownTag,
+    TooBig,
+    InvalidFormat,
 }
 
-pub fn saddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
-    match a {
-        net::SocketAddr::V4(v4) => shared::SocketAddr {
-            addr: Some(shared::SocketAddr_oneof_addr::V4(
-                shared::SocketAddr_SocketAddrV4 {
-                    octets: u32::from_be_bytes(v4.ip().octets()),
-                    port: v4.port() as u32,
-                    ..shared::SocketAddr_SocketAddrV4::default()
-                },
-            )),
-            ..shared::SocketAddr::default()
-        },
-        net::SocketAddr::V6(v6) => {
-            let oc = &v6.ip().octets();
-            let addr =
-                shared::SocketAddr_oneof_addr::V6(shared::SocketAddr_SocketAddrV6 {
-                    octets_a: u64::from_be_bytes([
-                        oc[0], oc[1], oc[2], oc[3], oc[4], oc[5], oc[6], oc[7],
-                    ]),
-                    octets_b: u64::from_be_bytes([
-                        oc[8], oc[9], oc[10], oc[11], oc[12], oc[13], oc[14], oc[15],
-                    ]),
-                    port: v6.port() as u32,
-                    flowinfo: v6.flowinfo(),
-                    scope_id: v6.scope_id(),
-                    ..shared::SocketAddr_SocketAddrV6::default()
-                });
-            shared::SocketAddr {
-                addr: Some(addr),
-                ..shared::SocketAddr::default()
-            }
-        }
+impl fmt::Display for PackError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
     }
+}
+
+impl error::Error for PackError {}
+
+pub trait Pack {
+    fn len(&self) -> usize;
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError>;
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError>
+    where
+        Self: std::marker::Sized;
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -188,11 +145,11 @@ impl Pack for Chars {
         Pack::len(self)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> PackResult<()> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
         Pack::encode(&self.0, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> PackResult<Self> {
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
         match Chars::from_bytes(<Bytes as Pack>::decode(buf)?) {
             Ok(c) => Ok(c),
             Err(_) => Err(PackError::InvalidFormat),

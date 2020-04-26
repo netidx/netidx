@@ -1,4 +1,4 @@
-use crate::utils::Chars;
+use crate::utils::{Chars, Pack, PackError};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
     collections::HashMap,
@@ -7,29 +7,7 @@ use std::{
     mem, net, result,
 };
 
-#[derive(Debug, Clone, Copy)]
-pub enum Error {
-    UnknownTag,
-    TooBig,
-    InvalidFormat,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl error::Error for Error {}
-
-pub trait Pack {
-    fn len(&self) -> usize;
-    fn encode(&self, buf: &mut BytesMut) -> Result<()>;
-    fn decode(buf: &mut BytesMut) -> Result<Self>
-    where
-        Self: std::marker::Sized;
-}
-
+type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
 
 impl Pack for net::SocketAddr {
@@ -200,7 +178,7 @@ impl<T: Pack> Pack for Option<T> {
 
 pub mod resolver {
     use super::*;
-    use crate::{path::Path, protocol, utils::Chars};
+    use crate::{path::Path, utils::{Chars, Pack}};
     use bytes::Bytes;
     use fxhash::FxBuildHasher;
     use std::{collections::HashMap, net::SocketAddr};
@@ -437,7 +415,7 @@ pub mod resolver {
                     let id = CtxId::decode(buf)?;
                     Ok(ServerHelloRead::Accepted(tok, id))
                 }
-                _ => Err(Error::UnknownTag)
+                _ => Err(Error::UnknownTag),
             }
         }
     }
@@ -477,7 +455,7 @@ pub mod resolver {
                     let tok = <Bytes as Pack>::decode(buf)?;
                     Ok(ServerAuthWrite::Accepted(tok))
                 }
-                _ => Err(Error::UnknownTag)
+                _ => Err(Error::UnknownTag),
             }
         }
     }
@@ -489,12 +467,56 @@ pub mod resolver {
         pub auth: ServerAuthWrite,
     }
 
+    impl Pack for ServerHelloWrite {
+        fn len(&self) -> usize {
+            1 + ResolverId::len(&self.resolver_id) + ServerAuthWrite::len(&self.auth)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            buf.put_u8(if self.ttl_expired { 1 } else { 0 });
+            ResolverId::encode(&self.resolver_id, buf)?;
+            Ok(ServerAuthWrite::encode(&self.auth, buf)?)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            let ttl_expired = match buf.get_u8() {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::UnknownTag),
+            };
+            let resolver_id = ResolverId::decode(buf)?;
+            let auth = ServerAuthWrite::decode(buf)?;
+            Ok(ServerHelloWrite {
+                ttl_expired,
+                resolver_id,
+                auth,
+            })
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub enum ToRead {
         /// Resolve the list of paths to addresses/ports
         Resolve(Vec<Path>),
         /// List the paths published under the specified root path
         List(Path),
+    }
+
+    impl Pack for ToRead {
+        fn len(&self) -> usize {
+            1 + match self {
+                ToRead::Resolve(paths) => <Vec<Path> as Pack>::len(paths),
+                ToRead::List(path) => <Path as Pack>::len(path),
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            todo!()
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            todo!()
+        }
     }
 
     #[derive(Clone, Debug)]
