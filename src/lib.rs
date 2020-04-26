@@ -46,8 +46,7 @@
 mod auth;
 //mod secstore;
 pub mod path;
-//pub mod protocol;
-pub mod model;
+pub mod protocol;
 pub mod config;
 pub mod channel;
 //pub mod resolver;
