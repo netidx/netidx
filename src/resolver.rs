@@ -1,5 +1,4 @@
 use crate::{
-    utils::{self, Chars},
     auth::{
         syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
@@ -12,12 +11,13 @@ use crate::{
         FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
         ServerHelloWrite, ToRead, ToWrite,
     },
+    utils::{self, Chars},
 };
-use log::info;
-use bytes::Bytes;
 use anyhow::Result;
+use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
+use log::info;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -96,8 +96,10 @@ async fn connect_read(
             },
         };
         try_cf!("hello", continue, con.send_one(&ClientHello::ReadOnly(auth)).await);
-        let r: ServerHelloRead = try_cf!("hello reply",  continue, con.receive().await);
-        ctx.iter().for_each(|ctx| con.set_ctx(ctx.clone()));
+        let r: ServerHelloRead = try_cf!("hello reply", continue, con.receive().await);
+        if let Some(ref ctx) = ctx {
+            con.set_ctx(ctx.clone()).await
+        }
         match (desired_auth, r) {
             (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
             (Auth::Anonymous, _) => {
@@ -197,7 +199,8 @@ async fn connect_write(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con = try_cf!("connect", continue, TcpStream::connect(&resolver_addr.1).await);
+        let con =
+            try_cf!("connect", continue, TcpStream::connect(&resolver_addr.1).await);
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
@@ -208,7 +211,8 @@ async fn connect_write(
                     None => {
                         let upnr = upn.as_ref().map(|s| s.as_bytes());
                         let target_spn = target_spn.as_bytes();
-                        let (ctx, token) = try_cf!("ctx", continue, create_ctx(upnr, target_spn));
+                        let (ctx, token) =
+                            try_cf!("ctx", continue, create_ctx(upnr, target_spn));
                         let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
                         (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
                     }
@@ -217,7 +221,9 @@ async fn connect_write(
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
         try_cf!("hello", continue, con.send_one(&h).await);
-        ctx.iter().for_each(|ctx| con.set_ctx(ctx.clone()));
+        if let Some(ref ctx) = ctx {
+            con.set_ctx(ctx.clone()).await
+        }
         let r: ServerHelloWrite = try_cf!("hello reply", continue, con.receive().await);
         // CR estokes: replace this with proper logging
         match (desired_auth, r.auth) {

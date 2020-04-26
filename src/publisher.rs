@@ -11,16 +11,15 @@ use crate::{
         resolver::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
-    utils,
+    utils::{self, Pack},
 };
-use anyhow::{anyhow, Result};
-use bytes::Bytes;
+use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
+use log::info;
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
-use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryFrom,
@@ -50,14 +49,14 @@ enum Update {
     Unpublish,
 }
 
-struct UValInner {
+struct ValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
     updates: Arc<SegQueue<(Id, Update)>>,
 }
 
-impl Drop for UValInner {
+impl Drop for ValInner {
     fn drop(&mut self) {
         self.updates.push((self.id, Update::Unpublish));
         if let Some(t) = self.publisher.upgrade() {
@@ -76,7 +75,7 @@ impl Drop for UValInner {
 /// you must call flush before references to it will be removed from
 /// the resolver server.
 #[derive(Clone)]
-pub struct Val<T>(Arc<UValInner>, PhantomData<T>);
+pub struct Val<T>(Arc<ValInner>, PhantomData<T>);
 
 impl<T: Prim> Val<T> {
     /// Queue an update to the published value, it will not be sent
@@ -92,7 +91,7 @@ impl<T: Prim> Val<T> {
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
-    pub fn update(&self, v: &T) -> () {
+    pub fn update(&self, v: T) -> () {
         self.0.updates.push((self.0.id, Update::Val(v.to_value())))
     }
 
@@ -103,32 +102,6 @@ impl<T: Prim> Val<T> {
     }
 
     /// Get a reference to the `Path` of this published value.
-    pub fn path(&self) -> &Path {
-        &self.0.path
-    }
-}
-
-/// Except that you send raw bytes, this is exactly the same as a
-/// `Val`. You can mix `UVal` and `Val` on the same publisher. The
-/// bytes you send will be received by the subscriber as a discrete
-/// message, so there is no need to handle multiple messages in a
-/// buffer, or partial messages, or length encoding (the length of the
-/// `Bytes` is the length of the message).
-#[derive(Clone)]
-pub struct UVal(Arc<UValInner>);
-
-impl UVal {
-    /// Same as `Val::update`, but untyped.
-    pub fn update(&self, v: Bytes) {
-        self.0.updates.push((self.0.id, Update::Val(v)));
-    }
-
-    /// Same as `Val::id`
-    pub fn id(&self) -> Id {
-        self.0.id
-    }
-
-    /// Same as `Val::path`
     pub fn path(&self) -> &Path {
         &self.0.path
     }
@@ -346,7 +319,7 @@ impl Publisher {
         self.0.lock().addr
     }
 
-    fn publish_val_internal(&self, path: Path, init: Value) -> Result<Arc<UValInner>> {
+    fn publish_val_internal(&self, path: Path, init: Value) -> Result<Arc<ValInner>> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             Err(anyhow!("can't publish to relative path"))
@@ -368,7 +341,7 @@ impl Publisher {
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
-            Ok(Arc::new(UValInner {
+            Ok(Arc::new(ValInner {
                 id,
                 path,
                 publisher: self.downgrade(),
@@ -381,17 +354,9 @@ impl Publisher {
     /// the same publisher to publish the same path twice, however
     /// different publishers may publish a given path as many times as
     /// they like. Subscribers will then pick randomly among the
-    /// advertised publishers when subscribing. See the `subscriber`
-    /// module for details.
-    pub fn publish_val<T: Serialize>(&self, path: Path, init: &T) -> Result<Val<T>> {
-        let init = mp_encode(init)?;
-        Ok(Val(self.publish_val_internal(path, init)?, PhantomData))
-    }
-
-    /// Publish `Path` with initial raw `Bytes` `init`. This is the
-    /// otherwise exactly the same as publish.
-    pub fn publish_val_ut(&self, path: Path, init: Bytes) -> Result<UVal> {
-        Ok(UVal(self.publish_val_internal(path, init)?))
+    /// advertised publishers when subscribing. See `subscriber`
+    pub fn publish_val<T: Prim>(&self, path: Path, init: T) -> Result<Val<T>> {
+        Ok(Val(self.publish_val_internal(path, init.to_value())?, PhantomData))
     }
 
     /// Send all queued updates out to subscribers, and send all
@@ -450,14 +415,11 @@ impl Publisher {
                                     &mut to_clients,
                                     timeout,
                                 );
-                                tc.to_client
-                                    .msgs
-                                    .push(ToClientMsg::Val(ut.header.clone(), m.clone()));
+                                tc.to_client.msgs.push(ToClientMsg::Val(id, m.clone()));
                             }
                         }
                     }
                     Update::Unpublish => {
-                        let m = mp_encode(&publisher::From::Unsubscribed(id))?;
                         if let Some(ut) = pb.by_id.remove(&id) {
                             for (addr, sender) in ut.subscribed {
                                 if let Some(cl) = pb.clients.get_mut(&addr) {
@@ -469,9 +431,7 @@ impl Publisher {
                                         &mut to_clients,
                                         timeout,
                                     );
-                                    tc.to_client
-                                        .msgs
-                                        .push(ToClientMsg::Unpublish(m.clone()));
+                                    tc.to_client.msgs.push(ToClientMsg::Unpublish(id));
                                 }
                             }
                         }
@@ -553,10 +513,8 @@ fn subscribe(
             let sender = cl.to_client.clone();
             let ut = t.by_id.get_mut(&id).unwrap();
             ut.subscribed.insert(addr, sender);
-            let mut msg = con.begin_msg();
-            msg.pack(&publisher::From::Subscribed(path, id))?;
-            msg.pack_ut(&ut.current);
-            msg.finish()?;
+            let m = publisher::From::Subscribed(path, id, ut.current.clone());
+            con.queue_send(&m)?;
             for tx in ut.wait_client.drain(..) {
                 let _ = tx.send(());
             }
@@ -599,7 +557,7 @@ fn handle_batch(
                                         u64::saturating_sub(now, ts),
                                         u64::saturating_sub(ts, now),
                                     );
-                                    if age > 300 || a_path != &*path {
+                                    if age > 300 || &*a_path != &*path {
                                         con.queue_send(&From::Denied(path))?
                                     } else {
                                         subscribe(&mut *pb, con, *addr, path)?
@@ -646,7 +604,7 @@ async fn hello_client(
                     .map(|b| utils::bytes(&*b))
                     .ok_or_else(|| anyhow!("expected step to generate a token"))?;
                 con.send_one(&Token(tok)).await?;
-                con.set_ctx(ctx);
+                con.set_ctx(ctx).await;
             }
         },
         ResolverAuthenticate(id, tok) => {
@@ -700,11 +658,11 @@ async fn client_loop(
                     msg_sent = true;
                     for msg in m.msgs {
                         match msg {
-                            ToClientMsg::Val(hdr, body) => {
-                                con.queue_send_ut(&[hdr, body])?;
+                            ToClientMsg::Val(id, v) => {
+                                con.queue_send(&publisher::From::Update(id, v))?;
                             }
-                            ToClientMsg::Unpublish(m) => {
-                                con.queue_send_ut(&[m])?;
+                            ToClientMsg::Unpublish(id) => {
+                                con.queue_send(&publisher::From::Unsubscribed(id))?;
                             }
                         }
                     }
@@ -738,7 +696,7 @@ async fn accept_loop(
         select_biased! {
             _ = stop => break,
             cl = serv.accept().fuse() => match cl {
-                Err(_) => (), // CR estokes: log this? exit the loop?
+                Err(e) => info!("accept error {}", e),
                 Ok((s, addr)) => {
                     let t_weak = t.clone();
                     let t = match t.upgrade() {
@@ -749,7 +707,7 @@ async fn accept_loop(
                     let ctxts = pb.resolver.ctxts();
                     if pb.clients.len() < MAX_CLIENTS {
                         let (tx, rx) = channel(100);
-                        try_cont!("nodelay", s.set_nodelay(true));
+                        try_cf!("nodelay", continue, s.set_nodelay(true));
                         pb.clients.insert(addr, Client {
                             to_client: tx,
                             subscribed: HashSet::with_hasher(FxBuildHasher::default()),

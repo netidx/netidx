@@ -156,7 +156,9 @@ impl Pack for To {
 
 pub trait Prim {
     fn to_value(self) -> Value;
-    fn from_value(v: Value) -> Result<Self>;
+    fn from_value(v: Value) -> Result<Self>
+    where
+        Self: std::marker::Sized;
 }
 
 impl Prim for u32 {
@@ -283,6 +285,16 @@ pub enum Value {
     Bytes(Bytes),
 }
 
+impl Prim for Value {
+    fn to_value(self) -> Value {
+        self
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        Ok(v)
+    }
+}
+
 impl Pack for Value {
     fn len(&self) -> usize {
         1 + match self {
@@ -365,7 +377,7 @@ pub enum From {
     /// The next message contains the first value for Id. All further
     /// communications about this subscription will only refer to the
     /// Id.
-    Subscribed(Path, Id),
+    Subscribed(Path, Id, Value),
     /// A value update to Id
     Update(Id, Value),
     /// Indicates that the publisher is idle, but still
@@ -379,7 +391,9 @@ impl Pack for From {
             From::NoSuchValue(p) => <Path as Pack>::len(p),
             From::Denied(p) => <Path as Pack>::len(p),
             From::Unsubscribed(id) => Id::len(id),
-            From::Subscribed(p, id) => <Path as Pack>::len(p) + Id::len(id),
+            From::Subscribed(p, id, v) => {
+                <Path as Pack>::len(p) + Id::len(id) + Value::len(v)
+            }
             From::Update(id, v) => Id::len(id) + Value::len(v),
             From::Heartbeat => 0,
         }
@@ -399,10 +413,11 @@ impl Pack for From {
                 buf.put_u8(2);
                 Ok(Id::encode(id, buf)?)
             }
-            From::Subscribed(p, id) => {
+            From::Subscribed(p, id, v) => {
                 buf.put_u8(3);
                 <Path as Pack>::encode(p, buf)?;
-                Ok(Id::encode(id, buf)?)
+                Id::encode(id, buf)?;
+                Ok(Value::encode(v, buf)?)
             }
             From::Update(id, v) => {
                 buf.put_u8(4);
@@ -421,15 +436,16 @@ impl Pack for From {
             3 => {
                 let path = <Path as Pack>::decode(buf)?;
                 let id = Id::decode(buf)?;
-                Ok(From::Subscribed(path, id))
-            },
+                let v = Value::decode(buf)?;
+                Ok(From::Subscribed(path, id, v))
+            }
             4 => {
                 let id = Id::decode(buf)?;
                 let value = Value::decode(buf)?;
                 Ok(From::Update(id, value))
             }
             5 => Ok(From::Heartbeat),
-            _ => Err(PackError::UnknownTag)
+            _ => Err(PackError::UnknownTag),
         }
     }
 }

@@ -385,7 +385,7 @@ impl Chars {
 
 impl Pack for Chars {
     fn len(&self) -> usize {
-        Pack::len(self)
+        Pack::len(&self.0)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {

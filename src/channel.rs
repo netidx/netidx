@@ -284,9 +284,9 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
         }
     }
 
-    pub(crate) fn set_ctx(&mut self, ctx: C) {
+    pub(crate) async fn set_ctx(&mut self, ctx: C) {
         self.read.set_ctx(ctx.clone());
-        self.write.set_ctx(ctx);
+        let _ = self.write.set_ctx(ctx).await;
     }
 
     pub(crate) fn split(self) -> (ReadChannel<C>, WriteChannel<C>) {

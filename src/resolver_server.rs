@@ -212,7 +212,7 @@ async fn hello_client_write(
                         auth: ServerAuthWrite::Reused,
                     };
                     send(&mut con, h).await?;
-                    con.set_ctx(ctx.clone());
+                    con.set_ctx(ctx.clone()).await;
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
@@ -227,7 +227,7 @@ async fn hello_client_write(
                     auth: ServerAuthWrite::Accepted(tok),
                 };
                 send(&mut con, h).await?;
-                con.set_ctx(ctx.clone());
+                con.set_ctx(ctx.clone()).await;
                 let mut con: Channel<ServerCtx> = Channel::new(
                     time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
                         .await??,
@@ -405,7 +405,7 @@ async fn hello_client_read(
                 None => bail!("ctx id not found"),
                 Some(ctx) => {
                     send(&mut con, ServerHelloRead::Reused).await?;
-                    con.set_ctx(ctx.clone());
+                    con.set_ctx(ctx.clone()).await;
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
@@ -416,7 +416,7 @@ async fn hello_client_read(
                 let (ctx, tok) = secstore.create(&tok)?;
                 let id = secstore.store_read(ctx.clone());
                 send(&mut con, ServerHelloRead::Accepted(tok, id)).await?;
-                con.set_ctx(ctx.clone());
+                con.set_ctx(ctx.clone()).await;
                 secstore.ifo(Some(&ctx.client()?))?
             }
         },
