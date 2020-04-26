@@ -9,7 +9,6 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
-    Eof,
     UnknownTag,
     TooBig,
     InvalidFormat,
@@ -62,24 +61,13 @@ impl Pack for net::SocketAddr {
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        if !buf.has_remaining() {
-            return Err(Error::Eof);
-        }
-        match buf[0] {
+        match buf.get_u8() {
             0 => {
-                if !buf.remaining() >= 7 {
-                    return Err(Error::Eof);
-                }
-                buf.advance(1);
                 let ip = net::Ipv4Addr::from(u32::to_be_bytes(buf.get_u32()));
                 let port = buf.get_u16();
                 Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
             }
             1 => {
-                if !buf.remaining() >= 27 {
-                    return Err(Error::Eof);
-                }
-                buf.advance(1);
                 let mut segments = [0u16; 8];
                 for i in 0..8 {
                     segments[i] = buf.get_u16();
@@ -115,17 +103,8 @@ impl Pack for Bytes {
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        if buf.remaining() < mem::size_of::<u32>() {
-            return Err(Error::Eof);
-        } else {
-            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.remaining() < len {
-                return Err(Error::Eof);
-            } else {
-                buf.advance(mem::size_of::<u32>());
-                Ok(buf.split_to(len as usize - mem::size_of::<u32>()).freeze())
-            }
-        }
+        let len = buf.get_u32();
+        Ok(buf.split_to(len as usize - mem::size_of::<u32>()).freeze())
     }
 }
 
@@ -139,17 +118,13 @@ impl Pack for u64 {
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        if buf.remaining() < mem::size_of::<u64>() {
-            Err(Error::Eof)
-        } else {
-            Ok(buf.get_u64())
-        }
+        Ok(buf.get_u64())
     }
 }
 
 impl<T: Pack> Pack for Vec<T> {
     fn len(&self) -> Result<u32> {
-        let mut len = mem::size_of::<u64>();
+        let mut len = mem::size_of::<u32>();
         for t in self {
             len = len
                 .checked_add(Pack::len(t)? as usize)
@@ -163,7 +138,6 @@ impl<T: Pack> Pack for Vec<T> {
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(Pack::len(self)?);
         buf.put_u32(Vec::len(self) as u32);
         for t in self {
             <T as Pack>::encode(t, buf)?
@@ -172,14 +146,6 @@ impl<T: Pack> Pack for Vec<T> {
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        if buf.remaining() < mem::size_of::<u64>() {
-            return Err(Error::Eof);
-        }
-        let bytes = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if buf.remaining() < bytes {
-            return Err(Error::Eof);
-        }
-        buf.advance(mem::size_of::<u32>());
         let elts = buf.get_u32() as usize;
         let mut data = Vec::with_capacity(elts);
         for _ in 0..elts {
@@ -196,7 +162,7 @@ where
     R: Default + BuildHasher,
 {
     fn len(&self) -> Result<u32> {
-        let mut len = mem::size_of::<u64>();
+        let mut len = mem::size_of::<u32>();
         for (k, v) in self {
             len = len
                 .checked_add(<K as Pack>::len(k)? as usize)
@@ -213,7 +179,6 @@ where
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(<Self as Pack>::len(self)?);
         buf.put_u32(HashMap::len(self) as u32);
         for (k, v) in self {
             <K as Pack>::encode(k, buf)?;
@@ -223,14 +188,6 @@ where
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        if buf.remaining() < mem::size_of::<u64>() {
-            return Err(Error::Eof);
-        }
-        let bytes = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if buf.remaining() < bytes {
-            return Err(Error::Eof);
-        }
-        buf.advance(mem::size_of::<u32>());
         let elts = buf.get_u32() as usize;
         let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
         for _ in 0..elts {
@@ -239,6 +196,35 @@ where
             data.insert(k, v);
         }
         Ok(data)
+    }
+}
+
+impl<T: Pack> Pack for Option<T> {
+    fn len(&self) -> Result<u32> {
+        match self {
+            None => Ok(1),
+            Some(v) => Ok(1u32
+                .checked_add(<T as Pack>::len(v)?)
+                .ok_or(Error::TooBig)?),
+        }
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        match self {
+            None => Ok(buf.put_u8(0)),
+            Some(v) => {
+                buf.put_u8(1);
+                <T as Pack>::encode(v, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(None),
+            1 => Ok(Some(<T as Pack>::decode(buf)?)),
+            _ => return Err(Error::UnknownTag),
+        }
     }
 }
 
@@ -324,22 +310,10 @@ pub mod resolver {
         }
 
         fn decode(buf: &mut BytesMut) -> Result<Self> {
-            if !buf.has_remaining() {
-                return Err(Error::Eof);
-            }
-            match buf[0] {
-                0 => {
-                    buf.advance(1);
-                    Ok(ClientAuthRead::Anonymous)
-                }
-                1 => {
-                    buf.advance(1);
-                    Ok(ClientAuthRead::Reuse(<CtxId as Pack>::decode(buf)?))
-                }
-                2 => {
-                    buf.advance(1);
-                    Ok(ClientAuthRead::Initiate(<Bytes as Pack>::decode(buf)?))
-                }
+            match buf.get_u8() {
+                0 => Ok(ClientAuthRead::Anonymous),
+                1 => Ok(ClientAuthRead::Reuse(<CtxId as Pack>::decode(buf)?)),
+                2 => Ok(ClientAuthRead::Initiate(<Bytes as Pack>::decode(buf)?)),
                 _ => return Err(Error::UnknownTag),
             }
         }
@@ -350,6 +324,29 @@ pub mod resolver {
         Anonymous,
         Reuse,
         Initiate { spn: Option<Chars>, token: Bytes },
+    }
+
+    impl Pack for ClientAuthWrite {
+        fn len(&self) -> Result<u32> {
+            1u32.checked_add(match self {
+                ClientAuthWrite::Anonymous => 0,
+                ClientAuthWrite::Reuse => 0,
+                ClientAuthWrite::Initiate { spn, token } => {
+                    <Option<Chars> as Packed>::len(spn)?
+                        .checked_add(<Bytes as Pack>::len(token)?)
+                        .ok_or(Error::TooBig)?
+                }
+            })
+            .ok_or(Error::TooBig)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            todo!()
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            todo!()
+        }
     }
 
     #[derive(Clone, Debug)]
