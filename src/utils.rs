@@ -184,7 +184,7 @@ impl Chars {
 }
 
 impl Pack for Chars {
-    fn len(&self) -> PackResult<u32> {
+    fn len(&self) -> usize {
         Pack::len(self)
     }
 

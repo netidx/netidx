@@ -23,7 +23,7 @@ impl fmt::Display for Error {
 impl error::Error for Error {}
 
 pub trait Pack {
-    fn len(&self) -> Result<u32>;
+    fn len(&self) -> usize;
     fn encode(&self, buf: &mut BytesMut) -> Result<()>;
     fn decode(buf: &mut BytesMut) -> Result<Self>
     where
@@ -33,10 +33,10 @@ pub trait Pack {
 pub type Result<T> = result::Result<T, Error>;
 
 impl Pack for net::SocketAddr {
-    fn len(&self) -> Result<u32> {
+    fn len(&self) -> usize {
         match self {
-            net::SocketAddr::V4(_) => Ok(7),
-            net::SocketAddr::V6(_) => Ok(27),
+            net::SocketAddr::V4(_) => 7,
+            net::SocketAddr::V6(_) => 27,
         }
     }
 
@@ -85,32 +85,24 @@ impl Pack for net::SocketAddr {
 }
 
 impl Pack for Bytes {
-    fn len(&self) -> Result<u32> {
-        let len = self
-            .len()
-            .checked_add(mem::size_of::<u32>())
-            .ok_or(Error::TooBig)?;
-        if len > u32::MAX as usize {
-            Err(Error::TooBig)
-        } else {
-            Ok(len as u32)
-        }
+    fn len(&self) -> usize {
+        Bytes::len(self) + mem::size_of::<u32>()
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u32(<Self as Pack>::len(self)?);
+        buf.put_u32(Bytes::len(self) as u32);
         Ok(buf.extend_from_slice(&*self))
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let len = buf.get_u32();
-        Ok(buf.split_to(len as usize - mem::size_of::<u32>()).freeze())
+        Ok(buf.split_to(len as usize).freeze())
     }
 }
 
 impl Pack for u64 {
-    fn len(&self) -> Result<u32> {
-        Ok(mem::size_of::<u64>() as u32)
+    fn len(&self) -> usize {
+        mem::size_of::<u64>()
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -123,18 +115,9 @@ impl Pack for u64 {
 }
 
 impl<T: Pack> Pack for Vec<T> {
-    fn len(&self) -> Result<u32> {
-        let mut len = mem::size_of::<u32>();
-        for t in self {
-            len = len
-                .checked_add(Pack::len(t)? as usize)
-                .ok_or(Error::TooBig)?;
-        }
-        if len > u32::MAX as usize {
-            Err(Error::TooBig)
-        } else {
-            Ok(len as u32)
-        }
+    fn len(&self) -> usize {
+        self.iter()
+            .fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -161,21 +144,10 @@ where
     V: Pack + Hash + Eq,
     R: Default + BuildHasher,
 {
-    fn len(&self) -> Result<u32> {
-        let mut len = mem::size_of::<u32>();
-        for (k, v) in self {
-            len = len
-                .checked_add(<K as Pack>::len(k)? as usize)
-                .ok_or(Error::TooBig)?;
-            len = len
-                .checked_add(<V as Pack>::len(v)? as usize)
-                .ok_or(Error::TooBig)?;
-        }
-        if len > u32::MAX as usize {
-            Err(Error::TooBig)
-        } else {
-            Ok(len as u32)
-        }
+    fn len(&self) -> usize {
+        self.iter().fold(mem::size_of::<u32>(), |len, (k, v)| {
+            len + <K as Pack>::len(k) + <V as Pack>::len(v)
+        })
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -200,12 +172,10 @@ where
 }
 
 impl<T: Pack> Pack for Option<T> {
-    fn len(&self) -> Result<u32> {
-        match self {
-            None => Ok(1),
-            Some(v) => Ok(1u32
-                .checked_add(<T as Pack>::len(v)?)
-                .ok_or(Error::TooBig)?),
+    fn len(&self) -> usize {
+        1 + match self {
+            None => 0,
+            Some(v) => <T as Pack>::len(v),
         }
     }
 
@@ -230,10 +200,9 @@ impl<T: Pack> Pack for Option<T> {
 
 pub mod resolver {
     use super::*;
-    use crate::{path::Path, protocol};
+    use crate::{path::Path, protocol, utils::Chars};
     use bytes::Bytes;
     use fxhash::FxBuildHasher;
-    use protobuf::Chars;
     use std::{collections::HashMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -248,7 +217,7 @@ pub mod resolver {
     }
 
     impl Pack for CtxId {
-        fn len(&self) -> Result<u32> {
+        fn len(&self) -> usize {
             <u64 as Pack>::len(&self.0)
         }
 
@@ -265,7 +234,7 @@ pub mod resolver {
     pub struct ResolverId(u64);
 
     impl Pack for ResolverId {
-        fn len(&self) -> Result<u32> {
+        fn len(&self) -> usize {
             <u64 as Pack>::len(&self.0)
         }
 
@@ -286,13 +255,12 @@ pub mod resolver {
     }
 
     impl Pack for ClientAuthRead {
-        fn len(&self) -> Result<u32> {
-            1u32.checked_add(match self {
+        fn len(&self) -> usize {
+            1 + match self {
                 ClientAuthRead::Anonymous => 0,
-                ClientAuthRead::Reuse(ref i) => Pack::len(i)?,
-                ClientAuthRead::Initiate(ref b) => Pack::len(b)?,
-            })
-            .ok_or(Error::TooBig)
+                ClientAuthRead::Reuse(ref i) => Pack::len(i),
+                ClientAuthRead::Initiate(ref b) => Pack::len(b),
+            }
         }
 
         fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -327,25 +295,39 @@ pub mod resolver {
     }
 
     impl Pack for ClientAuthWrite {
-        fn len(&self) -> Result<u32> {
-            1u32.checked_add(match self {
+        fn len(&self) -> usize {
+            1 + match self {
                 ClientAuthWrite::Anonymous => 0,
                 ClientAuthWrite::Reuse => 0,
                 ClientAuthWrite::Initiate { spn, token } => {
-                    <Option<Chars> as Packed>::len(spn)?
-                        .checked_add(<Bytes as Pack>::len(token)?)
-                        .ok_or(Error::TooBig)?
+                    <Option<Chars> as Pack>::len(spn) + <Bytes as Pack>::len(token)
                 }
-            })
-            .ok_or(Error::TooBig)
+            }
         }
 
         fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-            todo!()
+            match self {
+                ClientAuthWrite::Anonymous => Ok(buf.put_u8(0)),
+                ClientAuthWrite::Reuse => Ok(buf.put_u8(1)),
+                ClientAuthWrite::Initiate { spn, token } => {
+                    buf.put_u8(2);
+                    <Option<Chars> as Pack>::encode(spn, buf)?;
+                    Ok(<Bytes as Pack>::encode(token, buf)?)
+                }
+            }
         }
 
         fn decode(buf: &mut BytesMut) -> Result<Self> {
-            todo!()
+            match buf.get_u8() {
+                0 => Ok(ClientAuthWrite::Anonymous),
+                1 => Ok(ClientAuthWrite::Reuse),
+                2 => {
+                    let spn = <Option<Chars> as Pack>::decode(buf)?;
+                    let token = <Bytes as Pack>::decode(buf)?;
+                    Ok(ClientAuthWrite::Initiate { spn, token })
+                }
+                _ => Err(Error::UnknownTag),
+            }
         }
     }
 
@@ -353,6 +335,23 @@ pub mod resolver {
     pub struct ClientHelloWrite {
         pub write_addr: SocketAddr,
         pub auth: ClientAuthWrite,
+    }
+
+    impl Pack for ClientHelloWrite {
+        fn len(&self) -> usize {
+            <SocketAddr as Pack>::len(&self.write_addr) + ClientAuthWrite::len(&self.auth)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            <SocketAddr as Pack>::encode(&self.write_addr, buf)?;
+            Ok(ClientAuthWrite::encode(&self.auth, buf)?)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            let write_addr = <SocketAddr as Pack>::decode(buf)?;
+            let auth = ClientAuthWrite::decode(buf)?;
+            Ok(ClientHelloWrite { write_addr, auth })
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -369,6 +368,36 @@ pub mod resolver {
         WriteOnly(ClientHelloWrite),
     }
 
+    impl Pack for ClientHello {
+        fn len(&self) -> usize {
+            1 + match self {
+                ClientHello::ReadOnly(r) => ClientAuthRead::len(r),
+                ClientHello::WriteOnly(r) => ClientHelloWrite::len(r),
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                ClientHello::ReadOnly(r) => {
+                    buf.put_u8(0);
+                    Ok(<ClientAuthRead as Pack>::encode(r, buf)?)
+                }
+                ClientHello::WriteOnly(r) => {
+                    buf.put_u8(1);
+                    Ok(<ClientHelloWrite as Pack>::encode(r, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(ClientHello::ReadOnly(ClientAuthRead::decode(buf)?)),
+                1 => Ok(ClientHello::WriteOnly(ClientHelloWrite::decode(buf)?)),
+                _ => Err(Error::UnknownTag),
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub enum ServerHelloRead {
         Anonymous,
@@ -376,11 +405,81 @@ pub mod resolver {
         Accepted(Bytes, CtxId),
     }
 
+    impl Pack for ServerHelloRead {
+        fn len(&self) -> usize {
+            1 + match self {
+                ServerHelloRead::Anonymous => 0,
+                ServerHelloRead::Reused => 0,
+                ServerHelloRead::Accepted(tok, id) => {
+                    <Bytes as Pack>::len(tok) + CtxId::len(id)
+                }
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                ServerHelloRead::Anonymous => Ok(buf.put_u8(0)),
+                ServerHelloRead::Reused => Ok(buf.put_u8(1)),
+                ServerHelloRead::Accepted(tok, id) => {
+                    buf.put_u8(2);
+                    <Bytes as Pack>::encode(tok, buf)?;
+                    Ok(CtxId::encode(id, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(ServerHelloRead::Anonymous),
+                1 => Ok(ServerHelloRead::Reused),
+                2 => {
+                    let tok = <Bytes as Pack>::decode(buf)?;
+                    let id = CtxId::decode(buf)?;
+                    Ok(ServerHelloRead::Accepted(tok, id))
+                }
+                _ => Err(Error::UnknownTag)
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub enum ServerAuthWrite {
         Anonymous,
         Reused,
         Accepted(Bytes),
+    }
+
+    impl Pack for ServerAuthWrite {
+        fn len(&self) -> usize {
+            1 + match self {
+                ServerAuthWrite::Anonymous => 0,
+                ServerAuthWrite::Reused => 0,
+                ServerAuthWrite::Accepted(b) => <Bytes as Pack>::len(b),
+            }
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                ServerAuthWrite::Anonymous => Ok(buf.put_u8(0)),
+                ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
+                ServerAuthWrite::Accepted(b) => {
+                    buf.put_u8(2);
+                    Ok(<Bytes as Pack>::encode(b, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            match buf.get_u8() {
+                0 => Ok(ServerAuthWrite::Anonymous),
+                1 => Ok(ServerAuthWrite::Reused),
+                2 => {
+                    let tok = <Bytes as Pack>::decode(buf)?;
+                    Ok(ServerAuthWrite::Accepted(tok))
+                }
+                _ => Err(Error::UnknownTag)
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
