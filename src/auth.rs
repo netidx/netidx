@@ -1,5 +1,6 @@
 use crate::{config, path::Path};
-use failure::Error;
+use anyhow::{anyhow, Result, Error};
+use bytes::BytesMut;
 use std::{
     collections::HashMap, convert::TryFrom, iter, ops::Deref, sync::Arc, time::Duration,
 };
@@ -18,7 +19,7 @@ bitflags! {
 impl TryFrom<&str> for Permissions {
     type Error = Error;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
+    fn try_from(s: &str) -> Result<Self> {
         let mut p = Permissions::empty();
         for (i, c) in s.chars().enumerate() {
             match c {
@@ -26,7 +27,7 @@ impl TryFrom<&str> for Permissions {
                     if i == 0 {
                         p |= Permissions::DENY;
                     } else {
-                        bail!("! may only be used as the first character")
+                        return Err(anyhow!("! may only be used as the first character"));
                     }
                 }
                 's' => {
@@ -44,7 +45,12 @@ impl TryFrom<&str> for Permissions {
                 'r' => {
                     p |= Permissions::PUBLISH_REFERRAL;
                 }
-                c => bail!("unrecognized permission bit {}, valid bits are !spldr", c),
+                c => {
+                    return Err(anyhow!(
+                        "unrecognized permission bit {}, valid bits are !spldr",
+                        c
+                    ))
+                }
             }
         }
         Ok(p)
@@ -52,7 +58,7 @@ impl TryFrom<&str> for Permissions {
 }
 
 pub trait GMapper {
-    fn groups(&mut self, user: &str) -> Result<Vec<String>, Error>;
+    fn groups(&mut self, user: &str) -> Result<Vec<String>>;
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,7 +112,7 @@ impl<M: GMapper> UserDb<M> {
         }
     }
 
-    pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>, Error> {
+    pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>> {
         match user {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
@@ -136,7 +142,7 @@ impl PMap {
     pub(crate) fn from_file<M: GMapper>(
         file: config::resolver_server::PMap,
         db: &mut UserDb<M>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         let mut pmap = HashMap::with_capacity(file.0.len());
         for (path, tbl) in file.0.iter() {
             let mut entry = HashMap::with_capacity(tbl.len());
@@ -148,7 +154,7 @@ impl PMap {
                 };
                 entry.insert(entity, Permissions::try_from(perm.as_str())?);
             }
-            pmap.insert(path.clone(), entry);
+            pmap.insert(Path::from(path), entry);
         }
         Ok(PMap(pmap))
     }
@@ -198,20 +204,30 @@ impl PMap {
 }
 
 pub(crate) trait Krb5Ctx {
-    type Buf: Deref<Target = [u8]>;
+    type Buf: Deref<Target = [u8]> + Send + Sync;
 
-    fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error>;
-    fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error>;
-    fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error>;
-    fn ttl(&self) -> Result<Duration, Error>;
+    fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>>;
+    fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf>;
+    // CR estokes: will header, data, padding, trailer work for SSPI?
+    fn wrap_iov(
+        &self,
+        encrypt: bool,
+        header: &mut BytesMut,
+        data: &mut BytesMut,
+        padding: &mut BytesMut,
+        trailer: &mut BytesMut,
+    ) -> Result<()>;
+    fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf>;
+    fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut>;
+    fn ttl(&self) -> Result<Duration>;
 }
 
 pub(crate) trait Krb5ServerCtx: Krb5Ctx {
-    fn client(&self) -> Result<String, Error>;
+    fn client(&self) -> Result<String>;
 }
 
 pub(crate) trait Krb5 {
-    type Buf: Deref<Target = [u8]>;
+    type Buf: Deref<Target = [u8]> + Send + Sync;
     type Krb5ClientCtx: Krb5Ctx<Buf = Self::Buf>;
     type Krb5ServerCtx: Krb5ServerCtx<Buf = Self::Buf>;
 
@@ -219,18 +235,16 @@ pub(crate) trait Krb5 {
         &self,
         principal: Option<&[u8]>,
         target_principal: &[u8],
-    ) -> Result<Self::Krb5ClientCtx, Error>;
+    ) -> Result<Self::Krb5ClientCtx>;
 
-    fn create_server_ctx(
-        &self,
-        principal: Option<&[u8]>,
-    ) -> Result<Self::Krb5ServerCtx, Error>;
+    fn create_server_ctx(&self, principal: Option<&[u8]>) -> Result<Self::Krb5ServerCtx>;
 }
 
 #[cfg(unix)]
 pub(crate) mod syskrb5 {
     use super::{Krb5, Krb5Ctx, Krb5ServerCtx};
-    use failure::Error;
+    use anyhow::{Error, Result};
+    use bytes::{Buf as _, BytesMut};
     use libgssapi::{
         context::{
             ClientCtx as GssClientCtx, CtxFlags, SecurityContext,
@@ -240,10 +254,58 @@ pub(crate) mod syskrb5 {
         error::{Error as GssError, MajorFlags},
         name::Name,
         oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
-        util::Buf,
+        util::{Buf, GssIov, GssIovFake, GssIovType},
     };
     use std::time::Duration;
     use tokio::task;
+
+    fn wrap_iov(
+        ctx: &impl SecurityContext,
+        encrypt: bool,
+        header: &mut BytesMut,
+        data: &mut BytesMut,
+        padding: &mut BytesMut,
+        trailer: &mut BytesMut,
+    ) -> Result<()> {
+        let mut len_iovs = [
+            GssIovFake::new(GssIovType::Header),
+            GssIov::new(GssIovType::Data, &mut **data).as_fake(),
+            GssIovFake::new(GssIovType::Padding),
+            GssIovFake::new(GssIovType::Trailer),
+        ];
+        ctx.wrap_iov_length(encrypt, &mut len_iovs[..])?;
+        header.resize(len_iovs[0].len(), 0x0);
+        padding.resize(len_iovs[2].len(), 0x0);
+        trailer.resize(len_iovs[3].len(), 0x0);
+        let mut iovs = [
+            GssIov::new(GssIovType::Header, &mut **header),
+            GssIov::new(GssIovType::Data, &mut **data),
+            GssIov::new(GssIovType::Padding, &mut **padding),
+            GssIov::new(GssIovType::Trailer, &mut **trailer),
+        ];
+        Ok(ctx.wrap_iov(encrypt, &mut iovs)?)
+    }
+
+    fn unwrap_iov(
+        ctx: &impl SecurityContext,
+        len: usize,
+        msg: &mut BytesMut,
+    ) -> Result<BytesMut> {
+        let (hdr_len, data_len) = {
+            let mut iov = [
+                GssIov::new(GssIovType::Stream, &mut **msg),
+                GssIov::new(GssIovType::Data, &mut []),
+            ];
+            ctx.unwrap_iov(&mut iov[..])?;
+            let hdr_len = iov[0].header_length(&iov[1]).unwrap();
+            let data_len = iov[1].len();
+            (hdr_len, data_len)
+        };
+        msg.advance(hdr_len);
+        let data = msg.split_to(data_len);
+        msg.advance(len - hdr_len - data_len);
+        Ok(data) // return the decrypted contents
+    }
 
     #[derive(Debug, Clone)]
     pub(crate) struct ClientCtx(GssClientCtx);
@@ -251,30 +313,35 @@ pub(crate) mod syskrb5 {
     impl Krb5Ctx for ClientCtx {
         type Buf = Buf;
 
-        fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error> {
-            task::block_in_place(|| {
-                self.0
-                    .step(token)
-                    .map_err(|e| Error::from_boxed_compat(Box::new(e)))
-            })
+        fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>> {
+            task::block_in_place(|| self.0.step(token).map_err(|e| Error::from(e)))
         }
 
-        fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error> {
-            self.0
-                .wrap(encrypt, msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf> {
+            self.0.wrap(encrypt, msg).map_err(|e| Error::from(e))
         }
 
-        fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error> {
-            self.0
-                .unwrap(msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn wrap_iov(
+            &self,
+            encrypt: bool,
+            header: &mut BytesMut,
+            data: &mut BytesMut,
+            padding: &mut BytesMut,
+            trailer: &mut BytesMut,
+        ) -> Result<()> {
+            wrap_iov(&self.0, encrypt, header, data, padding, trailer)
         }
 
-        fn ttl(&self) -> Result<Duration, Error> {
-            self.0
-                .lifetime()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf> {
+            self.0.unwrap(msg).map_err(|e| Error::from(e))
+        }
+
+        fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
+            unwrap_iov(&self.0, len, msg)
+        }
+
+        fn ttl(&self) -> Result<Duration> {
+            self.0.lifetime().map_err(|e| Error::from(e))
         }
     }
 
@@ -284,7 +351,7 @@ pub(crate) mod syskrb5 {
     impl Krb5Ctx for ServerCtx {
         type Buf = Buf;
 
-        fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>, Error> {
+        fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>> {
             task::block_in_place(|| {
                 match token {
                     Some(token) => self.0.step(token),
@@ -293,35 +360,41 @@ pub(crate) mod syskrb5 {
                         minor: 0,
                     }),
                 }
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+                .map_err(|e| Error::from(e))
             })
         }
 
-        fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf, Error> {
-            self.0
-                .wrap(encrypt, msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf> {
+            self.0.wrap(encrypt, msg).map_err(|e| Error::from(e))
         }
 
-        fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf, Error> {
-            self.0
-                .unwrap(msg)
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn wrap_iov(
+            &self,
+            encrypt: bool,
+            header: &mut BytesMut,
+            data: &mut BytesMut,
+            padding: &mut BytesMut,
+            trailer: &mut BytesMut,
+        ) -> Result<()> {
+            wrap_iov(&self.0, encrypt, header, data, padding, trailer)
         }
 
-        fn ttl(&self) -> Result<Duration, Error> {
-            self.0
-                .lifetime()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))
+        fn unwrap(&self, msg: &[u8]) -> Result<Self::Buf> {
+            self.0.unwrap(msg).map_err(|e| Error::from(e))
+        }
+
+        fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
+            unwrap_iov(&self.0, len, msg)
+        }
+
+        fn ttl(&self) -> Result<Duration> {
+            self.0.lifetime().map_err(|e| Error::from(e))
         }
     }
 
     impl Krb5ServerCtx for ServerCtx {
-        fn client(&self) -> Result<String, Error> {
-            let n = self
-                .0
-                .source_name()
-                .map_err(|e| Error::from_boxed_compat(Box::new(e)))?;
+        fn client(&self) -> Result<String> {
+            let n = self.0.source_name().map_err(|e| Error::from(e))?;
             Ok(format!("{}", n))
         }
     }
@@ -339,7 +412,7 @@ pub(crate) mod syskrb5 {
             &self,
             principal: Option<&[u8]>,
             target_principal: &[u8],
-        ) -> Result<Self::Krb5ClientCtx, Error> {
+        ) -> Result<Self::Krb5ClientCtx> {
             task::block_in_place(|| {
                 let name = principal
                     .map(|n| {
@@ -366,10 +439,10 @@ pub(crate) mod syskrb5 {
         fn create_server_ctx(
             &self,
             principal: Option<&[u8]>,
-        ) -> Result<Self::Krb5ServerCtx, Error> {
+        ) -> Result<Self::Krb5ServerCtx> {
             task::block_in_place(|| {
                 let name = principal
-                    .map(|principal| -> Result<Name, Error> {
+                    .map(|principal| -> Result<Name> {
                         Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
                             .canonicalize(Some(&GSS_MECH_KRB5))?)
                     })
@@ -393,14 +466,14 @@ pub(crate) mod sysgmapper {
     // but unfortunatly Apple doesn't implement it. Luckily the 'id'
     // command is specified in POSIX.
     use super::GMapper;
-    use failure::Error;
+    use anyhow::{anyhow, Error, Result};
     use std::process::Command;
     use tokio::task;
 
     pub(crate) struct Mapper(String);
 
     impl GMapper for Mapper {
-        fn groups(&mut self, user: &str) -> Result<Vec<String>, Error> {
+        fn groups(&mut self, user: &str) -> Result<Vec<String>> {
             task::block_in_place(|| {
                 let out = Command::new(&self.0).arg(user).output()?;
                 Mapper::parse_output(&String::from_utf8_lossy(&out.stdout))
@@ -409,19 +482,19 @@ pub(crate) mod sysgmapper {
     }
 
     impl Mapper {
-        pub(crate) fn new() -> Result<Mapper, Error> {
+        pub(crate) fn new() -> Result<Mapper> {
             task::block_in_place(|| {
                 let out = Command::new("sh").arg("-c").arg("which id").output()?;
                 let buf = String::from_utf8_lossy(&out.stdout);
                 let path = buf
                     .lines()
                     .next()
-                    .ok_or_else(|| format_err!("can't find the id command"))?;
+                    .ok_or_else(|| anyhow!("can't find the id command"))?;
                 Ok(Mapper(String::from(path)))
             })
         }
 
-        fn parse_output(out: &str) -> Result<Vec<String>, Error> {
+        fn parse_output(out: &str) -> Result<Vec<String>> {
             let mut groups = Vec::new();
             match out.find("groups=") {
                 None => Ok(Vec::new()),
@@ -429,7 +502,11 @@ pub(crate) mod sysgmapper {
                     let mut s = &out[i..];
                     while let Some(i_op) = s.find('(') {
                         match s.find(')') {
-                            None => bail!("invalid id command output, expected ')'"),
+                            None => {
+                                return Err(anyhow!(
+                                    "invalid id command output, expected ')'"
+                                ))
+                            }
                             Some(i_cp) => {
                                 groups.push(String::from(&s[i_op + 1..i_cp]));
                                 s = &s[i_cp + 1..];
