@@ -2,7 +2,7 @@ use crate::{
     path::Path,
     utils::{Chars, Pack, PackError},
 };
-use bytes::{Bytes, BytesMut, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fxhash::FxBuildHasher;
 use std::{collections::HashMap, net::SocketAddr, result};
 
@@ -310,11 +310,7 @@ impl Pack for ServerHelloWrite {
         let ttl_expired = <bool as Pack>::decode(buf)?;
         let resolver_id = ResolverId::decode(buf)?;
         let auth = ServerAuthWrite::decode(buf)?;
-        Ok(ServerHelloWrite {
-            ttl_expired,
-            resolver_id,
-            auth,
-        })
+        Ok(ServerHelloWrite { ttl_expired, resolver_id, auth })
     }
 }
 
@@ -382,21 +378,14 @@ impl Pack for Resolved {
             buf,
         )?;
         ResolverId::encode(&self.resolver, buf)?;
-        Ok(<Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(
-            &self.addrs,
-            buf,
-        )?)
+        Ok(<Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)?)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
         let resolver = ResolverId::decode(buf)?;
         let addrs = <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
-        Ok(Resolved {
-            krb5_spns,
-            resolver,
-            addrs,
-        })
+        Ok(Resolved { krb5_spns, resolver, addrs })
     }
 }
 

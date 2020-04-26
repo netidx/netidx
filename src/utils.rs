@@ -208,8 +208,7 @@ impl Pack for u64 {
 
 impl<T: Pack> Pack for Vec<T> {
     fn len(&self) -> usize {
-        self.iter()
-            .fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
+        self.iter().fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
@@ -495,12 +494,7 @@ impl<S: Stream> Batched<S> {
     unsafe_unpinned!(current: usize);
 
     pub fn new(stream: S, max: usize) -> Batched<S> {
-        Batched {
-            stream,
-            max,
-            ended: false,
-            current: 0,
-        }
+        Batched { stream, max, ended: false, current: 0 }
     }
 
     pub fn inner(&self) -> &S {
