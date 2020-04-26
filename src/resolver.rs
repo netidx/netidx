@@ -16,7 +16,7 @@ use crate::{
 use log::info;
 use bytes::Bytes;
 use anyhow::Result;
-use futures::{future::select_ok, prelude::*, select};
+use futures::{future::select_ok, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use std::{
@@ -271,7 +271,7 @@ async fn connection_write(
     let mut hb = time::interval_at(now + ttl, ttl).fuse();
     let mut dc = time::interval_at(now + linger, linger).fuse();
     loop {
-        select! {
+        select_biased! {
             _ = dc.next() => {
                 if act {
                    act = false;
@@ -302,7 +302,7 @@ async fn connection_write(
                 None => break,
                 Some((m, reply)) => {
                     act = true;
-                    let m_r = &m;
+                    let m_r = &*m;
                     let r = loop {
                         let c = match con {
                             Some(ref mut c) => c,

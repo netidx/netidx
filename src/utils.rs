@@ -448,7 +448,7 @@ pub fn bytes(t: &[u8]) -> Bytes {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         b.extend_from_slice(t);
-        Ok(b.split().freeze())
+        b.split().freeze()
     })
 }
 

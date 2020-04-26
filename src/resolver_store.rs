@@ -3,7 +3,7 @@ use crate::{
     path::Path,
     protocol::resolver::PermissionToken,
     secstore::SecStoreInner,
-    utils::{self, Pack},
+    utils::{self, Chars},
 };
 use bytes::Bytes;
 use anyhow::Result;
@@ -204,7 +204,7 @@ impl<T> StoreInner<T> {
     pub(crate) fn resolve_and_sign(
         &self,
         sec: &SecStoreInner,
-        krb5_spns: &mut HashMap<SocketAddr, String, FxBuildHasher>,
+        krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
         now: u64,
         path: &Path,
     ) -> Result<Vec<(SocketAddr, Bytes)>> {
@@ -283,6 +283,7 @@ impl<T> Store<T> {
     }
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,3 +376,4 @@ mod tests {
         }
     }
 }
+*/
