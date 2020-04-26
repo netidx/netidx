@@ -444,12 +444,16 @@ pub fn pack<T: Pack>(t: &T) -> Result<Bytes, PackError> {
     })
 }
 
-pub fn bytes(t: &[u8]) -> Bytes {
+pub fn bytesmut(t: &[u8]) -> BytesMut {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         b.extend_from_slice(t);
-        b.split().freeze()
+        b.split()
     })
+}
+
+pub fn bytes(t: &[u8]) -> Bytes {
+    bytesmut(t).freeze()
 }
 
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);

@@ -7,16 +7,16 @@ use crate::{
     config,
     path::Path,
     protocol::{
-        publisher::{self, Id},
+        publisher::{self, Id, Value},
         resolver::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
-    utils::mp_encode,
+    utils,
 };
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use crossbeam::queue::SegQueue;
-use failure::Error;
-use futures::{prelude::*, select, select_biased};
+use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
@@ -28,7 +28,6 @@ use std::{
     marker::PhantomData,
     mem,
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
-    result::Result,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
 };
@@ -47,7 +46,7 @@ static MAX_CLIENTS: usize = 768;
 
 #[derive(Clone)]
 enum Update {
-    Val(Bytes),
+    Val(Value),
     Unpublish,
 }
 
@@ -93,7 +92,7 @@ impl<T: Serialize> Val<T> {
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
-    pub fn update(&self, v: &T) -> Result<(), Error> {
+    pub fn update(&self, v: &T) -> Result<()> {
         Ok(self.0.updates.push((self.0.id, Update::Val(mp_encode(v)?))))
     }
 
@@ -137,8 +136,8 @@ impl UVal {
 
 #[derive(Debug)]
 enum ToClientMsg {
-    Val(Bytes, Bytes),
-    Unpublish(Bytes),
+    Val(Id, Value),
+    Unpublish(Id),
 }
 
 #[derive(Debug)]
@@ -148,9 +147,8 @@ struct ToClient {
     timeout: Option<Duration>,
 }
 
-struct PublishedUVal {
-    header: Bytes,
-    current: Bytes,
+struct Published {
+    current: Value,
     subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
     wait_client: Vec<oneshot::Sender<()>>,
 }
@@ -165,7 +163,7 @@ struct PublisherInner {
     stop: Option<oneshot::Sender<()>>,
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
-    by_id: HashMap<Id, PublishedUVal, FxBuildHasher>,
+    by_id: HashMap<Id, Published, FxBuildHasher>,
     updates: Arc<SegQueue<(Id, Update)>>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
@@ -260,15 +258,15 @@ impl Publisher {
         resolver: config::resolver::Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
-    ) -> Result<Publisher, Error> {
+    ) -> Result<Publisher> {
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
             BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
-                let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr, Error> {
+                let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
                         .next()
-                        .ok_or_else(|| format_err!("socketaddrs bug"))?)
+                        .ok_or_else(|| anyhow!("socketaddrs bug"))?)
                 };
                 let ip = match bind_cfg {
                     BindCfg::Exact(_) => unreachable!(),
@@ -333,7 +331,7 @@ impl Publisher {
     ///
     /// This function will return an error if other references to the
     /// publisher exist.
-    pub async fn shutdown(self) -> Result<(), Error> {
+    pub async fn shutdown(self) -> Result<()> {
         match Arc::try_unwrap(self.0) {
             Err(_) => bail!("publisher is not unique"),
             Ok(mtx) => {
@@ -348,26 +346,20 @@ impl Publisher {
         self.0.lock().addr
     }
 
-    fn publish_val_internal(
-        &self,
-        path: Path,
-        init: Bytes,
-    ) -> Result<Arc<UValInner>, Error> {
+    fn publish_val_internal(&self, path: Path, init: Value) -> Result<Arc<UValInner>> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
-            Err(format_err!("can't publish to relative path"))
+            Err(anyhow!("can't publish to relative path"))
         } else if pb.stop.is_none() {
-            Err(format_err!("publisher is dead"))
+            Err(anyhow!("publisher is dead"))
         } else if pb.by_path.contains_key(&path) {
-            Err(format_err!("already published"))
+            Err(anyhow!("already published"))
         } else {
             let id = Id::new();
-            let header = mp_encode(&publisher::From::Message(id))?;
             pb.by_path.insert(path.clone(), id);
             pb.by_id.insert(
                 id,
-                PublishedUVal {
-                    header,
+                Published {
                     current: init,
                     subscribed: HashMap::with_hasher(FxBuildHasher::default()),
                     wait_client: Vec::new(),
@@ -391,18 +383,14 @@ impl Publisher {
     /// they like. Subscribers will then pick randomly among the
     /// advertised publishers when subscribing. See the `subscriber`
     /// module for details.
-    pub fn publish_val<T: Serialize>(
-        &self,
-        path: Path,
-        init: &T,
-    ) -> Result<Val<T>, Error> {
+    pub fn publish_val<T: Serialize>(&self, path: Path, init: &T) -> Result<Val<T>> {
         let init = mp_encode(init)?;
         Ok(Val(self.publish_val_internal(path, init)?, PhantomData))
     }
 
     /// Publish `Path` with initial raw `Bytes` `init`. This is the
     /// otherwise exactly the same as publish.
-    pub fn publish_val_ut(&self, path: Path, init: Bytes) -> Result<UVal, Error> {
+    pub fn publish_val_ut(&self, path: Path, init: Bytes) -> Result<UVal> {
         Ok(UVal(self.publish_val_internal(path, init)?))
     }
 
@@ -419,7 +407,7 @@ impl Publisher {
     /// update within the timeout duration will be disconnected.
     /// Otherwise flush will wait as long as necessary to flush the
     /// update to every client.
-    pub async fn flush(&self, timeout: Option<Duration>) -> Result<(), Error> {
+    pub async fn flush(&self, timeout: Option<Duration>) -> Result<()> {
         struct Tc {
             sender: Sender<ToClient>,
             to_client: ToClient,
@@ -436,11 +424,7 @@ impl Publisher {
                 flushes.push(rx);
                 Tc {
                     sender: sender.clone(),
-                    to_client: ToClient {
-                        msgs: Vec::new(),
-                        done,
-                        timeout,
-                    },
+                    to_client: ToClient { msgs: Vec::new(), done, timeout },
                 }
             })
         }
@@ -559,7 +543,7 @@ fn subscribe(
     con: &mut Channel<ServerCtx>,
     addr: SocketAddr,
     path: Path,
-) -> Result<(), Error> {
+) -> Result<()> {
     match t.by_path.get(&path) {
         None => con.queue_send(&publisher::From::NoSuchValue(path))?,
         Some(id) => {
@@ -589,29 +573,25 @@ fn handle_batch(
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
-) -> Result<(), Error> {
+) -> Result<()> {
     use crate::protocol::{
         publisher::{From, To::*},
         resolver::PermissionToken,
     };
-    use rmp_serde::decode::{from_read_ref, Error as DErr};
-    let t_st = t.upgrade().ok_or_else(|| format_err!("dead publisher"))?;
+    let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
     let mut pb = t_st.0.lock();
     let ctxts = ctxts.read();
     for msg in msgs {
         match msg {
-            Subscribe {
-                path,
-                resolver,
-                token,
-            } => match auth {
+            Subscribe { path, resolver, token } => match auth {
                 Auth::Anonymous => subscribe(&mut *pb, con, *addr, path)?,
                 Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                     None => con.queue_send(&From::Denied(path))?,
                     Some(ctx) => match ctx.unwrap(&token) {
                         Err(_) => con.queue_send(&From::Denied(path))?,
                         Ok(b) => {
-                            let tok: Result<PermissionToken, DErr> = from_read_ref(&*b);
+                            let mut b = utils::bytesmut(&*b);
+                            let tok = PermissionToken::decode(&mut b);
                             match tok {
                                 Err(_) => con.queue_send(&From::Denied(path))?,
                                 Ok(PermissionToken(a_path, ts)) => {
@@ -648,7 +628,7 @@ async fn hello_client(
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
-) -> Result<(), Error> {
+) -> Result<()> {
     use crate::{
         auth::Krb5,
         protocol::publisher::Hello::{self, *},
@@ -663,10 +643,10 @@ async fn hello_client(
                 let ctx = SYS_KRB5.create_server_ctx(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?
-                    .map(|b| Vec::from(&*b))
-                    .ok_or_else(|| format_err!("expected step to generate a token"))?;
+                    .map(|b| utils::bytes(&*b))
+                    .ok_or_else(|| anyhow!("expected step to generate a token"))?;
                 con.send_one(&Token(tok)).await?;
-                con.set_ctx(Some(ctx));
+                con.set_ctx(ctx);
             }
         },
         ResolverAuthenticate(id, tok) => {
@@ -676,7 +656,7 @@ async fn hello_client(
                 Some(ctx) => {
                     let n = ctx.unwrap(&*tok)?;
                     let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-                    let tok = Vec::from(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+                    let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
                     con.send_one(&ResolverAuthenticate(id, tok)).await?;
                 }
             }
@@ -692,7 +672,7 @@ async fn client_loop(
     msgs: Receiver<ToClient>,
     s: TcpStream,
     desired_auth: Auth,
-) -> Result<(), Error> {
+) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::To> = Vec::new();
     let mut msgs = msgs.fuse();

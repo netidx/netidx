@@ -154,6 +154,123 @@ impl Pack for To {
     }
 }
 
+pub trait Prim {
+    fn to_value(self) -> Value;
+    fn from_value(v: Value) -> Result<Self>;
+}
+
+impl Prim for u32 {
+    fn to_value(self) -> Value {
+        Value::U32(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::U32(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for i32 {
+    fn to_value(self) -> Value {
+        Value::I32(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::I32(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for u64 {
+    fn to_value(self) -> Value {
+        Value::U64(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::U64(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for i64 {
+    fn to_value(self) -> Value {
+        Value::I64(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::I64(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for f32 {
+    fn to_value(self) -> Value {
+        Value::F32(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::F32(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for f64 {
+    fn to_value(self) -> Value {
+        Value::F64(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::F64(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for Chars {
+    fn to_value(self) -> Value {
+        Value::String(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::String(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
+impl Prim for Bytes {
+    fn to_value(self) -> Value {
+        Value::Bytes(self)
+    }
+
+    fn from_value(v: Value) -> Result<Self> {
+        if let Value::Bytes(i) = v {
+            Ok(i)
+        } else {
+            Err(PackError::InvalidFormat)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     U32(u32),
