@@ -7,7 +7,7 @@ use crate::{
     config,
     path::Path,
     protocol::{
-        publisher::{self, Id, Value},
+        publisher::{self, Id, Prim, Value},
         resolver::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
@@ -78,7 +78,7 @@ impl Drop for UValInner {
 #[derive(Clone)]
 pub struct Val<T>(Arc<UValInner>, PhantomData<T>);
 
-impl<T: Serialize> Val<T> {
+impl<T: Prim> Val<T> {
     /// Queue an update to the published value, it will not be sent
     /// out until you call `flush` on the publisher. New subscribers
     /// will not see the new value until you have called
@@ -92,8 +92,8 @@ impl<T: Serialize> Val<T> {
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
-    pub fn update(&self, v: &T) -> Result<()> {
-        Ok(self.0.updates.push((self.0.id, Update::Val(mp_encode(v)?))))
+    pub fn update(&self, v: &T) -> () {
+        self.0.updates.push((self.0.id, Update::Val(v.to_value())))
     }
 
     /// Get the unique `Id` of this `Val`. This id is unique on this
