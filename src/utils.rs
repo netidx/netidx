@@ -1,4 +1,7 @@
-use crate::protocol::shared;
+use crate::{
+    model::{Error as PackError, Pack, Result as PackResult},
+    protocol::shared,
+};
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::{
@@ -11,9 +14,11 @@ use std::pin::Pin;
 use std::{
     cmp::min,
     collections::VecDeque,
+    fmt,
     io::{self, IoSlice, Write},
     net,
     ops::{Deref, DerefMut},
+    str,
 };
 
 macro_rules! try_cf {
@@ -157,6 +162,73 @@ pub fn saddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
                 ..shared::SocketAddr::default()
             }
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Chars(Bytes);
+
+impl Chars {
+    pub fn new() -> Chars {
+        Chars(Bytes::new())
+    }
+
+    pub fn from_bytes(bytes: Bytes) -> Result<Chars, str::Utf8Error> {
+        str::from_utf8(&bytes)?;
+        Ok(Chars(bytes))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Pack for Chars {
+    fn len(&self) -> PackResult<u32> {
+        Pack::len(self)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> PackResult<()> {
+        Pack::encode(&self.0, buf)
+    }
+
+    fn decode(buf: &mut BytesMut) -> PackResult<Self> {
+        match Chars::from_bytes(<Bytes as Pack>::decode(buf)?) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(PackError::InvalidFormat),
+        }
+    }
+}
+
+impl<'a> From<&'a str> for Chars {
+    fn from(src: &'a str) -> Chars {
+        Chars(Bytes::copy_from_slice(src.as_bytes()))
+    }
+}
+
+impl From<String> for Chars {
+    fn from(src: String) -> Chars {
+        Chars(Bytes::from(src))
+    }
+}
+
+impl Deref for Chars {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        unsafe { str::from_utf8_unchecked(&self.0) }
+    }
+}
+
+impl fmt::Display for Chars {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl fmt::Debug for Chars {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
 

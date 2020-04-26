@@ -1,69 +1,254 @@
-use crate::protocol::shared;
-use bytes::Bytes;
-use std::net;
+use crate::utils::Chars;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::{
+    collections::HashMap,
+    error, fmt,
+    hash::{BuildHasher, Hash},
+    mem, net, result,
+};
 
-pub fn protobuf_socketaddr_to_std(p: shared::SocketAddr) -> Option<net::SocketAddr> {
-    p.addr.map(|addr| match addr {
-        Some(shared::SocketAddr_oneof_addr::V4(addr)) => {
-            let octets = addr.octets.to_be_bytes();
-            let ip = net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
-            Some(net::SocketAddr::V4(net::SocketAddrV4::new(
-                ip,
-                addr.port as u16,
-            )))
-        }
-        Some(shared::SocketAddr_oneof_addr::V6(addr)) => {
-            if addr.octets.len() != 16 {
-                None
-            } else {
-                let a = addr.octets.get_u16();
-                let b = addr.octets.get_u16();
-                let c = addr.octets.get_u16();
-                let d = addr.octets.get_u16();
-                let e = addr.octets.get_u16();
-                let f = addr.octets.get_u16();
-                let g = addr.octets.get_u16();
-                let h = addr.octets.get_u16();
-                let ip = net::Ipv6Addr::new(a, b, c, d, e, f, g, h);
-                let a =
-                    net::SocketAddrV6::new(ip, addr.port, addr.flowinfo, addr.scope_id);
-                Some(net::SocketAddr::V6(a))
-            }
-        }
-    })
+#[derive(Debug, Clone, Copy)]
+pub enum Error {
+    Eof,
+    UnknownTag,
+    TooBig,
+    InvalidFormat,
 }
 
-pub fn std_socketaddr_to_protobuf(a: net::SocketAddr) -> shared::SocketAddr {
-    match a {
-        net::SocketAddr::V4(v4) => shared::SocketAddr {
-            addr: shared::SocketAddr_oneof_addr::V4(shared::SocketAddr_SocketAddrV4 {
-                octets: u32::from_be_bytes(v4.ip().octets()),
-                port: v4.port() as u32,
-                ..shared::SocketAddr_SocketAddrV4::default()
-            }),
-            ..shared::SocketAddr::default()
-        },
-        net::SocketAddr::V6(v6) => shared::SocketAddr {
-            addr: shared::SocketAddr_oneof_addr::V6(shared::SocketAddr_SocketAddrV6 {
-                octets: Bytes::from(&v6.ip().octets()[..]),
-                port: v6.port() as u16,
-                flowinfo: v6.flowinfo(),
-                scope_id: v6.scope_id(),
-                ..shared::SocketAddr_SocketAddrV6::default()
-            }),
-            ..shared::SocketAddr::default()
-        },
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl error::Error for Error {}
+
+pub trait Pack {
+    fn len(&self) -> Result<u32>;
+    fn encode(&self, buf: &mut BytesMut) -> Result<()>;
+    fn decode(buf: &mut BytesMut) -> Result<Self>
+    where
+        Self: std::marker::Sized;
+}
+
+pub type Result<T> = result::Result<T, Error>;
+
+impl Pack for net::SocketAddr {
+    fn len(&self) -> Result<u32> {
+        match self {
+            net::SocketAddr::V4(_) => Ok(7),
+            net::SocketAddr::V6(_) => Ok(27),
+        }
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        match self {
+            net::SocketAddr::V4(v4) => {
+                buf.put_u8(0);
+                buf.put_u32(u32::from_be_bytes(v4.ip().octets()));
+                buf.put_u16(v4.port());
+            }
+            net::SocketAddr::V6(v6) => {
+                buf.put_u8(1);
+                for s in &v6.ip().segments() {
+                    buf.put_u16(*s);
+                }
+                buf.put_u16(v6.port());
+                buf.put_u32(v6.flowinfo());
+                buf.put_u32(v6.scope_id());
+            }
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        if !buf.has_remaining() {
+            return Err(Error::Eof);
+        }
+        match buf[0] {
+            0 => {
+                if !buf.remaining() >= 7 {
+                    return Err(Error::Eof);
+                }
+                buf.advance(1);
+                let ip = net::Ipv4Addr::from(u32::to_be_bytes(buf.get_u32()));
+                let port = buf.get_u16();
+                Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
+            }
+            1 => {
+                if !buf.remaining() >= 27 {
+                    return Err(Error::Eof);
+                }
+                buf.advance(1);
+                let mut segments = [0u16; 8];
+                for i in 0..8 {
+                    segments[i] = buf.get_u16();
+                }
+                let port = buf.get_u16();
+                let flowinfo = buf.get_u32();
+                let scope_id = buf.get_u32();
+                let ip = net::Ipv6Addr::from(segments);
+                let v6 = net::SocketAddrV6::new(ip, port, flowinfo, scope_id);
+                Ok(net::SocketAddr::V6(v6))
+            }
+            _ => return Err(Error::UnknownTag),
+        }
+    }
+}
+
+impl Pack for Bytes {
+    fn len(&self) -> Result<u32> {
+        let len = self
+            .len()
+            .checked_add(mem::size_of::<u32>())
+            .ok_or(Error::TooBig)?;
+        if len > u32::MAX as usize {
+            Err(Error::TooBig)
+        } else {
+            Ok(len as u32)
+        }
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        buf.put_u32(<Self as Pack>::len(self)?);
+        Ok(buf.extend_from_slice(&*self))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        if buf.remaining() < mem::size_of::<u32>() {
+            return Err(Error::Eof);
+        } else {
+            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            if buf.remaining() < len {
+                return Err(Error::Eof);
+            } else {
+                buf.advance(mem::size_of::<u32>());
+                Ok(buf.split_to(len as usize - mem::size_of::<u32>()).freeze())
+            }
+        }
+    }
+}
+
+impl Pack for u64 {
+    fn len(&self) -> Result<u32> {
+        Ok(mem::size_of::<u64>() as u32)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        Ok(buf.put_u64(*self))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        if buf.remaining() < mem::size_of::<u64>() {
+            Err(Error::Eof)
+        } else {
+            Ok(buf.get_u64())
+        }
+    }
+}
+
+impl<T: Pack> Pack for Vec<T> {
+    fn len(&self) -> Result<u32> {
+        let mut len = mem::size_of::<u64>();
+        for t in self {
+            len = len
+                .checked_add(Pack::len(t)? as usize)
+                .ok_or(Error::TooBig)?;
+        }
+        if len > u32::MAX as usize {
+            Err(Error::TooBig)
+        } else {
+            Ok(len as u32)
+        }
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        buf.put_u32(Pack::len(self)?);
+        buf.put_u32(Vec::len(self) as u32);
+        for t in self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        if buf.remaining() < mem::size_of::<u64>() {
+            return Err(Error::Eof);
+        }
+        let bytes = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if buf.remaining() < bytes {
+            return Err(Error::Eof);
+        }
+        buf.advance(mem::size_of::<u32>());
+        let elts = buf.get_u32() as usize;
+        let mut data = Vec::with_capacity(elts);
+        for _ in 0..elts {
+            data.push(<T as Pack>::decode(buf)?);
+        }
+        Ok(data)
+    }
+}
+
+impl<K, V, R> Pack for HashMap<K, V, R>
+where
+    K: Pack + Hash + Eq,
+    V: Pack + Hash + Eq,
+    R: Default + BuildHasher,
+{
+    fn len(&self) -> Result<u32> {
+        let mut len = mem::size_of::<u64>();
+        for (k, v) in self {
+            len = len
+                .checked_add(<K as Pack>::len(k)? as usize)
+                .ok_or(Error::TooBig)?;
+            len = len
+                .checked_add(<V as Pack>::len(v)? as usize)
+                .ok_or(Error::TooBig)?;
+        }
+        if len > u32::MAX as usize {
+            Err(Error::TooBig)
+        } else {
+            Ok(len as u32)
+        }
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        buf.put_u32(<Self as Pack>::len(self)?);
+        buf.put_u32(HashMap::len(self) as u32);
+        for (k, v) in self {
+            <K as Pack>::encode(k, buf)?;
+            <V as Pack>::encode(v, buf)?;
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        if buf.remaining() < mem::size_of::<u64>() {
+            return Err(Error::Eof);
+        }
+        let bytes = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if buf.remaining() < bytes {
+            return Err(Error::Eof);
+        }
+        buf.advance(mem::size_of::<u32>());
+        let elts = buf.get_u32() as usize;
+        let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
+        for _ in 0..elts {
+            let k = <K as Pack>::decode(buf)?;
+            let v = <V as Pack>::decode(buf)?;
+            data.insert(k, v);
+        }
+        Ok(data)
     }
 }
 
 pub mod resolver {
+    use super::*;
     use crate::{path::Path, protocol};
-    use anyhow::{anyhow, Result};
     use bytes::Bytes;
     use fxhash::FxBuildHasher;
     use protobuf::Chars;
     use std::{collections::HashMap, net::SocketAddr};
-    use super::{protobuf_socketaddr_to_std, std_socketaddr_to_protobuf};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CtxId(u64);
@@ -76,14 +261,88 @@ pub mod resolver {
         }
     }
 
+    impl Pack for CtxId {
+        fn len(&self) -> Result<u32> {
+            <u64 as Pack>::len(&self.0)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            <u64 as Pack>::encode(&self.0, buf)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            Ok(CtxId(<u64 as Pack>::decode(buf)?))
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ResolverId(u64);
+
+    impl Pack for ResolverId {
+        fn len(&self) -> Result<u32> {
+            <u64 as Pack>::len(&self.0)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            self.0.encode(buf)
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            Ok(ResolverId(u64::decode(buf)?))
+        }
+    }
 
     #[derive(Clone, Debug)]
     pub enum ClientAuthRead {
         Anonymous,
         Reuse(CtxId),
         Initiate(Bytes),
+    }
+
+    impl Pack for ClientAuthRead {
+        fn len(&self) -> Result<u32> {
+            1u32.checked_add(match self {
+                ClientAuthRead::Anonymous => 0,
+                ClientAuthRead::Reuse(ref i) => Pack::len(i)?,
+                ClientAuthRead::Initiate(ref b) => Pack::len(b)?,
+            })
+            .ok_or(Error::TooBig)
+        }
+
+        fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+            match self {
+                ClientAuthRead::Anonymous => Ok(buf.put_u8(0)),
+                ClientAuthRead::Reuse(ref id) => {
+                    buf.put_u8(1);
+                    Ok(<CtxId as Pack>::encode(id, buf)?)
+                }
+                ClientAuthRead::Initiate(ref tok) => {
+                    buf.put_u8(2);
+                    Ok(<Bytes as Pack>::encode(tok, buf)?)
+                }
+            }
+        }
+
+        fn decode(buf: &mut BytesMut) -> Result<Self> {
+            if !buf.has_remaining() {
+                return Err(Error::Eof);
+            }
+            match buf[0] {
+                0 => {
+                    buf.advance(1);
+                    Ok(ClientAuthRead::Anonymous)
+                }
+                1 => {
+                    buf.advance(1);
+                    Ok(ClientAuthRead::Reuse(<CtxId as Pack>::decode(buf)?))
+                }
+                2 => {
+                    buf.advance(1);
+                    Ok(ClientAuthRead::Initiate(<Bytes as Pack>::decode(buf)?))
+                }
+                _ => return Err(Error::UnknownTag),
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -111,44 +370,6 @@ pub mod resolver {
         /// resolver server will purge all paths published by
         /// `write_addr`.
         WriteOnly(ClientHelloWrite),
-    }
-
-    impl ClientHello {
-        pub fn from_protobuf(msg: protocol::resolver::ClientHello) -> Result<Self> {
-            use protocol::resolver::{
-                ClientHello_Read, ClientHello_Read_Initiate, ClientHello_Read_Reuse,
-                ClientHello_Read_oneof_auth, ClientHello_Write, ClientHello_oneof_hello,
-            };
-            match msg.hello {
-                None => return Err(anyhow!("hello is required")),
-                Some(hello) => match hello {
-                    ClientHello_oneof_hello::ReadOnly(hello) => match hello.auth {
-                        None => return Err(anyhow!("auth is required")),
-                        Some(ClientHello_Read_oneof_auth::Anonymous(_)) => {
-                            Ok(ClientHello::ReadOnly(ClientAuthRead::Anonymous))
-                        }
-                        Some(ClientHello_Read_oneof_auth::Reuse(r)) => {
-                            Ok(ClientHello::ReadOnly(ClientAuthRead::Reuse(CtxId::from(
-                                r.session_id,
-                            ))))
-                        }
-                        Some(ClientHello_Read_oneof_auth::Initiate(i)) => {
-                            Ok(ClientHello::ReadOnly(ClientAuthRead::Initiate(i.token)))
-                        }
-                    },
-                    ClientHello_oneof_hello::WriteOnly(hello) => {
-                        let write_addr = hello
-                            .write_addr
-                            .take()
-                            .and_then(protobuf_socketaddr_to_std)
-                            .ok_or_else(|| {
-                                anyhow!("protocol error, write addr required")
-                            })?;
-                        
-                    }
-                },
-            }
-        }
     }
 
     #[derive(Clone, Debug)]
@@ -204,7 +425,7 @@ pub mod resolver {
     #[derive(Clone, Debug)]
     pub struct PermissionToken(pub Chars, pub u64);
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Clone, Debug)]
     pub enum ToWrite {
         /// Publish the list of paths
         Publish(Vec<Path>),
@@ -216,7 +437,7 @@ pub mod resolver {
         Heartbeat,
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Clone, Debug)]
     pub enum FromWrite {
         Published,
         Unpublished,
@@ -238,11 +459,10 @@ pub mod resolver {
 /// encoding, and will not be interpreted at this layer.
 pub mod publisher {
     use super::resolver::ResolverId;
+    use super::*;
     use crate::path::Path;
 
-    #[derive(
-        Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-    )]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Id(u64);
 
     impl Id {
@@ -253,7 +473,7 @@ pub mod publisher {
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[derive(Debug, Clone)]
     pub enum Hello {
         /// No authentication will be provided. The publisher may drop
         /// the connection at this point, if it chooses to allow this
@@ -279,7 +499,7 @@ pub mod publisher {
         ResolverAuthenticate(ResolverId, Vec<u8>),
     }
 
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[derive(Debug, Clone)]
     pub enum To {
         /// Subscribe to the specified value, if it is not available
         /// the result will be NoSuchValue. The optional security
@@ -297,7 +517,7 @@ pub mod publisher {
         Unsubscribe(Id),
     }
 
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[derive(Debug, Clone)]
     pub enum From {
         /// The requested subscription to Path cannot be completed because
         /// it doesn't exist

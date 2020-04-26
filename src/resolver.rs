@@ -6,7 +6,14 @@ use crate::{
     channel::Channel,
     config::{self, resolver::Auth as CAuth},
     path::Path,
-    protocol,
+    protocol::{
+        self,
+        resolver::{
+            ReadClientRequest, ReadServerResponse,
+            ReadServerResponse_Resolved as Resolved, WriteClientRequest,
+            WriteServerResponse,
+        },
+    },
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -187,7 +194,9 @@ async fn connection_read(
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverRead(mpsc::UnboundedSender<ToCon<ToRead, FromRead>>);
+pub struct ResolverRead(
+    mpsc::UnboundedSender<ToCon<ReadClientRequest, ReadServerResponse>>,
+);
 
 impl ResolverRead {
     pub fn new(
@@ -202,6 +211,17 @@ impl ResolverRead {
     }
 
     pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
+        use protocol::resolver::{
+            ReadClientRequest_Resolve as Resolve,
+            ReadClientRequest_oneof_request as ToRead,
+        };
+        let r = ReadClientRequest {
+            request: Some(ToRead::Resolve(Resolve {
+                paths: paths.into_iter().map(|p| p.as_chars()).collect(),
+                ..Resolve::default()
+            })),
+            ..ReadClientRequest::default()
+        };
         match send(&self.0, resolver::ToRead::Resolve(paths)).await? {
             resolver::FromRead::Resolved(r) => Ok(r),
             _ => return Err(anyhow!("unexpected response")),
