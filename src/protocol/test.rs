@@ -188,3 +188,76 @@ mod resolver {
         }
     }
 }
+
+mod publisher {
+    use super::*;
+    use crate::protocol::{
+        publisher::{From, Hello, Id, To, Value},
+        resolver::ResolverId,
+    };
+
+    fn hello() -> impl Strategy<Value = Hello> {
+        prop_oneof![
+            Just(Hello::Anonymous),
+            bytes().prop_map(Hello::Token),
+            (any::<u64>(), bytes())
+                .prop_map(|(i, b)| Hello::ResolverAuthenticate(ResolverId::mk(i), b))
+        ]
+    }
+
+    fn to() -> impl Strategy<Value = To> {
+        prop_oneof![
+            (path(), any::<u64>(), bytes()).prop_map(|(p, i, b)| To::Subscribe {
+                path: p,
+                resolver: ResolverId::mk(i),
+                token: b
+            }),
+            any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i)))
+        ]
+    }
+
+    fn value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            any::<u32>().prop_map(Value::U32),
+            any::<i32>().prop_map(Value::I32),
+            any::<u64>().prop_map(Value::U64),
+            any::<i64>().prop_map(Value::I64),
+            any::<f32>().prop_map(Value::F32),
+            any::<f64>().prop_map(Value::F64),
+            chars().prop_map(Value::String),
+            bytes().prop_map(Value::Bytes),
+        ]
+    }
+
+    fn from() -> impl Strategy<Value = From> {
+        prop_oneof![
+            path().prop_map(From::NoSuchValue),
+            path().prop_map(From::Denied),
+            any::<u64>().prop_map(|i| From::Unsubscribed(Id::mk(i))),
+            (path(), any::<u64>(), value()).prop_map(|(p, i, v)| From::Subscribed(
+                p,
+                Id::mk(i),
+                v
+            )),
+            (any::<u64>(), value()).prop_map(|(i, v)| From::Update(Id::mk(i), v)),
+            Just(From::Heartbeat)
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn test_hello(a in hello()) {
+            check(a)
+        }
+
+        #[test]
+        fn test_to(a in to()) {
+            check(a)
+        }
+
+        #[test]
+        fn test_from(a in from()) {
+            check(a)
+        }
+    }
+}

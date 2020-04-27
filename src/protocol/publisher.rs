@@ -17,6 +17,11 @@ impl Id {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Id(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    #[cfg(test)]
+    pub(crate) fn mk(i: u64) -> Self {
+        Id(i)
+    }
 }
 
 impl Pack for Id {
@@ -33,7 +38,7 @@ impl Pack for Id {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hello {
     /// No authentication will be provided. The publisher may drop
     /// the connection at this point, if it chooses to allow this
@@ -99,7 +104,7 @@ impl Pack for Hello {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum To {
     /// Subscribe to the specified value, if it is not available
     /// the result will be NoSuchValue. The optional security
@@ -156,7 +161,7 @@ impl Pack for To {
 
 pub trait Prim {
     fn to_value(self) -> Value;
-    fn from_value(v: Value) -> Result<Self>
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error>
     where
         Self: std::marker::Sized;
 }
@@ -166,11 +171,11 @@ impl Prim for u32 {
         Value::U32(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::U32(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -180,11 +185,11 @@ impl Prim for i32 {
         Value::I32(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::I32(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -194,11 +199,11 @@ impl Prim for u64 {
         Value::U64(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::U64(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -208,11 +213,11 @@ impl Prim for i64 {
         Value::I64(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::I64(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -222,11 +227,11 @@ impl Prim for f32 {
         Value::F32(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::F32(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -236,11 +241,11 @@ impl Prim for f64 {
         Value::F64(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::F64(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -250,11 +255,11 @@ impl Prim for Chars {
         Value::String(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::String(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
@@ -264,16 +269,16 @@ impl Prim for Bytes {
         Value::Bytes(self)
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         if let Value::Bytes(i) = v {
             Ok(i)
         } else {
-            Err(PackError::InvalidFormat)
+            bail!("type mismatch")
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     U32(u32),
     I32(i32),
@@ -290,7 +295,7 @@ impl Prim for Value {
         self
     }
 
-    fn from_value(v: Value) -> Result<Self> {
+    fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
         Ok(v)
     }
 }
@@ -361,7 +366,7 @@ impl Pack for Value {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum From {
     /// The requested subscription to Path cannot be completed because
     /// it doesn't exist
