@@ -436,11 +436,11 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub fn pack<T: Pack>(t: &T) -> Result<Bytes, PackError> {
+pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         t.encode(&mut *b)?;
-        Ok(b.split().freeze())
+        Ok(b.split())
     })
 }
 

@@ -30,3 +30,6 @@ parking_lot = "0.10"
 bitflags = "1"
 smallvec = "1"
 arc-swap = "0.4"
+
+[dev-dependencies]
+proptest = "0.9"

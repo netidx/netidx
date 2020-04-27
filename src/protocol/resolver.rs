@@ -18,6 +18,11 @@ impl CtxId {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    #[cfg(test)]
+    pub(crate) fn mk(i: u64) -> CtxId {
+        CtxId(i)
+    }
 }
 
 impl Pack for CtxId {
@@ -34,8 +39,17 @@ impl Pack for CtxId {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub struct ResolverId(u64);
+
+impl ResolverId {
+    #[cfg(test)]
+    pub(crate) fn mk(i: u64) -> ResolverId {
+        ResolverId(i)
+    }
+}
 
 impl Pack for ResolverId {
     fn len(&self) -> usize {
@@ -51,7 +65,7 @@ impl Pack for ResolverId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientAuthRead {
     Anonymous,
     Reuse(CtxId),
@@ -91,7 +105,7 @@ impl Pack for ClientAuthRead {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientAuthWrite {
     Anonymous,
     Reuse,
@@ -135,7 +149,7 @@ impl Pack for ClientAuthWrite {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientHelloWrite {
     pub write_addr: SocketAddr,
     pub auth: ClientAuthWrite,
@@ -158,7 +172,7 @@ impl Pack for ClientHelloWrite {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientHello {
     /// Instruct the resolver server that this connection will not
     /// publish paths.
@@ -202,7 +216,7 @@ impl Pack for ClientHello {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerHelloRead {
     Anonymous,
     Reused,
@@ -246,7 +260,7 @@ impl Pack for ServerHelloRead {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerAuthWrite {
     Anonymous,
     Reused,
@@ -286,7 +300,7 @@ impl Pack for ServerAuthWrite {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerHelloWrite {
     pub ttl_expired: bool,
     pub resolver_id: ResolverId,
@@ -314,7 +328,7 @@ impl Pack for ServerHelloWrite {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToRead {
     /// Resolve the list of paths to addresses/ports
     Resolve(Vec<Path>),
@@ -358,7 +372,7 @@ impl Pack for ToRead {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
     pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
     pub resolver: ResolverId,
@@ -389,7 +403,7 @@ impl Pack for Resolved {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
     Resolved(Resolved),
     List(Vec<Path>),
@@ -439,7 +453,7 @@ impl Pack for FromRead {
 /// to the specified path (because the subsciber can't decrypt or
 /// fabricate the token without the session key shared by the
 /// resolver server and the publisher).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PermissionToken(pub Path, pub u64);
 
 impl Pack for PermissionToken {
@@ -459,7 +473,7 @@ impl Pack for PermissionToken {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToWrite {
     /// Publish the list of paths
     Publish(Vec<Path>),
@@ -507,7 +521,7 @@ impl Pack for ToWrite {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromWrite {
     Published,
     Unpublished,
