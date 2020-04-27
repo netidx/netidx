@@ -6,7 +6,7 @@ use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use std::fmt::Debug;
 
-fn check<T: Pack + Debug + PartialEq + Eq>(t: T) {
+fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
     assert_eq!(t.len(), BytesMut::len(&bytes));
     let u = T::decode(&mut bytes).expect("decode failed");

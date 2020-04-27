@@ -278,7 +278,7 @@ impl Prim for Bytes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     U32(u32),
     I32(i32),
@@ -366,7 +366,7 @@ impl Pack for Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum From {
     /// The requested subscription to Path cannot be completed because
     /// it doesn't exist
