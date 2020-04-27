@@ -312,6 +312,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
         let _ = self.write.set_ctx(ctx).await;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn split(self) -> (ReadChannel<C>, WriteChannel<C>) {
         (self.read, self.write)
     }

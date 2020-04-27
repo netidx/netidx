@@ -3,7 +3,7 @@ use crate::{
         syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
     },
-    channel::{Channel, ReadChannel, WriteChannel},
+    channel::Channel,
     config,
     path::Path,
     protocol::{
@@ -15,21 +15,19 @@ use crate::{
     utils::{self, BatchItem, Batched, Chars},
 };
 use anyhow::{anyhow, Error, Result};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use futures::{
     channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
-    future::FusedFuture,
     prelude::*,
     select, select_biased,
 };
 use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
 use rand::Rng;
-use serde::de::DeserializeOwned;
 use std::{
     cmp::max,
     collections::{hash_map::Entry, HashMap},
-    io, iter,
+    iter,
     marker::PhantomData,
     mem,
     net::SocketAddr,
