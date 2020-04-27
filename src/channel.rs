@@ -1,19 +1,24 @@
 use crate::{auth::Krb5Ctx, utils::Pack};
-use byteorder::{ByteOrder, BigEndian};
 use anyhow::{anyhow, Error, Result};
+use byteorder::{BigEndian, ByteOrder};
 use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use futures::prelude::*;
 use log::info;
 use std::{
     cmp::{max, min},
     fmt::Debug,
-    mem,
+    mem, result,
+    time::Duration,
 };
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{
-        mpsc::{self, Receiver, Sender},
+        mpsc::{
+            self,
+            error::{SendError, SendTimeoutError},
+            Receiver, Sender,
+        },
         oneshot,
     },
     task,
@@ -95,10 +100,7 @@ pub(crate) struct WriteChannel<C> {
 
 impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
-        WriteChannel {
-            to_flush: flush_task(socket),
-            buf: BytesMut::with_capacity(BUF),
-        }
+        WriteChannel { to_flush: flush_task(socket), buf: BytesMut::with_capacity(BUF) }
     }
 
     pub(crate) async fn set_ctx(&mut self, ctx: C) -> Result<()> {
@@ -135,7 +137,31 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) async fn flush(&mut self) -> Result<()> {
         while self.buf.has_remaining() {
             let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
-            self.to_flush.send(ToFlush::Flush(chunk)).await?
+            self.to_flush.send(ToFlush::Flush(chunk)).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn flush_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> result::Result<(), SendTimeoutError<()>> {
+        while self.buf.has_remaining() {
+            let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
+            match self.to_flush.send_timeout(ToFlush::Flush(chunk), timeout).await {
+                Ok(()) => (),
+                Err(SendTimeoutError::Timeout(ToFlush::Flush(mut chunk))) => {
+                    chunk.unsplit(self.buf.split());
+                    self.buf = chunk;
+                    return Err(SendTimeoutError::Timeout(()));
+                }
+                Err(SendTimeoutError::Timeout(_)) => {
+                    return Err(SendTimeoutError::Timeout(()))
+                }
+                Err(SendTimeoutError::Closed(_)) => {
+                    return Err(SendTimeoutError::Closed(()))
+                }
+            }
         }
         Ok(())
     }
@@ -257,11 +283,11 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
         batch.push(self.receive().await?);
         loop {
             if self.buf.remaining() < mem::size_of::<u32>() {
-                break
+                break;
             }
             let len = BigEndian::read_u32(&*self.buf) as usize;
             if self.buf.remaining() < len + mem::size_of::<u32>() {
-                break
+                break;
             }
             self.buf.advance(mem::size_of::<u32>());
             batch.push(T::decode(&mut self.buf)?);
@@ -278,10 +304,7 @@ pub(crate) struct Channel<C> {
 impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
-        Channel {
-            read: ReadChannel::new(rh),
-            write: WriteChannel::new(wh),
-        }
+        Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
     }
 
     pub(crate) async fn set_ctx(&mut self, ctx: C) {
@@ -308,6 +331,13 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
 
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
         Ok(self.write.flush().await?)
+    }
+
+    pub(crate) async fn flush_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), SendTimeoutError<()>> {
+        Ok(self.write.flush_timeout(timeout).await?)
     }
 
     pub(crate) async fn receive<T: Pack>(&mut self) -> Result<T, Error> {
