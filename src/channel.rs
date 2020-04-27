@@ -16,7 +16,7 @@ use tokio::{
     sync::{
         mpsc::{
             self,
-            error::{SendError, SendTimeoutError},
+            error::SendTimeoutError,
             Receiver, Sender,
         },
         oneshot,

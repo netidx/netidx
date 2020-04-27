@@ -146,7 +146,7 @@ impl<T: Prim> Val<T> {
 
     /// Same as `SubscriptionUt::updates` but it decodes the value
     pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Result<T>> {
-        self.0.updates(begin_with_last).map(|v| Ok(T::from_value(v)))
+        self.0.updates(begin_with_last).map(|v| Ok(T::from_value(v)?))
     }
 }
 
@@ -771,7 +771,7 @@ impl Subscriber {
     }
 
     /// Same as `durable_subscribe_val_ut` but typed.
-    pub fn durable_subscribe_val<T: DeserializeOwned>(&self, path: Path) -> DVal<T> {
+    pub fn durable_subscribe_val<T: Prim>(&self, path: Path) -> DVal<T> {
         self.durable_subscribe_val_ut(path).typed()
     }
 }
@@ -963,7 +963,7 @@ async fn connection(
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
                 if !msg_recvd {
-                    break 'main Err(format_err!("hung publisher"));
+                    break 'main Err(anyhow!("hung publisher"));
                 } else {
                     msg_recvd = false;
                 }
@@ -983,16 +983,22 @@ async fn connection(
                 }
                 for path in timed_out {
                     if let Some(req) = pending.remove(&path) {
-                        let _ = req.finished.send(Err(format_err!("timed out")));
+                        let _ = req.finished.send(Err(anyhow!("timed out")));
                     }
                 }
                 try_cf!(try_flush(&mut con).await)
             },
-            r = con.read_batch(&mut batch) => match r {
+            r = con.receive_batch(&mut batch).fuse() => match r {
                 Err(e) => break Err(Error::from(e)),
                 Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
                     msg_recvd = true;
-                    try_cf!(process_batch(&mut batch, &mut subscriptions, &mut pending, &mut con, &subscriber, addr));
+                    try_cf!(process_batch(
+                        &mut batch,
+                        &mut subscriptions,
+                        &mut pending,
+                        &mut con,
+                        &subscriber,
+                        addr).await);
                     try_cf!(try_flush(&mut con).await)
                 }
             },
