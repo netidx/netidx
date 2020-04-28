@@ -1,5 +1,4 @@
 use crate::publisher::SValue;
-use anyhow::Error;
 use bytes::BytesMut;
 use futures::{
     prelude::*,
@@ -67,116 +66,123 @@ impl<'a> Out<'a> {
     }
 }
 
-fn process_request(
-    subscriptions: &mut HashMap<Path, DVal<SValue>>,
-    add: &mut HashSet<String>,
-    drop: &mut HashSet<String>,
-    subscriber: &Subscriber,
-    updates: &mut Batched<SelectAll<Box<dyn Stream<Item = (Path, SValue)> + Unpin>>>,
-    requests: &mut Box<
-        dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin,
-    >,
-    r: Option<BatchItem<Result<String, io::Error>>>,
-) {
-    match r {
-        None | Some(BatchItem::InBatch(Err(_))) => {
-            *requests = Box::new(stream::pending());
+struct Ctx {
+    subscriptions: HashMap<Path, DVal<SValue>>,
+    subscriber: Subscriber,
+    requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
+    updates: Batched<SelectAll<Box<dyn Stream<Item = (Path, SValue)> + Unpin>>>,
+    stdout: io::Stdout,
+    stderr: io::Stderr,
+    to_stdout: BytesMut,
+    to_stderr: BytesMut,
+    add: HashSet<String>,
+    drop: HashSet<String>,
+}
+
+impl Ctx {
+    fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
+        Ctx {
+            subscriber,
+            subscriptions: HashMap::new(),
+            requests: {
+                let stdin = BufReader::new(io::stdin()).lines();
+                Box::new(Batched::new(
+                    stream::iter(paths).map(|p| Ok(p)).chain(stdin),
+                    1000,
+                ))
+            },
+            updates: Batched::new(SelectAll::new(), 100_000),
+            stdout: io::stdout(),
+            stderr: io::stderr(),
+            to_stdout: BytesMut::new(),
+            to_stderr: BytesMut::new(),
+            add: HashSet::new(),
+            drop: HashSet::new(),
         }
-        Some(BatchItem::InBatch(Ok(l))) => match l.parse::<In>() {
-            Err(e) => eprintln!("{}", e),
-            Ok(In::Add(p)) => {
-                if !drop.remove(&p) {
-                    add.insert(p);
+    }
+
+    fn process_request(&mut self, r: Option<BatchItem<Result<String, io::Error>>>) {
+        match r {
+            None | Some(BatchItem::InBatch(Err(_))) => {
+                self.requests = Box::new(stream::pending());
+            }
+            Some(BatchItem::InBatch(Ok(l))) => match l.parse::<In>() {
+                Err(e) => eprintln!("{}", e),
+                Ok(In::Add(p)) => {
+                    if !self.drop.remove(&p) {
+                        self.add.insert(p);
+                    }
                 }
-            }
-            Ok(In::Drop(p)) => {
-                if !add.remove(&p) {
-                    drop.insert(p);
+                Ok(In::Drop(p)) => {
+                    if !self.add.remove(&p) {
+                        self.drop.insert(p);
+                    }
                 }
-            }
-        },
-        Some(BatchItem::EndBatch) => {
-            for p in drop.drain() {
-                subscriptions.remove(&*p);
-            }
-            for p in add.drain() {
-                let p = Path::from(p);
-                subscriptions.entry(p.clone()).or_insert_with(|| {
-                    let s = subscriber.durable_subscribe_val(p.clone());
-                    updates.inner_mut().push(Box::new(s.updates(true).map(move |v| {
-                        let v = match v {
-                            Err(e) => SValue::String(format!("{}", e)),
-                            Ok(v) => v,
-                        };
-                        (p.clone(), v)
-                    })));
-                    s
-                });
+            },
+            Some(BatchItem::EndBatch) => {
+                for p in self.drop.drain() {
+                    self.subscriptions.remove(&*p);
+                }
+                for p in self.add.drain() {
+                    let p = Path::from(p);
+                    let updates = &mut self.updates;
+                    let subscriptions = &mut self.subscriptions;
+                    let subscriber = &self.subscriber;
+                    subscriptions.entry(p.clone()).or_insert_with(|| {
+                        let s = subscriber.durable_subscribe_val(p.clone());
+                        updates.inner_mut().push(Box::new(s.updates(true).map(
+                            move |v| {
+                                let v = match v {
+                                    Err(e) => SValue::String(format!("{}", e)),
+                                    Ok(v) => v,
+                                };
+                                (p.clone(), v)
+                            },
+                        )));
+                        s
+                    });
+                }
             }
         }
     }
-}
 
-async fn process_update(
-    to_stdout: &mut BytesMut,
-    to_stderr: &mut BytesMut,
-    stdout: &mut io::Stdout,
-    stderr: &mut io::Stderr,
-    u: Option<BatchItem<(Path, SValue)>>,
-) -> Result<(), anyhow::Error> {
-    Ok(match u {
-        None => unreachable!(),
-        Some(BatchItem::EndBatch) => {
-            if to_stdout.len() > 0 {
-                let to_write = to_stdout.split().freeze();
-                stdout.write_all(&*to_write).await?;
+    async fn process_update(
+        &mut self,
+        u: Option<BatchItem<(Path, SValue)>>,
+    ) -> Result<(), anyhow::Error> {
+        Ok(match u {
+            None => unreachable!(),
+            Some(BatchItem::EndBatch) => {
+                if self.to_stdout.len() > 0 {
+                    let to_write = self.to_stdout.split().freeze();
+                    self.stdout.write_all(&*to_write).await?;
+                }
+                if self.to_stderr.len() > 0 {
+                    let to_write = self.to_stderr.split().freeze();
+                    self.stderr.write_all(&*to_write).await?;
+                }
             }
-            if to_stderr.len() > 0 {
-                let to_write = to_stderr.split().freeze();
-                stderr.write_all(&*to_write).await?;
+            Some(BatchItem::InBatch((path, value))) => {
+                Out { path: &*path, value }.write(&mut self.to_stdout, &mut self.to_stderr);
             }
-        }
-        Some(BatchItem::InBatch((path, value))) => {
-            Out { path: &*path, value }.write(to_stdout, to_stderr);
-        }
-    })
+        })
+    }
 }
 
 async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
-    let mut subscriptions: HashMap<Path, DVal<SValue>> = HashMap::new();
     let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
-    let mut requests: Box<
-        dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin,
-    > = {
-        let stdin = BufReader::new(io::stdin()).lines();
-        Box::new(Batched::new(stream::iter(paths).map(|p| Ok(p)).chain(stdin), 1000))
-    };
-    let mut updates: Batched<SelectAll<Box<dyn Stream<Item = (Path, SValue)> + Unpin>>> =
-        Batched::new(SelectAll::new(), 100_000);
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    let mut to_stdout = BytesMut::new();
-    let mut to_stderr = BytesMut::new();
-    let mut add: HashSet<String> = HashSet::new();
-    let mut drop: HashSet<String> = HashSet::new();
+    let mut ctx = Ctx::new(subscriber, paths);
     // ensure that we never see None from updates.next()
-    updates.inner_mut().push(Box::new(stream::pending()));
+    ctx.updates.inner_mut().push(Box::new(stream::pending()));
     loop {
         select_biased! {
-            u = updates.next() => {
-                let r = process_update(
-                    &mut to_stdout, &mut to_stderr, &mut stdout, 
-                    &mut stderr, u
-                ).await;
-                match r {
+            u = ctx.updates.next() => {
+                match ctx.process_update(u).await {
                     Ok(()) => (),
                     Err(_) => break,
                 }
             },
-            r = requests.next() => process_request(
-                &mut subscriptions, &mut add, &mut drop,
-                &subscriber, &mut updates, &mut requests, r
-            )
+            r = ctx.requests.next() => ctx.process_request(r)
         }
     }
 }
