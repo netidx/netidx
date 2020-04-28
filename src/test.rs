@@ -83,13 +83,13 @@ mod publisher {
                 let publisher =
                     Publisher::new(pcfg, Auth::Anonymous, BindCfg::Local).await.unwrap();
                 let vp =
-                    publisher.publish_val("/app/v0".into(), Value::U64(314159)).unwrap();
+                    publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
-                    vp.update(Value::U64(314159 + c));
+                    vp.update(Value::U64(314159 + c)).unwrap();
                     publisher.flush(None).await.unwrap();
                     c += 1
                 }

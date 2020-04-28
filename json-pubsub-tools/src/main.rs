@@ -1,10 +1,8 @@
 #![recursion_limit = "1024"]
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
-extern crate json_pubsub;
-#[macro_use]
-extern crate failure;
+#[macro_use] extern crate json_pubsub;
+
 use json_pubsub::{config, path::Path, resolver::Auth};
 use std::{fs::read, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
@@ -66,8 +64,8 @@ enum Sub {
             help = "use the specified krb5 service principal name"
         )]
         spn: Option<String>,
-        #[structopt(short = "j", long = "json", help = "interpret data as json")]
-        json: bool,
+        #[structopt(short = "t", long = "type", help = "data type")]
+        typ: publisher::Typ,
         #[structopt(
             short = "t",
             long = "timeout",
@@ -131,8 +129,6 @@ enum Stress {
         spn: Option<String>,
         #[structopt(name = "nvals", default_value = "100")]
         nvals: usize,
-        #[structopt(name = "vsize", default_value = "1")]
-        vsize: usize,
     },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
     Subscriber {
@@ -167,9 +163,9 @@ fn main() {
             krb5,
             upn,
             spn,
-            json,
+            typ,
             timeout,
-        } => publisher::run(cfg, json, timeout, auth(krb5, upn, spn)),
+        } => publisher::run(cfg, typ, timeout, auth(krb5, upn, spn)),
         Sub::Subscriber { krb5, upn, paths } => {
             subscriber::run(cfg, paths, auth(krb5, upn, None))
         }
@@ -182,8 +178,7 @@ fn main() {
                 upn,
                 spn,
                 nvals,
-                vsize,
-            } => stress_publisher::run(cfg, nvals, vsize, auth(krb5, upn, spn)),
+            } => stress_publisher::run(cfg, nvals, auth(krb5, upn, spn)),
         },
     }
 }

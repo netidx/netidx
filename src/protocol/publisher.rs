@@ -161,15 +161,15 @@ impl Pack for To {
 }
 
 pub trait Prim {
-    fn to_value(self) -> Value;
+    fn to_value(self) -> result::Result<Value, anyhow::Error>;
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error>
     where
         Self: std::marker::Sized;
 }
 
 impl Prim for u32 {
-    fn to_value(self) -> Value {
-        Value::U32(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::U32(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -182,8 +182,8 @@ impl Prim for u32 {
 }
 
 impl Prim for i32 {
-    fn to_value(self) -> Value {
-        Value::I32(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::I32(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -196,8 +196,8 @@ impl Prim for i32 {
 }
 
 impl Prim for u64 {
-    fn to_value(self) -> Value {
-        Value::U64(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::U64(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -210,8 +210,8 @@ impl Prim for u64 {
 }
 
 impl Prim for i64 {
-    fn to_value(self) -> Value {
-        Value::I64(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::I64(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -224,8 +224,8 @@ impl Prim for i64 {
 }
 
 impl Prim for f32 {
-    fn to_value(self) -> Value {
-        Value::F32(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::F32(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -238,8 +238,8 @@ impl Prim for f32 {
 }
 
 impl Prim for f64 {
-    fn to_value(self) -> Value {
-        Value::F64(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::F64(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -252,8 +252,8 @@ impl Prim for f64 {
 }
 
 impl Prim for Chars {
-    fn to_value(self) -> Value {
-        Value::String(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::String(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -266,8 +266,8 @@ impl Prim for Chars {
 }
 
 impl Prim for Bytes {
-    fn to_value(self) -> Value {
-        Value::Bytes(self)
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(Value::Bytes(self))
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {
@@ -292,8 +292,8 @@ pub enum Value {
 }
 
 impl Prim for Value {
-    fn to_value(self) -> Value {
-        self
+    fn to_value(self) -> result::Result<Value, anyhow::Error> {
+        Ok(self)
     }
 
     fn from_value(v: Value) -> result::Result<Self, anyhow::Error> {

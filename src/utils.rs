@@ -26,7 +26,7 @@ macro_rules! bail {
     }
 }
 
-macro_rules! try_cf {
+#[macro_export] macro_rules! try_cf {
     ($msg:expr, continue, $lbl:tt, $e:expr) => {
         match $e {
             Ok(x) => x,

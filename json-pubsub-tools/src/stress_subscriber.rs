@@ -1,4 +1,3 @@
-use crate::stress_publisher::Data;
 use futures::prelude::*;
 use json_pubsub::{
     path::Path,
@@ -17,7 +16,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs =
             paths.into_iter().map(|path| subscriber.durable_subscribe_val(path))
-            .collect::<Vec<DVal<Data>>>();
+            .collect::<Vec<DVal<u64>>>();
         let mut vals = stream::select_all(subs.iter().map(|s| s.updates(true)));
         let one_second = Duration::from_secs(1);
         let start = Instant::now();

@@ -1,87 +1,153 @@
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use json_pubsub::{
-    utils::{self, Batched, BatchItem},
-    path::Path,
-    publisher::{BindCfg, Publisher, UVal},
-    resolver::Auth,
-    config::resolver::Config,
-};
 use futures::prelude::*;
-use tokio::{
-    runtime::Runtime,
-    io::{stdin, BufReader, AsyncBufReadExt},
+use json_pubsub::{
+    chars::Chars,
+    config::resolver::Config,
+    path::Path,
+    publisher::{BindCfg, Prim, Publisher, Val, Value},
+    resolver::Auth,
+    utils::{self, BatchItem, Batched},
 };
-use std::{collections::HashMap, time::Duration};
-use failure::Error;
+use std::{collections::HashMap, str::FromStr, time::Duration};
+use tokio::{
+    io::{stdin, AsyncBufReadExt, BufReader},
+    runtime::Runtime,
+};
 
-fn jsonv_to_rmpv(v: serde_json::Value) -> rmpv::Value {
-    use serde_json::Value as Jv;
-    use rmpv::{Value as Rv, Integer, Utf8String};
-    match v {
-        Jv::Null => Rv::Nil,
-        Jv::Bool(b) => Rv::Boolean(b),
-        Jv::String(s) => Rv::String(Utf8String::from(s)),
-        Jv::Array(a) => Rv::Array(a.into_iter().map(jsonv_to_rmpv).collect()),
-        Jv::Object(m) => Rv::Map(m.into_iter().map(|(k, v)| {
-            (Rv::String(Utf8String::from(k)), jsonv_to_rmpv(v))
-        }).collect()),
-        Jv::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Rv::Integer(Integer::from(i))
-            } else if let Some(u) = n.as_u64() {
-                Rv::Integer(Integer::from(u))
-            } else if let Some(f) = n.as_f64() {
-                Rv::F64(f)
-            } else {
-                unreachable!("invalid number")
-            }
+#[derive(Debug, Clone, Copy)]
+pub enum Typ {
+    U32,
+    I32,
+    U64,
+    I64,
+    F32,
+    F64,
+    String,
+    Json,
+}
+
+impl FromStr for Typ {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "u32" => Ok(Typ::U32),
+            "i32" => Ok(Typ::I32),
+            "u64" => Ok(Typ::U64),
+            "i64" => Ok(Typ::U64),
+            "f32" => Ok(Typ::F32),
+            "f64" => Ok(Typ::F64),
+            "string" => Ok(Typ::String),
+            "json" => Ok(Typ::Json),
+            s => Err(anyhow!(
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, string, json", s))
         }
     }
 }
 
-fn from_json(s: &str) -> Result<Bytes, Error> {
-    utils::rmpv_encode(&jsonv_to_rmpv(serde_json::from_str(s)?))
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) enum SValue {
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    String(String),
+    Bytes(Vec<u8>),
 }
 
-fn e() -> Error { format_err!("") }
+impl Prim for SValue {
+    fn to_value(self) -> Result<Value> {
+        Ok(match self {
+            SValue::U32(n) => Value::U32(n),
+            SValue::I32(n) => Value::I32(n),
+            SValue::U64(n) => Value::U64(n),
+            SValue::I64(n) => Value::I64(n),
+            SValue::F32(n) => Value::F32(n),
+            SValue::F64(n) => Value::F64(n),
+            SValue::String(s) => Value::String(Chars::from(s)),
+            SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
+        })
+    }
 
-pub(crate) fn run(config: Config, json: bool, timeout: Option<u64>, auth: Auth) {
+    fn from_value(v: Value) -> Result<Self> {
+        Ok(match v {
+            Value::U32(n) => SValue::U32(n),
+            Value::I32(n) => SValue::I32(n),
+            Value::U64(n) => SValue::U64(n),
+            Value::I64(n) => SValue::I64(n),
+            Value::F32(n) => SValue::F32(n),
+            Value::F64(n) => SValue::F64(n),
+            Value::String(c) => SValue::String(String::from(c.as_ref())),
+            Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
+        })
+    }
+}
+
+fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
+    Ok(match typ {
+        Typ::U32 => SValue::U32(s.parse::<u32>()?),
+        Typ::I32 => SValue::I32(s.parse::<i32>()?),
+        Typ::U64 => SValue::U64(s.parse::<u64>()?),
+        Typ::I64 => SValue::I64(s.parse::<i64>()?),
+        Typ::F32 => SValue::F32(s.parse::<f32>()?),
+        Typ::F64 => SValue::F64(s.parse::<f64>()?),
+        Typ::String => SValue::String(String::from(s)),
+        Typ::Json => serde_json::from_str(s)?,
+    })
+}
+
+pub(crate) fn run(config: Config, typ: Typ, timeout: Option<u64>, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
-        let mut published: HashMap<Path, UVal> = HashMap::new();
-        let publisher = Publisher::new(config, auth, BindCfg::Any).await
-            .expect("creating publisher");
+        let mut published: HashMap<Path, Val<SValue>> = HashMap::new();
+        let publisher =
+            Publisher::new(config, auth, BindCfg::Any).await.expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
         let mut batch = Vec::new();
         while let Some(l) = lines.next().await {
             match l {
-                BatchItem::InBatch(l) => { batch.push(try_brk!("reading line", l)); },
+                BatchItem::InBatch(l) => {
+                    batch.push(match l {
+                        Err(_) => break,
+                        Ok(l) => l,
+                    });
+                }
                 BatchItem::EndBatch => {
                     for line in batch.drain(..) {
                         let mut m = utils::splitn_escaped(&*line, 2, '\\', '|');
-                        let path = try_cont!("missing path", m.next().ok_or_else(e));
+                        let path = try_cf!(
+                            "missing path",
+                            continue,
+                            m.next().ok_or_else(|| anyhow!("missing path"))
+                        );
                         let val = {
-                            let v = try_cont!("missing value", m.next().ok_or_else(e));
-                            if json {
-                                try_cont!("invalid json", from_json(v))
-                            } else {
-                                utils::str_encode(v)
-                            }
+                            let v = try_cf!(
+                                "missing value",
+                                continue,
+                                m.next().ok_or_else(|| anyhow!("malformed data"))
+                            );
+                            try_cf!("parse val", continue, parse_val(typ, v))
                         };
                         match published.get(path) {
-                            Some(p) => { p.update(val); },
+                            Some(p) => {
+                                p.update(val);
+                            }
                             None => {
                                 let path = Path::from(path);
-                                let publ = try_cont!(
+                                let publ = try_cf!(
                                     "failed to publish",
-                                    publisher.publish_val_ut(path.clone(), val)
+                                    continue,
+                                    publisher.publish(path.clone(), val)
                                 );
                                 published.insert(path, publ);
                             }
                         }
                     }
-                    try_cont!("flush failed", publisher.flush(timeout).await);
+                    try_cf!("flush failed", continue, publisher.flush(timeout).await);
                 }
             }
         }

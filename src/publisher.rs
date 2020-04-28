@@ -92,8 +92,8 @@ impl<T: Prim> Val<T> {
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
-    pub fn update(&self, v: T) -> () {
-        self.0.updates.push((self.0.id, Update::Val(v.to_value())))
+    pub fn update(&self, v: T) -> Result<()> {
+        Ok(self.0.updates.push((self.0.id, Update::Val(v.to_value()?))))
     }
 
     /// Get the unique `Id` of this `Val`. This id is unique on this
@@ -356,8 +356,8 @@ impl Publisher {
     /// different publishers may publish a given path as many times as
     /// they like. Subscribers will then pick randomly among the
     /// advertised publishers when subscribing. See `subscriber`
-    pub fn publish_val<T: Prim>(&self, path: Path, init: T) -> Result<Val<T>> {
-        Ok(Val(self.publish_val_internal(path, init.to_value())?, PhantomData))
+    pub fn publish<T: Prim>(&self, path: Path, init: T) -> Result<Val<T>> {
+        Ok(Val(self.publish_val_internal(path, init.to_value()?)?, PhantomData))
     }
 
     /// Send all queued updates out to subscribers, and send all
