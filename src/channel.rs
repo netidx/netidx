@@ -65,12 +65,12 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
-                Some(m) => match dbg!(m) {
+                Some(m) => match m {
                     ToFlush::SetCtx(c) => {
                         ctx = Some(c);
                     }
                     ToFlush::Flush(mut data) => match ctx {
-                        None => try_cf!(dbg!(flush_buf(&mut soc, data, false).await)),
+                        None => try_cf!(flush_buf(&mut soc, data, false).await),
                         Some(ref ctx) => {
                             try_cf!(ctx.wrap_iov(
                                 true,
@@ -186,18 +186,18 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
-                    let hdr = dbg!(u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]));
+                    let hdr = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
                     if hdr > LEN_MASK {
                         (true, (hdr & LEN_MASK) as usize)
                     } else {
                         (false, hdr as usize)
                     }
                 };
-                if dbg!(buf.remaining() - mem::size_of::<u32>()) < dbg!(len) {
+                if buf.remaining() - mem::size_of::<u32>() < len {
                     break; // read more
-                } else if !dbg!(encrypted) {
+                } else if !encrypted {
                     buf.advance(mem::size_of::<u32>());
-                    try_cf!(break, 'main, tx.send(dbg!(buf.split_to(len))).await);
+                    try_cf!(break, 'main, tx.send(buf.split_to(len)).await);
                 } else {
                     let ctx = match ctx {
                         Some(ref ctx) => ctx,
@@ -250,7 +250,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     pub(crate) async fn fill_buffer(&mut self) -> Result<()> {
         if let Some(chunk) = self.incoming.next().await {
             if !self.buf.has_remaining() {
-                self.buf = dbg!(chunk);
+                self.buf = chunk;
             } else {
                 // this should be very rare because a batch must
                 // exceed 1 GB before it can contain a partial
@@ -259,7 +259,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
                 let mut tmp = BytesMut::with_capacity(len);
                 tmp.extend_from_slice(&*self.buf);
                 tmp.extend_from_slice(&*chunk);
-                self.buf = dbg!(tmp);
+                self.buf = tmp;
             }
             Ok(())
         } else {
@@ -272,7 +272,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
             if self.buf.remaining() < mem::size_of::<u32>() {
                 self.fill_buffer().await?;
             } else {
-                let len = dbg!(BigEndian::read_u32(&*self.buf) as usize);
+                let len = BigEndian::read_u32(&*self.buf) as usize;
                 if self.buf.remaining() < len + mem::size_of::<u32>() {
                     self.fill_buffer().await?;
                 } else {
@@ -281,7 +281,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
             }
         }
         self.buf.advance(mem::size_of::<u32>());
-        Ok(dbg!(T::decode(&mut self.buf)?))
+        Ok(T::decode(&mut self.buf)?)
     }
 
     pub(crate) async fn receive_batch<T: Pack + Debug>(

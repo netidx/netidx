@@ -78,7 +78,7 @@ fn handle_batch_write(
                 } else {
                     if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
                         for path in paths {
-                            s.publish(dbg!(path), dbg!(write_addr));
+                            s.publish(path, write_addr);
                         }
                         con.queue_send(&FromWrite::Published)?
                     } else {

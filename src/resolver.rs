@@ -196,7 +196,7 @@ async fn connect_write(
 ) -> Result<Channel<ClientCtx>> {
     let mut backoff = 0;
     loop {
-        if dbg!(backoff) > 0 {
+        if backoff > 0 {
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
@@ -221,12 +221,12 @@ async fn connect_write(
             }
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
-        try_cf!("hello", continue, dbg!(con.send_one(&h).await));
+        try_cf!("hello", continue, con.send_one(&h).await);
         if let Some(ref ctx) = ctx {
             con.set_ctx(ctx.clone()).await
         }
         let r: ServerHelloWrite =
-            try_cf!("hello reply", continue, dbg!(con.receive().await));
+            try_cf!("hello reply", continue, con.receive().await);
         match (desired_auth, r.auth) {
             (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
             (Auth::Anonymous, _) => {
@@ -305,7 +305,7 @@ async fn connection_write(
                     }
                 }
             },
-            m = receiver.next() => match dbg!(m) {
+            m = receiver.next() => match m {
                 None => break,
                 Some((m, reply)) => {
                     act = true;
@@ -375,7 +375,7 @@ async fn write_mgr(
         senders
     };
     while let Some((m, reply)) = receiver.next().await {
-        let m = Arc::new(dbg!(m));
+        let m = Arc::new(m);
         let r = select_ok(senders.iter().map(|s| {
             let (tx, rx) = oneshot::channel();
             let _ = s.send((Arc::clone(&m), tx));

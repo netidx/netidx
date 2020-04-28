@@ -1,3 +1,4 @@
+pub use crate::protocol::publisher::{Prim, Value};
 use crate::{
     auth::{
         syskrb5::{ClientCtx, ServerCtx, SYS_KRB5},
@@ -13,7 +14,6 @@ use crate::{
     resolver::{Auth, ResolverWrite},
     utils::{self, Pack},
 };
-pub use crate::protocol::publisher::{Prim, Value};
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{prelude::*, select_biased};
@@ -592,7 +592,7 @@ async fn hello_client(
         auth::Krb5,
         protocol::publisher::Hello::{self, *},
     };
-    let hello: Hello = dbg!(con.receive().await)?;
+    let hello: Hello = con.receive().await?;
     match hello {
         Anonymous => con.send_one(&Anonymous).await?,
         Token(tok) => match auth {
@@ -718,9 +718,9 @@ async fn accept_loop(
                         }
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
-                            let _ = dbg!(client_loop(
+                            let _ = client_loop(
                                 t_weak.clone(), ctxts, addr, rx, s, desired_auth
-                            ).await);
+                            ).await;
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();
                                 if let Some(cl) = pb.clients.remove(&addr) {

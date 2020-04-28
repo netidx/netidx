@@ -35,18 +35,13 @@ mod resolver {
         use tokio::runtime::Runtime;
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            dbg!("starting server");
             let server = Server::new(server_config()).await.expect("start server");
-            dbg!("server started");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let cfg = client_config(*server.local_addr());
             let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr).unwrap();
             let r = ResolverRead::new(cfg, Auth::Anonymous).unwrap();
-            dbg!("clients created");
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
-            dbg!("before publish");
             w.publish(paths.clone()).await.unwrap();
-            dbg!("after publish");
             for addrs in r.resolve(paths.clone()).await.unwrap().addrs {
                 assert_eq!(addrs.len(), 1);
                 assert_eq!(addrs[0].0, paddr);
@@ -91,7 +86,7 @@ mod publisher {
                     publisher.publish_val("/app/v0".into(), Value::U64(314159)).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
-                let mut c = 0;
+                let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
                     vp.update(Value::U64(314159 + c));
@@ -103,6 +98,7 @@ mod publisher {
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
             let vs =
                 subscriber.subscribe_val::<u64>("/app/v0".into(), None).await.unwrap();
+            let mut i: u64 = 0;
             let mut c: u64 = 0;
             let mut s = vs.updates(true);
             loop {
@@ -110,11 +106,16 @@ mod publisher {
                     None => panic!("publisher died"),
                     Some(Err(e)) => panic!("error: {}", e),
                     Some(Ok(v)) => {
-                        assert_eq!(314159 + c, v);
-                        c += 1
+                        if c == 0 {
+                            c = dbg!(v);
+                            i = v;
+                        } else {
+                            assert_eq!(c + 1, dbg!(v));
+                            c += 1
+                        }
                     }
                 }
-                if c == 100 {
+                if c - i == 100 {
                     break;
                 }
             }
@@ -124,30 +125,20 @@ mod publisher {
 }
 
 mod resolver_store {
-    use std::{collections::HashMap, net::SocketAddr};
+    use crate::{path::Path, resolver_store::*};
     use bytes::Bytes;
-    use crate::{resolver_store::*, path::Path};
-    
+    use std::{collections::HashMap, net::SocketAddr};
+
     #[test]
     fn test_resolver_store() {
         let mut hm = HashMap::new();
         hm.insert(Path::from("foo"), 0);
         assert_eq!(hm.get(&Path::from("foo")).copied(), Some(0));
         let apps = vec![
+            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:100"),
+            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:101"),
             (
-                vec!["/app/test/app0/v0", "/app/test/app0/v1"],
-                "127.0.0.1:100",
-            ),
-            (
-                vec!["/app/test/app0/v0", "/app/test/app0/v1"],
-                "127.0.0.1:101",
-            ),
-            (
-                vec![
-                    "/app/test/app1/v2",
-                    "/app/test/app1/v3",
-                    "/app/test/app1/v4",
-                ],
+                vec!["/app/test/app1/v2", "/app/test/app1/v3", "/app/test/app1/v4"],
                 "127.0.0.1:105",
             ),
         ];

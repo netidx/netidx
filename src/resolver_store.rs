@@ -1,6 +1,6 @@
 use crate::{
-    chars::Chars, path::Path, protocol::resolver::PermissionToken,
-    secstore::SecStoreInner, utils, auth::Krb5Ctx,
+    auth::Krb5Ctx, chars::Chars, path::Path, protocol::resolver::PermissionToken,
+    secstore::SecStoreInner, utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -179,8 +179,9 @@ impl<T> StoreInner<T> {
     }
 
     pub(crate) fn resolve(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
-        dbg!(self.by_path.get(&**path))
-            .map(|a| dbg!(a).iter().map(|addr| (*addr, Bytes::new())).collect())
+        self.by_path
+            .get(&**path)
+            .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
             .unwrap_or_else(|| Vec::new())
     }
 

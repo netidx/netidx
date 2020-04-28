@@ -16,6 +16,7 @@ use crate::{
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched},
 };
+use log::info;
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
@@ -956,7 +957,7 @@ async fn connection(
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
     let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
-    dbg!(hello_publisher(&mut con, &auth, &target_spn).await)?;
+    hello_publisher(&mut con, &auth, &target_spn).await?;
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let mut batch: Vec<From> = Vec::new();
     let res = 'main: loop {
@@ -1051,5 +1052,6 @@ async fn connection(
             let _ = req.finished.send(Err(anyhow!("connection died")));
         }
     }
-    dbg!(res)
+    info!("connection to {:?} shutting down {:?}", addr, res);
+    res
 }
