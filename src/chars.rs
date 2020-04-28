@@ -1,12 +1,15 @@
-use std::fmt;
-use std::ops::Deref;
-use std::str;
+use crate::utils::{Pack, PackError};
+use bytes::{Bytes, BytesMut};
+use std::{
+    cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
+    convert::AsRef,
+    fmt,
+    hash::{Hash, Hasher},
+    ops::Deref,
+    str,
+};
 
-use bytes::Bytes;
-
-use clear::Clear;
-
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone)]
 pub struct Chars(Bytes);
 
 impl Chars {
@@ -21,6 +24,55 @@ impl Chars {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+}
+
+impl PartialEq for Chars {
+    fn eq(&self, other: &Chars) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for Chars {}
+
+impl PartialOrd for Chars {
+    fn partial_cmp(&self, other: &Chars) -> Option<Ordering> {
+        self.as_ref().partial_cmp(other.as_ref())
+    }
+}
+
+impl Ord for Chars {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_ref().cmp(other.as_ref())
+    }
+}
+
+impl Hash for Chars {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state)
+    }
+}
+
+impl AsRef<str> for Chars {
+    fn as_ref(&self) -> &str {
+        unsafe { str::from_utf8_unchecked(&self.0) }
+    }
+}
+
+impl Pack for Chars {
+    fn len(&self) -> usize {
+        Pack::len(&self.0)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Pack::encode(&self.0, buf)
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+        match Chars::from_bytes(<Bytes as Pack>::decode(buf)?) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(PackError::InvalidFormat),
+        }
     }
 }
 
@@ -40,7 +92,7 @@ impl Deref for Chars {
     type Target = str;
 
     fn deref(&self) -> &str {
-        unsafe { str::from_utf8_unchecked(&self.0) }
+        unsafe { str::from_utf8_unchecked(&*self.0) }
     }
 }
 

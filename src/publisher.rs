@@ -7,12 +7,13 @@ use crate::{
     config,
     path::Path,
     protocol::{
-        publisher::{self, Id, Prim, Value},
+        publisher::{self, Id},
         resolver::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
     utils::{self, Pack},
 };
+pub use crate::protocol::publisher::{Prim, Value};
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{prelude::*, select_biased};

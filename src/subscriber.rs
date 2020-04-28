@@ -1,18 +1,20 @@
+pub use crate::protocol::publisher::{Prim, Value};
 use crate::{
     auth::{
         syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
     },
     channel::Channel,
+    chars::Chars,
     config,
     path::Path,
     protocol::{
         self,
-        publisher::{Id, Prim, Value},
+        publisher::Id,
         resolver::{Resolved, ResolverId},
     },
     resolver::{Auth, ResolverRead},
-    utils::{self, BatchItem, Batched, Chars},
+    utils::{self, BatchItem, Batched},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
@@ -1051,99 +1053,3 @@ async fn connection(
     }
     dbg!(res)
 }
-
-/*
-#[cfg(test)]
-mod test {
-    use crate::{
-        config,
-        publisher::{BindCfg, Publisher},
-        resolver_server::Server,
-        subscriber::Subscriber,
-    };
-    use futures::{
-        future::{self, Either},
-        prelude::*,
-    };
-    use std::{net::SocketAddr, time::Duration};
-    use tokio::{runtime::Runtime, sync::oneshot, task, time};
-
-    async fn init_server() -> Server {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        Server::new(addr, 100).await.expect("start server")
-    }
-
-    #[test]
-    fn publish_subscribe() {
-        #[derive(Debug, Clone, Serialize, Deserialize)]
-        struct V {
-            id: usize,
-            v: String,
-        };
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let server = init_server().await;
-            let cfg = config::Resolver { addr: *server.local_addr() };
-            let (tx, ready) = oneshot::channel();
-            task::spawn(async move {
-                let publisher = Publisher::new(cfg, BindCfg::Local).await.unwrap();
-                let vp0 = publisher
-                    .publish_val("/app/v0".into(), &V { id: 0, v: "foo".into() })
-                    .unwrap();
-                let vp1 = publisher
-                    .publish_val("/app/v1".into(), &V { id: 0, v: "bar".into() })
-                    .unwrap();
-                publisher.flush(None).await.unwrap();
-                tx.send(()).unwrap();
-                let mut c = 1;
-                loop {
-                    time::delay_for(Duration::from_millis(100)).await;
-                    vp0.update(&V { id: c, v: "foo".into() }).unwrap();
-                    vp1.update(&V { id: c, v: "bar".into() }).unwrap();
-                    publisher.flush(None).await.unwrap();
-                    c += 1
-                }
-            });
-            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            let subscriber = Subscriber::new(cfg).unwrap();
-            let vs0 =
-                subscriber.subscribe_val::<V>("/app/v0".into(), None).await.unwrap();
-            let vs1 =
-                subscriber.subscribe_val::<V>("/app/v1".into(), None).await.unwrap();
-            let mut c0: Option<usize> = None;
-            let mut c1: Option<usize> = None;
-            let mut vs0s = vs0.updates(true);
-            let mut vs1s = vs1.updates(true);
-            loop {
-                let r =
-                    Either::factor_first(future::select(vs0s.next(), vs1s.next()).await)
-                        .0;
-                match r {
-                    None => panic!("publishers died"),
-                    Some(Err(e)) => panic!("publisher error: {}", e),
-                    Some(Ok(v)) => {
-                        let c = match &*v.v {
-                            "foo" => &mut c0,
-                            "bar" => &mut c1,
-                            _ => panic!("unexpected v"),
-                        };
-                        match c {
-                            None => {
-                                *c = Some(v.id);
-                            }
-                            Some(c_id) => {
-                                assert_eq!(*c_id + 1, v.id);
-                                if *c_id >= 50 {
-                                    break;
-                                }
-                                *c = Some(v.id);
-                            }
-                        }
-                    }
-                }
-            }
-            drop(server);
-        });
-    }
-}
-*/

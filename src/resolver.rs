@@ -4,6 +4,7 @@ use crate::{
         Krb5, Krb5Ctx,
     },
     channel::Channel,
+    chars::Chars,
     config::{self, resolver::Auth as CAuth},
     path::Path,
     protocol::resolver::{
@@ -11,7 +12,7 @@ use crate::{
         FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
         ServerHelloWrite, ToRead, ToWrite,
     },
-    utils::{self, Chars},
+    utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -195,7 +196,7 @@ async fn connect_write(
 ) -> Result<Channel<ClientCtx>> {
     let mut backoff = 0;
     loop {
-        if backoff > 0 {
+        if dbg!(backoff) > 0 {
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
@@ -220,20 +221,20 @@ async fn connect_write(
             }
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
-        try_cf!("hello", continue, con.send_one(&h).await);
+        try_cf!("hello", continue, dbg!(con.send_one(&h).await));
         if let Some(ref ctx) = ctx {
             con.set_ctx(ctx.clone()).await
         }
-        let r: ServerHelloWrite = try_cf!("hello reply", continue, con.receive().await);
-        // CR estokes: replace this with proper logging
+        let r: ServerHelloWrite =
+            try_cf!("hello reply", continue, dbg!(con.receive().await));
         match (desired_auth, r.auth) {
             (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
             (Auth::Anonymous, _) => {
-                println!("server requires authentication");
+                info!("server requires authentication");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous) => {
-                println!("could not authenticate resolver server");
+                info!("could not authenticate resolver server");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => (),
@@ -304,7 +305,7 @@ async fn connection_write(
                     }
                 }
             },
-            m = receiver.next() => match m {
+            m = receiver.next() => match dbg!(m) {
                 None => break,
                 Some((m, reply)) => {
                     act = true;
@@ -355,7 +356,7 @@ async fn write_mgr(
             let ctxts = ctxts.clone();
             senders.push(sender);
             task::spawn(async move {
-                let _ = connection_write(
+                let r = connection_write(
                     receiver,
                     resolver,
                     addr,
@@ -365,13 +366,16 @@ async fn write_mgr(
                     ctxts.clone(),
                 )
                 .await;
-                // CR estokes: handle failure
+                info!(
+                    "resolver: write manager connection for {:?} exited: {:?}",
+                    addr, r
+                );
             });
         }
         senders
     };
     while let Some((m, reply)) = receiver.next().await {
-        let m = Arc::new(m);
+        let m = Arc::new(dbg!(m));
         let r = select_ok(senders.iter().map(|s| {
             let (tx, rx) = oneshot::channel();
             let _ = s.send((Arc::clone(&m), tx));
@@ -410,8 +414,9 @@ impl ResolverWrite {
         let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let ctxts_c = ctxts.clone();
         task::spawn(async move {
-            let _ =
+            let r =
                 write_mgr(receiver, resolver, desired_auth, ctxts_c, write_addr).await;
+            info!("resolver: write manager exited {:?}", r);
         });
         Ok(ResolverWrite { sender, ctxts })
     }

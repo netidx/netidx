@@ -1,4 +1,4 @@
-use crate::utils::{self, Chars, Pack, PackError};
+use crate::{chars::Chars, utils::{self, Pack, PackError}};
 use std::{
     borrow::Borrow,
     cmp::{Eq, Ord, PartialEq, PartialOrd},

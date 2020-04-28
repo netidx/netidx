@@ -1,12 +1,9 @@
 use crate::{
-    auth::Krb5Ctx,
-    path::Path,
-    protocol::resolver::PermissionToken,
-    secstore::SecStoreInner,
-    utils::{self, Chars},
+    chars::Chars, path::Path, protocol::resolver::PermissionToken,
+    secstore::SecStoreInner, utils, auth::Krb5Ctx,
 };
-use bytes::Bytes;
 use anyhow::Result;
+use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use std::{
@@ -52,11 +49,7 @@ impl HCAddrs {
     }
 
     fn add_address(&mut self, current: &Addrs, addr: SocketAddr) -> Addrs {
-        let mut set = current
-            .iter()
-            .copied()
-            .chain(iter::once(addr))
-            .collect::<Vec<_>>();
+        let mut set = current.iter().copied().chain(iter::once(addr)).collect::<Vec<_>>();
         set.sort_by_key(|a| (a.ip(), a.port()));
         set.dedup();
         self.hashcons(set)
@@ -139,21 +132,12 @@ impl<T> StoreInner<T> {
     }
 
     pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr) {
-        self.by_addr
-            .entry(addr)
-            .or_insert_with(HashSet::new)
-            .insert(path.clone());
-        let addrs = self
-            .by_path
-            .entry(path.clone())
-            .or_insert_with(|| EMPTY.clone());
+        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
+        let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
         self.add_parents(path.as_ref());
         let n = Path::levels(path.as_ref());
-        self.by_level
-            .entry(n)
-            .or_insert_with(BTreeSet::new)
-            .insert(path);
+        self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
     }
 
     pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
@@ -194,10 +178,9 @@ impl<T> StoreInner<T> {
         })
     }
 
-    pub(crate) fn resolve<S: AsRef<str>>(&self, path: &S) -> Vec<(SocketAddr, Bytes)> {
-        self.by_path
-            .get(path.as_ref())
-            .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
+    pub(crate) fn resolve(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
+        dbg!(self.by_path.get(&**path))
+            .map(|a| dbg!(a).iter().map(|addr| (*addr, Bytes::new())).collect())
             .unwrap_or_else(|| Vec::new())
     }
 
@@ -229,13 +212,12 @@ impl<T> StoreInner<T> {
             .unwrap_or_else(|| Ok(vec![]))
     }
 
-    pub(crate) fn list<S: AsRef<str>>(&self, parent: &S) -> Vec<Path> {
-        let parent = parent.as_ref();
+    pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
         self.by_level
-            .get(&(Path::levels(parent) + 1))
+            .get(&(Path::levels(&**parent) + 1))
             .map(|l| {
                 l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                    .take_while(|p| p.as_ref().starts_with(parent))
+                    .take_while(|p| p.as_ref().starts_with(&**parent))
                     .cloned()
                     .collect()
             })
@@ -282,98 +264,3 @@ impl<T> Store<T> {
         })))
     }
 }
-
-/*
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test() {
-        let apps = vec![
-            (
-                vec!["/app/test/app0/v0", "/app/test/app0/v1"],
-                "127.0.0.1:100",
-            ),
-            (
-                vec!["/app/test/app0/v0", "/app/test/app0/v1"],
-                "127.0.0.1:101",
-            ),
-            (
-                vec![
-                    "/app/test/app1/v2",
-                    "/app/test/app1/v3",
-                    "/app/test/app1/v4",
-                ],
-                "127.0.0.1:105",
-            ),
-        ];
-        let store = Store::<()>::new();
-        {
-            let mut store = store.write();
-            for (paths, addr) in &apps {
-                let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-                let addr = addr.parse::<SocketAddr>().unwrap();
-                for path in parsed.clone() {
-                    store.publish(path.clone(), addr);
-                    if !store.resolve(&path).contains(&addr) {
-                        panic!()
-                    }
-                }
-            }
-        }
-        {
-            let store = store.read();
-            let paths = store.list(&Path::from("/"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app");
-            let paths = store.list(&Path::from("/app"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test");
-            let paths = store.list(&Path::from("/app/test"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app1");
-            let paths = store.list(&Path::from("/app/test/app0"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-            let paths = store.list(&Path::from("/app/test/app1"));
-            assert_eq!(paths.len(), 3);
-            assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
-            assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
-            assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
-        }
-        let (ref paths, ref addr) = apps[2];
-        let addr = addr.parse::<SocketAddr>().unwrap();
-        let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-        {
-            let mut store = store.write();
-            for path in parsed.clone() {
-                store.unpublish(path.clone(), addr);
-                if store.resolve(&path).contains(&addr) {
-                    panic!()
-                }
-            }
-        }
-        {
-            let store = store.read();
-            let paths = store.list(&Path::from("/"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app");
-            let paths = store.list(&Path::from("/app"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test");
-            let paths = store.list(&Path::from("/app/test"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            let paths = store.list(&Path::from("/app/test/app1"));
-            assert_eq!(paths.len(), 0);
-            let paths = store.list(&Path::from("/app/test/app0"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-        }
-    }
-}
-*/

@@ -1,7 +1,8 @@
 use crate::{
+    chars::Chars,
     path::Path,
     protocol::resolver::ResolverId,
-    utils::{Chars, Pack, PackError},
+    utils::{Pack, PackError},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{mem, result};

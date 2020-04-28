@@ -1,6 +1,7 @@
 use crate::{
+    chars::Chars,
     path::Path,
-    utils::{pack, Chars, Pack},
+    utils::{pack, Pack},
 };
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;

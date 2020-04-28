@@ -4,9 +4,9 @@ use crate::{
         syskrb5::{ServerCtx, SYS_KRB5},
         Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
     },
+    chars::Chars,
     config,
     protocol::resolver::CtxId,
-    utils::Chars,
 };
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};

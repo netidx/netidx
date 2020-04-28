@@ -1,6 +1,7 @@
 use crate::{
     path::Path,
-    utils::{Chars, Pack, PackError},
+    utils::{Pack, PackError},
+    chars::Chars,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fxhash::FxBuildHasher;

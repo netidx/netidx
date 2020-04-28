@@ -3,6 +3,7 @@ use crate::{
         syskrb5::ServerCtx, Krb5Ctx, Krb5ServerCtx, Permissions, UserInfo, ANONYMOUS,
     },
     channel::Channel,
+    chars::Chars,
     config,
     path::Path,
     protocol::{
@@ -15,7 +16,7 @@ use crate::{
     },
     resolver_store::Store,
     secstore::SecStore,
-    utils::{self, Chars},
+    utils,
 };
 use anyhow::Result;
 use futures::{prelude::*, select_biased};
@@ -77,7 +78,7 @@ fn handle_batch_write(
                 } else {
                     if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
                         for path in paths {
-                            s.publish(path, write_addr);
+                            s.publish(dbg!(path), dbg!(write_addr));
                         }
                         con.queue_send(&FromWrite::Published)?
                     } else {
@@ -524,53 +525,3 @@ impl Server {
         &self.local_addr
     }
 }
-
-/*
-#[cfg(test)]
-mod test {
-    use crate::{
-        config,
-        path::Path,
-        resolver::{ReadOnly, Resolver, WriteOnly},
-        resolver_server::Server,
-    };
-    use std::net::SocketAddr;
-
-    async fn init_server() -> Server {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        Server::new(addr, 100, "".into()).await.expect("start server")
-    }
-
-    fn p(p: &str) -> Path {
-        Path::from(p)
-    }
-
-    #[test]
-    fn publish_resolve() {
-        use tokio::runtime::Runtime;
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let server = init_server().await;
-            let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let cfg = config::Resolver { addr: *server.local_addr() };
-            let mut w = Resolver::<WriteOnly>::new_w(cfg, paddr).unwrap();
-            let mut r = Resolver::<ReadOnly>::new_r(cfg).unwrap();
-            let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
-            w.publish(paths.clone()).await.unwrap();
-            for addrs in r.resolve(paths.clone()).await.unwrap() {
-                assert_eq!(addrs.len(), 1);
-                assert_eq!(addrs[0], paddr);
-            }
-            assert_eq!(r.list(p("/")).await.unwrap(), vec![p("/app"), p("/foo")]);
-            assert_eq!(
-                r.list(p("/foo")).await.unwrap(),
-                vec![p("/foo/bar"), p("/foo/baz")]
-            );
-            assert_eq!(
-                r.list(p("/app")).await.unwrap(),
-                vec![p("/app/v0"), p("/app/v1")]
-            );
-        });
-    }
-}
-*/
