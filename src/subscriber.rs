@@ -844,9 +844,7 @@ async fn hello_publisher(
                 .map(|b| utils::bytes(&*b))
                 .ok_or_else(|| anyhow!("expected step to generate a token"))?;
             con.send_one(&Hello::Token(tok)).await?;
-            let reply: Hello = con.receive().await?;
-            con.set_ctx(ctx.clone()).await;
-            match reply {
+            match con.receive().await? {
                 Hello::Anonymous => bail!("publisher failed mutual authentication"),
                 Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
                 Hello::Token(tok) => {
@@ -855,6 +853,7 @@ async fn hello_publisher(
                     }
                 }
             }
+            con.set_ctx(ctx.clone()).await;
         }
     }
     Ok(())

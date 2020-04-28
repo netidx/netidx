@@ -1,27 +1,26 @@
+use futures::{prelude::*, select};
 use json_pubsub::{
+    config::resolver::Config,
     path::Path,
     publisher::{BindCfg, Publisher},
     resolver::Auth,
-    config::resolver::Config
 };
-use tokio::{
-    runtime::Runtime,
-    signal, time,
-};
-use futures::{prelude::*, select};
-use std::{
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
+use tokio::{runtime::Runtime, signal, time};
 
 async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
-    let publisher = Publisher::new(config, auth, BindCfg::Any).await
+    let publisher = Publisher::new(config, auth, BindCfg::Any)
+        .await
         .expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
-    let published = (0..nvals).into_iter().map(|i| {
-        let path = Path::from(format!("/bench/{}", i));
-        publisher.publish(path, v).expect("encode")
-    }).collect::<Vec<_>>();
+    let published = (0..nvals)
+        .into_iter()
+        .map(|i| {
+            let path = Path::from(format!("/bench/{}", i));
+            publisher.publish(path, v).expect("encode")
+        })
+        .collect::<Vec<_>>();
     publisher.flush(None).await.expect("publish");
     let mut last_stat = Instant::now();
     let one_second = Duration::from_secs(1);

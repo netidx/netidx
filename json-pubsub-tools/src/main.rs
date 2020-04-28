@@ -64,10 +64,9 @@ enum Sub {
             help = "use the specified krb5 service principal name"
         )]
         spn: Option<String>,
-        #[structopt(short = "t", long = "type", help = "data type")]
+        #[structopt(long = "type", help = "data type")]
         typ: publisher::Typ,
         #[structopt(
-            short = "t",
             long = "timeout",
             help = "require subscribers to consume values before timeout seconds"
         )]
@@ -148,6 +147,7 @@ fn auth(krb5: bool, upn: Option<String>, spn: Option<String>) -> Auth {
 }
 
 fn main() {
+    env_logger::init();
     let opt = Opt::from_args();
     let cfg: config::resolver::Config =
         serde_json::from_slice(&*read(opt.config).expect("reading config"))

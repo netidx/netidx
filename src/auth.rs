@@ -293,7 +293,7 @@ pub(crate) mod syskrb5 {
     ) -> Result<BytesMut> {
         let (hdr_len, data_len) = {
             let mut iov = [
-                GssIov::new(GssIovType::Stream, &mut **msg),
+                GssIov::new(GssIovType::Stream, &mut msg[0..len]),
                 GssIov::new(GssIovType::Data, &mut []),
             ];
             ctx.unwrap_iov(&mut iov[..])?;
