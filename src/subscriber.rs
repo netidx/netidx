@@ -4,13 +4,13 @@ use crate::{
         syskrb5::{ClientCtx, SYS_KRB5},
         Krb5, Krb5Ctx,
     },
-    channel::Channel,
+    channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
     config,
     path::Path,
     protocol::{
         self,
-        publisher::Id,
+        publisher::{From, Id, To},
         resolver::{Resolved, ResolverId},
     },
     resolver::{Auth, ResolverRead},
@@ -19,7 +19,7 @@ use crate::{
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
-    channel::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
+    channel::mpsc::{self, Sender, Receiver, UnboundedReceiver, UnboundedSender},
     prelude::*,
     select, select_biased,
 };
@@ -816,11 +816,10 @@ async fn process_batch(
     batch: &mut Vec<protocol::publisher::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
-    con: &mut Channel<ClientCtx>,
+    con: &mut WriteChannel<ClientCtx>,
     subscriber: &Subscriber,
     addr: SocketAddr,
 ) -> Result<()> {
-    use protocol::publisher::{From, To};
     for m in batch.drain(..) {
         match m {
             From::Update(i, m) => match subscriptions.get_mut(&i) {
@@ -884,7 +883,7 @@ async fn process_batch(
     Ok(())
 }
 
-async fn try_flush(con: &mut Channel<ClientCtx>) -> Result<()> {
+async fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
     if con.bytes_queued() > 0 {
         match con.flush_timeout(FLUSH).await {
             Ok(()) => Ok(()),
@@ -896,6 +895,38 @@ async fn try_flush(con: &mut Channel<ClientCtx>) -> Result<()> {
     }
 }
 
+fn decode_task(
+    mut con: ReadChannel<ClientCtx>,
+    mut buf_return: UnboundedReceiver<Vec<From>>,
+) -> Receiver<Result<Vec<From>>> {
+    let (mut send, recv) = mpsc::channel(10);
+    task::spawn(async move {
+        let mut bufs: Vec<Vec<From>> = Vec::new();
+        let mut buf: Vec<From> = Vec::new();
+        let r = loop {
+            select_biased! {
+                b = buf_return.next() => match b {
+                    None => break Ok(()),
+                    Some(b) => { bufs.push(b); }
+                },
+                r = con.receive_batch(&mut buf).fuse() => match r {
+                    Err(e) => {
+                        buf.clear();
+                        try_cf!(send.send(Err(e)).await)
+                    }
+                    Ok(()) => {
+                        let next = bufs.pop().unwrap_or_else(Vec::new);
+                        let batch = mem::replace(&mut buf, next);
+                        try_cf!(send.send(Ok(batch)).await)
+                    }
+                }
+            }
+        };
+        info!("decode task shutting down {:?}", r);
+    });
+    recv
+}
+
 async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
@@ -903,7 +934,6 @@ async fn connection(
     from_sub: UnboundedReceiver<ToCon>,
     auth: Auth,
 ) -> Result<()> {
-    use protocol::publisher::{From, To};
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
@@ -912,8 +942,10 @@ async fn connection(
     let mut from_sub = Batched::new(from_sub, BATCH);
     let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
     hello_publisher(&mut con, &auth, &target_spn).await?;
+    let (read_con, mut write_con) = con.split();
+    let (mut return_batch, read_returned) = mpsc::unbounded();
+    let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
-    let mut batch: Vec<From> = Vec::new();
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -941,40 +973,42 @@ async fn connection(
                         let _ = req.finished.send(Err(anyhow!("timed out")));
                     }
                 }
-                try_cf!(try_flush(&mut con).await)
+                try_cf!(try_flush(&mut write_con).await)
             },
-            r = con.receive_batch(&mut batch).fuse() => match r {
-                Err(e) => break Err(Error::from(e)),
-                Ok(()) => if let Some(subscriber) = subscriber.upgrade() {
+            r = batches.next() => match r {
+                None => break Err(anyhow!("EOF")),
+                Some(Err(e)) => break Err(Error::from(e)),
+                Some(Ok(mut batch)) => if let Some(subscriber) = subscriber.upgrade() {
                     msg_recvd = true;
                     try_cf!(process_batch(
                         &mut batch,
                         &mut subscriptions,
                         &mut pending,
-                        &mut con,
+                        &mut write_con,
                         &subscriber,
                         addr).await);
-                    try_cf!(try_flush(&mut con).await)
+                    let _ = return_batch.send(batch);
+                    try_cf!(try_flush(&mut write_con).await)
                 }
             },
             msg = from_sub.next() => match msg {
                 None => break Err(anyhow!("dropped")),
                 Some(BatchItem::EndBatch) => {
-                    try_cf!(try_flush(&mut con).await)
+                    try_cf!(try_flush(&mut write_con).await)
                 }
                 Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
                     let path = req.path.clone();
                     let resolver = req.resolver;
                     let token = req.token.clone();
                     pending.insert(path.clone(), req);
-                    try_cf!(con.queue_send(&To::Subscribe {
+                    try_cf!(write_con.queue_send(&To::Subscribe {
                         path,
                         resolver,
                         token,
                     }))
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    try_cf!(con.queue_send(&To::Unsubscribe(id)))
+                    try_cf!(write_con.queue_send(&To::Unsubscribe(id)))
                 }
                 Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
                     if let Some(sub) = subscriptions.get(&id) {
