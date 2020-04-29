@@ -1,15 +1,16 @@
 use crate::publisher::SValue;
 use bytes::BytesMut;
 use futures::{
+    channel::mpsc::{self, Sender, Receiver},
     prelude::*,
     select_biased,
-    stream::{self, FusedStream, SelectAll},
+    stream::{self, FusedStream},
 };
 use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::Auth,
-    subscriber::{DVal, Subscriber, Value},
+    subscriber::{DVal, SubId, Subscriber, Value},
     utils::{BatchItem, Batched, BytesWriter},
 };
 use std::{
@@ -67,10 +68,12 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
+    sender: Sender<(SubId, Value)>,
+    paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, DVal>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
-    updates: Batched<SelectAll<Box<dyn Stream<Item = (Path, Value)> + Unpin>>>,
+    updates: Batched<Receiver<(SubId, Value)>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -81,7 +84,10 @@ struct Ctx {
 
 impl Ctx {
     fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
+        let (sender, updates) = mpsc::channel(100_0000);
         Ctx {
+            sender,
+            paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
             requests: {
@@ -91,7 +97,7 @@ impl Ctx {
                     1000,
                 ))
             },
-            updates: Batched::new(SelectAll::new(), 100_000),
+            updates: Batched::new(updates, 100_000),
             stdout: io::stdout(),
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
@@ -121,18 +127,21 @@ impl Ctx {
             },
             Some(BatchItem::EndBatch) => {
                 for p in self.drop.drain() {
-                    self.subscriptions.remove(&*p);
+                    if let Some(sub) = self.subscriptions.remove(&*p) {
+                        self.paths.remove(&sub.id());
+                    }
                 }
                 for p in self.add.drain() {
                     let p = Path::from(p);
                     let updates = &mut self.updates;
                     let subscriptions = &mut self.subscriptions;
+                    let paths = &mut self.paths;
                     let subscriber = &self.subscriber;
+                    let sender = self.sender.clone();
                     subscriptions.entry(p.clone()).or_insert_with(|| {
                         let s = subscriber.durable_subscribe_val(p.clone());
-                        updates
-                            .inner_mut()
-                            .push(Box::new(s.updates(true).map(move |v| (p.clone(), v))));
+                        paths.insert(s.id(), p.clone());
+                        s.updates(true, sender);
                         s
                     });
                 }
@@ -142,7 +151,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<(Path, Value)>>,
+        u: Option<BatchItem<(SubId, Value)>>,
     ) -> Result<(), anyhow::Error> {
         Ok(match u {
             None => unreachable!(),
@@ -156,10 +165,12 @@ impl Ctx {
                     self.stderr.write_all(&*to_write).await?;
                 }
             }
-            Some(BatchItem::InBatch((path, value))) => {
-                let value = SValue::from_value(value);
-                Out { path: &*path, value }
-                    .write(&mut self.to_stdout, &mut self.to_stderr);
+            Some(BatchItem::InBatch((id, value))) => {
+                if let Some(path) = self.paths.get(&id) {
+                    let value = SValue::from_value(value);
+                    Out { path: &**path, value }
+                        .write(&mut self.to_stdout, &mut self.to_stderr);
+                }
             }
         })
     }
@@ -168,8 +179,6 @@ impl Ctx {
 async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
     let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
     let mut ctx = Ctx::new(subscriber, paths);
-    // ensure that we never see None from updates.next()
-    ctx.updates.inner_mut().push(Box::new(stream::pending()));
     loop {
         select_biased! {
             u = ctx.updates.next() => {
