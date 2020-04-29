@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::{Prim, Value};
+pub use crate::protocol::publisher::Value;
 use crate::{
     auth::{
         syskrb5::{ClientCtx, ServerCtx, SYS_KRB5},
@@ -76,9 +76,9 @@ impl Drop for ValInner {
 /// you must call flush before references to it will be removed from
 /// the resolver server.
 #[derive(Clone)]
-pub struct Val<T>(Arc<ValInner>, PhantomData<T>);
+pub struct Val(Arc<ValInner>);
 
-impl<T: Prim> Val<T> {
+impl Val {
     /// Queue an update to the published value, it will not be sent
     /// out until you call `flush` on the publisher. New subscribers
     /// will not see the new value until you have called
@@ -92,8 +92,8 @@ impl<T: Prim> Val<T> {
     ///
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
-    pub fn update(&self, v: T) -> Result<()> {
-        Ok(self.0.updates.push((self.0.id, Update::Val(v.to_value()?))))
+    pub fn update(&self, v: Value) {
+        self.0.updates.push((self.0.id, Update::Val(v)))
     }
 
     /// Get the unique `Id` of this `Val`. This id is unique on this
@@ -356,8 +356,8 @@ impl Publisher {
     /// different publishers may publish a given path as many times as
     /// they like. Subscribers will then pick randomly among the
     /// advertised publishers when subscribing. See `subscriber`
-    pub fn publish<T: Prim>(&self, path: Path, init: T) -> Result<Val<T>> {
-        Ok(Val(self.publish_val_internal(path, init.to_value()?)?, PhantomData))
+    pub fn publish(&self, path: Path, init: Value) -> Result<Val> {
+        Ok(Val(self.publish_val_internal(path, init)?))
     }
 
     /// Send all queued updates out to subscribers, and send all

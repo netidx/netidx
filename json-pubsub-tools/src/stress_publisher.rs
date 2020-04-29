@@ -2,7 +2,7 @@ use futures::{prelude::*, select};
 use json_pubsub::{
     config::resolver::Config,
     path::Path,
-    publisher::{BindCfg, Publisher},
+    publisher::{BindCfg, Publisher, Value},
     resolver::Auth,
 };
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
         .into_iter()
         .map(|i| {
             let path = Path::from(format!("/bench/{}", i));
-            publisher.publish(path, v).expect("encode")
+            publisher.publish(path, Value::U64(v)).expect("encode")
         })
         .collect::<Vec<_>>();
     publisher.flush(None).await.expect("publish");
@@ -31,7 +31,7 @@ async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
         }
         v += 1;
         for p in published.iter() {
-            p.update(v).expect("encode");
+            p.update(Value::U64(v));
             sent += 1;
         }
         publisher.flush(None).await.expect("flush");

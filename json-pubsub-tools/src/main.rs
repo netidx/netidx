@@ -7,12 +7,12 @@ use json_pubsub::{config, path::Path, resolver::Auth};
 use std::{fs::read, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 
-mod publisher;
 mod resolver;
 mod resolver_server;
 mod stress_publisher;
 mod stress_subscriber;
-mod subscriber;
+mod publisher;
+//mod subscriber;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
@@ -165,9 +165,9 @@ fn main() {
             spn,
             typ,
             timeout,
-        } => publisher::run(cfg, typ, timeout, auth(krb5, upn, spn)),
+        } => (), //publisher::run(cfg, typ, timeout, auth(krb5, upn, spn)),
         Sub::Subscriber { krb5, upn, paths } => {
-            subscriber::run(cfg, paths, auth(krb5, upn, None))
+            () //subscriber::run(cfg, paths, auth(krb5, upn, None))
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber { krb5, upn } => {

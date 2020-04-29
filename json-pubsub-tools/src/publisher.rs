@@ -5,7 +5,7 @@ use json_pubsub::{
     chars::Chars,
     config::resolver::Config,
     path::Path,
-    publisher::{BindCfg, Prim, Publisher, Val, Value},
+    publisher::{BindCfg, Publisher, Val, Value},
     resolver::Auth,
     utils::{self, BatchItem, Batched},
 };
@@ -58,9 +58,9 @@ pub(crate) enum SValue {
     Bytes(Vec<u8>),
 }
 
-impl Prim for SValue {
-    fn to_value(self) -> Result<Value> {
-        Ok(match self {
+impl SValue {
+    pub fn to_value(self) -> Value {
+        match self {
             SValue::U32(n) => Value::U32(n),
             SValue::I32(n) => Value::I32(n),
             SValue::U64(n) => Value::U64(n),
@@ -69,11 +69,11 @@ impl Prim for SValue {
             SValue::F64(n) => Value::F64(n),
             SValue::String(s) => Value::String(Chars::from(s)),
             SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
-        })
+        }
     }
 
-    fn from_value(v: Value) -> Result<Self> {
-        Ok(match v {
+    pub fn from_value(v: Value) -> Self {
+        match v {
             Value::U32(n) => SValue::U32(n),
             Value::I32(n) => SValue::I32(n),
             Value::U64(n) => SValue::U64(n),
@@ -82,7 +82,7 @@ impl Prim for SValue {
             Value::F64(n) => SValue::F64(n),
             Value::String(c) => SValue::String(String::from(c.as_ref())),
             Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
-        })
+        }
     }
 }
 
@@ -103,7 +103,7 @@ pub(crate) fn run(config: Config, typ: Typ, timeout: Option<u64>, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
-        let mut published: HashMap<Path, Val<SValue>> = HashMap::new();
+        let mut published: HashMap<Path, Val> = HashMap::new();
         let publisher =
             Publisher::new(config, auth, BindCfg::Any).await.expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
@@ -134,14 +134,14 @@ pub(crate) fn run(config: Config, typ: Typ, timeout: Option<u64>, auth: Auth) {
                         };
                         match published.get(path) {
                             Some(p) => {
-                                p.update(val).unwrap();
+                                p.update(val.to_value());
                             }
                             None => {
                                 let path = Path::from(path);
                                 let publ = try_cf!(
                                     "failed to publish",
                                     continue,
-                                    publisher.publish(path.clone(), val)
+                                    publisher.publish(path.clone(), val.to_value())
                                 );
                                 published.insert(path, publ);
                             }

@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::{Prim, Value};
+pub use crate::protocol::publisher::Value;
 use crate::{
     auth::{
         syskrb5::{ClientCtx, SYS_KRB5},
@@ -16,7 +16,6 @@ use crate::{
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched},
 };
-use log::info;
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
@@ -25,14 +24,13 @@ use futures::{
     select, select_biased,
 };
 use fxhash::FxBuildHasher;
+use log::info;
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
     cmp::max,
     collections::{hash_map::Entry, HashMap},
-    iter,
-    marker::PhantomData,
-    mem,
+    iter, mem,
     net::SocketAddr,
     sync::{Arc, Weak},
     time::Duration,
@@ -46,12 +44,23 @@ use tokio::{
 
 const BATCH: usize = 100_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubId(u64);
+
+impl SubId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        SubId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
     token: Bytes,
     resolver: ResolverId,
-    finished: oneshot::Sender<Result<UVal>>,
+    finished: oneshot::Sender<Result<Val>>,
     con: UnboundedSender<ToCon>,
     deadline: Option<Instant>,
 }
@@ -61,28 +70,29 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Value>),
-    Stream { id: Id, tx: Sender<Value>, last: bool },
+    Stream { id: Id, sub_id: SubId, tx: Sender<(SubId, Value)>, last: bool },
 }
 
 #[derive(Debug)]
-struct UValInner {
+struct ValInner {
+    sub_id: SubId,
     id: Id,
     addr: SocketAddr,
     connection: UnboundedSender<ToCon>,
 }
 
-impl Drop for UValInner {
+impl Drop for ValInner {
     fn drop(&mut self) {
         let _ = self.connection.send(ToCon::Unsubscribe(self.id));
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct UValWeak(Weak<UValInner>);
+pub struct ValWeak(Weak<ValInner>);
 
-impl UValWeak {
-    pub fn upgrade(&self) -> Option<UVal> {
-        Weak::upgrade(&self.0).map(|r| UVal(r))
+impl ValWeak {
+    pub fn upgrade(&self) -> Option<Val> {
+        Weak::upgrade(&self.0).map(|r| Val(r))
     }
 }
 
@@ -92,15 +102,11 @@ impl UValWeak {
 /// subscription is alive. The stream of updates is accessed with the
 /// `UVal::updates` function.
 #[derive(Debug, Clone)]
-pub struct UVal(Arc<UValInner>);
+pub struct Val(Arc<ValInner>);
 
-impl UVal {
-    pub fn typed<T: Prim>(self) -> Val<T> {
-        Val(self, PhantomData)
-    }
-
-    pub fn downgrade(&self) -> UValWeak {
-        UValWeak(Arc::downgrade(&self.0))
+impl Val {
+    pub fn downgrade(&self) -> ValWeak {
+        ValWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last published value, or None if the subscription is
@@ -122,32 +128,18 @@ impl UVal {
     /// only receive new values.
     ///
     /// If the subscription dies the stream will end.
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Value> {
-        let (tx, rx) = mpsc::channel(10);
-        let m = ToCon::Stream { tx, last: begin_with_last, id: self.0.id };
+    pub fn updates(&self, begin_with_last: bool, tx: Sender<(SubId, Value)>) {
+        let m = ToCon::Stream {
+            tx,
+            sub_id: self.0.sub_id,
+            last: begin_with_last,
+            id: self.0.id,
+        };
         let _ = self.0.connection.unbounded_send(m);
-        rx
-    }
-}
-
-/// A typed version of UVal
-#[derive(Debug, Clone)]
-pub struct Val<T: Prim>(UVal, PhantomData<T>);
-
-impl<T: Prim> Val<T> {
-    pub fn untyped(self) -> UVal {
-        self.0
     }
 
-    /// Get and decode the last published value, or None if the
-    /// subscription is dead.
-    pub async fn last(&self) -> Option<Result<T>> {
-        self.0.last().await.map(|v| Ok(T::from_value(v)?))
-    }
-
-    /// Same as `SubscriptionUt::updates` but it decodes the value
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Result<T>> {
-        self.0.updates(begin_with_last).map(|v| Ok(T::from_value(v)?))
+    pub fn id(&self) -> SubId {
+        self.0.sub_id
     }
 }
 
@@ -158,20 +150,21 @@ pub enum DVState {
 }
 
 #[derive(Debug)]
-struct DUValInner {
-    sub: Option<UVal>,
-    streams: Vec<Sender<Value>>,
-    states: Vec<UnboundedSender<DVState>>,
+struct DValInner {
+    sub_id: SubId,
+    sub: Option<Val>,
+    streams: Vec<Sender<(SubId, Value)>>,
+    states: Vec<UnboundedSender<(SubId, DVState)>>,
     tries: usize,
     next_try: Instant,
 }
 
 #[derive(Debug, Clone)]
-struct DUValWeak(Weak<Mutex<DUValInner>>);
+struct DValWeak(Weak<Mutex<DValInner>>);
 
-impl DUValWeak {
-    fn upgrade(&self) -> Option<DUVal> {
-        Weak::upgrade(&self.0).map(|s| DUVal(s))
+impl DValWeak {
+    fn upgrade(&self) -> Option<DVal> {
+        Weak::upgrade(&self.0).map(|s| DVal(s))
     }
 }
 
@@ -204,15 +197,11 @@ impl DUValWeak {
 /// that `DUVal` and `DVal` be considered the default value
 /// subscription type where semantics allow.
 #[derive(Debug, Clone)]
-pub struct DUVal(Arc<Mutex<DUValInner>>);
+pub struct DVal(Arc<Mutex<DValInner>>);
 
-impl DUVal {
-    pub fn typed<T: Prim>(self) -> DVal<T> {
-        DVal(self, PhantomData)
-    }
-
-    fn downgrade(&self) -> DUValWeak {
-        DUValWeak(Arc::downgrade(&self.0))
+impl DVal {
+    fn downgrade(&self) -> DValWeak {
+        DValWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last value published by the publisher, or None if the
@@ -229,8 +218,11 @@ impl DUVal {
     /// subscription changes. if include_current is true, then the
     /// current state will be immediatly emitted once even if there
     /// was no state change.
-    pub fn state_updates(&self, include_current: bool) -> impl Stream<Item = DVState> {
-        let (tx, rx) = mpsc::unbounded();
+    pub fn state_updates(
+        &self,
+        include_current: bool,
+        tx: UnboundedSender<(SubId, DVState)>,
+    ) {
         let mut t = self.0.lock();
         t.states.retain(|c| !c.is_closed());
         if include_current {
@@ -238,10 +230,9 @@ impl DUVal {
                 None => DVState::Unsubscribed,
                 Some(_) => DVState::Subscribed,
             };
-            let _ = tx.unbounded_send(current);
+            let _ = tx.unbounded_send((t.sub_id, current));
         }
         t.states.push(tx);
-        rx
     }
 
     pub fn state(&self) -> DVState {
@@ -256,56 +247,37 @@ impl DUVal {
     /// the stream will not end when the subscription dies, it will
     /// just stop producing values, and will start again if
     /// resubscription is successful.
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Value> {
+    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<(SubId, Value)>) {
         let mut t = self.0.lock();
-        let (tx, rx) = mpsc::channel(10);
         t.streams.retain(|c| !c.is_closed());
         t.streams.push(tx.clone());
         if let Some(ref sub) = t.sub {
-            let m = ToCon::Stream { tx, last: begin_with_last, id: sub.0.id };
+            let m = ToCon::Stream {
+                tx,
+                sub_id: t.sub_id,
+                last: begin_with_last,
+                id: sub.0.id,
+            };
             let _ = sub.0.connection.unbounded_send(m);
         }
-        rx
-    }
-}
-
-/// A typed version of `DUVal`
-#[derive(Debug, Clone)]
-pub struct DVal<T: Prim>(DUVal, PhantomData<T>);
-
-impl<T: Prim> DVal<T> {
-    pub fn untyped(self) -> DUVal {
-        self.0
     }
 
-    pub async fn last(&self) -> Option<Result<T>> {
-        self.0.last().await.map(|v| Ok(T::from_value(v)?))
-    }
-
-    pub fn state_updates(&self, include_current: bool) -> impl Stream<Item = DVState> {
-        self.0.state_updates(include_current)
-    }
-
-    pub fn state(&self) -> DVState {
-        self.0.state()
-    }
-
-    pub fn updates(&self, begin_with_last: bool) -> impl Stream<Item = Result<T>> {
-        self.0.updates(begin_with_last).map(|v| Ok(T::from_value(v)?))
+    pub fn id(&self) -> SubId {
+        self.0.lock().sub_id
     }
 }
 
 enum SubStatus {
-    Subscribed(UValWeak),
-    Pending(Vec<oneshot::Sender<Result<UVal>>>),
+    Subscribed(ValWeak),
+    Pending(Vec<oneshot::Sender<Result<Val>>>),
 }
 
 struct SubscriberInner {
     resolver: ResolverRead,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
-    durable_dead: HashMap<Path, DUValWeak>,
-    durable_alive: HashMap<Path, DUValWeak>,
+    durable_dead: HashMap<Path, DValWeak>,
+    durable_alive: HashMap<Path, DValWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: Auth,
 }
@@ -405,7 +377,7 @@ impl Subscriber {
                     update_retry(&mut *subscriber, retry);
                 } else {
                     let r = subscriber
-                        .subscribe_vals_ut(batch.keys().cloned(), Some(timeout))
+                        .subscribe_vals(batch.keys().cloned(), Some(timeout))
                         .await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
@@ -421,7 +393,8 @@ impl Subscriber {
                                 ds.tries = 0;
                                 let mut i = 0;
                                 while i < ds.states.len() {
-                                    match ds.states[i].unbounded_send(DVState::Subscribed)
+                                    match ds.states[i]
+                                        .unbounded_send((ds.sub_id, DVState::Subscribed))
                                     {
                                         Ok(()) => {
                                             i += 1;
@@ -436,6 +409,7 @@ impl Subscriber {
                                     let _ =
                                         sub.0.connection.unbounded_send(ToCon::Stream {
                                             tx,
+                                            sub_id: ds.sub_id,
                                             last: true,
                                             id: sub.0.id,
                                         });
@@ -496,16 +470,16 @@ impl Subscriber {
     /// `subscribe_vals_ut` future in a `time::timeout`. In the case
     /// timeout is specified, `subscribe_vals_ut` is guaranteed to
     /// complete no later than `now + timeout`.
-    pub async fn subscribe_vals_ut(
+    pub async fn subscribe_vals(
         &self,
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
-    ) -> Vec<(Path, Result<UVal>)> {
+    ) -> Vec<(Path, Result<Val>)> {
         enum St {
             Resolve,
-            Subscribing(oneshot::Receiver<Result<UVal>>),
-            WaitingOther(oneshot::Receiver<Result<UVal>>),
-            Subscribed(UVal),
+            Subscribing(oneshot::Receiver<Result<Val>>),
+            WaitingOther(oneshot::Receiver<Result<Val>>),
+            Subscribed(Val),
             Error(Error),
         }
         let now = Instant::now();
@@ -710,37 +684,15 @@ impl Subscriber {
     /// Subscribe to one value. This is sufficient for a small number
     /// of paths, but if you need to subscribe to a lot of values it
     /// is more efficent to use `subscribe_vals_ut`
-    pub async fn subscribe_val_ut(
+    pub async fn subscribe_val(
         &self,
         path: Path,
         timeout: Option<Duration>,
-    ) -> Result<UVal> {
-        self.subscribe_vals_ut(iter::once(path), timeout).await.pop().unwrap().1
+    ) -> Result<Val> {
+        self.subscribe_vals(iter::once(path), timeout).await.pop().unwrap().1
     }
 
-    /// Same as `subscribe_vals_ut`, but typed.
-    pub async fn subscribe_vals<T: Prim>(
-        &self,
-        batch: impl IntoIterator<Item = Path>,
-        timeout: Option<Duration>,
-    ) -> Vec<(Path, Result<Val<T>>)> {
-        self.subscribe_vals_ut(batch, timeout)
-            .await
-            .into_iter()
-            .map(|(p, r)| (p, r.map(|r| r.typed())))
-            .collect()
-    }
-
-    /// Same as `subscribe_val_ut` but typed.
-    pub async fn subscribe_val<T: Prim>(
-        &self,
-        path: Path,
-        timeout: Option<Duration>,
-    ) -> Result<Val<T>> {
-        self.subscribe_val_ut(path, timeout).await.map(|v| v.typed())
-    }
-
-    /// Create a durable untyped value subscription to `path`.
+    /// Create a durable value subscription to `path`.
     ///
     /// Batching of durable subscriptions is automatic, if you create
     /// a lot of durable subscriptions all at once they will batch,
@@ -751,7 +703,7 @@ impl Subscriber {
     /// subscription for a given path, calling
     /// `subscribe_val_durable_ut` again for the same path will just
     /// return another pointer to it.
-    pub fn durable_subscribe_val_ut(&self, path: Path) -> DUVal {
+    pub fn durable_subscribe_val(&self, path: Path) -> DVal {
         let mut t = self.0.lock();
         if let Some(s) = t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
         {
@@ -759,7 +711,8 @@ impl Subscriber {
                 return s;
             }
         }
-        let s = DUVal(Arc::new(Mutex::new(DUValInner {
+        let s = DVal(Arc::new(Mutex::new(DValInner {
+            sub_id: SubId::new(),
             sub: None,
             streams: Vec::new(),
             states: Vec::new(),
@@ -770,16 +723,11 @@ impl Subscriber {
         let _ = t.trigger_resub.unbounded_send(());
         s
     }
-
-    /// Same as `durable_subscribe_val_ut` but typed.
-    pub fn durable_subscribe_val<T: Prim>(&self, path: Path) -> DVal<T> {
-        self.durable_subscribe_val_ut(path).typed()
-    }
 }
 
 struct Sub {
     path: Path,
-    streams: Vec<Sender<Value>>,
+    streams: Vec<(SubId, Sender<(SubId, Value)>)>,
     last: Value,
 }
 
@@ -790,7 +738,9 @@ fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketA
             inner.sub = None;
             let mut i = 0;
             while i < inner.states.len() {
-                match inner.states[i].unbounded_send(DVState::Unsubscribed) {
+                match inner.states[i]
+                    .unbounded_send((inner.sub_id, DVState::Unsubscribed))
+                {
                     Ok(()) => {
                         i += 1;
                     }
@@ -876,8 +826,8 @@ async fn process_batch(
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
                     let mut gc = false;
-                    for c in sub.streams.iter_mut() {
-                        match c.send(m.clone()).await {
+                    for (id, c) in sub.streams.iter_mut() {
+                        match c.send((*id, m.clone())).await {
                             Ok(()) => (),
                             Err(_) => {
                                 gc = true;
@@ -885,7 +835,7 @@ async fn process_batch(
                         }
                     }
                     if gc {
-                        sub.streams.retain(|c| !c.is_closed());
+                        sub.streams.retain(|(_, c)| !c.is_closed());
                     }
                     sub.last = m;
                 }
@@ -911,8 +861,13 @@ async fn process_batch(
             From::Subscribed(p, id, m) => match pending.remove(&p) {
                 None => con.queue_send(&To::Unsubscribe(id))?,
                 Some(req) => {
-                    let s =
-                        Ok(UVal(Arc::new(UValInner { id, addr, connection: req.con })));
+                    let sub_id = SubId::new();
+                    let s = Ok(Val(Arc::new(ValInner {
+                        sub_id,
+                        id,
+                        addr,
+                        connection: req.con,
+                    })));
                     match req.finished.send(s) {
                         Err(_) => con.queue_send(&To::Unsubscribe(id))?,
                         Ok(()) => {
@@ -1026,16 +981,16 @@ async fn connection(
                         let _ = tx.send(sub.last.clone());
                     }
                 }
-                Some(BatchItem::InBatch(ToCon::Stream { id, mut tx, last })) => {
+                Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
-                        sub.streams.retain(|c| !c.is_closed());
+                        sub.streams.retain(|(_, c)| !c.is_closed());
                         if last {
-                            match tx.send(sub.last.clone()).await {
+                            match tx.send((sub_id, sub.last.clone())).await {
                                 Err(_) => continue,
                                 Ok(()) => ()
                             }
                         }
-                        sub.streams.push(tx);
+                        sub.streams.push((sub_id, tx));
                     }
                 }
             },

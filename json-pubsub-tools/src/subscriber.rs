@@ -9,7 +9,7 @@ use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::Auth,
-    subscriber::{DVal, Subscriber},
+    subscriber::{DVal, Subscriber, Value},
     utils::{BatchItem, Batched, BytesWriter},
 };
 use std::{
@@ -67,10 +67,10 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    subscriptions: HashMap<Path, DVal<SValue>>,
+    subscriptions: HashMap<Path, DVal>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
-    updates: Batched<SelectAll<Box<dyn Stream<Item = (Path, SValue)> + Unpin>>>,
+    updates: Batched<SelectAll<Box<dyn Stream<Item = (Path, Value)> + Unpin>>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -130,15 +130,9 @@ impl Ctx {
                     let subscriber = &self.subscriber;
                     subscriptions.entry(p.clone()).or_insert_with(|| {
                         let s = subscriber.durable_subscribe_val(p.clone());
-                        updates.inner_mut().push(Box::new(s.updates(true).map(
-                            move |v| {
-                                let v = match v {
-                                    Err(e) => SValue::String(format!("{}", e)),
-                                    Ok(v) => v,
-                                };
-                                (p.clone(), v)
-                            },
-                        )));
+                        updates
+                            .inner_mut()
+                            .push(Box::new(s.updates(true).map(move |v| (p.clone(), v))));
                         s
                     });
                 }
@@ -148,7 +142,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<(Path, SValue)>>,
+        u: Option<BatchItem<(Path, Value)>>,
     ) -> Result<(), anyhow::Error> {
         Ok(match u {
             None => unreachable!(),
@@ -163,7 +157,9 @@ impl Ctx {
                 }
             }
             Some(BatchItem::InBatch((path, value))) => {
-                Out { path: &*path, value }.write(&mut self.to_stdout, &mut self.to_stderr);
+                let value = SValue::from_value(value);
+                Out { path: &*path, value }
+                    .write(&mut self.to_stdout, &mut self.to_stderr);
             }
         })
     }
