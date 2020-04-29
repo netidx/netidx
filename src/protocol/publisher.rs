@@ -27,15 +27,15 @@ impl Id {
 
 impl Pack for Id {
     fn len(&self) -> usize {
-        <u64 as Pack>::len(&self.0)
+        mem::size_of::<u64>()
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        <u64 as Pack>::encode(&self.0, buf)
+        Ok(buf.put_u64(self.0))
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        Ok(Id(<u64 as Pack>::decode(buf)?))
+        Ok(Id(buf.get_u64()))
     }
 }
 
