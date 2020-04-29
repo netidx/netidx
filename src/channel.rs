@@ -1,11 +1,10 @@
 use crate::{auth::Krb5Ctx, utils::Pack};
 use anyhow::{anyhow, Error, Result};
-use byteorder::{BigEndian, ByteOrder};
 use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use futures::prelude::*;
 use log::info;
 use std::{
-    cmp::{max, min},
+    cmp::min,
     fmt::Debug,
     mem, result,
     time::Duration,
@@ -14,11 +13,7 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{
-        mpsc::{
-            self,
-            error::SendTimeoutError,
-            Receiver, Sender,
-        },
+        mpsc::{self, error::SendTimeoutError, Receiver, Sender},
         oneshot,
     },
     task,
@@ -96,11 +91,16 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
 pub(crate) struct WriteChannel<C> {
     to_flush: Sender<ToFlush<C>>,
     buf: BytesMut,
+    boundries: Vec<usize>,
 }
 
 impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
-        WriteChannel { to_flush: flush_task(socket), buf: BytesMut::with_capacity(BUF) }
+        WriteChannel {
+            to_flush: flush_task(socket),
+            buf: BytesMut::with_capacity(BUF),
+            boundries: Vec::new(),
+        }
     }
 
     pub(crate) async fn set_ctx(&mut self, ctx: C) -> Result<()> {
@@ -111,18 +111,22 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// writes it to the buffer, you must call flush actually send it.
     pub(crate) fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<()> {
         let len = msg.len();
-        if len > u32::MAX as usize {
-            return Err(anyhow!("message length {} exceeds max size u32::MAX", len));
+        if len > MAX_BATCH as usize {
+            return Err(anyhow!("message length {} exceeds max size {}", len, MAX_BATCH));
         }
-        if self.buf.remaining_mut() < len + mem::size_of::<u32>() {
-            self.buf.reserve(max(BUF, len));
+        if self.buf.remaining_mut() < len {
+            self.buf.reserve(self.buf.capacity());
         }
         let buf_len = self.buf.remaining();
-        self.buf.put_u32(len as u32);
+        if (buf_len - self.boundries.last().copied().unwrap_or(0)) + len > MAX_BATCH {
+            let prev_len: usize = self.boundries.iter().sum();
+            self.boundries.push(buf_len - prev_len);
+        }
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.buf.resize(buf_len, 0x0);
+                self.boundries.pop();
                 Err(Error::from(e))
             }
         }
@@ -143,10 +147,10 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        while self.buf.has_remaining() {
-            let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
-            self.to_flush.send(ToFlush::Flush(chunk)).await?;
+        for b in self.boundries.drain(..) {
+            self.to_flush.send(ToFlush::Flush(self.buf.split_to(b))).await?;
         }
+        self.to_flush.send(ToFlush::Flush(self.buf.split())).await?;
         Ok(())
     }
 
@@ -249,18 +253,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     /// Read a load of bytes from the socket into the read buffer
     pub(crate) async fn fill_buffer(&mut self) -> Result<()> {
         if let Some(chunk) = self.incoming.next().await {
-            if !self.buf.has_remaining() {
-                self.buf = chunk;
-            } else {
-                // this should be very rare because a batch must
-                // exceed 1 GB before it can contain a partial
-                // message.
-                let len = self.buf.remaining() + chunk.remaining();
-                let mut tmp = BytesMut::with_capacity(len);
-                tmp.extend_from_slice(&*self.buf);
-                tmp.extend_from_slice(&*chunk);
-                self.buf = tmp;
-            }
+            self.buf = chunk;
             Ok(())
         } else {
             Err(anyhow!("EOF"))
@@ -268,19 +261,9 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     }
 
     pub(crate) async fn receive<T: Pack + Debug>(&mut self) -> Result<T> {
-        loop {
-            if self.buf.remaining() < mem::size_of::<u32>() {
-                self.fill_buffer().await?;
-            } else {
-                let len = BigEndian::read_u32(&*self.buf) as usize;
-                if self.buf.remaining() < len + mem::size_of::<u32>() {
-                    self.fill_buffer().await?;
-                } else {
-                    break;
-                }
-            }
+        if !self.buf.has_remaining() {
+            self.fill_buffer().await?;
         }
-        self.buf.advance(mem::size_of::<u32>());
         Ok(T::decode(&mut self.buf)?)
     }
 
@@ -289,15 +272,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
         batch: &mut Vec<T>,
     ) -> Result<()> {
         batch.push(self.receive().await?);
-        loop {
-            if self.buf.remaining() < mem::size_of::<u32>() {
-                break;
-            }
-            let len = BigEndian::read_u32(&*self.buf) as usize;
-            if self.buf.remaining() < len + mem::size_of::<u32>() {
-                break;
-            }
-            self.buf.advance(mem::size_of::<u32>());
+        while self.buf.has_remaining() {
             batch.push(T::decode(&mut self.buf)?);
         }
         Ok(())

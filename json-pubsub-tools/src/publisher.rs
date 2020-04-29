@@ -134,7 +134,7 @@ pub(crate) fn run(config: Config, typ: Typ, timeout: Option<u64>, auth: Auth) {
                         };
                         match published.get(path) {
                             Some(p) => {
-                                p.update(val);
+                                p.update(val).unwrap();
                             }
                             None => {
                                 let path = Path::from(path);
