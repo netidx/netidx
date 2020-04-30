@@ -813,7 +813,7 @@ const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
 // This is the fast path for the common case where a batch is all
-// updates.  Last checked 2020-04-30 this fast path alone by itself is
+// updates. Last checked 2020-04-30 this fast path alone by itself is
 // worth %15 in the overall message rate! LLVM and the branch
 // predictor must really go nuts on this tiny function!
 async fn process_updates_batch(
@@ -935,7 +935,7 @@ fn decode_task(
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
-                        let next = bufs.pop().unwrap_or_else(|| dbg!(Vec::new()));
+                        let next = bufs.pop().unwrap_or_else(Vec::new());
                         let batch = mem::replace(&mut buf, next);
                         let only_updates = batch.iter().all(|v| match v {
                             From::Update(_, _) => true,
