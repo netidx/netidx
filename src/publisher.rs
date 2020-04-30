@@ -583,7 +583,17 @@ fn handle_batch(
 
 const HB: Duration = Duration::from_secs(5);
 
+fn client_arrived(publisher: &PublisherWeak) {
+    if let Some(publisher) = publisher.upgrade() {
+        let mut pb = publisher.0.lock();
+        for tx in pb.wait_any_client.drain(..) {
+            let _ = tx.send(());
+        }
+    }
+}
+
 async fn hello_client(
+    publisher: &PublisherWeak,
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
@@ -594,7 +604,10 @@ async fn hello_client(
     };
     let hello: Hello = con.receive().await?;
     match hello {
-        Anonymous => con.send_one(&Anonymous).await?,
+        Anonymous => {
+            con.send_one(&Anonymous).await?;
+            client_arrived(publisher);
+        },
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
@@ -606,6 +619,7 @@ async fn hello_client(
                     .ok_or_else(|| anyhow!("expected step to generate a token"))?;
                 con.send_one(&Token(tok)).await?;
                 con.set_ctx(ctx).await;
+                client_arrived(publisher);
             }
         },
         ResolverAuthenticate(id, tok) => {
@@ -637,7 +651,7 @@ async fn client_loop(
     let mut msgs = msgs.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
-    hello_client(&ctxts, &mut con, &desired_auth).await?;
+    hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
             from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
@@ -713,9 +727,6 @@ async fn accept_loop(
                             to_client: tx,
                             subscribed: HashSet::with_hasher(FxBuildHasher::default()),
                         });
-                        for tx in pb.wait_any_client.drain(..) {
-                            let _ = tx.send(());
-                        }
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
                             let _ = client_loop(

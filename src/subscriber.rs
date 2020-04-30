@@ -935,7 +935,7 @@ fn decode_task(
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
-                        let next = bufs.pop().unwrap_or_else(Vec::new());
+                        let next = bufs.pop().unwrap_or_else(Vec::new);
                         let batch = mem::replace(&mut buf, next);
                         let only_updates = batch.iter().all(|v| match v {
                             From::Update(_, _) => true,
