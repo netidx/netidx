@@ -21,6 +21,7 @@ use crate::{
 use anyhow::Result;
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
+use log::{debug, info};
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -184,6 +185,8 @@ async fn hello_client_write(
     resolver_id: ResolverId,
     hello: ClientHelloWrite,
 ) -> Result<()> {
+    info!("hello_write starting negotiation");
+    debug!("hello_write client_hello: {:?}", hello);
     async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloWrite) -> Result<()> {
         Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
     }
@@ -199,6 +202,8 @@ async fn hello_client_write(
                 resolver_id,
                 auth: ServerAuthWrite::Anonymous,
             };
+            info!("hello_write accepting Anonymous authentication");
+            debug!("hello_write sending hello {:?}", h);
             send(&mut con, h).await?;
             ANONYMOUS.clone()
         }
@@ -212,8 +217,11 @@ async fn hello_client_write(
                         resolver_id,
                         auth: ServerAuthWrite::Reused,
                     };
+                    info!("hello_write reusing krb5 context");
+                    debug!("hello_write sending {:?}", h);
                     send(&mut con, h).await?;
                     con.set_ctx(ctx.clone()).await;
+                    info!("hello_write all traffic now encrypted");
                     secstore.ifo(Some(&ctx.client()?))?
                 }
             },
@@ -221,14 +229,25 @@ async fn hello_client_write(
         ClientAuthWrite::Initiate { spn, token } => match secstore {
             None => bail!("authentication not supported"),
             Some(ref secstore) => {
+                info!(
+                    "hello_write initiating new krb5 context for {:?}",
+                    hello.write_addr
+                );
                 let (ctx, tok) = secstore.create(&token)?;
                 let h = ServerHelloWrite {
                     ttl_expired,
                     resolver_id,
                     auth: ServerAuthWrite::Accepted(tok),
                 };
+                info!("hello_write created context for {:?}", hello.write_addr);
+                debug!("hello_write sending {:?}", h);
                 send(&mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
+                info!("hello_write all traffic now encrypted");
+                info!(
+                    "hello_write connecting to {:?} for round trip check",
+                    hello.write_addr
+                );
                 let mut con: Channel<ServerCtx> = Channel::new(
                     time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
                         .await??,
@@ -239,17 +258,18 @@ async fn hello_client_write(
                 time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
                 match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
                     publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
-                        bail!("denied")
+                        bail!("round trip check unexpected response")
                     }
                     publisher::Hello::ResolverAuthenticate(_, tok) => {
                         let d = Vec::from(&*ctx.unwrap(&tok)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
                         if dsalt != salt + 2 {
-                            bail!("denied");
+                            bail!("round trip check failed");
                         }
                         let client = ctx.client()?;
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = spn.unwrap_or(Chars::from(client));
+                        info!("hello_write round trip check succeeded");
                         secstore.store_write(hello.write_addr, spn, ctx.clone());
                         uifo
                     }
@@ -483,9 +503,10 @@ async fn server_loop(
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
-                            let _ = hello_client(
+                            let r = hello_client(
                                 published, client, rx, secstore, id
                             ).await;
+                            info!("server_loop client connection shutting down {:?}", r);
                             connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     }

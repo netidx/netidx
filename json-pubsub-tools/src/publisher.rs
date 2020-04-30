@@ -104,8 +104,9 @@ pub(crate) fn run(config: Config, typ: Typ, timeout: Option<u64>, auth: Auth) {
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
         let mut published: HashMap<Path, Val> = HashMap::new();
-        let publisher =
-            Publisher::new(config, auth, BindCfg::Any).await.expect("creating publisher");
+        let publisher = Publisher::new(config, auth, BindCfg::Local) // CR estokes: fix
+            .await
+            .expect("creating publisher");
         let mut lines = Batched::new(BufReader::new(stdin()).lines(), 1000);
         let mut batch = Vec::new();
         while let Some(l) = lines.next().await {

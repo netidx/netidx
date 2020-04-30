@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::{runtime::Runtime, signal, time};
 
 async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
-    let publisher = Publisher::new(config, auth, BindCfg::Any)
+    let publisher = Publisher::new(config, auth, BindCfg::Local)
         .await
         .expect("failed to create publisher");
     let mut sent: usize = 0;

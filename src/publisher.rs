@@ -194,8 +194,6 @@ pub enum BindCfg {
     /// at 5000 and ending at the ephemeral port range. Error if no
     /// unused port can be found.
     Local,
-    /// Bind to `0.0.0.0`, automatically pick an unused port as in `Local`.
-    Any,
     /// Bind to the specified address, but automatically pick an
     /// unused port as in `Local`.
     Addr(IpAddr),
@@ -205,7 +203,7 @@ pub enum BindCfg {
 
 impl Default for BindCfg {
     fn default() -> Self {
-        BindCfg::Any
+        BindCfg::Local
     }
 }
 
@@ -235,7 +233,7 @@ impl Publisher {
     ) -> Result<Publisher> {
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
-            BindCfg::Local | BindCfg::Any | BindCfg::Addr(_) => {
+            BindCfg::Local | BindCfg::Addr(_) => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
@@ -245,7 +243,6 @@ impl Publisher {
                 let ip = match bind_cfg {
                     BindCfg::Exact(_) => unreachable!(),
                     BindCfg::Local => IpAddr::from(Ipv4Addr::new(127, 0, 0, 1)),
-                    BindCfg::Any => IpAddr::from(Ipv4Addr::new(0, 0, 0, 0)),
                     BindCfg::Addr(addr) => addr,
                 };
                 let mut port = 5000;
@@ -256,7 +253,7 @@ impl Publisher {
                     port = rand_port(port);
                     let addr = mkaddr(ip, port)?;
                     match TcpListener::bind(&addr).await {
-                        Ok(l) => break (addr, l),
+                        Ok(l) => break (l.local_addr()?, l),
                         Err(e) => {
                             if e.kind() != std::io::ErrorKind::AddrInUse {
                                 bail!(e)

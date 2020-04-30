@@ -18,7 +18,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
-use log::info;
+use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -200,8 +200,12 @@ async fn connect_write(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let con =
-            try_cf!("connect", continue, TcpStream::connect(&resolver_addr.1).await);
+        info!("write_con connecting to resolver {:?}", resolver_addr);
+        let con = try_cf!(
+            "write_con connect",
+            continue,
+            TcpStream::connect(&resolver_addr.1).await
+        );
         let mut con = Channel::new(con);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
@@ -221,40 +225,65 @@ async fn connect_write(
             }
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
+        debug!("write_con connection established hello {:?}", h);
         try_cf!("hello", continue, con.send_one(&h).await);
-        if let Some(ref ctx) = ctx {
-            con.set_ctx(ctx.clone()).await
-        }
-        let r: ServerHelloWrite =
-            try_cf!("hello reply", continue, con.receive().await);
+        let r: ServerHelloWrite = try_cf!("hello reply", continue, con.receive().await);
+        debug!("write_con resolver hello {:?}", r);
         match (desired_auth, r.auth) {
             (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
             (Auth::Anonymous, _) => {
-                info!("server requires authentication");
+                warn!("server requires authentication");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous) => {
-                info!("could not authenticate resolver server");
+                warn!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => (),
+            (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => {
+                if let Some(ref ctx) = ctx {
+                    con.set_ctx(ctx.clone()).await;
+                    info!("write_con all traffic now encrypted");
+                }
+            }
             (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
                 let ctx = ctx.unwrap();
+                info!("write_con processing resolver mutual authentication");
                 try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
+                info!("write_con mutual authentication succeeded");
                 if r.resolver_id != resolver_addr.0 {
                     bail!("resolver id mismatch, bad configuration");
                 }
                 ctxts.write().insert(r.resolver_id, ctx.clone());
+                con.set_ctx(ctx).await;
+                info!("write_con all traffic now encrypted");
             }
         }
         if !r.ttl_expired {
+            info!("connected to resolver {:?} for write", resolver_addr);
             break Ok(con);
         } else {
-            let m = ToWrite::Publish(published.read().iter().cloned().collect());
-            try_cf!("republish", continue, con.send_one(&m).await);
-            match try_cf!("replublish reply", continue, con.receive().await) {
-                FromWrite::Published => break Ok(con),
-                _ => (),
+            let names: Vec<Path> = published.read().iter().cloned().collect();
+            let len = names.len();
+            if len == 0 {
+                info!("connected to resolver {:?} for write", resolver_addr);
+                break Ok(con);
+            } else {
+                info!("write_con ttl is expired, republishing {}", len);
+                try_cf!(
+                    "republish",
+                    continue,
+                    con.send_one(&ToWrite::Publish(names)).await
+                );
+                match try_cf!("replublish reply", continue, con.receive().await) {
+                    FromWrite::Published => {
+                        info!(
+                            "connected to resolver {:?} for write (republished {})",
+                            resolver_addr, len
+                        );
+                        break Ok(con);
+                    }
+                    r => warn!("unexpected republish reply {:?}", r),
+                }
             }
         }
     }
@@ -282,7 +311,8 @@ async fn connection_write(
             _ = dc.next() => {
                 if act {
                    act = false;
-                } else {
+                } else if con.is_some() {
+                    info!("write_con dropping inactive connection");
                     con = None;
                 }
             },
@@ -300,7 +330,10 @@ async fn connection_write(
                         },
                         Some(ref mut c) => match c.send_one(&ToWrite::Heartbeat).await {
                             Ok(()) => break,
-                            Err(_) => { con = None; }
+                            Err(e) => {
+                                info!("write_con heartbeat send error {}", e);
+                                con = None;
+                            }
                         }
                     }
                 }
@@ -322,9 +355,15 @@ async fn connection_write(
                             }
                         };
                         match c.send_one(m_r).await {
-                            Err(_) => { con = None; }
+                            Err(e) => {
+                                info!("write_con connection send error {}", e);
+                                con = None;
+                            }
                             Ok(()) => match c.receive().await {
-                                Err(_) => { con = None; }
+                                Err(e) => {
+                                    info!("write_con connection recv error {}", e);
+                                    con = None;
+                                }
                                 Ok(r) => break r,
                             }
                         }
