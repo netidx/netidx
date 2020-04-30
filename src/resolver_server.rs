@@ -245,7 +245,7 @@ async fn hello_client_write(
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
                 info!(
-                    "hello_write connecting to {:?} for round trip check",
+                    "hello_write connecting to {:?} for listener ownership check",
                     hello.write_addr
                 );
                 let mut con: Channel<ServerCtx> = Channel::new(
@@ -258,18 +258,18 @@ async fn hello_client_write(
                 time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
                 match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
                     publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
-                        bail!("round trip check unexpected response")
+                        bail!("listener ownership check unexpected response")
                     }
                     publisher::Hello::ResolverAuthenticate(_, tok) => {
                         let d = Vec::from(&*ctx.unwrap(&tok)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
                         if dsalt != salt + 2 {
-                            bail!("round trip check failed");
+                            bail!("listener ownership check failed");
                         }
                         let client = ctx.client()?;
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = spn.unwrap_or(Chars::from(client));
-                        info!("hello_write round trip check succeeded");
+                        info!("hello_write listener ownership check succeeded");
                         secstore.store_write(hello.write_addr, spn, ctx.clone());
                         uifo
                     }

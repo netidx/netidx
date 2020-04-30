@@ -18,7 +18,7 @@ use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
-use log::info;
+use log::{info, debug};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
@@ -281,6 +281,7 @@ impl Publisher {
             let pb_weak = pb.downgrade();
             async move {
                 accept_loop(pb_weak.clone(), listener, receive_stop, desired_auth).await;
+                info!("accept loop shutdown");
             }
         });
         Ok(pb)
@@ -600,6 +601,7 @@ async fn hello_client(
         protocol::publisher::Hello::{self, *},
     };
     let hello: Hello = con.receive().await?;
+    debug!("hello_client received {:?}", hello);
     match hello {
         Anonymous => {
             con.send_one(&Anonymous).await?;
@@ -620,16 +622,24 @@ async fn hello_client(
             }
         },
         ResolverAuthenticate(id, tok) => {
-            let ctx = ctxts.read().get(&id).cloned();
-            match ctx {
-                None => bail!("no security context"),
-                Some(ctx) => {
-                    let n = ctx.unwrap(&*tok)?;
-                    let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-                    let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
-                    con.send_one(&ResolverAuthenticate(id, tok)).await?;
+            info!("hello_client processing listener ownership check from resolver");
+            for i in 0..10 {
+                let ctx = ctxts.read().get(&id).cloned();
+                match ctx {
+                    None => {
+                        time::delay_for(Duration::from_secs(1)).await;
+                        continue
+                    },
+                    Some(ctx) => {
+                        let n = ctx.unwrap(&*tok)?;
+                        let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+                        let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+                        con.send_one(&ResolverAuthenticate(id, tok)).await?;
+                        return Ok(())
+                    }
                 }
             }
+            bail!("no security context")
         }
     }
     Ok(())
@@ -710,6 +720,7 @@ async fn accept_loop(
             cl = serv.accept().fuse() => match cl {
                 Err(e) => info!("accept error {}", e),
                 Ok((s, addr)) => {
+                    debug!("accepted client {:?}", addr);
                     let t_weak = t.clone();
                     let t = match t.upgrade() {
                         None => return,
@@ -726,9 +737,10 @@ async fn accept_loop(
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
-                            let _ = client_loop(
+                            let r = client_loop(
                                 t_weak.clone(), ctxts, addr, rx, s, desired_auth
                             ).await;
+                            info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();
                                 if let Some(cl) = pb.clients.remove(&addr) {
