@@ -19,7 +19,7 @@ use crate::{
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
-    channel::mpsc::{self, Sender, Receiver, UnboundedReceiver, UnboundedSender},
+    channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
     select, select_biased,
 };
@@ -812,6 +812,26 @@ async fn hello_publisher(
 const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
+// This is the fast path for the common case where a batch is all
+// updates.  Last checked 2020-04-30 this fast path alone by itself is
+// worth %15 in the overall message rate! LLVM and the branch
+// predictor must really go nuts on this tiny function!
+async fn process_updates_batch(
+    batch: &mut Vec<protocol::publisher::From>,
+    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+) {
+    for m in batch.drain(..) {
+        if let From::Update(i, m) = m {
+            if let Some(sub) = subscriptions.get_mut(&i) {
+                for (id, c) in sub.streams.iter_mut() {
+                    let _ = c.send((*id, m.clone())).await;
+                }
+                sub.last = m;
+            }
+        }
+    }
+}
+
 async fn process_batch(
     batch: &mut Vec<protocol::publisher::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
@@ -898,7 +918,7 @@ async fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
 fn decode_task(
     mut con: ReadChannel<ClientCtx>,
     mut buf_return: UnboundedReceiver<Vec<From>>,
-) -> Receiver<Result<Vec<From>>> {
+) -> Receiver<Result<(Vec<From>, bool)>> {
     let (mut send, recv) = mpsc::channel(10);
     task::spawn(async move {
         let mut bufs: Vec<Vec<From>> = Vec::new();
@@ -915,9 +935,13 @@ fn decode_task(
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
-                        let next = bufs.pop().unwrap_or_else(Vec::new);
+                        let next = bufs.pop().unwrap_or_else(|| dbg!(Vec::new()));
                         let batch = mem::replace(&mut buf, next);
-                        try_cf!(send.send(Ok(batch)).await)
+                        let only_updates = batch.iter().all(|v| match v {
+                            From::Update(_, _) => true,
+                            _ => false
+                        });
+                        try_cf!(send.send(Ok((batch, only_updates))).await)
                     }
                 }
             }
@@ -943,7 +967,7 @@ async fn connection(
     let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
     hello_publisher(&mut con, &auth, &target_spn).await?;
     let (read_con, mut write_con) = con.split();
-    let (mut return_batch, read_returned) = mpsc::unbounded();
+    let (return_batch, read_returned) = mpsc::unbounded();
     let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let res = 'main: loop {
@@ -976,20 +1000,27 @@ async fn connection(
                 try_cf!(try_flush(&mut write_con).await)
             },
             r = batches.next() => match r {
-                None => break Err(anyhow!("EOF")),
+                Some(Ok((mut batch, true))) => {
+                        msg_recvd = true;
+                        process_updates_batch(&mut batch, &mut subscriptions).await;
+                        try_cf!(return_batch.unbounded_send(batch));
+                        try_cf!(try_flush(&mut write_con).await)
+                },
+                Some(Ok((mut batch, false))) =>
+                    if let Some(subscriber) = subscriber.upgrade() {
+                        msg_recvd = true;
+                        try_cf!(process_batch(
+                            &mut batch,
+                            &mut subscriptions,
+                            &mut pending,
+                            &mut write_con,
+                            &subscriber,
+                            addr).await);
+                        try_cf!(return_batch.unbounded_send(batch));
+                        try_cf!(try_flush(&mut write_con).await)
+                    }
                 Some(Err(e)) => break Err(Error::from(e)),
-                Some(Ok(mut batch)) => if let Some(subscriber) = subscriber.upgrade() {
-                    msg_recvd = true;
-                    try_cf!(process_batch(
-                        &mut batch,
-                        &mut subscriptions,
-                        &mut pending,
-                        &mut write_con,
-                        &subscriber,
-                        addr).await);
-                    let _ = return_batch.send(batch);
-                    try_cf!(try_flush(&mut write_con).await)
-                }
+                None => break Err(anyhow!("EOF")),
             },
             msg = from_sub.next() => match msg {
                 None => break Err(anyhow!("dropped")),
