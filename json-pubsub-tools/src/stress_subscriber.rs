@@ -28,35 +28,37 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let mut last_stat = start;
         let mut total = 0;
         let mut n = 0;
-        while let Some(_) = vals.next().await {
-            total += 1;
-            n += 1;
-            if n >= subs.len() {
-                let now = Instant::now();
-                let elapsed = now - last_stat;
-                let since_start = now - start;
-                if elapsed > one_second {
-                    let mut subscribed = 0;
-                    let mut unsubscribed = 0;
-                    for s in subs.iter() {
-                        match s.state() {
-                            DVState::Unsubscribed => {
-                                unsubscribed += 1;
-                            }
-                            DVState::Subscribed => {
-                                subscribed += 1;
+        while let Some(batch) = vals.next().await {
+            for _ in batch {
+                total += 1;
+                n += 1;
+                if n >= subs.len() {
+                    let now = Instant::now();
+                    let elapsed = now - last_stat;
+                    let since_start = now - start;
+                    if elapsed > one_second {
+                        let mut subscribed = 0;
+                        let mut unsubscribed = 0;
+                        for s in subs.iter() {
+                            match s.state() {
+                                DVState::Unsubscribed => {
+                                    unsubscribed += 1;
+                                }
+                                DVState::Subscribed => {
+                                    subscribed += 1;
+                                }
                             }
                         }
+                        println!(
+                            "subscribed: {} unsubscribed: {} rx: {:.0} rx(avg): {:.0}",
+                            subscribed,
+                            unsubscribed,
+                            n as f64 / elapsed.as_secs_f64(),
+                            total as f64 / since_start.as_secs_f64()
+                        );
+                        n = 0;
+                        last_stat = now;
                     }
-                    println!(
-                        "subscribed: {} unsubscribed: {} rx: {:.0} rx(avg): {:.0}",
-                        subscribed,
-                        unsubscribed,
-                        n as f64 / elapsed.as_secs_f64(),
-                        total as f64 / since_start.as_secs_f64()
-                    );
-                    n = 0;
-                    last_stat = now;
                 }
             }
         }

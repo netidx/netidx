@@ -19,17 +19,20 @@ use crate::{
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
+    // CR estokes: switch to tokio when it has is_closed.
     channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
-    select, select_biased,
+    select,
+    select_biased,
 };
 use fxhash::FxBuildHasher;
 use log::info;
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
-    cmp::max,
+    cmp::{max, Eq, PartialEq},
     collections::{hash_map::Entry, HashMap},
+    hash::Hash,
     iter, mem,
     net::SocketAddr,
     sync::{Arc, Weak},
@@ -70,7 +73,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Value>),
-    Stream { id: Id, sub_id: SubId, tx: Sender<(SubId, Value)>, last: bool },
+    Stream { id: Id, sub_id: SubId, tx: Sender<Vec<(SubId, Value)>>, last: bool },
 }
 
 #[derive(Debug)]
@@ -128,7 +131,7 @@ impl Val {
     /// only receive new values.
     ///
     /// If the subscription dies the stream will end.
-    pub fn updates(&self, begin_with_last: bool, tx: Sender<(SubId, Value)>) {
+    pub fn updates(&self, begin_with_last: bool, tx: Sender<Vec<(SubId, Value)>>) {
         let m = ToCon::Stream {
             tx,
             sub_id: self.0.sub_id,
@@ -153,7 +156,7 @@ pub enum DVState {
 struct DValInner {
     sub_id: SubId,
     sub: Option<Val>,
-    streams: Vec<Sender<(SubId, Value)>>,
+    streams: Vec<Sender<Vec<(SubId, Value)>>>,
     states: Vec<UnboundedSender<(SubId, DVState)>>,
     tries: usize,
     next_try: Instant,
@@ -247,7 +250,7 @@ impl DVal {
     /// the stream will not end when the subscription dies, it will
     /// just stop producing values, and will start again if
     /// resubscription is successful.
-    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<(SubId, Value)>) {
+    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Vec<(SubId, Value)>>) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
         t.streams.push(tx.clone());
@@ -725,9 +728,26 @@ impl Subscriber {
     }
 }
 
+#[derive(Clone)]
+struct ChanWrap(Sender<Vec<(SubId, Value)>>);
+
+impl PartialEq for ChanWrap {
+    fn eq(&self, other: &ChanWrap) -> bool {
+        self.0.same_receiver(&other.0)
+    }
+}
+
+impl Eq for ChanWrap {}
+
+impl Hash for ChanWrap {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash_receiver(state)
+    }
+}
+
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, Sender<(SubId, Value)>)>,
+    streams: Vec<(SubId, ChanWrap)>,
     last: Value,
 }
 
@@ -812,23 +832,35 @@ async fn hello_publisher(
 const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
-// This is the fast path for the common case where a batch is all
-// updates. Last checked 2020-04-30 this fast path alone by itself is
-// worth %15 in the overall message rate! LLVM and the branch
-// predictor must really go nuts on this tiny function!
+// This is the fast path for the common case where the batch contains
+// only updates. As of 2020-04-30, sending to an mpsc channel is
+// pretty slow, about 250ns, so even though it may seem like
+// allocating a vec and a hashmap for every batch is slow, it actually
+// nearly triples performance.
 async fn process_updates_batch(
     batch: &mut Vec<protocol::publisher::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
+    let mut by_receiver: HashMap<ChanWrap, Vec<(SubId, Value)>> = HashMap::new();
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
             if let Some(sub) = subscriptions.get_mut(&i) {
                 for (id, c) in sub.streams.iter_mut() {
-                    let _ = c.send((*id, m.clone())).await;
+                    match by_receiver.get_mut(c) {
+                        Some(batch) => {
+                            batch.push((*id, m.clone()));
+                        }
+                        None => {
+                            by_receiver.insert(c.clone(), vec![(*id, m.clone())]);
+                        }
+                    }
                 }
                 sub.last = m;
             }
         }
+    }
+    for (mut c, batch) in by_receiver {
+        let _ = c.0.send(batch).await;
     }
 }
 
@@ -846,7 +878,7 @@ async fn process_batch(
                 Some(sub) => {
                     let mut gc = false;
                     for (id, c) in sub.streams.iter_mut() {
-                        match c.send((*id, m.clone())).await {
+                        match c.0.send(vec![(*id, m.clone())]).await {
                             Ok(()) => (),
                             Err(_) => {
                                 gc = true;
@@ -854,7 +886,7 @@ async fn process_batch(
                         }
                     }
                     if gc {
-                        sub.streams.retain(|(_, c)| !c.is_closed());
+                        sub.streams.retain(|(_, c)| !c.0.is_closed());
                     }
                     sub.last = m;
                 }
@@ -1001,10 +1033,10 @@ async fn connection(
             },
             r = batches.next() => match r {
                 Some(Ok((mut batch, true))) => {
-                        msg_recvd = true;
-                        process_updates_batch(&mut batch, &mut subscriptions).await;
-                        try_cf!(return_batch.unbounded_send(batch));
-                        try_cf!(try_flush(&mut write_con).await)
+                    msg_recvd = true;
+                    process_updates_batch(&mut batch, &mut subscriptions).await;
+                    try_cf!(return_batch.unbounded_send(batch));
+                    try_cf!(try_flush(&mut write_con).await)
                 },
                 Some(Ok((mut batch, false))) =>
                     if let Some(subscriber) = subscriber.upgrade() {
@@ -1048,14 +1080,14 @@ async fn connection(
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
-                        sub.streams.retain(|(_, c)| !c.is_closed());
+                        sub.streams.retain(|(_, c)| !c.0.is_closed());
                         if last {
-                            match tx.send((sub_id, sub.last.clone())).await {
+                            match tx.send(vec![(sub_id, sub.last.clone())]).await {
                                 Err(_) => continue,
                                 Ok(()) => ()
                             }
                         }
-                        sub.streams.push((sub_id, tx));
+                        sub.streams.push((sub_id, ChanWrap(tx)));
                     }
                 }
             },

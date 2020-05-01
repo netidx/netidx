@@ -12,7 +12,7 @@ mod resolver_server;
 mod stress_publisher;
 mod stress_subscriber;
 mod publisher;
-mod subscriber;
+//mod subscriber;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
@@ -167,7 +167,8 @@ fn main() {
             timeout,
         } => publisher::run(cfg, typ, timeout, auth(krb5, upn, spn)),
         Sub::Subscriber { krb5, upn, paths } => {
-            subscriber::run(cfg, paths, auth(krb5, upn, None))
+            ()
+            //subscriber::run(cfg, paths, auth(krb5, upn, None))
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber { krb5, upn } => {
