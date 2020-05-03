@@ -1,6 +1,7 @@
 use crate::{auth::Krb5Ctx, utils::Pack};
 use anyhow::{anyhow, Error, Result};
 use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
+use byteorder::{BigEndian, ByteOrder};
 use futures::prelude::*;
 use log::info;
 use std::{
@@ -190,7 +191,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
-                    let hdr = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    let hdr = BigEndian::read_u32(&*buf);
                     if hdr > LEN_MASK {
                         (true, (hdr & LEN_MASK) as usize)
                     } else {

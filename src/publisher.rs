@@ -25,7 +25,6 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryFrom,
     default::Default,
-    marker::PhantomData,
     mem,
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak},
@@ -623,7 +622,7 @@ async fn hello_client(
         },
         ResolverAuthenticate(id, tok) => {
             info!("hello_client processing listener ownership check from resolver");
-            for i in 0..10 {
+            for _ in 0..10 {
                 let ctx = ctxts.read().get(&id).cloned();
                 match ctx {
                     None => {

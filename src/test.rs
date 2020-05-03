@@ -67,7 +67,7 @@ mod publisher {
         resolver_server::Server,
         subscriber::{Subscriber, Value},
     };
-    use futures::prelude::*;
+    use futures::{channel::mpsc, prelude::*};
     use std::time::Duration;
     use tokio::{runtime::Runtime, sync::oneshot, task, time};
 
@@ -82,36 +82,41 @@ mod publisher {
             task::spawn(async move {
                 let publisher =
                     Publisher::new(pcfg, Auth::Anonymous, BindCfg::Local).await.unwrap();
-                let vp =
-                    publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
+                let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
                 let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
-                    vp.update(Value::U64(314159 + c)).unwrap();
+                    vp.update(Value::U64(314159 + c));
                     publisher.flush(None).await.unwrap();
                     c += 1
                 }
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
-            let vs =
-                subscriber.subscribe_val::<u64>("/app/v0".into(), None).await.unwrap();
+            let vs = subscriber.subscribe_val("/app/v0".into(), None).await.unwrap();
             let mut i: u64 = 0;
             let mut c: u64 = 0;
-            let mut s = vs.updates(true);
+            let (tx, mut rx) = mpsc::channel(10);
+            vs.updates(true, tx);
             loop {
-                match s.next().await {
+                match rx.next().await {
                     None => panic!("publisher died"),
-                    Some(Err(e)) => panic!("error: {}", e),
-                    Some(Ok(v)) => {
-                        if c == 0 {
-                            c = dbg!(v);
-                            i = v;
-                        } else {
-                            assert_eq!(c + 1, dbg!(v));
-                            c += 1
+                    Some(batch) => {
+                        for (_, v) in batch {
+                            match v {
+                                Value::U64(v) => {
+                                    if c == 0 {
+                                        c = dbg!(v);
+                                        i = v;
+                                    } else {
+                                        assert_eq!(c + 1, dbg!(v));
+                                        c += 1
+                                    }
+                                }
+                                _ => panic!("unexpected value from publisher"),
+                            }
                         }
                     }
                 }
