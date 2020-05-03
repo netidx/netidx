@@ -139,7 +139,7 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
     if ip.is_multicast() {
         bail!("can't publish a multicast address");
     }
-    if ip.is_loopback() && !resolvers.iter().all(|(_, a)| a.ip().is_loopback()) {
+    if ip.is_loopback() && !resolvers.iter().all(|a| a.ip().is_loopback()) {
         bail!("can't publish a loopback address to a remote server");
     }
     Ok(())

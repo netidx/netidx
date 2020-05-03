@@ -80,8 +80,13 @@ mod publisher {
             let pcfg = cfg.clone();
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
-                let publisher =
-                    Publisher::new(pcfg, Auth::Anonymous, BindCfg::Local).await.unwrap();
+                let publisher = Publisher::new(
+                    pcfg,
+                    Auth::Anonymous,
+                    BindCfg::Addr("127.0.0.1".parse().unwrap()),
+                )
+                .await
+                .unwrap();
                 let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
