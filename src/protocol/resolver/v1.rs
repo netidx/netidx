@@ -1,7 +1,7 @@
 use crate::{
+    chars::Chars,
     path::Path,
     utils::{Pack, PackError},
-    chars::Chars,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fxhash::FxBuildHasher;
@@ -303,6 +303,7 @@ impl Pack for ServerAuthWrite {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerHelloWrite {
+    pub ttl: u64,
     pub ttl_expired: bool,
     pub resolver_id: ResolverId,
     pub auth: ServerAuthWrite,
@@ -310,22 +311,25 @@ pub struct ServerHelloWrite {
 
 impl Pack for ServerHelloWrite {
     fn len(&self) -> usize {
-        <bool as Pack>::len(&self.ttl_expired)
+        <u64 as Pack>::len(&self.ttl)
+            + <bool as Pack>::len(&self.ttl_expired)
             + ResolverId::len(&self.resolver_id)
             + ServerAuthWrite::len(&self.auth)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        <u64 as Pack>::encode(&self.ttl, buf)?;
         <bool as Pack>::encode(&self.ttl_expired, buf)?;
         ResolverId::encode(&self.resolver_id, buf)?;
-        Ok(ServerAuthWrite::encode(&self.auth, buf)?)
+        ServerAuthWrite::encode(&self.auth, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
+        let ttl = <u64 as Pack>::decode(buf)?;
         let ttl_expired = <bool as Pack>::decode(buf)?;
         let resolver_id = ResolverId::decode(buf)?;
         let auth = ServerAuthWrite::decode(buf)?;
-        Ok(ServerHelloWrite { ttl_expired, resolver_id, auth })
+        Ok(ServerHelloWrite { ttl, ttl_expired, resolver_id, auth })
     }
 }
 

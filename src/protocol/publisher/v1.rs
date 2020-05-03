@@ -1,7 +1,7 @@
 use crate::{
     chars::Chars,
     path::Path,
-    protocol::resolver::ResolverId,
+    protocol::resolver::v1::ResolverId,
     utils::{Pack, PackError},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};

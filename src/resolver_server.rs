@@ -8,7 +8,7 @@ use crate::{
     path::Path,
     protocol::{
         publisher,
-        resolver::{
+        resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
             FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
             ServerHelloWrite, ToRead, ToWrite,
@@ -203,6 +203,7 @@ async fn hello_client_write(
     let uifo = match hello.auth {
         ClientAuthWrite::Anonymous => {
             let h = ServerHelloWrite {
+                ttl: cfg.writer_ttl.as_secs(),
                 ttl_expired,
                 resolver_id,
                 auth: ServerAuthWrite::Anonymous,
@@ -218,6 +219,7 @@ async fn hello_client_write(
                 None => bail!("session not found"),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
+                        ttl: cfg.writer_ttl.as_secs(),
                         ttl_expired,
                         resolver_id,
                         auth: ServerAuthWrite::Reused,
@@ -240,6 +242,7 @@ async fn hello_client_write(
                 );
                 let (ctx, tok) = secstore.create(&token)?;
                 let h = ServerHelloWrite {
+                    ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
                     resolver_id,
                     auth: ServerAuthWrite::Accepted(tok),
@@ -262,13 +265,13 @@ async fn hello_client_write(
                 );
                 let salt = salt();
                 let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
-                let m = publisher::Hello::ResolverAuthenticate(resolver_id, tok);
+                let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-                    publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
+                    publisher::v1::Hello::Anonymous | publisher::v1::Hello::Token(_) => {
                         bail!("listener ownership check unexpected response")
                     }
-                    publisher::Hello::ResolverAuthenticate(_, tok) => {
+                    publisher::v1::Hello::ResolverAuthenticate(_, tok) => {
                         let d = Vec::from(&*ctx.unwrap(&tok)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
                         if dsalt != salt + 2 {

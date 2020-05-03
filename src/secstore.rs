@@ -6,7 +6,7 @@ use crate::{
     },
     chars::Chars,
     config,
-    protocol::resolver::CtxId,
+    protocol::resolver::v1::CtxId,
 };
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};

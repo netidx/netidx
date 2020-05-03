@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::Value;
+pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::{
         syskrb5::{ClientCtx, SYS_KRB5},
@@ -10,8 +10,8 @@ use crate::{
     path::Path,
     protocol::{
         self,
-        publisher::{From, Id, To},
-        resolver::{Resolved, ResolverId},
+        publisher::v1::{From, Id, To},
+        resolver::v1::{Resolved, ResolverId},
     },
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched},
@@ -796,7 +796,7 @@ async fn hello_publisher(
     auth: &Auth,
     target_spn: &Chars,
 ) -> Result<()> {
-    use crate::protocol::publisher::Hello;
+    use crate::protocol::publisher::v1::Hello;
     match auth {
         Auth::Anonymous => {
             con.send_one(&Hello::Anonymous).await?;
@@ -838,7 +838,7 @@ const FLUSH: Duration = Duration::from_secs(1);
 // allocating a vec and a hashmap for every batch is slow, it actually
 // nearly triples performance.
 async fn process_updates_batch(
-    batch: &mut Vec<protocol::publisher::From>,
+    batch: &mut Vec<protocol::publisher::v1::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
     let mut by_receiver: HashMap<ChanWrap, Vec<(SubId, Value)>> = HashMap::new();
@@ -865,7 +865,7 @@ async fn process_updates_batch(
 }
 
 async fn process_batch(
-    batch: &mut Vec<protocol::publisher::From>,
+    batch: &mut Vec<protocol::publisher::v1::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
     con: &mut WriteChannel<ClientCtx>,

@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::Value;
+pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::{
         syskrb5::{ClientCtx, ServerCtx, SYS_KRB5},
@@ -8,8 +8,8 @@ use crate::{
     config,
     path::Path,
     protocol::{
-        publisher::{self, Id},
-        resolver::ResolverId,
+        publisher::{self, v1::Id},
+        resolver::v1::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
     utils::{self, Pack},
@@ -26,7 +26,7 @@ use std::{
     convert::TryFrom,
     default::Default,
     mem,
-    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
 };
@@ -508,7 +508,7 @@ fn subscribe(
     path: Path,
 ) -> Result<()> {
     match t.by_path.get(&path) {
-        None => con.queue_send(&publisher::From::NoSuchValue(path))?,
+        None => con.queue_send(&publisher::v1::From::NoSuchValue(path))?,
         Some(id) => {
             let id = *id;
             let cl = t.clients.get_mut(&addr).unwrap();
@@ -516,7 +516,7 @@ fn subscribe(
             let sender = cl.to_client.clone();
             let ut = t.by_id.get_mut(&id).unwrap();
             ut.subscribed.insert(addr, sender);
-            let m = publisher::From::Subscribed(path, id, ut.current.clone());
+            let m = publisher::v1::From::Subscribed(path, id, ut.current.clone());
             con.queue_send(&m)?;
             for tx in ut.wait_client.drain(..) {
                 let _ = tx.send(());
@@ -529,15 +529,15 @@ fn subscribe(
 fn handle_batch(
     t: &PublisherWeak,
     addr: &SocketAddr,
-    msgs: impl Iterator<Item = publisher::To>,
+    msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
 ) -> Result<()> {
     use crate::protocol::{
-        publisher::{From, To::*},
-        resolver::PermissionToken,
+        publisher::v1::{From, To::*},
+        resolver::v1::PermissionToken,
     };
     let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
     let mut pb = t_st.0.lock();
@@ -602,7 +602,7 @@ async fn hello_client(
 ) -> Result<()> {
     use crate::{
         auth::Krb5,
-        protocol::publisher::Hello::{self, *},
+        protocol::publisher::v1::Hello::{self, *},
     };
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
@@ -658,7 +658,7 @@ async fn client_loop(
     desired_auth: Auth,
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
-    let mut batch: Vec<publisher::To> = Vec::new();
+    let mut batch: Vec<publisher::v1::To> = Vec::new();
     let mut msgs = msgs.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
@@ -685,10 +685,10 @@ async fn client_loop(
                     for msg in m.msgs {
                         match msg {
                             ToClientMsg::Val(id, v) => {
-                                con.queue_send(&publisher::From::Update(id, v))?;
+                                con.queue_send(&publisher::v1::From::Update(id, v))?;
                             }
                             ToClientMsg::Unpublish(id) => {
-                                con.queue_send(&publisher::From::Unsubscribed(id))?;
+                                con.queue_send(&publisher::v1::From::Unsubscribed(id))?;
                             }
                         }
                     }
@@ -702,7 +702,7 @@ async fn client_loop(
             },
             _ = hb.next() => {
                 if !msg_sent {
-                    con.queue_send(&publisher::From::Heartbeat)?;
+                    con.queue_send(&publisher::v1::From::Heartbeat)?;
                     con.flush().await?;
                 }
                 msg_sent = false;

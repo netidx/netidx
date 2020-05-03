@@ -1,5 +1,5 @@
 pub mod resolver_server {
-    use crate::protocol::resolver::ResolverId;
+    use crate::protocol::resolver::v1::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
@@ -81,7 +81,7 @@ pub mod resolver_server {
                 pid_file: cfg.pid_file,
                 id: cfg.id,
                 addr: cfg.addr,
-                max_connections: Duration::from_secs(cfg.max_connections),
+                max_connections: cfg.max_connections,
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
                 hello_timeout: Duration::from_secs(cfg.hello_timeout),
@@ -92,7 +92,7 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
-    use crate::protocol::resolver::ResolverId;
+    use crate::protocol::resolver::v1::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
     use std::{convert::AsRef, net::SocketAddr, path::Path};

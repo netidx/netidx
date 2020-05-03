@@ -8,19 +8,28 @@ use crate::{
     config::{self, resolver::Auth as CAuth},
     path::Path,
     protocol::resolver::{
-        self, ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-        FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
+        self,
+        v1::{
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
+        },
     },
     utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
-use futures::{future::select_ok, prelude::*, select_biased};
+use futures::{
+    future::select_ok,
+    stream::Fuse,
+    prelude::*,
+    select_biased,
+};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::{
+    cmp::max,
     collections::{HashMap, HashSet},
     fmt::Debug,
     net::SocketAddr,
@@ -31,11 +40,10 @@ use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
     task,
-    time::{self, Instant},
+    time::{self, Instant, Interval},
 };
 
 static TTL: u64 = 120;
-static LINGER: u64 = 10;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -117,7 +125,7 @@ async fn connect_read(
                 try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
                 *sc = Some((id, ctx));
             }
-        }
+        };
         break Ok(con);
     }
 }
@@ -172,15 +180,15 @@ impl ResolverRead {
     }
 
     pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
-        match send(&self.0, resolver::ToRead::Resolve(paths)).await? {
-            resolver::FromRead::Resolved(r) => Ok(r),
+        match send(&self.0, resolver::v1::ToRead::Resolve(paths)).await? {
+            resolver::v1::FromRead::Resolved(r) => Ok(r),
             _ => bail!("unexpected response"),
         }
     }
 
     pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
-        match send(&self.0, resolver::ToRead::List(p)).await? {
-            resolver::FromRead::List(v) => Ok(v),
+        match send(&self.0, resolver::v1::ToRead::List(p)).await? {
+            resolver::v1::FromRead::List(v) => Ok(v),
             _ => bail!("unexpected response"),
         }
     }
@@ -193,7 +201,7 @@ async fn connect_write(
     published: &Arc<RwLock<HashSet<Path>>>,
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     desired_auth: &Auth,
-) -> Result<Channel<ClientCtx>> {
+) -> Result<(u64, Channel<ClientCtx>)> {
     let mut backoff = 0;
     loop {
         if backoff > 0 {
@@ -260,13 +268,13 @@ async fn connect_write(
         }
         if !r.ttl_expired {
             info!("connected to resolver {:?} for write", resolver_addr);
-            break Ok(con);
+            break Ok((r.ttl, con));
         } else {
             let names: Vec<Path> = published.read().iter().cloned().collect();
             let len = names.len();
             if len == 0 {
                 info!("connected to resolver {:?} for write", resolver_addr);
-                break Ok(con);
+                break Ok((r.ttl, con));
             } else {
                 info!("write_con ttl is expired, republishing {}", len);
                 try_cf!(
@@ -280,7 +288,7 @@ async fn connect_write(
                             "connected to resolver {:?} for write (republished {})",
                             resolver_addr, len
                         );
-                        break Ok(con);
+                        break Ok((r.ttl, con));
                     }
                     r => warn!("unexpected republish reply {:?}", r),
                 }
@@ -299,13 +307,20 @@ async fn connection_write(
     ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
 ) -> Result<()> {
     let mut con: Option<Channel<ClientCtx>> = None;
-    let ttl = Duration::from_secs(TTL / 2);
-    let linger = Duration::from_secs(LINGER);
+    let hb = Duration::from_secs(TTL / 2);
+    let linger = Duration::from_secs(TTL / 10);
     let now = Instant::now();
     let mut act = false;
     let mut receiver = receiver.fuse();
-    let mut hb = time::interval_at(now + ttl, ttl).fuse();
+    let mut hb = time::interval_at(now + hb, hb).fuse();
     let mut dc = time::interval_at(now + linger, linger).fuse();
+    fn set_ttl(ttl: u64, hb: &mut Fuse<Interval>, dc: &mut Fuse<Interval>) {
+        let linger = Duration::from_secs(max(1, ttl / 10));
+        let heartbeat = Duration::from_secs(max(1, ttl / 2));
+        let now = Instant::now();
+        *hb = time::interval_at(now + heartbeat, heartbeat).fuse();
+        *dc = time::interval_at(now + linger, linger).fuse();
+    }
     loop {
         select_biased! {
             _ = dc.next() => {
@@ -322,10 +337,12 @@ async fn connection_write(
                 } else {
                     match con {
                         None => {
-                            con = Some(connect_write(
+                            let (ttl, c) = connect_write(
                                 &resolver, resolver_addr, write_addr, &published,
                                 &ctxts, &desired_auth
-                            ).await?);
+                            ).await?;
+                            set_ttl(ttl, &mut hb, &mut dc);
+                            con = Some(c);
                             break;
                         },
                         Some(ref mut c) => match c.send_one(&ToWrite::Heartbeat).await {
@@ -347,10 +364,12 @@ async fn connection_write(
                         let c = match con {
                             Some(ref mut c) => c,
                             None => {
-                                con = Some(connect_write(
+                                let (ttl, c) = connect_write(
                                     &resolver, resolver_addr, write_addr, &published,
                                     &ctxts, &desired_auth
-                                ).await?);
+                                ).await?;
+                                set_ttl(ttl, &mut hb, &mut dc);
+                                con = Some(c);
                                 con.as_mut().unwrap()
                             }
                         };
