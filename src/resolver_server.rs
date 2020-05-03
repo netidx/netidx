@@ -178,6 +178,7 @@ async fn client_loop_write(
 }
 
 async fn hello_client_write(
+    cfg: config::resolver_server::Config,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -194,6 +195,7 @@ async fn hello_client_write(
         let mut rng = rand::thread_rng();
         rng.gen_range(0, u64::max_value() - 2)
     }
+    utils::check_addr(hello.write_addr.ip(), &[cfg.addr])?;
     let ttl_expired = !store.read().clinfo().contains_key(&hello.write_addr);
     let uifo = match hello.auth {
         ClientAuthWrite::Anonymous => {
@@ -446,6 +448,7 @@ async fn hello_client_read(
 }
 
 async fn hello_client(
+    cfg: config::resolver_server::Config,
     store: Store<ClientInfo>,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
@@ -460,7 +463,8 @@ async fn hello_client(
             Ok(hello_client_read(store, con, server_stop, secstore, id, hello).await?)
         }
         ClientHello::WriteOnly(hello) => {
-            Ok(hello_client_write(store, con, server_stop, secstore, id, hello).await?)
+            Ok(hello_client_write(cfg, store, con, server_stop, secstore, id, hello)
+                .await?)
         }
     }
 }
@@ -500,11 +504,12 @@ async fn server_loop(
                         let connections = connections.clone();
                         let published = published.clone();
                         let secstore = secstore.clone();
+                        let cfg = cfg.clone();
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
                             let r = hello_client(
-                                published, client, rx, secstore, id
+                                cfg, published, client, rx, secstore, id
                             ).await;
                             info!("server_loop client connection shutting down {:?}", r);
                             connections.fetch_sub(1, Ordering::Relaxed);

@@ -189,21 +189,12 @@ impl PublisherWeak {
 /// Control how the publisher picks a `SocketAddr` to bind to
 #[derive(Clone, Copy, Debug)]
 pub enum BindCfg {
-    /// Bind to `127.0.0.1`, automatically pick an unused port starting
-    /// at 5000 and ending at the ephemeral port range. Error if no
-    /// unused port can be found.
-    Local,
     /// Bind to the specified address, but automatically pick an
-    /// unused port as in `Local`.
+    /// unused port starting at 5000.
     Addr(IpAddr),
-    /// Bind to the specifed `SocketAddr`, error if it is in use.
+    /// Bind to the specifed `SocketAddr`, error if it is in use. If
+    /// you want to OS to pick a port for you, use Exact with port 0.
     Exact(SocketAddr),
-}
-
-impl Default for BindCfg {
-    fn default() -> Self {
-        BindCfg::Local
-    }
 }
 
 fn rand_port(current: u16) -> u16 {
@@ -225,24 +216,35 @@ impl Publisher {
     }
 
     /// Create a new publisher using the specified resolver and bind config.
+    /// There are a number of address rules to follow,
+    ///
+    /// - no broadcast addresses
+    /// - no multicast addresses
+    /// - no link local addresses
+    /// - loopback is only allowed if all the resolvers are also loopback
+    /// - private addresses are only allowed if all the resolvers are also private
+    ///
+    /// Following these rules should prevent the most obvious network
+    /// configuration errors.
     pub async fn new(
         resolver: config::resolver::Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
+        let resolvers = resolver.servers.iter().map(|(_, a)| *a).collect::<Vec<_>>();
         let (addr, listener) = match bind_cfg {
-            BindCfg::Exact(addr) => (addr, TcpListener::bind(&addr).await?),
-            BindCfg::Local | BindCfg::Addr(_) => {
+            BindCfg::Exact(addr) => {
+                utils::check_addr(addr.ip(), &resolvers)?;
+                let l = TcpListener::bind(&addr).await?;
+                (l.local_addr()?, l)
+            },
+            BindCfg::Addr(ip) => {
+                utils::check_addr(ip, &resolvers)?;
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
                         .next()
                         .ok_or_else(|| anyhow!("socketaddrs bug"))?)
-                };
-                let ip = match bind_cfg {
-                    BindCfg::Exact(_) => unreachable!(),
-                    BindCfg::Local => IpAddr::from(Ipv4Addr::new(127, 0, 0, 1)),
-                    BindCfg::Addr(addr) => addr,
                 };
                 let mut port = 5000;
                 loop {

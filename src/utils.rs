@@ -6,8 +6,8 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use std::pin::Pin;
 use std::{
+    cell::RefCell,
     cmp::min,
     collections::HashMap,
     collections::VecDeque,
@@ -15,9 +15,10 @@ use std::{
     hash::{BuildHasher, Hash},
     io::{self, IoSlice, Write},
     mem, net,
+    net::{IpAddr, SocketAddr},
     ops::{Deref, DerefMut},
+    pin::Pin,
     str,
-    cell::RefCell,
 };
 
 macro_rules! bail {
@@ -26,7 +27,8 @@ macro_rules! bail {
     }
 }
 
-#[macro_export] macro_rules! try_cf {
+#[macro_export]
+macro_rules! try_cf {
     ($msg:expr, continue, $lbl:tt, $e:expr) => {
         match $e {
             Ok(x) => x,
@@ -112,6 +114,35 @@ macro_rules! bail {
             }
         }
     };
+}
+
+pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
+    match ip {
+        IpAddr::V4(ip) if ip.is_link_local() => {
+            bail!("can't publish a link local address");
+        }
+        IpAddr::V4(ip) if ip.is_broadcast() => {
+            bail!("can't publish to broadcast");
+        }
+        IpAddr::V4(ip) if ip.is_private() => {
+            let ok = resolvers.iter().all(|a| match a.ip() {
+                IpAddr::V4(ip) if ip.is_private() => true,
+                IpAddr::V6(_) => true,
+                _ => false,
+            });
+            if !ok {
+                bail!("can't publish private addresses to a global resolver")
+            }
+        }
+        _ => (),
+    }
+    if ip.is_multicast() {
+        bail!("can't publish a multicast address");
+    }
+    if ip.is_loopback() && !resolvers.iter().all(|(_, a)| a.ip().is_loopback()) {
+        bail!("can't publish a loopback address to a remote server");
+    }
+    Ok(())
 }
 
 pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
