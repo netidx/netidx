@@ -4,7 +4,7 @@ use crate::{
     },
     channel::Channel,
     chars::Chars,
-    config,
+    config::resolver_server::{Auth, Config},
     path::Path,
     protocol::{
         publisher,
@@ -32,7 +32,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -42,10 +42,6 @@ use tokio::{
 };
 
 type ClientInfo = Option<oneshot::Sender<()>>;
-
-static HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-static READER_TTL: Duration = Duration::from_secs(60);
-static WRITER_TTL: Duration = Duration::from_secs(120);
 
 fn allowed_for(
     secstore: Option<&SecStore>,
@@ -104,6 +100,7 @@ fn handle_batch_write(
 }
 
 async fn client_loop_write(
+    cfg: Arc<Config>,
     store: Store<ClientInfo>,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
@@ -117,7 +114,8 @@ async fn client_loop_write(
     let mut rx_stop = rx_stop.fuse();
     let mut batch = Vec::new();
     let mut act = false;
-    let mut timeout = time::interval_at(Instant::now() + WRITER_TTL, WRITER_TTL).fuse();
+    let mut timeout =
+        time::interval_at(Instant::now() + cfg.writer_ttl, cfg.writer_ttl).fuse();
     async fn receive_batch(
         con: &mut Option<Channel<ServerCtx>>,
         batch: &mut Vec<ToWrite>,
@@ -178,6 +176,7 @@ async fn client_loop_write(
 }
 
 async fn hello_client_write(
+    cfg: Arc<Config>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
@@ -188,8 +187,12 @@ async fn hello_client_write(
 ) -> Result<()> {
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloWrite) -> Result<()> {
-        Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
+    async fn send(
+        cfg: &Arc<Config>,
+        con: &mut Channel<ServerCtx>,
+        hello: ServerHelloWrite,
+    ) -> Result<()> {
+        Ok(time::timeout(cfg.hello_timeout, con.send_one(&hello)).await??)
     }
     fn salt() -> u64 {
         let mut rng = rand::thread_rng();
@@ -206,7 +209,7 @@ async fn hello_client_write(
             };
             info!("hello_write accepting Anonymous authentication");
             debug!("hello_write sending hello {:?}", h);
-            send(&mut con, h).await?;
+            send(&cfg, &mut con, h).await?;
             ANONYMOUS.clone()
         }
         ClientAuthWrite::Reuse => match secstore {
@@ -221,7 +224,7 @@ async fn hello_client_write(
                     };
                     info!("hello_write reusing krb5 context");
                     debug!("hello_write sending {:?}", h);
-                    send(&mut con, h).await?;
+                    send(&cfg, &mut con, h).await?;
                     con.set_ctx(ctx.clone()).await;
                     info!("hello_write all traffic now encrypted");
                     secstore.ifo(Some(&ctx.client()?))?
@@ -243,7 +246,7 @@ async fn hello_client_write(
                 };
                 info!("hello_write created context for {:?}", hello.write_addr);
                 debug!("hello_write sending {:?}", h);
-                send(&mut con, h).await?;
+                send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
                 info!(
@@ -251,14 +254,17 @@ async fn hello_client_write(
                     hello.write_addr
                 );
                 let mut con: Channel<ServerCtx> = Channel::new(
-                    time::timeout(HELLO_TIMEOUT, TcpStream::connect(hello.write_addr))
-                        .await??,
+                    time::timeout(
+                        cfg.hello_timeout,
+                        TcpStream::connect(hello.write_addr),
+                    )
+                    .await??,
                 );
                 let salt = salt();
                 let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
                 let m = publisher::Hello::ResolverAuthenticate(resolver_id, tok);
-                time::timeout(HELLO_TIMEOUT, con.send_one(&m)).await??;
-                match time::timeout(HELLO_TIMEOUT, con.receive()).await?? {
+                time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
+                match time::timeout(cfg.hello_timeout, con.receive()).await?? {
                     publisher::Hello::Anonymous | publisher::Hello::Token(_) => {
                         bail!("listener ownership check unexpected response")
                     }
@@ -295,6 +301,7 @@ async fn hello_client_write(
         }
     }
     Ok(client_loop_write(
+        cfg,
         store,
         con,
         secstore,
@@ -368,6 +375,7 @@ fn handle_batch_read(
 }
 
 async fn client_loop_read(
+    cfg: Arc<Config>,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -378,7 +386,8 @@ async fn client_loop_read(
     let mut batch: Vec<ToRead> = Vec::new();
     let mut server_stop = server_stop.fuse();
     let mut act = false;
-    let mut timeout = time::interval_at(Instant::now() + READER_TTL, READER_TTL).fuse();
+    let mut timeout =
+        time::interval_at(Instant::now() + cfg.reader_ttl, cfg.reader_ttl).fuse();
     loop {
         select_biased! {
             _ = server_stop => break Ok(()),
@@ -407,6 +416,7 @@ async fn client_loop_read(
 }
 
 async fn hello_client_read(
+    cfg: Arc<Config>,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -414,12 +424,16 @@ async fn hello_client_read(
     id: ResolverId,
     hello: ClientAuthRead,
 ) -> Result<()> {
-    async fn send(con: &mut Channel<ServerCtx>, hello: ServerHelloRead) -> Result<()> {
-        Ok(time::timeout(HELLO_TIMEOUT, con.send_one(&hello)).await??)
+    async fn send(
+        cfg: &Arc<Config>,
+        con: &mut Channel<ServerCtx>,
+        hello: ServerHelloRead,
+    ) -> Result<()> {
+        Ok(time::timeout(cfg.hello_timeout, con.send_one(&hello)).await??)
     }
     let uifo = match hello {
         ClientAuthRead::Anonymous => {
-            send(&mut con, ServerHelloRead::Anonymous).await?;
+            send(&cfg, &mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
         }
         ClientAuthRead::Reuse(id) => match secstore {
@@ -427,7 +441,7 @@ async fn hello_client_read(
             Some(ref secstore) => match secstore.get_read(&id) {
                 None => bail!("ctx id not found"),
                 Some(ctx) => {
-                    send(&mut con, ServerHelloRead::Reused).await?;
+                    send(&cfg, &mut con, ServerHelloRead::Reused).await?;
                     con.set_ctx(ctx.clone()).await;
                     secstore.ifo(Some(&ctx.client()?))?
                 }
@@ -438,16 +452,17 @@ async fn hello_client_read(
             Some(ref secstore) => {
                 let (ctx, tok) = secstore.create(&tok)?;
                 let id = secstore.store_read(ctx.clone());
-                send(&mut con, ServerHelloRead::Accepted(tok, id)).await?;
+                send(&cfg, &mut con, ServerHelloRead::Accepted(tok, id)).await?;
                 con.set_ctx(ctx.clone()).await;
                 secstore.ifo(Some(&ctx.client()?))?
             }
         },
     };
-    Ok(client_loop_read(store, con, server_stop, secstore, id, uifo).await?)
+    Ok(client_loop_read(cfg, store, con, server_stop, secstore, id, uifo).await?)
 }
 
 async fn hello_client(
+    cfg: Arc<Config>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
     s: TcpStream,
@@ -457,12 +472,14 @@ async fn hello_client(
 ) -> Result<()> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
-    let hello: ClientHello = time::timeout(HELLO_TIMEOUT, con.receive()).await??;
+    let hello: ClientHello = time::timeout(cfg.hello_timeout, con.receive()).await??;
     match hello {
         ClientHello::ReadOnly(hello) => {
-            Ok(hello_client_read(store, con, server_stop, secstore, id, hello).await?)
+            Ok(hello_client_read(cfg, store, con, server_stop, secstore, id, hello)
+                .await?)
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
+            cfg,
             listen_addr,
             store,
             con,
@@ -476,16 +493,17 @@ async fn hello_client(
 }
 
 async fn server_loop(
-    cfg: config::resolver_server::Config,
+    cfg: Config,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr> {
+    let cfg = Arc::new(cfg);
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
-    let secstore = match cfg.auth {
-        config::resolver_server::Auth::Anonymous => None,
-        config::resolver_server::Auth::Krb5 { spn, permissions } => {
-            Some(SecStore::new(spn, permissions)?)
+    let secstore = match &cfg.auth {
+        Auth::Anonymous => None,
+        Auth::Krb5 { spn, permissions } => {
+            Some(SecStore::new(spn.clone(), permissions.clone())?)
         }
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;
@@ -510,11 +528,12 @@ async fn server_loop(
                         let connections = connections.clone();
                         let published = published.clone();
                         let secstore = secstore.clone();
+                        let cfg = cfg.clone();
                         let (tx, rx) = oneshot::channel();
                         client_stops.push(tx);
                         task::spawn(async move {
                             let r = hello_client(
-                                local_addr, published, client, rx, secstore, id
+                                cfg, local_addr, published, client, rx, secstore, id
                             ).await;
                             info!("server_loop client connection shutting down {:?}", r);
                             connections.fetch_sub(1, Ordering::Relaxed);
@@ -541,7 +560,7 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: config::resolver_server::Config) -> Result<Server> {
+    pub async fn new(cfg: Config) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, recv_stop, send_ready);
