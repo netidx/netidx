@@ -1,18 +1,19 @@
 #![recursion_limit = "1024"]
 #[macro_use]
 extern crate serde_derive;
-#[macro_use] extern crate json_pubsub;
+#[macro_use]
+extern crate json_pubsub;
 
-use json_pubsub::{config, path::Path, resolver::Auth};
+use json_pubsub::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::{fs::read, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 
+mod publisher;
 mod resolver;
 mod resolver_server;
 mod stress_publisher;
 mod stress_subscriber;
-mod publisher;
-//mod subscriber;
+mod subscriber;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
@@ -55,6 +56,10 @@ enum Sub {
     },
     #[structopt(name = "publisher", about = "publish path|data lines from stdin")]
     Publisher {
+        #[structopt(short = "b", long = "bind", help = "the ip address to bind to")]
+        bind: String,
+        #[structopt(short = "p", long = "port", help = "optional, the port to bind to")]
+        port: Option<u16>,
         #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
         krb5: bool,
         #[structopt(long = "upn", help = "use the specified krb5 user principal name")]
@@ -117,6 +122,10 @@ enum ResolverCmd {
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
     Publisher {
+        #[structopt(short = "b", long = "bind", help = "the ip address to bind to")]
+        bind: String,
+        #[structopt(short = "p", long = "port", help = "optional, the port to bind to")]
+        port: Option<u16>,
         #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
         krb5: bool,
         #[structopt(long = "upn", help = "use the specified krb5 user principal name")]
@@ -146,6 +155,15 @@ fn auth(krb5: bool, upn: Option<String>, spn: Option<String>) -> Auth {
     }
 }
 
+fn parse_bindcfg(bind: String, port: Option<u16>) -> BindCfg {
+    match port {
+        None => BindCfg::Addr(bind.parse().expect("parsing bind address")),
+        Some(port) => BindCfg::Exact(
+            format!("{}:{}", bind, port).parse().expect("parsing bind address and port"),
+        ),
+    }
+}
+
 fn main() {
     env_logger::init();
     let opt = Opt::from_args();
@@ -159,27 +177,21 @@ fn main() {
         Sub::Resolver { krb5, upn, cmd } => {
             resolver::run(cfg, cmd, auth(krb5, upn, None))
         }
-        Sub::Publisher {
-            krb5,
-            upn,
-            spn,
-            typ,
-            timeout,
-        } => publisher::run(cfg, typ, timeout, auth(krb5, upn, spn)),
+        Sub::Publisher { bind, port, krb5, upn, spn, typ, timeout } => {
+            let bcfg = parse_bindcfg(bind, port);
+            publisher::run(cfg, bcfg, typ, timeout, auth(krb5, upn, spn))
+        }
         Sub::Subscriber { krb5, upn, paths } => {
-            ()
-            //subscriber::run(cfg, paths, auth(krb5, upn, None))
+            subscriber::run(cfg, paths, auth(krb5, upn, None))
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber { krb5, upn } => {
                 stress_subscriber::run(cfg, auth(krb5, upn, None))
             }
-            Stress::Publisher {
-                krb5,
-                upn,
-                spn,
-                nvals,
-            } => stress_publisher::run(cfg, nvals, auth(krb5, upn, spn)),
+            Stress::Publisher { bind, port, krb5, upn, spn, nvals } => {
+                let bcfg = parse_bindcfg(bind, port);
+                stress_publisher::run(cfg, bcfg, nvals, auth(krb5, upn, spn))
+            }
         },
     }
 }

@@ -136,6 +136,9 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
         }
         _ => (),
     }
+    if ip.is_unspecified() {
+        bail!("can't publish to an unspecified address");
+    }
     if ip.is_multicast() {
         bail!("can't publish a multicast address");
     }

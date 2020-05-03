@@ -218,13 +218,16 @@ impl Publisher {
     /// Create a new publisher using the specified resolver and bind config.
     /// There are a number of address rules to follow,
     ///
-    /// - no broadcast addresses
-    /// - no multicast addresses
-    /// - no link local addresses
-    /// - loopback is only allowed if all the resolvers are also loopback
-    /// - private addresses are only allowed if all the resolvers are also private
+    /// - no unspecified (0.0.0.0)
+    /// - no broadcast (255.255.255.255)
+    /// - no multicast addresses (224.0.0.0/8)
+    /// - no link local addresses (169.254.0.0/16)
+    /// - loopback (127.0.0.1) is only allowed if all the resolvers are also loopback
+    /// - private addresses (192.168.0.0/16, 10.0.0.0/8,
+    ///   172.16.0.0/12) are only allowed if all the resolvers are also
+    ///   private.
     ///
-    /// Following these rules should prevent the most obvious network
+    /// Following these rules will prevent the most obvious network
     /// configuration errors.
     pub async fn new(
         resolver: config::resolver::Config,

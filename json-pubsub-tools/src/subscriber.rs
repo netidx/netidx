@@ -68,12 +68,12 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    sender: Sender<(SubId, Value)>,
+    sender: Sender<Vec<(SubId, Value)>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, DVal>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
-    updates: Batched<Receiver<(SubId, Value)>>,
+    updates: Batched<Receiver<Vec<(SubId, Value)>>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -151,7 +151,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<(SubId, Value)>>,
+        u: Option<BatchItem<Vec<(SubId, Value)>>>,
     ) -> Result<(), anyhow::Error> {
         Ok(match u {
             None => unreachable!(),
@@ -165,7 +165,7 @@ impl Ctx {
                     self.stderr.write_all(&*to_write).await?;
                 }
             }
-            Some(BatchItem::InBatch((id, value))) => {
+            Some(BatchItem::InBatch(batch)) => for (id, value) in batch {
                 if let Some(path) = self.paths.get(&id) {
                     let value = SValue::from_value(value);
                     Out { path: &**path, value }

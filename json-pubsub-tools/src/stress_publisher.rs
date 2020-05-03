@@ -8,10 +8,9 @@ use json_pubsub::{
 use std::time::{Duration, Instant};
 use tokio::{runtime::Runtime, signal, time};
 
-async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
-    let publisher = Publisher::new(config, auth, BindCfg::Local)
-        .await
-        .expect("failed to create publisher");
+async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) {
+    let publisher =
+        Publisher::new(config, auth, bcfg).await.expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
     let published = (0..nvals)
@@ -45,10 +44,10 @@ async fn run_publisher(config: Config, nvals: usize, auth: Auth) {
     }
 }
 
-pub(crate) fn run(config: Config, nvals: usize, auth: Auth) {
+pub(crate) fn run(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        run_publisher(config, nvals, auth).await;
+        run_publisher(config, bcfg, nvals, auth).await;
         // Allow the publisher time to send the clear message
         time::delay_for(Duration::from_secs(1)).await;
     });
