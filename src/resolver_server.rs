@@ -482,7 +482,7 @@ async fn hello_client(
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
     time::timeout(cfg.hello_timeout, con.send_one(&1u64)).await??;
-    // we will use this to select a protocol version where there is more than one
+    // we will use this to select a protocol version when there is more than one
     let _version: u64 = time::timeout(cfg.hello_timeout, con.receive()).await??;
     let hello: ClientHello = time::timeout(cfg.hello_timeout, con.receive()).await??;
     match hello {
