@@ -841,10 +841,10 @@ const FLUSH: Duration = Duration::from_secs(1);
 // allocating a vec and a hashmap for every batch is slow, it actually
 // nearly triples performance.
 async fn process_updates_batch(
+    by_receiver: &mut HashMap<ChanWrap, Vec<(SubId, Value)>>,
     batch: &mut Vec<protocol::publisher::v1::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
-    let mut by_receiver: HashMap<ChanWrap, Vec<(SubId, Value)>> = HashMap::new();
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
             if let Some(sub) = subscriptions.get_mut(&i) {
@@ -862,7 +862,7 @@ async fn process_updates_batch(
             }
         }
     }
-    for (mut c, batch) in by_receiver {
+    for (mut c, batch) in by_receiver.drain() {
         let _ = c.0.send(batch).await;
     }
 }
@@ -1005,6 +1005,7 @@ async fn connection(
     let (return_batch, read_returned) = mpsc::unbounded();
     let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
+    let mut by_receiver: HashMap<ChanWrap, Vec<(SubId, Value)>> = HashMap::new();
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -1037,7 +1038,11 @@ async fn connection(
             r = batches.next() => match r {
                 Some(Ok((mut batch, true))) => {
                     msg_recvd = true;
-                    process_updates_batch(&mut batch, &mut subscriptions).await;
+                    process_updates_batch(
+                        &mut by_receiver,
+                        &mut batch,
+                        &mut subscriptions
+                    ).await;
                     try_cf!(return_batch.unbounded_send(batch));
                     try_cf!(try_flush(&mut write_con).await)
                 },
