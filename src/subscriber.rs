@@ -745,9 +745,20 @@ impl Hash for ChanWrap {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChanId(u64);
+
+impl ChanId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        ChanId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, ChanWrap)>,
+    streams: Vec<(SubId, ChanId, Sender<Vec<(SubId, Value)>>)>,
     last: Value,
 }
 
@@ -841,29 +852,30 @@ const FLUSH: Duration = Duration::from_secs(1);
 // allocating a vec and a hashmap for every batch is slow, it actually
 // nearly triples performance.
 async fn process_updates_batch(
-    by_receiver: &mut HashMap<ChanWrap, Vec<(SubId, Value)>>,
+    by_chan: &mut HashMap<
+        ChanId,
+        (Sender<Vec<(SubId, Value)>>, Vec<(SubId, Value)>),
+        FxBuildHasher,
+    >,
     batch: &mut Vec<protocol::publisher::v1::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
             if let Some(sub) = subscriptions.get_mut(&i) {
-                for (id, c) in sub.streams.iter_mut() {
-                    match by_receiver.get_mut(c) {
-                        Some(batch) => {
-                            batch.push((*id, m.clone()));
-                        }
-                        None => {
-                            by_receiver.insert(c.clone(), vec![(*id, m.clone())]);
-                        }
-                    }
+                for (sub_id, chan_id, c) in sub.streams.iter_mut() {
+                    by_chan
+                        .entry(*chan_id)
+                        .or_insert_with(|| (c.clone(), Vec::new()))
+                        .1
+                        .push((*sub_id, m.clone()))
                 }
                 sub.last = m;
             }
         }
     }
-    for (mut c, batch) in by_receiver.drain() {
-        let _ = c.0.send(batch).await;
+    for (_, (mut c, batch)) in by_chan.drain() {
+        let _ = c.send(batch).await;
     }
 }
 
@@ -879,17 +891,8 @@ async fn process_batch(
         match m {
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
-                    let mut gc = false;
-                    for (id, c) in sub.streams.iter_mut() {
-                        match c.0.send(vec![(*id, m.clone())]).await {
-                            Ok(()) => (),
-                            Err(_) => {
-                                gc = true;
-                            }
-                        }
-                    }
-                    if gc {
-                        sub.streams.retain(|(_, c)| !c.0.is_closed());
+                    for (id, _, c) in sub.streams.iter_mut() {
+                        let _ = c.send(vec![(*id, m.clone())]).await;
                     }
                     sub.last = m;
                 }
@@ -1005,7 +1008,12 @@ async fn connection(
     let (return_batch, read_returned) = mpsc::unbounded();
     let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
-    let mut by_receiver: HashMap<ChanWrap, Vec<(SubId, Value)>> = HashMap::new();
+    let mut by_receiver: HashMap<ChanWrap, ChanId> = HashMap::new();
+    let mut by_chan: HashMap<
+        ChanId,
+        (Sender<Vec<(SubId, Value)>>, Vec<(SubId, Value)>),
+        FxBuildHasher,
+    > = HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -1039,7 +1047,7 @@ async fn connection(
                 Some(Ok((mut batch, true))) => {
                     msg_recvd = true;
                     process_updates_batch(
-                        &mut by_receiver,
+                        &mut by_chan,
                         &mut batch,
                         &mut subscriptions
                     ).await;
@@ -1088,14 +1096,23 @@ async fn connection(
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
-                        sub.streams.retain(|(_, c)| !c.0.is_closed());
+                        sub.streams.retain(|(_, _, c)| {
+                            if c.is_closed() {
+                                by_receiver.remove(&ChanWrap(c.clone()));
+                                false
+                            } else {
+                                true
+                            }
+                        });
                         if last {
                             match tx.send(vec![(sub_id, sub.last.clone())]).await {
                                 Err(_) => continue,
                                 Ok(()) => ()
                             }
                         }
-                        sub.streams.push((sub_id, ChanWrap(tx)));
+                        let id = by_receiver.entry(ChanWrap(tx.clone()))
+                            .or_insert_with(ChanId::new);
+                        sub.streams.push((sub_id, *id, tx));
                     }
                 }
             },
