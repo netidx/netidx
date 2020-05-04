@@ -148,10 +148,12 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        for b in self.boundries.drain(..) {
-            self.to_flush.send(ToFlush::Flush(self.buf.split_to(b))).await?;
+        if self.buf.has_remaining() {
+            for b in self.boundries.drain(..) {
+                self.to_flush.send(ToFlush::Flush(self.buf.split_to(b))).await?;
+            }
+            self.to_flush.send(ToFlush::Flush(self.buf.split())).await?;
         }
-        self.to_flush.send(ToFlush::Flush(self.buf.split())).await?;
         Ok(())
     }
 

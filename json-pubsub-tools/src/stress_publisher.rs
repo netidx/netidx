@@ -24,10 +24,6 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
     let mut last_stat = Instant::now();
     let one_second = Duration::from_secs(1);
     loop {
-        select! {
-            _ = publisher.wait_any_client().fuse() => (),
-            _ = signal::ctrl_c().fuse() => break,
-        }
         v += 1;
         for p in published.iter() {
             p.update(Value::U64(v));
@@ -37,6 +33,10 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
         let now = Instant::now();
         let elapsed = now - last_stat;
         if elapsed > one_second {
+            select! {
+                _ = publisher.wait_any_client().fuse() => (),
+                _ = signal::ctrl_c().fuse() => break,
+            }
             last_stat = now;
             println!("tx: {:.0}", sent as f64 / elapsed.as_secs_f64());
             sent = 0;

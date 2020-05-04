@@ -18,7 +18,7 @@ use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
-use log::{info, debug};
+use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
@@ -43,27 +43,23 @@ use tokio::{
 
 static MAX_CLIENTS: usize = 768;
 
-#[derive(Clone)]
-enum Update {
-    Val(Value),
-    Unpublish,
-}
-
 struct ValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
-    updates: Arc<SegQueue<(Id, Update)>>,
+    published: Published,
 }
 
 impl Drop for ValInner {
     fn drop(&mut self) {
-        self.updates.push((self.id, Update::Unpublish));
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.by_path.remove(&self.path);
             if !pb.to_publish.remove(&self.path) {
                 pb.to_unpublish.insert(self.path.clone());
+            }
+            for q in self.published.0.lock().subscribed.values() {
+                q.push(ToClientMsg::Unpublish(self.id));
             }
         }
     }
@@ -92,7 +88,11 @@ impl Val {
     /// The thread calling update pays the serialization cost. No
     /// locking occurs during update.
     pub fn update(&self, v: Value) {
-        self.0.updates.push((self.0.id, Update::Val(v)))
+        let mut inner = self.0.published.0.lock();
+        for q in inner.subscribed.values() {
+            q.push(ToClientMsg::Val(self.0.id, v.clone()))
+        }
+        inner.current = v;
     }
 
     /// Get the unique `Id` of this `Val`. This id is unique on this
@@ -113,21 +113,17 @@ enum ToClientMsg {
     Unpublish(Id),
 }
 
-#[derive(Debug)]
-struct ToClient {
-    msgs: Vec<ToClientMsg>,
-    done: oneshot::Sender<()>,
-    timeout: Option<Duration>,
-}
-
-struct Published {
+struct PublishedInner {
     current: Value,
-    subscribed: HashMap<SocketAddr, Sender<ToClient>, FxBuildHasher>,
+    subscribed: HashMap<SocketAddr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>,
     wait_client: Vec<oneshot::Sender<()>>,
 }
 
+#[derive(Clone)]
+struct Published(Arc<Mutex<PublishedInner>>);
+
 struct Client {
-    to_client: Sender<ToClient>,
+    to_client: Sender<Option<Duration>>,
     subscribed: HashSet<Id, FxBuildHasher>,
 }
 
@@ -137,7 +133,6 @@ struct PublisherInner {
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, Published, FxBuildHasher>,
-    updates: Arc<SegQueue<(Id, Update)>>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
@@ -150,7 +145,6 @@ impl PublisherInner {
             None => false,
             Some(stop) => {
                 let _ = stop.send(());
-                while let Ok(_) = self.updates.pop() {}
                 self.clients.clear();
                 self.by_id.clear();
                 true
@@ -160,7 +154,6 @@ impl PublisherInner {
 
     async fn shutdown(&mut self) {
         if self.cleanup() {
-            // CR estokes: report this, or is best effort the right approach?
             let _ = self.resolver.clear().await;
         }
     }
@@ -240,7 +233,7 @@ impl Publisher {
                 utils::check_addr(addr.ip(), &resolvers)?;
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
-            },
+            }
             BindCfg::Addr(ip) => {
                 utils::check_addr(ip, &resolvers)?;
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
@@ -275,7 +268,6 @@ impl Publisher {
             clients: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            updates: Arc::new(SegQueue::new()),
             resolver,
             to_publish: HashSet::new(),
             to_unpublish: HashSet::new(),
@@ -332,15 +324,13 @@ impl Publisher {
             Err(anyhow!("already published"))
         } else {
             let id = Id::new();
+            let published = Published(Arc::new(Mutex::new(PublishedInner {
+                current: init,
+                subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+                wait_client: Vec::new(),
+            })));
             pb.by_path.insert(path.clone(), id);
-            pb.by_id.insert(
-                id,
-                Published {
-                    current: init,
-                    subscribed: HashMap::with_hasher(FxBuildHasher::default()),
-                    wait_client: Vec::new(),
-                },
-            );
+            pb.by_id.insert(id, published.clone());
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
@@ -348,7 +338,7 @@ impl Publisher {
                 id,
                 path,
                 publisher: self.downgrade(),
-                updates: Arc::clone(&pb.updates),
+                published,
             }))
         }
     }
@@ -376,84 +366,24 @@ impl Publisher {
     /// Otherwise flush will wait as long as necessary to flush the
     /// update to every client.
     pub async fn flush(&self, timeout: Option<Duration>) -> Result<()> {
-        struct Tc {
-            sender: Sender<ToClient>,
-            to_client: ToClient,
-        }
-        fn get_tc<'a>(
-            addr: SocketAddr,
-            sender: &Sender<ToClient>,
-            flushes: &mut Vec<oneshot::Receiver<()>>,
-            to_clients: &'a mut HashMap<SocketAddr, Tc, FxBuildHasher>,
-            timeout: Option<Duration>,
-        ) -> &'a mut Tc {
-            to_clients.entry(addr).or_insert_with(|| {
-                let (done, rx) = oneshot::channel();
-                flushes.push(rx);
-                Tc {
-                    sender: sender.clone(),
-                    to_client: ToClient { msgs: Vec::new(), done, timeout },
-                }
-            })
-        }
-        let mut to_clients: HashMap<SocketAddr, Tc, FxBuildHasher> =
-            HashMap::with_hasher(FxBuildHasher::default());
-        let mut flushes = Vec::<oneshot::Receiver<()>>::new();
         let mut to_publish = Vec::new();
         let mut to_unpublish = Vec::new();
+        let mut clients = Vec::new();
         let resolver = {
             let mut pb = self.0.lock();
             to_publish.extend(pb.to_publish.drain());
             to_unpublish.extend(pb.to_unpublish.drain());
-            while let Ok((id, m)) = pb.updates.pop() {
-                match m {
-                    Update::Val(m) => {
-                        if let Some(ut) = pb.by_id.get_mut(&id) {
-                            ut.current = m.clone();
-                            for (addr, sender) in ut.subscribed.iter() {
-                                let tc = get_tc(
-                                    *addr,
-                                    sender,
-                                    &mut flushes,
-                                    &mut to_clients,
-                                    timeout,
-                                );
-                                tc.to_client.msgs.push(ToClientMsg::Val(id, m.clone()));
-                            }
-                        }
-                    }
-                    Update::Unpublish => {
-                        if let Some(ut) = pb.by_id.remove(&id) {
-                            for (addr, sender) in ut.subscribed {
-                                if let Some(cl) = pb.clients.get_mut(&addr) {
-                                    cl.subscribed.remove(&id);
-                                    let tc = get_tc(
-                                        addr,
-                                        &sender,
-                                        &mut flushes,
-                                        &mut to_clients,
-                                        timeout,
-                                    );
-                                    tc.to_client.msgs.push(ToClientMsg::Unpublish(id));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            clients.extend(pb.clients.values().map(|c| c.to_client.clone()));
             pb.resolver.clone()
         };
-        for (_, mut tc) in to_clients {
-            let _ = tc.sender.send(tc.to_client).await;
+        for mut client in clients {
+            let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
             resolver.publish(to_publish).await?
         }
         if to_unpublish.len() > 0 {
             resolver.unpublish(to_unpublish).await?
-        }
-        for rx in flushes {
-            let _ = rx.await;
         }
         Ok(())
     }
@@ -487,11 +417,12 @@ impl Publisher {
             match inner.by_id.get_mut(&id) {
                 None => return,
                 Some(ut) => {
-                    if ut.subscribed.len() > 0 {
+                    let mut published = ut.0.lock();
+                    if published.subscribed.len() > 0 {
                         return;
                     } else {
                         let (tx, rx) = oneshot::channel();
-                        ut.wait_client.push(tx);
+                        published.wait_client.push(tx);
                         rx
                     }
                 }
@@ -503,6 +434,7 @@ impl Publisher {
 
 fn subscribe(
     t: &mut PublisherInner,
+    updates: &Arc<SegQueue<ToClientMsg>>,
     con: &mut Channel<ServerCtx>,
     addr: SocketAddr,
     path: Path,
@@ -513,12 +445,12 @@ fn subscribe(
             let id = *id;
             let cl = t.clients.get_mut(&addr).unwrap();
             cl.subscribed.insert(id);
-            let sender = cl.to_client.clone();
             let ut = t.by_id.get_mut(&id).unwrap();
-            ut.subscribed.insert(addr, sender);
-            let m = publisher::v1::From::Subscribed(path, id, ut.current.clone());
+            let mut uti = ut.0.lock();
+            uti.subscribed.insert(addr, updates.clone());
+            let m = publisher::v1::From::Subscribed(path, id, uti.current.clone());
             con.queue_send(&m)?;
-            for tx in ut.wait_client.drain(..) {
+            for tx in uti.wait_client.drain(..) {
                 let _ = tx.send(());
             }
         }
@@ -528,6 +460,7 @@ fn subscribe(
 
 fn handle_batch(
     t: &PublisherWeak,
+    updates: &Arc<SegQueue<ToClientMsg>>,
     addr: &SocketAddr,
     msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
@@ -545,7 +478,7 @@ fn handle_batch(
     for msg in msgs {
         match msg {
             Subscribe { path, resolver, token } => match auth {
-                Auth::Anonymous => subscribe(&mut *pb, con, *addr, path)?,
+                Auth::Anonymous => subscribe(&mut *pb, updates, con, *addr, path)?,
                 Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                     None => con.queue_send(&From::Denied(path))?,
                     Some(ctx) => match ctx.unwrap(&token) {
@@ -563,7 +496,7 @@ fn handle_batch(
                                     if age > 300 || &*a_path != &*path {
                                         con.queue_send(&From::Denied(path))?
                                     } else {
-                                        subscribe(&mut *pb, con, *addr, path)?
+                                        subscribe(&mut *pb, updates, con, *addr, path)?
                                     }
                                 }
                             }
@@ -573,7 +506,7 @@ fn handle_batch(
             },
             Unsubscribe(id) => {
                 if let Some(ut) = pb.by_id.get_mut(&id) {
-                    ut.subscribed.remove(&addr);
+                    ut.0.lock().subscribed.remove(&addr);
                     pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
                 }
                 con.queue_send(&From::Unsubscribed(id))?;
@@ -613,7 +546,7 @@ async fn hello_client(
         Anonymous => {
             con.send_one(&Anonymous).await?;
             client_arrived(publisher);
-        },
+        }
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
@@ -635,14 +568,14 @@ async fn hello_client(
                 match ctx {
                     None => {
                         time::delay_for(Duration::from_secs(1)).await;
-                        continue
-                    },
+                        continue;
+                    }
                     Some(ctx) => {
                         let n = ctx.unwrap(&*tok)?;
                         let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
                         let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
                         con.send_one(&ResolverAuthenticate(id, tok)).await?;
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }
@@ -656,37 +589,25 @@ async fn client_loop(
     t: PublisherWeak,
     ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     addr: SocketAddr,
-    msgs: Receiver<ToClient>,
+    flushes: Receiver<Option<Duration>>,
     s: TcpStream,
     desired_auth: Auth,
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::v1::To> = Vec::new();
-    let mut msgs = msgs.fuse();
+    let mut flushes = flushes.fuse();
+    let updates: Arc<SegQueue<ToClientMsg>> = Arc::new(SegQueue::new());
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
     hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
-            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs();
-                    handle_batch(
-                        &t, &addr, batch.drain(..), &mut con,
-                        &ctxts, &desired_auth, now,
-                    )?;
-                    con.flush().await?
-                }
-            },
-            to_cl = msgs.next() => match to_cl {
+            to_cl = flushes.next() => match to_cl {
                 None => break Ok(()),
-                Some(m) => {
-                    msg_sent = true;
-                    for msg in m.msgs {
-                        match msg {
+                Some(timeout) => {
+                    while let Ok(m) = updates.pop() {
+                        msg_sent = true;
+                        match m {
                             ToClientMsg::Val(id, v) => {
                                 con.queue_send(&publisher::v1::From::Update(id, v))?;
                             }
@@ -696,11 +617,23 @@ async fn client_loop(
                         }
                     }
                     let f = con.flush();
-                    match m.timeout {
+                    match timeout {
                         None => f.await?,
                         Some(d) => time::timeout(d, f).await??
                     }
-                    let _ = m.done.send(());
+                }
+            },
+            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
+                Err(e) => return Err(Error::from(e)),
+                Ok(()) => {
+                    let now = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)?
+                        .as_secs();
+                    handle_batch(
+                        &t, &updates, &addr, batch.drain(..), &mut con,
+                        &ctxts, &desired_auth, now,
+                    )?;
+                    con.flush().await?
                 }
             },
             _ = hb.next() => {
@@ -736,7 +669,7 @@ async fn accept_loop(
                     let mut pb = t.0.lock();
                     let ctxts = pb.resolver.ctxts();
                     if pb.clients.len() < MAX_CLIENTS {
-                        let (tx, rx) = channel(100);
+                        let (tx, rx) = channel(1);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
                         pb.clients.insert(addr, Client {
                             to_client: tx,
@@ -753,7 +686,8 @@ async fn accept_loop(
                                 if let Some(cl) = pb.clients.remove(&addr) {
                                     for id in cl.subscribed {
                                         if let Some(ut) = pb.by_id.get_mut(&id) {
-                                            ut.subscribed.remove(&addr);
+                                            let mut uti = ut.0.lock();
+                                            uti.subscribed.remove(&addr);
                                         }
                                     }
                                 }
