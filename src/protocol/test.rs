@@ -66,18 +66,13 @@ mod resolver {
         ]
     }
 
-    fn server_auth_read() -> impl Strategy<Value = ServerAuthRead> {
+    fn server_hello_read() -> impl Strategy<Value = ServerHelloRead> {
         prop_oneof![
             Just(ServerHelloRead::Anonymous),
             Just(ServerHelloRead::Reused),
             (bytes(), any::<u64>())
                 .prop_map(|(tok, id)| ServerHelloRead::Accepted(tok, CtxId::mk(id)))
         ]
-    }
-
-    fn server_hello_read() -> impl Strategy<Value = ServerHelloRead> {
-        (any::<u64>, server_auth_read())
-            .prop_map(|(ttl, auth)| ServerHelloRead { ttl, auth })
     }
 
     fn server_auth_write() -> impl Strategy<Value = ServerAuthWrite> {
@@ -89,7 +84,7 @@ mod resolver {
     }
 
     fn server_hello_write() -> impl Strategy<Value = ServerHelloWrite> {
-        (any::<u64>, any::<bool>(), any::<u64>(), server_auth_write()).prop_map(
+        (any::<u64>(), any::<bool>(), any::<u64>(), server_auth_write()).prop_map(
             |(ttl, ttl_expired, resolver_id, auth)| ServerHelloWrite {
                 ttl,
                 ttl_expired,
@@ -200,7 +195,7 @@ mod publisher {
     use super::*;
     use crate::protocol::{
         publisher::v1::{From, Hello, Id, To, Value},
-        resolver::ResolverId,
+        resolver::v1::ResolverId,
     };
 
     fn hello() -> impl Strategy<Value = Hello> {

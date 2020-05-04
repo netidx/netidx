@@ -1,5 +1,5 @@
-use crate::{config, protocol::resolver::ResolverId};
-use std::net::SocketAddr;
+use crate::{config, protocol::resolver::v1::ResolverId};
+use std::{net::SocketAddr, time::Duration};
 
 fn server_config() -> config::resolver_server::Config {
     use config::resolver_server::{Auth, Config};
@@ -8,6 +8,9 @@ fn server_config() -> config::resolver_server::Config {
         id: ResolverId::mk(0),
         addr: "127.0.0.1:0".parse().unwrap(),
         max_connections: 768,
+        hello_timeout: Duration::from_secs(10),
+        reader_ttl: Duration::from_secs(60),
+        writer_ttl: Duration::from_secs(120),
         auth: Auth::Anonymous,
     }
 }

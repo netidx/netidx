@@ -90,6 +90,8 @@ async fn connect_read(
         let addr = choose_read_addr(resolver);
         let con = try_cf!("connect", continue, TcpStream::connect(&addr.1).await);
         let mut con = Channel::new(con);
+        try_cf!("send version", continue, con.send_one(&1u64).await);
+        let _ver: u64 = try_cf!("recv version", continue, con.receive().await);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
