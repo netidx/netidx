@@ -36,6 +36,8 @@ enum Sub {
     ResolverServer {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool,
+        #[structopt(long = "delay-reads", help = "don't allow read clients until 1 writer ttl has passed")]
+        delay_reads: bool,
         #[structopt(
             short = "c",
             long = "config",
@@ -171,8 +173,8 @@ fn main() {
         serde_json::from_slice(&*read(opt.config).expect("reading config"))
             .expect("parsing config");
     match opt.cmd {
-        Sub::ResolverServer { foreground, config } => {
-            resolver_server::run(config, !foreground)
+        Sub::ResolverServer { foreground, config, delay_reads } => {
+            resolver_server::run(config, !foreground, delay_reads)
         }
         Sub::Resolver { krb5, upn, cmd } => {
             resolver::run(cfg, cmd, auth(krb5, upn, None))
