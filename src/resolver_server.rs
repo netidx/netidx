@@ -263,6 +263,11 @@ async fn hello_client_write(
                     )
                     .await??,
                 );
+                time::timeout(cfg.hello_timeout, con.send_one(&1u64)).await??;
+                // we will need to select a protocol version here when
+                // we have more than one.
+                let _version: u64 =
+                    time::timeout(cfg.hello_timeout, con.receive()).await??;
                 let salt = salt();
                 let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
                 let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
@@ -475,6 +480,9 @@ async fn hello_client(
 ) -> Result<()> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
+    time::timeout(cfg.hello_timeout, con.send_one(&1u64)).await??;
+    // we will use this to select a protocol version where there is more than one
+    let _version: u64 = time::timeout(cfg.hello_timeout, con.receive()).await??;
     let hello: ClientHello = time::timeout(cfg.hello_timeout, con.receive()).await??;
     match hello {
         ClientHello::ReadOnly(hello) => {

@@ -797,6 +797,9 @@ async fn hello_publisher(
     target_spn: &Chars,
 ) -> Result<()> {
     use crate::protocol::publisher::v1::Hello;
+    // negotiate protocol version
+    con.send_one(&1u64).await?;
+    let _ver: u64 = con.receive().await?;
     match auth {
         Auth::Anonymous => {
             con.send_one(&Hello::Anonymous).await?;

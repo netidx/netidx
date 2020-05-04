@@ -604,6 +604,9 @@ async fn hello_client(
         auth::Krb5,
         protocol::publisher::v1::Hello::{self, *},
     };
+    // negotiate protocol version
+    con.send_one(&1u64).await?;
+    let _ver: u64 = con.receive().await?;
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
     match hello {

@@ -215,6 +215,8 @@ async fn connect_write(
             TcpStream::connect(&resolver_addr.1).await
         );
         let mut con = Channel::new(con);
+        try_cf!("send version", continue, con.send_one(&1u64).await);
+        let _version: u64 = try_cf!("receive version", continue, con.receive().await);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
