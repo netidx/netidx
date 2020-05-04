@@ -37,6 +37,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Weak},
     time::Duration,
+    vec::Drain,
 };
 use tokio::{
     net::TcpStream,
@@ -73,7 +74,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Value>),
-    Stream { id: Id, sub_id: SubId, tx: Sender<Vec<(SubId, Value)>>, last: bool },
+    Stream { id: Id, sub_id: SubId, tx: Sender<Batch>, last: bool },
 }
 
 #[derive(Debug)]
@@ -131,7 +132,7 @@ impl Val {
     /// only receive new values.
     ///
     /// If the subscription dies the stream will end.
-    pub fn updates(&self, begin_with_last: bool, tx: Sender<Vec<(SubId, Value)>>) {
+    pub fn updates(&self, begin_with_last: bool, tx: Sender<Batch>) {
         let m = ToCon::Stream {
             tx,
             sub_id: self.0.sub_id,
@@ -156,7 +157,7 @@ pub enum DVState {
 struct DValInner {
     sub_id: SubId,
     sub: Option<Val>,
-    streams: Vec<Sender<Vec<(SubId, Value)>>>,
+    streams: Vec<Sender<Batch>>,
     states: Vec<UnboundedSender<(SubId, DVState)>>,
     tries: usize,
     next_try: Instant,
@@ -250,7 +251,7 @@ impl DVal {
     /// the stream will not end when the subscription dies, it will
     /// just stop producing values, and will start again if
     /// resubscription is successful.
-    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Vec<(SubId, Value)>>) {
+    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Batch>) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
         t.streams.push(tx.clone());
@@ -729,7 +730,7 @@ impl Subscriber {
 }
 
 #[derive(Clone)]
-struct ChanWrap(Sender<Vec<(SubId, Value)>>);
+struct ChanWrap(Sender<Batch>);
 
 impl PartialEq for ChanWrap {
     fn eq(&self, other: &ChanWrap) -> bool {
@@ -758,7 +759,7 @@ impl ChanId {
 
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, ChanId, Sender<Vec<(SubId, Value)>>)>,
+    streams: Vec<(SubId, ChanId, Sender<Batch>)>,
     last: Value,
 }
 
@@ -846,17 +847,46 @@ async fn hello_publisher(
 const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
+lazy_static! {
+    static ref BATCHES: Mutex<Vec<Vec<(SubId, Value)>>> = Mutex::new(Vec::new());
+}
+
+#[derive(Debug)]
+pub struct Batch(Vec<(SubId, Value)>);
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        let mut batches = BATCHES.lock();
+        if batches.len() < 1000 {
+            batches.push(mem::replace(&mut self.0, Vec::new()));
+        }
+    }
+}
+
+impl Batch {
+    fn new() -> Self {
+        let v = BATCHES.lock().pop().unwrap_or_else(Vec::new);
+        Batch(v)
+    }
+
+    fn push(&mut self, v: (SubId, Value)) {
+        self.0.push(v);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn consume<'a>(&'a mut self) -> Drain<'a, (SubId, Value)> {
+        self.0.drain(..)
+    }
+}
+
 // This is the fast path for the common case where the batch contains
 // only updates. As of 2020-04-30, sending to an mpsc channel is
-// pretty slow, about 250ns, so even though it may seem like
-// allocating a vec and a hashmap for every batch is slow, it actually
-// nearly triples performance.
+// pretty slow, about 250ns, so we go to great lengths to avoid it.
 async fn process_updates_batch(
-    by_chan: &mut HashMap<
-        ChanId,
-        (Sender<Vec<(SubId, Value)>>, Vec<(SubId, Value)>),
-        FxBuildHasher,
-    >,
+    by_chan: &mut HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher>,
     batch: &mut Vec<protocol::publisher::v1::From>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
@@ -866,7 +896,7 @@ async fn process_updates_batch(
                 for (sub_id, chan_id, c) in sub.streams.iter() {
                     by_chan
                         .entry(*chan_id)
-                        .or_insert_with(|| (c.clone(), Vec::new()))
+                        .or_insert_with(|| (c.clone(), Batch::new()))
                         .1
                         .push((*sub_id, m.clone()))
                 }
@@ -892,7 +922,9 @@ async fn process_batch(
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
                     for (id, _, c) in sub.streams.iter_mut() {
-                        let _ = c.send(vec![(*id, m.clone())]).await;
+                        let mut b = Batch::new();
+                        b.push((*id, m.clone()));
+                        let _ = c.send(b).await;
                     }
                     sub.last = m;
                 }
@@ -1009,11 +1041,8 @@ async fn connection(
     let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let mut by_receiver: HashMap<ChanWrap, ChanId> = HashMap::new();
-    let mut by_chan: HashMap<
-        ChanId,
-        (Sender<Vec<(SubId, Value)>>, Vec<(SubId, Value)>),
-        FxBuildHasher,
-    > = HashMap::with_hasher(FxBuildHasher::default());
+    let mut by_chan: HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher> =
+        HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -1106,7 +1135,9 @@ async fn connection(
                         });
                         if last {
                             let m = sub.last.clone();
-                            match tx.send(vec![(sub_id, m)]).await {
+                            let mut b = Batch::new();
+                            b.push((sub_id, m));
+                            match tx.send(b).await {
                                 Err(_) => continue,
                                 Ok(()) => ()
                             }

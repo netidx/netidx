@@ -10,7 +10,7 @@ use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::Auth,
-    subscriber::{DVal, SubId, Subscriber, Value},
+    subscriber::{DVal, SubId, Subscriber, Batch},
     utils::{BatchItem, Batched, BytesWriter},
 };
 use std::{
@@ -68,12 +68,12 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    sender: Sender<Vec<(SubId, Value)>>,
+    sender: Sender<Batch>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, DVal>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
-    updates: Batched<Receiver<Vec<(SubId, Value)>>>,
+    updates: Batched<Receiver<Batch>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -84,7 +84,7 @@ struct Ctx {
 
 impl Ctx {
     fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
-        let (sender, updates) = mpsc::channel(100_0000);
+        let (sender, updates) = mpsc::channel(100);
         Ctx {
             sender,
             paths: HashMap::new(),
@@ -150,7 +150,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<Vec<(SubId, Value)>>>,
+        u: Option<BatchItem<Batch>>,
     ) -> Result<(), anyhow::Error> {
         Ok(match u {
             None => unreachable!(),
@@ -164,7 +164,7 @@ impl Ctx {
                     self.stderr.write_all(&*to_write).await?;
                 }
             }
-            Some(BatchItem::InBatch(batch)) => for (id, value) in batch {
+            Some(BatchItem::InBatch(mut batch)) => for (id, value) in batch.consume() {
                 if let Some(path) = self.paths.get(&id) {
                     let value = SValue::from_value(value);
                     Out { path: &**path, value }

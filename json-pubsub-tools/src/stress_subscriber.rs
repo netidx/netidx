@@ -28,8 +28,12 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let mut last_stat = start;
         let mut total = 0;
         let mut n = 0;
-        while let Some(batch) = vals.next().await {
-            for _ in batch {
+        let mut batch_size = 0;
+        let mut nbatches = 0;
+        while let Some(mut batch) = vals.next().await {
+            batch_size += batch.len();
+            nbatches += 1;
+            for _ in batch.consume() {
                 total += 1;
                 n += 1;
                 if n >= subs.len() {
@@ -50,11 +54,12 @@ pub(crate) fn run(config: Config, auth: Auth) {
                             }
                         }
                         println!(
-                            "subscribed: {} unsubscribed: {} rx: {:.0} rx(avg): {:.0}",
+                            "subscribed: {} unsubscribed: {} rx: {:.0} rx(avg): {:.0} batch(avg): {:.0}",
                             subscribed,
                             unsubscribed,
                             n as f64 / elapsed.as_secs_f64(),
-                            total as f64 / since_start.as_secs_f64()
+                            total as f64 / since_start.as_secs_f64(),
+                            batch_size as f64 / nbatches as f64
                         );
                         n = 0;
                         last_stat = now;
