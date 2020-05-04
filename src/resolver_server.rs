@@ -471,6 +471,7 @@ async fn hello_client_read(
 
 async fn hello_client(
     cfg: Arc<Config>,
+    delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
     s: TcpStream,
@@ -486,6 +487,11 @@ async fn hello_client(
     let hello: ClientHello = time::timeout(cfg.hello_timeout, con.receive()).await??;
     match hello {
         ClientHello::ReadOnly(hello) => {
+            if let Some(t) = delay_reads {
+                if Instant::now() < t {
+                    bail!("no read clients allowed yet");
+                }
+            }
             Ok(hello_client_read(cfg, store, con, server_stop, secstore, id, hello)
                 .await?)
         }
@@ -505,9 +511,12 @@ async fn hello_client(
 
 async fn server_loop(
     cfg: Config,
+    delay_reads: bool,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr> {
+    let delay_reads =
+        if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
     let cfg = Arc::new(cfg);
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> = Store::new();
@@ -544,7 +553,14 @@ async fn server_loop(
                         client_stops.push(tx);
                         task::spawn(async move {
                             let r = hello_client(
-                                cfg, local_addr, published, client, rx, secstore, id
+                                cfg,
+                                delay_reads,
+                                local_addr,
+                                published,
+                                client,
+                                rx,
+                                secstore,
+                                id
                             ).await;
                             info!("server_loop client connection shutting down {:?}", r);
                             connections.fetch_sub(1, Ordering::Relaxed);
@@ -571,10 +587,10 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: Config) -> Result<Server> {
+    pub async fn new(cfg: Config, delay_reads: bool) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, recv_stop, send_ready);
+        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);
         let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,
