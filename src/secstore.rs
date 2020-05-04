@@ -13,7 +13,6 @@ use arc_swap::{ArcSwap, Guard};
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
-use smallvec::SmallVec;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 static GC: usize = u16::MAX as usize;

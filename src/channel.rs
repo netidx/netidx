@@ -318,6 +318,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
         Ok(self.write.flush().await?)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn flush_timeout(
         &mut self,
         timeout: Duration,
