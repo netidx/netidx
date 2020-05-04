@@ -2,7 +2,7 @@ use crate::{auth::Krb5Ctx, utils::Pack};
 use anyhow::{anyhow, Error, Result};
 use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use byteorder::{BigEndian, ByteOrder};
-use futures::prelude::*;
+use futures::{prelude::*, select_biased};
 use log::info;
 use std::{
     cmp::min,
@@ -183,11 +183,13 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
 }
 
 fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
+    stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<TcpStream>,
     mut set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<BytesMut> {
     let (mut tx, rx) = mpsc::channel(10);
     task::spawn(async move {
+        let mut stop = stop.fuse();
         let mut ctx: Option<C> = None;
         let mut buf = BytesMut::with_capacity(BUF);
         let res: Result<()> = 'main: loop {
@@ -222,8 +224,13 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
             if buf.remaining_mut() < mem::size_of::<u32>() {
                 buf.reserve(buf.capacity());
             }
-            if try_cf!(soc.read_buf(&mut buf).await) == 0 {
-                break Err(anyhow!("EOF"));
+            select_biased! {
+                _ = stop => break Ok(()),
+                i = soc.read_buf(&mut buf).fuse() => {
+                    if try_cf!(i) == 0 {
+                        break Err(anyhow!("EOF"));
+                    }
+                }
             }
         };
         log::info!("read task shutting down {:?}", res);
@@ -233,6 +240,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
 
 pub(crate) struct ReadChannel<C> {
     buf: BytesMut,
+    _stop: oneshot::Sender<()>,
     set_ctx: Option<oneshot::Sender<C>>,
     incoming: Receiver<BytesMut>,
 }
@@ -240,10 +248,12 @@ pub(crate) struct ReadChannel<C> {
 impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
             buf: BytesMut::new(),
+            _stop: stop_tx,
             set_ctx: Some(set_ctx),
-            incoming: read_task(socket, read_ctx),
+            incoming: read_task(stop_rx, socket, read_ctx),
         }
     }
 

@@ -863,7 +863,7 @@ async fn process_updates_batch(
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
             if let Some(sub) = subscriptions.get_mut(&i) {
-                for (sub_id, chan_id, c) in sub.streams.iter_mut() {
+                for (sub_id, chan_id, c) in sub.streams.iter() {
                     by_chan
                         .entry(*chan_id)
                         .or_insert_with(|| (c.clone(), Vec::new()))
@@ -1105,7 +1105,8 @@ async fn connection(
                             }
                         });
                         if last {
-                            match tx.send(vec![(sub_id, sub.last.clone())]).await {
+                            let m = sub.last.clone();
+                            match tx.send(vec![(sub_id, m)]).await {
                                 Err(_) => continue,
                                 Ok(()) => ()
                             }
