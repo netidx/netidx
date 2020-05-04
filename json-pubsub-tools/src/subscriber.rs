@@ -133,7 +133,6 @@ impl Ctx {
                 }
                 for p in self.add.drain() {
                     let p = Path::from(p);
-                    let updates = &mut self.updates;
                     let subscriptions = &mut self.subscriptions;
                     let paths = &mut self.paths;
                     let subscriber = &self.subscriber;

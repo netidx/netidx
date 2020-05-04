@@ -38,7 +38,7 @@ mod resolver {
         use tokio::runtime::Runtime;
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let server = Server::new(server_config()).await.expect("start server");
+            let server = Server::new(server_config(), false).await.expect("start server");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let cfg = client_config(*server.local_addr());
             let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr).unwrap();
@@ -78,7 +78,7 @@ mod publisher {
     fn publish_subscribe() {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let server = Server::new(server_config()).await.expect("start server");
+            let server = Server::new(server_config(), false).await.expect("start server");
             let cfg = client_config(*server.local_addr());
             let pcfg = cfg.clone();
             let (tx, ready) = oneshot::channel();

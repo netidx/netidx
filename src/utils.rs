@@ -267,6 +267,41 @@ impl Pack for Bytes {
     }
 }
 
+pub(crate) fn varint_len(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+pub(crate) fn encode_varint(mut value: u64, buf: &mut BytesMut) {
+    loop {
+        if value < 0x80 {
+            buf.put_u8(value as u8);
+            break;
+        } else {
+            buf.put_u8(((value & 0x7F) | 0x80) as u8);
+            value >>= 7;
+        }
+    }
+}
+
+pub(crate) fn decode_varint(buf: &mut BytesMut) -> Result<u64, PackError> {
+    let mut value = 0;
+    let mut i = 0;
+    while i < 10 {
+        let byte = buf.get_u8();
+        value |= u64::from(byte & 0x7F) << (i * 7);
+        if byte <= 0x7F {
+            return Ok(value);
+        }
+        i += 1;
+    }
+    Err(PackError::InvalidFormat)
+}
+
 impl Pack for u64 {
     fn len(&self) -> usize {
         mem::size_of::<u64>()

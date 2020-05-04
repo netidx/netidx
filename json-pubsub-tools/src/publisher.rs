@@ -35,7 +35,7 @@ impl FromStr for Typ {
             "u32" => Ok(Typ::U32),
             "i32" => Ok(Typ::I32),
             "u64" => Ok(Typ::U64),
-            "i64" => Ok(Typ::U64),
+            "i64" => Ok(Typ::I64),
             "f32" => Ok(Typ::F32),
             "f64" => Ok(Typ::F64),
             "string" => Ok(Typ::String),
