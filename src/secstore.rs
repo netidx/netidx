@@ -1,11 +1,8 @@
 use crate::{
-    auth::{
-        sysgmapper::Mapper,
-        syskrb5::{ServerCtx, SYS_KRB5},
-        Krb5, Krb5Ctx, PMap, UserDb, UserInfo,
-    },
+    auth::{PMap, UserDb, UserInfo},
     chars::Chars,
     config,
+    os::{self, Mapper, Krb5Ctx, ServerCtx},
     protocol::resolver::v1::CtxId,
 };
 use anyhow::{anyhow, Result};
@@ -20,7 +17,7 @@ static GC: usize = u16::MAX as usize;
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
     write_ctxts: HashMap<SocketAddr, (Chars, ServerCtx), FxBuildHasher>,
-    userdb: UserDb<Mapper>,
+    userdb: UserDb,
 }
 
 impl SecStoreInner {
@@ -104,7 +101,7 @@ impl SecStore {
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes)> {
-        let ctx = SYS_KRB5.create_server_ctx(Some(self.spn.as_bytes()))?;
+        let ctx = os::create_server_ctx(Some(self.spn.as_bytes()))?;
         let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
             || anyhow!("step didn't generate a mutual authentication token"),
         )?;

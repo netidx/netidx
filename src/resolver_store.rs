@@ -1,5 +1,5 @@
 use crate::{
-    auth::Krb5Ctx, chars::Chars, path::Path, protocol::resolver::v1::PermissionToken,
+    chars::Chars, os::Krb5Ctx, path::Path, protocol::resolver::v1::PermissionToken,
     secstore::SecStoreInner, utils,
 };
 use anyhow::Result;

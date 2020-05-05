@@ -1,10 +1,9 @@
 use crate::{
-    auth::{
-        syskrb5::ServerCtx, Krb5Ctx, Krb5ServerCtx, Permissions, UserInfo, ANONYMOUS,
-    },
+    auth::{Permissions, UserInfo, ANONYMOUS},
     channel::Channel,
     chars::Chars,
     config::resolver_server::{Auth, Config},
+    os::{Krb5Ctx, Krb5ServerCtx, ServerCtx},
     path::Path,
     protocol::{
         publisher,

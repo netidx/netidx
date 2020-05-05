@@ -1,9 +1,6 @@
 pub use crate::protocol::publisher::v1::Value;
 use crate::{
-    auth::{
-        syskrb5::{ClientCtx, SYS_KRB5},
-        Krb5, Krb5Ctx,
-    },
+    os::{self, ClientCtx, Krb5Ctx},
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
     config,
@@ -823,7 +820,7 @@ async fn hello_publisher(
         }
         Auth::Krb5 { upn, .. } => {
             let p = upn.as_ref().map(|p| p.as_bytes());
-            let ctx = SYS_KRB5.create_client_ctx(p, target_spn.as_bytes())?;
+            let ctx = os::create_client_ctx(p, target_spn.as_bytes())?;
             let tok = ctx
                 .step(None)?
                 .map(|b| utils::bytes(&*b))

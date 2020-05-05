@@ -1,11 +1,8 @@
 pub use crate::protocol::publisher::v1::Value;
 use crate::{
-    auth::{
-        syskrb5::{ClientCtx, ServerCtx, SYS_KRB5},
-        Krb5Ctx,
-    },
     channel::Channel,
     config,
+    os::{self, ClientCtx, Krb5Ctx, ServerCtx},
     path::Path,
     protocol::{
         publisher::{self, v1::Id},
@@ -334,12 +331,7 @@ impl Publisher {
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
-            Ok(Arc::new(ValInner {
-                id,
-                path,
-                publisher: self.downgrade(),
-                published,
-            }))
+            Ok(Arc::new(ValInner { id, path, publisher: self.downgrade(), published }))
         }
     }
 
@@ -533,10 +525,7 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
-    use crate::{
-        auth::Krb5,
-        protocol::publisher::v1::Hello::{self, *},
-    };
+    use crate::protocol::publisher::v1::Hello::{self, *};
     // negotiate protocol version
     con.send_one(&1u64).await?;
     let _ver: u64 = con.receive().await?;
@@ -551,7 +540,7 @@ async fn hello_client(
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|p| p.as_bytes());
-                let ctx = SYS_KRB5.create_server_ctx(p)?;
+                let ctx = os::create_server_ctx(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?
                     .map(|b| utils::bytes(&*b))

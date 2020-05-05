@@ -42,6 +42,7 @@
 #[macro_use] extern crate bitflags;
 
 #[macro_use] pub mod utils;
+mod os;
 pub mod chars;
 mod resolver_store;
 mod auth;

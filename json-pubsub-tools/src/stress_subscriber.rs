@@ -61,6 +61,8 @@ pub(crate) fn run(config: Config, auth: Auth) {
                             total as f64 / since_start.as_secs_f64(),
                             batch_size as f64 / nbatches as f64
                         );
+                        nbatches = 0;
+                        batch_size = 0;
                         n = 0;
                         last_stat = now;
                     }

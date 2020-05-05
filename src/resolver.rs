@@ -1,8 +1,5 @@
 use crate::{
-    auth::{
-        syskrb5::{ClientCtx, SYS_KRB5},
-        Krb5, Krb5Ctx,
-    },
+    os::{self, Krb5Ctx, ClientCtx},
     channel::Channel,
     chars::Chars,
     config::{self, resolver::Auth as CAuth},
@@ -64,7 +61,7 @@ async fn send<T: Send + Sync + Debug + 'static, F: Send + Sync + Debug + 'static
 }
 
 fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes)> {
-    let ctx = SYS_KRB5.create_client_ctx(upn, target_spn)?;
+    let ctx = os::create_client_ctx(upn, target_spn)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
         Some(tok) => Ok((ctx, utils::bytes(&*tok))),

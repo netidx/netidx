@@ -1,4 +1,4 @@
-use crate::{auth::Krb5Ctx, utils::Pack};
+use crate::{os::Krb5Ctx, utils::Pack};
 use anyhow::{anyhow, Error, Result};
 use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use byteorder::{BigEndian, ByteOrder};
