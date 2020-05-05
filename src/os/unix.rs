@@ -11,8 +11,18 @@ use libgssapi::{
     oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
     util::{Buf, GssIov, GssIovFake, GssIovType},
 };
-use std::{process::Command, time::Duration};
+use std::{process::Command, time::Duration, net::IpAddr};
 use tokio::task;
+
+pub(crate) fn get_addrs() -> Result<impl Iterator<Item = IpAddr>> {
+    use nix::{sys::socket::SockAddr, ifaddrs::getifaddrs};
+    task::block_in_place(|| {
+        Ok(getifaddrs()?.filter_map(|i| i.address.and_then(|addr| match addr {
+            SockAddr::Inet(addr) => Some(addr.to_std().ip()),
+            _ => None
+        })))
+    })
+}
 
 fn wrap_iov(
     ctx: &impl SecurityContext,

@@ -23,7 +23,8 @@ use std::{
     convert::TryFrom,
     default::Default,
     mem,
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
 };
@@ -176,15 +177,124 @@ impl PublisherWeak {
     }
 }
 
-/// Control how the publisher picks a `SocketAddr` to bind to
+/// Control how the publisher picks a bind address. The address we
+/// give to the resolver server must be uniquely routable back to us,
+/// otherwise clients will not be able to subscribe. In the
+/// furtherance of this goal there are a number of address rules to
+/// follow,
+///
+/// - no unspecified (0.0.0.0)
+/// - no broadcast (255.255.255.255)
+/// - no multicast addresses (224.0.0.0/8)
+/// - no link local addresses (169.254.0.0/16)
+/// - loopback (127.0.0.1, or ::1) is only allowed if all the resolvers are also loopback
+/// - private addresses (192.168.0.0/16, 10.0.0.0/8,
+///   172.16.0.0/12) are only allowed if all the resolvers are also
+///   using private addresses.
+///
+/// As well as the above rules we will enumerate all the network
+/// interface addresses present at startup time and check that the
+/// specified bind address (or specification in case of Addr) matches
+/// exactly 1 of them.
 #[derive(Clone, Copy, Debug)]
 pub enum BindCfg {
-    /// Bind to the specified address, but automatically pick an
-    /// unused port starting at 5000.
-    Addr(IpAddr),
+    /// Bind to the interface who's address matches `addr` when masked
+    /// with `netmask`, e.g.
+    ///
+    /// `192.168.0.0/16`
+    ///
+    /// will match interfaces with addresses 192.168.1.1, 192.168.10.234, ... etc
+    Addr { addr: IpAddr, netmask: IpAddr },
+
     /// Bind to the specifed `SocketAddr`, error if it is in use. If
     /// you want to OS to pick a port for you, use Exact with port 0.
     Exact(SocketAddr),
+}
+
+impl FromStr for BindCfg {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.find("/") {
+            None => Ok(BindCfg::Exact(s.parse()?)),
+            Some(_) => {
+                let mut parts = s.splitn(2, '/');
+                let addr: IpAddr =
+                    parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
+                let bits: usize =
+                    parts.next().ok_or_else(|| anyhow!("expected netmask"))?.parse()?;
+                if parts.next().is_some() {
+                    bail!("parse error, trailing garbage after netmask")
+                }
+                let netmask = match addr {
+                    IpAddr::V4(_) => {
+                        if bits > 32 {
+                            bail!("invalid netmask");
+                        }
+                        let addr = u32::MAX.wrapping_shl((32 - bits) as u32);
+                        IpAddr::V4(Ipv4Addr::from(addr))
+                    }
+                    IpAddr::V6(_) => {
+                        if bits > 128 {
+                            bail!("invalid netmask");
+                        }
+                        let addr = u128::MAX.wrapping_shl((128 - bits) as u32);
+                        IpAddr::V6(Ipv6Addr::from(addr))
+                    }
+                };
+                Ok(BindCfg::Addr { addr, netmask })
+            }
+        }
+    }
+}
+
+impl BindCfg {
+    fn select(&self) -> Result<IpAddr> {
+        match self {
+            BindCfg::Exact(addr) => {
+                if os::get_addrs()?.any(|ip| ip == addr.ip()) {
+                    Ok(addr.ip())
+                } else {
+                    bail!("no interface matches the bind address {:?}", addr);
+                }
+            }
+            BindCfg::Addr { addr, netmask } => {
+                let selected = os::get_addrs()?
+                    .filter_map(|ip| match (ip, addr, netmask) {
+                        (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
+                            let masked = Ipv4Addr::from(
+                                u32::from_be_bytes(ip.octets())
+                                    & u32::from_be_bytes(nm.octets()),
+                            );
+                            if &masked == addr {
+                                Some(IpAddr::V4(ip))
+                            } else {
+                                None
+                            }
+                        }
+                        (IpAddr::V6(ip), IpAddr::V6(addr), IpAddr::V6(nm)) => {
+                            let masked = Ipv6Addr::from(
+                                u128::from_be_bytes(ip.octets())
+                                    & u128::from_be_bytes(nm.octets()),
+                            );
+                            if &masked == addr {
+                                Some(IpAddr::V6(ip))
+                            } else {
+                                None
+                            }
+                        }
+                        (_, _, _) => None,
+                    })
+                    .collect::<Vec<_>>();
+                if selected.len() == 1 {
+                    Ok(selected[0])
+                } else if selected.len() == 0 {
+                    bail!("no interface matches {:?}", self);
+                } else {
+                    bail!("ambigous specification {:?} matches {:?}", self, selected);
+                }
+            }
+        }
+    }
 }
 
 fn rand_port(current: u16) -> u16 {
@@ -206,33 +316,20 @@ impl Publisher {
     }
 
     /// Create a new publisher using the specified resolver and bind config.
-    /// There are a number of address rules to follow,
-    ///
-    /// - no unspecified (0.0.0.0)
-    /// - no broadcast (255.255.255.255)
-    /// - no multicast addresses (224.0.0.0/8)
-    /// - no link local addresses (169.254.0.0/16)
-    /// - loopback (127.0.0.1) is only allowed if all the resolvers are also loopback
-    /// - private addresses (192.168.0.0/16, 10.0.0.0/8,
-    ///   172.16.0.0/12) are only allowed if all the resolvers are also
-    ///   private.
-    ///
-    /// Following these rules will prevent the most obvious network
-    /// configuration errors.
     pub async fn new(
         resolver: config::resolver::Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
         let resolvers = resolver.servers.iter().map(|(_, a)| *a).collect::<Vec<_>>();
+        let ip = bind_cfg.select()?;
+        utils::check_addr(ip, &resolvers)?;
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => {
-                utils::check_addr(addr.ip(), &resolvers)?;
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
             }
-            BindCfg::Addr(ip) => {
-                utils::check_addr(ip, &resolvers)?;
+            BindCfg::Addr { .. } => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
