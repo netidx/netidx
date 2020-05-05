@@ -78,17 +78,19 @@ mod publisher {
     fn bindcfg() {
         let addr: IpAddr = "192.168.0.0".parse().unwrap();
         let netmask: IpAddr = "255.255.0.0".parse().unwrap();
-        assert_eq!(BindCfg::Match {addr, netmask}, "192.168.0.0/16".parse());
-        let addr: IpAddr = "ff::1c::27::3c::00::00::00::00".parse().unwrap();
-        let netmask: IpAddr = "ff::ff::ff::ff::00::00::00::00".parse().unwrap();
-        let bc: BindCfg = "ff::1c::27::3c::00::00::00::00".parse().unwrap();
+        assert_eq!(BindCfg::Match {addr, netmask}, "192.168.0.0/16".parse().unwrap());
+        let addr: IpAddr = "ffff:1c00:2700:3c00::".parse().unwrap();
+        let netmask: IpAddr = "ffff:ffff:ffff:ffff::".parse().unwrap();
+        let bc: BindCfg = "ffff:1c00:2700:3c00::/64".parse().unwrap();
         assert_eq!(BindCfg::Match {addr, netmask}, bc);
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         assert_eq!(BindCfg::Exact(addr), "127.0.0.1:1234".parse().unwrap());
+        let addr: SocketAddr = "[ffff:1c00:2700:3c00::]:1234".parse().unwrap();
+        assert_eq!(BindCfg::Exact(addr), "[ffff:1c00:2700:3c00::]:1234".parse().unwrap());
         assert!("192.168.0.1".parse::<BindCfg>().is_err());
         assert!("192.168.0.1:12345/16".parse::<BindCfg>().is_err());
         assert!("192.168.0.1/8/foo".parse::<BindCfg>().is_err());
-        assert!("ff::1c::27::3c::00::00::00::00".parse::<BindCfg>().is_err());
+        assert!("ffff:1c00:2700:3c00::".parse::<BindCfg>().is_err());
     }
 
     #[test]
@@ -103,7 +105,7 @@ mod publisher {
                 let publisher = Publisher::new(
                     pcfg,
                     Auth::Anonymous,
-                    "127.0.0.1/0".parse().unwrap(),
+                    "127.0.0.1/32".parse().unwrap(),
                 )
                 .await
                 .unwrap();
@@ -128,8 +130,8 @@ mod publisher {
             loop {
                 match rx.next().await {
                     None => panic!("publisher died"),
-                    Some(batch) => {
-                        for (_, v) in batch {
+                    Some(mut batch) => {
+                        for (_, v) in batch.consume() {
                             match v {
                                 Value::U64(v) => {
                                     if c == 0 {

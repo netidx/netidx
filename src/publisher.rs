@@ -196,7 +196,7 @@ impl PublisherWeak {
 /// interface addresses present at startup time and check that the
 /// specified bind address (or specification in case of Addr) matches
 /// exactly 1 of them.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindCfg {
     /// Bind to the interface who's address matches `addr` when masked
     /// with `netmask`, e.g.
@@ -204,10 +204,26 @@ pub enum BindCfg {
     /// `192.168.0.0/16`
     ///
     /// will match interfaces with addresses 192.168.1.1, 192.168.10.234, ... etc
+    ///
+    /// # Examples
+    /// ```
+    /// assert!("ffff:1cc00:2700:3c00::/64".parse::<BindCfg>().is_ok());
+    /// assert!("127.0.0.1/32".parse::<BindCfg>().is_ok());
+    /// assert!("192.168.2.0/24".parse::<BindCfg>().is_ok());
+    /// ```
     Match { addr: IpAddr, netmask: IpAddr },
 
     /// Bind to the specifed `SocketAddr`, error if it is in use. If
-    /// you want to OS to pick a port for you, use Exact with port 0.
+    /// you want to OS to pick a port for you, use Exact with port
+    /// 0. The ip address you specify must obey all the rules, and
+    /// must be the ip address of one of the network interfaces
+    /// present on the machine at the time of publisher creation.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!("[ffff:1cc00:2700:3c00::]:1234".parse::<BindCfg>().is_ok());
+    /// assert!("192.168.0.1:1234".parse::<BindCfg>().is_ok());
+    /// ```
     Exact(SocketAddr),
 }
 
@@ -220,7 +236,7 @@ impl FromStr for BindCfg {
                 let mut parts = s.splitn(2, '/');
                 let addr: IpAddr =
                     parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
-                let bits: usize =
+                let bits: u32 =
                     parts.next().ok_or_else(|| anyhow!("expected netmask"))?.parse()?;
                 if parts.next().is_some() {
                     bail!("parse error, trailing garbage after netmask")
@@ -230,15 +246,13 @@ impl FromStr for BindCfg {
                         if bits > 32 {
                             bail!("invalid netmask");
                         }
-                        let addr = u32::MAX.wrapping_shl((32 - bits) as u32);
-                        IpAddr::V4(Ipv4Addr::from(addr))
+                        IpAddr::V4(Ipv4Addr::from(u32::MAX.wrapping_shl(32 - bits)))
                     }
                     IpAddr::V6(_) => {
                         if bits > 128 {
                             bail!("invalid netmask");
                         }
-                        let addr = u128::MAX.wrapping_shl((128 - bits) as u32);
-                        IpAddr::V6(Ipv6Addr::from(addr))
+                        IpAddr::V6(Ipv6Addr::from(u128::MAX.wrapping_shl(128 - bits)))
                     }
                 };
                 Ok(BindCfg::Match { addr, netmask })
