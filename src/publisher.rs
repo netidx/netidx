@@ -204,7 +204,7 @@ pub enum BindCfg {
     /// `192.168.0.0/16`
     ///
     /// will match interfaces with addresses 192.168.1.1, 192.168.10.234, ... etc
-    Addr { addr: IpAddr, netmask: IpAddr },
+    Match { addr: IpAddr, netmask: IpAddr },
 
     /// Bind to the specifed `SocketAddr`, error if it is in use. If
     /// you want to OS to pick a port for you, use Exact with port 0.
@@ -241,7 +241,7 @@ impl FromStr for BindCfg {
                         IpAddr::V6(Ipv6Addr::from(addr))
                     }
                 };
-                Ok(BindCfg::Addr { addr, netmask })
+                Ok(BindCfg::Match { addr, netmask })
             }
         }
     }
@@ -257,7 +257,7 @@ impl BindCfg {
                     bail!("no interface matches the bind address {:?}", addr);
                 }
             }
-            BindCfg::Addr { addr, netmask } => {
+            BindCfg::Match { addr, netmask } => {
                 let selected = os::get_addrs()?
                     .filter_map(|ip| match (ip, addr, netmask) {
                         (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
@@ -329,7 +329,7 @@ impl Publisher {
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
             }
-            BindCfg::Addr { .. } => {
+            BindCfg::Match { .. } => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?

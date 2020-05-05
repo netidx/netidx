@@ -71,8 +71,25 @@ mod publisher {
         subscriber::{Subscriber, Value},
     };
     use futures::{channel::mpsc, prelude::*};
-    use std::time::Duration;
+    use std::{time::Duration, net::{SocketAddr, IpAddr}};
     use tokio::{runtime::Runtime, sync::oneshot, task, time};
+
+    #[test]
+    fn bindcfg() {
+        let addr: IpAddr = "192.168.0.0".parse().unwrap();
+        let netmask: IpAddr = "255.255.0.0".parse().unwrap();
+        assert_eq!(BindCfg::Match {addr, netmask}, "192.168.0.0/16".parse());
+        let addr: IpAddr = "ff::1c::27::3c::00::00::00::00".parse().unwrap();
+        let netmask: IpAddr = "ff::ff::ff::ff::00::00::00::00".parse().unwrap();
+        let bc: BindCfg = "ff::1c::27::3c::00::00::00::00".parse().unwrap();
+        assert_eq!(BindCfg::Match {addr, netmask}, bc);
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        assert_eq!(BindCfg::Exact(addr), "127.0.0.1:1234".parse().unwrap());
+        assert!("192.168.0.1".parse::<BindCfg>().is_err());
+        assert!("192.168.0.1:12345/16".parse::<BindCfg>().is_err());
+        assert!("192.168.0.1/8/foo".parse::<BindCfg>().is_err());
+        assert!("ff::1c::27::3c::00::00::00::00".parse::<BindCfg>().is_err());
+    }
 
     #[test]
     fn publish_subscribe() {
@@ -86,7 +103,7 @@ mod publisher {
                 let publisher = Publisher::new(
                     pcfg,
                     Auth::Anonymous,
-                    BindCfg::Addr("127.0.0.1".parse().unwrap()),
+                    "127.0.0.1/0".parse().unwrap(),
                 )
                 .await
                 .unwrap();
