@@ -203,13 +203,18 @@ pub enum BindCfg {
     ///
     /// `192.168.0.0/16`
     ///
-    /// will match interfaces with addresses 192.168.1.1, 192.168.10.234, ... etc
+    /// will match interfaces with addresses 192.168.1.1, 192.168.10.234, ... etc,
+    ///
+    /// `192.168.0.0/24`
+    ///
+    /// will match interfaces with addresses 192.168.0.[1-254]
     ///
     /// # Examples
     /// ```
-    /// assert!("ffff:1cc00:2700:3c00::/64".parse::<BindCfg>().is_ok());
-    /// assert!("127.0.0.1/32".parse::<BindCfg>().is_ok());
-    /// assert!("192.168.2.0/24".parse::<BindCfg>().is_ok());
+    /// use json_pubsub::publisher::BindCfg;
+    /// "ffff:1c00:2700:3c00::/64".parse::<BindCfg>().unwrap();
+    /// "127.0.0.1/32".parse::<BindCfg>().unwrap();
+    /// "192.168.2.0/24".parse::<BindCfg>().unwrap();
     /// ```
     Match { addr: IpAddr, netmask: IpAddr },
 
@@ -221,8 +226,9 @@ pub enum BindCfg {
     ///
     /// # Examples
     /// ```
-    /// assert!("[ffff:1cc00:2700:3c00::]:1234".parse::<BindCfg>().is_ok());
-    /// assert!("192.168.0.1:1234".parse::<BindCfg>().is_ok());
+    /// use json_pubsub::publisher::BindCfg;
+    /// "[ffff:1c00:2700:3c00::]:1234".parse::<BindCfg>().unwrap();
+    /// "192.168.0.1:1234".parse::<BindCfg>().unwrap();
     /// ```
     Exact(SocketAddr),
 }
