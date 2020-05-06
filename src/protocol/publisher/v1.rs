@@ -81,12 +81,12 @@ impl Pack for Hello {
             Hello::Anonymous => Ok(buf.put_u8(0)),
             Hello::Token(tok) => {
                 buf.put_u8(1);
-                Ok(<Bytes as Pack>::encode(tok, buf)?)
+                <Bytes as Pack>::encode(tok, buf)
             }
             Hello::ResolverAuthenticate(id, tok) => {
                 buf.put_u8(2);
                 ResolverId::encode(id, buf)?;
-                Ok(<Bytes as Pack>::encode(tok, buf)?)
+                <Bytes as Pack>::encode(tok, buf)
             }
         }
     }
@@ -105,7 +105,7 @@ impl Pack for Hello {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum To {
     /// Subscribe to the specified value, if it is not available
     /// the result will be NoSuchValue. The optional security
@@ -117,6 +117,8 @@ pub enum To {
     /// in an Unsubscibed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
+    /// Send a write to the specified value.
+    Write(Id, Value),
 }
 
 impl Pack for To {
@@ -128,6 +130,7 @@ impl Pack for To {
                     + <Bytes as Pack>::len(token)
             }
             To::Unsubscribe(id) => Id::len(id),
+            To::Write(id, v) => Id::len(id) + Value::len(v),
         }
     }
 
@@ -137,11 +140,16 @@ impl Pack for To {
                 buf.put_u8(0);
                 <Path as Pack>::encode(path, buf)?;
                 ResolverId::encode(resolver, buf)?;
-                Ok(<Bytes as Pack>::encode(token, buf)?)
+                <Bytes as Pack>::encode(token, buf)
             }
             To::Unsubscribe(id) => {
                 buf.put_u8(1);
-                Ok(Id::encode(id, buf)?)
+                Id::encode(id, buf)
+            }
+            To::Write(id, v) => {
+                buf.put_u8(2);
+                Id::encode(id, buf)?;
+                Value::encode(v, buf)
             }
         }
     }
@@ -155,12 +163,17 @@ impl Pack for To {
                 Ok(To::Subscribe { path, resolver, token })
             }
             1 => Ok(To::Unsubscribe(Id::decode(buf)?)),
+            2 => {
+                let id = Id::decode(buf)?;
+                let v = Value::decode(buf)?;
+                Ok(To::Write(id, v))
+            }
             _ => Err(PackError::UnknownTag),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     U32(u32),
     I32(i32),
@@ -214,11 +227,11 @@ impl Pack for Value {
             }
             Value::String(s) => {
                 buf.put_u8(6);
-                Ok(<Chars as Pack>::encode(s, buf)?)
+                <Chars as Pack>::encode(s, buf)
             }
             Value::Bytes(b) => {
                 buf.put_u8(7);
-                Ok(<Bytes as Pack>::encode(b, buf)?)
+                <Bytes as Pack>::encode(b, buf)
             }
         }
     }
@@ -280,26 +293,26 @@ impl Pack for From {
         match self {
             From::NoSuchValue(p) => {
                 buf.put_u8(0);
-                Ok(<Path as Pack>::encode(p, buf)?)
+                <Path as Pack>::encode(p, buf)
             }
             From::Denied(p) => {
                 buf.put_u8(1);
-                Ok(<Path as Pack>::encode(p, buf)?)
+                <Path as Pack>::encode(p, buf)
             }
             From::Unsubscribed(id) => {
                 buf.put_u8(2);
-                Ok(Id::encode(id, buf)?)
+                Id::encode(id, buf)
             }
             From::Subscribed(p, id, v) => {
                 buf.put_u8(3);
                 <Path as Pack>::encode(p, buf)?;
                 Id::encode(id, buf)?;
-                Ok(Value::encode(v, buf)?)
+                Value::encode(v, buf)
             }
             From::Update(id, v) => {
                 buf.put_u8(4);
                 Id::encode(id, buf)?;
-                Ok(Value::encode(v, buf)?)
+                Value::encode(v, buf)
             }
             From::Heartbeat => Ok(buf.put_u8(5)),
         }

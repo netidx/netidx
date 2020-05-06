@@ -9,11 +9,11 @@ use crate::{
         resolver::v1::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
-    utils::{self, Pack},
+    utils::{self, ChanId, ChanWrap, Pack},
 };
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
-use futures::{prelude::*, select_biased};
+use futures::{channel::mpsc as fmpsc, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
@@ -27,6 +27,7 @@ use std::{
     str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
+    vec::Drain,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -40,6 +41,41 @@ use tokio::{
 // CR estokes: add a handler for lazy publishing (delegated subtrees)
 
 static MAX_CLIENTS: usize = 768;
+
+lazy_static! {
+    static ref BATCHES: Mutex<Vec<Vec<(Id, Value)>>> = Mutex::new(Vec::new());
+}
+
+#[derive(Debug)]
+pub struct Batch(Vec<(Id, Value)>);
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        let mut batches = BATCHES.lock();
+        if batches.len() < 1000 {
+            batches.push(mem::replace(&mut self.0, Vec::new()));
+        }
+    }
+}
+
+impl Batch {
+    fn new() -> Self {
+        let v = BATCHES.lock().pop().unwrap_or_else(Vec::new);
+        Batch(v)
+    }
+
+    fn push(&mut self, v: (Id, Value)) {
+        self.0.push(v);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn consume<'a>(&'a mut self) -> Drain<'a, (Id, Value)> {
+        self.0.drain(..)
+    }
+}
 
 struct ValInner {
     id: Id,
@@ -93,6 +129,29 @@ impl Val {
         inner.current = v;
     }
 
+    /// Register `tx` to receive writes. You can register multiple
+    /// channels, and you can register the same channel on multiple
+    /// `Val` objects.
+    pub fn writes(&self, tx: fmpsc::Sender<Batch>) {
+        if let Some(publisher) = self.0.publisher.upgrade() {
+            let mut pb = publisher.0.lock();
+            let id = *pb
+                .on_write_chans
+                .entry(ChanWrap(tx.clone()))
+                .or_insert_with(ChanId::new);
+            let mut inner = self.0.published.0.lock();
+            inner.on_write.retain(|(_, c)| {
+                if c.is_closed() {
+                    pb.on_write_chans.remove(&ChanWrap(c.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            inner.on_write.push((id, tx));
+        }
+    }
+
     /// Get the unique `Id` of this `Val`. This id is unique on this
     /// publisher only, no attempt is made to make it globally unique.
     pub fn id(&self) -> Id {
@@ -114,6 +173,7 @@ enum ToClientMsg {
 struct PublishedInner {
     current: Value,
     subscribed: HashMap<SocketAddr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>,
+    on_write: Vec<(ChanId, fmpsc::Sender<Batch>)>,
     wait_client: Vec<oneshot::Sender<()>>,
 }
 
@@ -131,6 +191,7 @@ struct PublisherInner {
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, Published, FxBuildHasher>,
+    on_write_chans: HashMap<ChanWrap<Batch>, ChanId, FxBuildHasher>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
@@ -383,6 +444,7 @@ impl Publisher {
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
+            on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
             to_publish: HashSet::new(),
             to_unpublish: HashSet::new(),
             wait_any_client: Vec::new(),
@@ -441,6 +503,7 @@ impl Publisher {
             let published = Published(Arc::new(Mutex::new(PublishedInner {
                 current: init,
                 subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+                on_write: Vec::new(),
                 wait_client: Vec::new(),
             })));
             pb.by_path.insert(path.clone(), id);
@@ -567,12 +630,13 @@ fn subscribe(
     Ok(())
 }
 
-fn handle_batch(
+async fn handle_batch(
     t: &PublisherWeak,
     updates: &Arc<SegQueue<ToClientMsg>>,
     addr: &SocketAddr,
     msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
+    write_batches: &mut HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher>,
     ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
@@ -581,46 +645,65 @@ fn handle_batch(
         publisher::v1::{From, To::*},
         resolver::v1::PermissionToken,
     };
-    let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
-    let mut pb = t_st.0.lock();
-    let ctxts = ctxts.read();
-    for msg in msgs {
-        match msg {
-            Subscribe { path, resolver, token } => match auth {
-                Auth::Anonymous => subscribe(&mut *pb, updates, con, *addr, path)?,
-                Auth::Krb5 { .. } => match ctxts.get(&resolver) {
-                    None => con.queue_send(&From::Denied(path))?,
-                    Some(ctx) => match ctx.unwrap(&token) {
-                        Err(_) => con.queue_send(&From::Denied(path))?,
-                        Ok(b) => {
-                            let mut b = utils::bytesmut(&*b);
-                            let tok = PermissionToken::decode(&mut b);
-                            match tok {
-                                Err(_) => con.queue_send(&From::Denied(path))?,
-                                Ok(PermissionToken(a_path, ts)) => {
-                                    let age = std::cmp::max(
-                                        u64::saturating_sub(now, ts),
-                                        u64::saturating_sub(ts, now),
-                                    );
-                                    if age > 300 || &*a_path != &*path {
-                                        con.queue_send(&From::Denied(path))?
-                                    } else {
-                                        subscribe(&mut *pb, updates, con, *addr, path)?
+    {
+        let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
+        let mut pb = t_st.0.lock();
+        let ctxts = ctxts.read();
+        for msg in msgs {
+            match msg {
+                Subscribe { path, resolver, token } => match auth {
+                    Auth::Anonymous => subscribe(&mut *pb, updates, con, *addr, path)?,
+                    Auth::Krb5 { .. } => match ctxts.get(&resolver) {
+                        None => con.queue_send(&From::Denied(path))?,
+                        Some(ctx) => match ctx.unwrap(&token) {
+                            Err(_) => con.queue_send(&From::Denied(path))?,
+                            Ok(b) => {
+                                let mut b = utils::bytesmut(&*b);
+                                let tok = PermissionToken::decode(&mut b);
+                                match tok {
+                                    Err(_) => con.queue_send(&From::Denied(path))?,
+                                    Ok(PermissionToken(a_path, ts)) => {
+                                        let age = std::cmp::max(
+                                            u64::saturating_sub(now, ts),
+                                            u64::saturating_sub(ts, now),
+                                        );
+                                        if age > 300 || &*a_path != &*path {
+                                            con.queue_send(&From::Denied(path))?
+                                        } else {
+                                            subscribe(
+                                                &mut *pb, updates, con, *addr, path,
+                                            )?
+                                        }
                                     }
                                 }
                             }
-                        }
+                        },
                     },
                 },
-            },
-            Unsubscribe(id) => {
-                if let Some(ut) = pb.by_id.get_mut(&id) {
-                    ut.0.lock().subscribed.remove(&addr);
-                    pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
+                Unsubscribe(id) => {
+                    if let Some(ut) = pb.by_id.get_mut(&id) {
+                        ut.0.lock().subscribed.remove(&addr);
+                        pb.clients.get_mut(&addr).unwrap().subscribed.remove(&id);
+                    }
+                    con.queue_send(&From::Unsubscribed(id))?;
                 }
-                con.queue_send(&From::Unsubscribed(id))?;
+                Write(id, v) => {
+                    if let Some(ut) = pb.by_id.get_mut(&id) {
+                        let inner = ut.0.lock();
+                        for (cid, ch) in inner.on_write.iter() {
+                            write_batches
+                                .entry(*cid)
+                                .or_insert_with(|| (Batch::new(), ch.clone()))
+                                .0
+                                .push((id, v.clone()))
+                        }
+                    }
+                }
             }
         }
+    }
+    for (_, (batch, mut sender)) in write_batches.drain() {
+        let _ = sender.send(batch).await;
     }
     Ok(())
 }
@@ -701,6 +784,8 @@ async fn client_loop(
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::v1::To> = Vec::new();
+    let mut write_batches: HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher> =
+        HashMap::with_hasher(FxBuildHasher::default());
     let mut flushes = flushes.fuse();
     let updates: Arc<SegQueue<ToClientMsg>> = Arc::new(SegQueue::new());
     let mut hb = time::interval(HB).fuse();
@@ -737,8 +822,8 @@ async fn client_loop(
                         .as_secs();
                     handle_batch(
                         &t, &updates, &addr, batch.drain(..), &mut con,
-                        &ctxts, &desired_auth, now,
-                    )?;
+                        &mut write_batches, &ctxts, &desired_auth, now,
+                    ).await?;
                     con.flush().await?
                 }
             },

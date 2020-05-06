@@ -5,6 +5,7 @@ use futures::{
     sink::Sink,
     stream::FusedStream,
     task::{Context, Poll},
+    channel::mpsc,
 };
 use std::{
     cell::RefCell,
@@ -458,6 +459,7 @@ pub fn bytes(t: &[u8]) -> Bytes {
     bytesmut(t).freeze()
 }
 
+// CR estokes: unused?
 pub struct BytesWriter<'a>(pub &'a mut BytesMut);
 
 impl Write for BytesWriter<'_> {
@@ -471,6 +473,7 @@ impl Write for BytesWriter<'_> {
     }
 }
 
+// CR estokes: unused?
 pub struct BytesDeque(VecDeque<Bytes>);
 
 impl BytesDeque {
@@ -532,6 +535,34 @@ impl Buf for BytesDeque {
             i += 1;
         }
         i
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ChanWrap<T>(pub(crate) mpsc::Sender<T>);
+
+impl<T> PartialEq for ChanWrap<T> {
+    fn eq(&self, other: &ChanWrap<T>) -> bool {
+        self.0.same_receiver(&other.0)
+    }
+}
+
+impl<T> Eq for ChanWrap<T> {}
+
+impl<T> Hash for ChanWrap<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash_receiver(state)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChanId(u64);
+
+impl ChanId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        ChanId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 

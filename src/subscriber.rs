@@ -11,7 +11,7 @@ use crate::{
         resolver::v1::{Resolved, ResolverId},
     },
     resolver::{Auth, ResolverRead},
-    utils::{self, BatchItem, Batched},
+    utils::{self, BatchItem, Batched, ChanWrap, ChanId},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
@@ -726,34 +726,6 @@ impl Subscriber {
     }
 }
 
-#[derive(Clone)]
-struct ChanWrap(Sender<Batch>);
-
-impl PartialEq for ChanWrap {
-    fn eq(&self, other: &ChanWrap) -> bool {
-        self.0.same_receiver(&other.0)
-    }
-}
-
-impl Eq for ChanWrap {}
-
-impl Hash for ChanWrap {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash_receiver(state)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ChanId(u64);
-
-impl ChanId {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        ChanId(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
 struct Sub {
     path: Path,
     streams: Vec<(SubId, ChanId, Sender<Batch>)>,
@@ -1037,7 +1009,7 @@ async fn connection(
     let (return_batch, read_returned) = mpsc::unbounded();
     let mut batches = decode_task(read_con, read_returned);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
-    let mut by_receiver: HashMap<ChanWrap, ChanId> = HashMap::new();
+    let mut by_receiver: HashMap<ChanWrap<Batch>, ChanId> = HashMap::new();
     let mut by_chan: HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {

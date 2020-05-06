@@ -131,7 +131,7 @@ impl Pack for ClientAuthWrite {
             ClientAuthWrite::Initiate { spn, token } => {
                 buf.put_u8(2);
                 <Option<Chars> as Pack>::encode(spn, buf)?;
-                Ok(<Bytes as Pack>::encode(token, buf)?)
+                <Bytes as Pack>::encode(token, buf)
             }
         }
     }
@@ -163,7 +163,7 @@ impl Pack for ClientHelloWrite {
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <SocketAddr as Pack>::encode(&self.write_addr, buf)?;
-        Ok(ClientAuthWrite::encode(&self.auth, buf)?)
+        ClientAuthWrite::encode(&self.auth, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
@@ -199,11 +199,11 @@ impl Pack for ClientHello {
         match self {
             ClientHello::ReadOnly(r) => {
                 buf.put_u8(0);
-                Ok(<ClientAuthRead as Pack>::encode(r, buf)?)
+                <ClientAuthRead as Pack>::encode(r, buf)
             }
             ClientHello::WriteOnly(r) => {
                 buf.put_u8(1);
-                Ok(<ClientHelloWrite as Pack>::encode(r, buf)?)
+                <ClientHelloWrite as Pack>::encode(r, buf)
             }
         }
     }
@@ -242,7 +242,7 @@ impl Pack for ServerHelloRead {
             ServerHelloRead::Accepted(tok, id) => {
                 buf.put_u8(2);
                 <Bytes as Pack>::encode(tok, buf)?;
-                Ok(CtxId::encode(id, buf)?)
+                CtxId::encode(id, buf)
             }
         }
     }
@@ -283,7 +283,7 @@ impl Pack for ServerAuthWrite {
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
             ServerAuthWrite::Accepted(b) => {
                 buf.put_u8(2);
-                Ok(<Bytes as Pack>::encode(b, buf)?)
+                <Bytes as Pack>::encode(b, buf)
             }
         }
     }
@@ -353,11 +353,11 @@ impl Pack for ToRead {
         match self {
             ToRead::Resolve(paths) => {
                 buf.put_u8(0);
-                Ok(<Vec<Path> as Pack>::encode(paths, buf)?)
+                <Vec<Path> as Pack>::encode(paths, buf)
             }
             ToRead::List(path) => {
                 buf.put_u8(1);
-                Ok(<Path as Pack>::encode(path, buf)?)
+                <Path as Pack>::encode(path, buf)
             }
         }
     }
@@ -397,7 +397,7 @@ impl Pack for Resolved {
             buf,
         )?;
         ResolverId::encode(&self.resolver, buf)?;
-        Ok(<Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)?)
+        <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
@@ -428,15 +428,15 @@ impl Pack for FromRead {
         match self {
             FromRead::Resolved(r) => {
                 buf.put_u8(0);
-                Ok(Resolved::encode(r, buf)?)
+                Resolved::encode(r, buf)
             }
             FromRead::List(l) => {
                 buf.put_u8(1);
-                Ok(<Vec<Path> as Pack>::encode(l, buf)?)
+                <Vec<Path> as Pack>::encode(l, buf)
             }
             FromRead::Error(e) => {
                 buf.put_u8(2);
-                Ok(<Chars as Pack>::encode(e, buf)?)
+                <Chars as Pack>::encode(e, buf)
             }
         }
     }
@@ -468,7 +468,7 @@ impl Pack for PermissionToken {
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <Path as Pack>::encode(&self.0, buf)?;
-        Ok(<u64 as Pack>::encode(&self.1, buf)?)
+        <u64 as Pack>::encode(&self.1, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
@@ -504,11 +504,11 @@ impl Pack for ToWrite {
         match self {
             ToWrite::Publish(p) => {
                 buf.put_u8(0);
-                Ok(<Vec<Path> as Pack>::encode(p, buf)?)
+                <Vec<Path> as Pack>::encode(p, buf)
             }
             ToWrite::Unpublish(p) => {
                 buf.put_u8(1);
-                Ok(<Vec<Path> as Pack>::encode(p, buf)?)
+                <Vec<Path> as Pack>::encode(p, buf)
             }
             ToWrite::Clear => Ok(buf.put_u8(2)),
             ToWrite::Heartbeat => Ok(buf.put_u8(3)),
@@ -548,7 +548,7 @@ impl Pack for FromWrite {
             FromWrite::Unpublished => Ok(buf.put_u8(1)),
             FromWrite::Error(c) => {
                 buf.put_u8(2);
-                Ok(<Chars as Pack>::encode(c, buf)?)
+                <Chars as Pack>::encode(c, buf)
             }
         }
     }
