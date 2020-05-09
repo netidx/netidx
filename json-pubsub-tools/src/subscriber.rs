@@ -138,7 +138,7 @@ impl Ctx {
                     let subscriber = &self.subscriber;
                     let sender = self.sender.clone();
                     subscriptions.entry(p.clone()).or_insert_with(|| {
-                        let s = subscriber.durable_subscribe_val(p.clone());
+                        let s = subscriber.durable_subscribe(p.clone());
                         paths.insert(s.id(), p.clone());
                         s.updates(true, sender);
                         s

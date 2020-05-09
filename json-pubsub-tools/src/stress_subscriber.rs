@@ -17,7 +17,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs = paths
             .into_iter()
-            .map(|path| subscriber.durable_subscribe_val(path))
+            .map(|path| subscriber.durable_subscribe(path))
             .collect::<Vec<DVal>>();
         let (tx, mut vals) = mpsc::channel(100000);
         for s in subs.iter() {
