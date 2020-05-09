@@ -12,7 +12,6 @@ use crate::{
     utils::{self, ChanId, ChanWrap, Pack},
 };
 use anyhow::{anyhow, Error, Result};
-use arc_swap::ArcSwap;
 use crossbeam::queue::SegQueue;
 use futures::{channel::mpsc as fmpsc, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
@@ -127,14 +126,18 @@ impl Ord for Addr {
 // are many more published values than clients we can save a lot of
 // memory this way. Roughly the size of a hashmap, plus it's
 // keys/values, replaced by 1 word.
-type Subscribed = HashMap<Addr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>;
+type Subscribed = Arc<HashMap<Addr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>>;
+
+struct ValLocked {
+    current: Value,
+    subscribed: Subscribed,
+}
 
 struct ValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
-    current_updates: Arc<SegQueue<(Id, Value)>>,
-    subscribed: ArcSwap<Subscribed>,
+    locked: Mutex<ValLocked>,
 }
 
 impl Drop for ValInner {
@@ -142,7 +145,6 @@ impl Drop for ValInner {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.by_path.remove(&self.path);
-            pb.current.remove(&self.id);
             pb.wait_clients.remove(&self.id);
             if let Some(chans) = pb.on_write.remove(&self.id) {
                 for (_, c) in chans {
@@ -160,7 +162,7 @@ impl Drop for ValInner {
             if !pb.to_publish.remove(&self.path) {
                 pb.to_unpublish.insert(self.path.clone());
             }
-            for q in self.subscribed.load().values() {
+            for q in self.locked.lock().subscribed.values() {
                 q.push(ToClientMsg::Unpublish(self.id));
             }
         }
@@ -190,13 +192,12 @@ impl Val {
     /// on multiple different published values before `flush` is
     /// called, they will all be sent out as a batch in the order that
     /// update is called.
-    ///
-    /// No locking occurs during update.
     pub fn update(&self, v: Value) {
-        for q in self.0.subscribed.load().values() {
+        let mut inner = self.0.locked.lock();
+        for q in inner.subscribed.values() {
             q.push(ToClientMsg::Val(self.0.id, v.clone()))
         }
-        self.0.current_updates.push((self.0.id, v));
+        inner.current = v;
     }
 
     /// Register `tx` to receive writes. You can register multiple
@@ -267,7 +268,7 @@ struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     clients: HashMap<SocketAddr, Client, FxBuildHasher>,
-    hc_subscribed: HashMap<BTreeSet<Addr>, Arc<Subscribed>, FxBuildHasher>,
+    hc_subscribed: HashMap<BTreeSet<Addr>, Subscribed, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, ValWeak, FxBuildHasher>,
     on_write_chans: HashMap<ChanWrap<Batch>, (ChanId, HashSet<Id>), FxBuildHasher>,
@@ -277,8 +278,6 @@ struct PublisherInner {
     to_unpublish: HashSet<Path>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
-    current_updates: Arc<SegQueue<(Id, Value)>>,
-    current: HashMap<Id, Value, FxBuildHasher>,
 }
 
 impl PublisherInner {
@@ -534,8 +533,6 @@ impl Publisher {
             to_unpublish: HashSet::new(),
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
             wait_any_client: Vec::new(),
-            current_updates: Arc::new(SegQueue::new()),
-            current: HashMap::with_hasher(FxBuildHasher::default()),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -604,11 +601,9 @@ impl Publisher {
                 id,
                 path: path.clone(),
                 publisher: self.downgrade(),
-                subscribed: ArcSwap::new(subscribed),
-                current_updates: pb.current_updates.clone(),
+                locked: Mutex::new(ValLocked { current: init, subscribed }),
             }));
             pb.by_id.insert(id, val.downgrade());
-            pb.current.insert(id, init);
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
@@ -652,9 +647,6 @@ impl Publisher {
                     c.flush_trigger.clone()
                 })
                 .collect::<Vec<_>>();
-            while let Ok((id, v)) = pb.current_updates.pop() {
-                pb.current.insert(id, v);
-            }
             pb.resolver.clone()
         };
         for mut client in clients {
@@ -700,7 +692,7 @@ impl Publisher {
                 Some(ut) => match ut.upgrade() {
                     None => return,
                     Some(ut) => {
-                        if ut.0.subscribed.load().len() > 0 {
+                        if ut.0.locked.lock().subscribed.len() > 0 {
                             return;
                         }
                         let (tx, rx) = oneshot::channel();
@@ -727,23 +719,22 @@ fn subscribe(
             let id = *id;
             if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
                 t.clients.get_mut(&addr).unwrap().subscribed.insert(id);
+                let mut inner = ut.0.locked.lock();
                 let subs = BTreeSet::from_iter(
-                    iter::once(Addr::from(addr))
-                        .chain(ut.0.subscribed.load().keys().copied()),
+                    iter::once(Addr::from(addr)).chain(inner.subscribed.keys().copied()),
                 );
                 match t.hc_subscribed.entry(subs) {
                     Entry::Occupied(e) => {
-                        ut.0.subscribed.store(e.get().clone());
+                        inner.subscribed = e.get().clone();
                     }
                     Entry::Vacant(e) => {
-                        let mut s = HashMap::clone(&*ut.0.subscribed.load());
+                        let mut s = HashMap::clone(&inner.subscribed);
                         s.insert(Addr::from(addr), Arc::clone(updates));
-                        let a = Arc::new(s);
-                        ut.0.subscribed.store(a.clone());
-                        e.insert(a);
+                        inner.subscribed = Arc::new(s);
+                        e.insert(inner.subscribed.clone());
                     }
                 }
-                let m = publisher::v1::From::Subscribed(path, id, t.current[&id].clone());
+                let m = publisher::v1::From::Subscribed(path, id, inner.current.clone());
                 con.queue_send(&m)?;
                 if let Some(waiters) = t.wait_clients.remove(&id) {
                     for tx in waiters {
@@ -759,19 +750,19 @@ fn subscribe(
 fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
     if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
         let addr = Addr::from(*addr);
+        let mut inner = ut.0.locked.lock();
         let subs = BTreeSet::from_iter(
-            ut.0.subscribed.load().keys().filter(|a| *a != &addr).copied(),
+            inner.subscribed.keys().filter(|a| *a != &addr).copied(),
         );
         match t.hc_subscribed.entry(subs) {
             Entry::Occupied(e) => {
-                ut.0.subscribed.store(e.get().clone());
+                inner.subscribed = e.get().clone();
             }
             Entry::Vacant(e) => {
-                let mut h = HashMap::clone(&*ut.0.subscribed.load());
+                let mut h = HashMap::clone(&inner.subscribed);
                 h.remove(&addr);
-                let a = Arc::new(h);
-                ut.0.subscribed.store(a.clone());
-                e.insert(a);
+                inner.subscribed = Arc::new(h);
+                e.insert(inner.subscribed.clone());
             }
         }
         if let Some(cl) = t.clients.get_mut(&addr.0) {
