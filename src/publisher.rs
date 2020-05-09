@@ -12,6 +12,7 @@ use crate::{
     utils::{self, ChanId, ChanWrap, Pack},
 };
 use anyhow::{anyhow, Error, Result};
+use arc_swap::ArcSwap;
 use crossbeam::queue::SegQueue;
 use futures::{channel::mpsc as fmpsc, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
@@ -128,20 +129,12 @@ impl Ord for Addr {
 // keys/values, replaced by 1 word.
 type Subscribed = HashMap<Addr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>;
 
-// These two structs are the essentials of a published value. All the
-// optional features, like wait client, and write support are in
-// seperate hashtables in the publisher struct. This saves a ton of
-// memory in the common case, but does make the code a bit messier.
-struct Published {
-    current: Value,
-    subscribed: Arc<Subscribed>,
-}
-
 struct ValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
-    published: Mutex<Published>,
+    current_updates: Arc<SegQueue<(Id, Value)>>,
+    subscribed: ArcSwap<Subscribed>,
 }
 
 impl Drop for ValInner {
@@ -149,10 +142,25 @@ impl Drop for ValInner {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.by_path.remove(&self.path);
+            pb.current.remove(&self.id);
+            pb.wait_clients.remove(&self.id);
+            if let Some(chans) = pb.on_write.remove(&self.id) {
+                for (_, c) in chans {
+                    match pb.on_write_chans.entry(ChanWrap(c)) {
+                        Entry::Vacant(_) => (),
+                        Entry::Occupied(mut e) => {
+                            e.get_mut().1.remove(&self.id);
+                            if e.get().1.is_empty() {
+                                e.remove();
+                            }
+                        }
+                    }
+                }
+            }
             if !pb.to_publish.remove(&self.path) {
                 pb.to_unpublish.insert(self.path.clone());
             }
-            for q in self.published.lock().subscribed.values() {
+            for q in self.subscribed.load().values() {
                 q.push(ToClientMsg::Unpublish(self.id));
             }
         }
@@ -183,26 +191,27 @@ impl Val {
     /// called, they will all be sent out as a batch in the order that
     /// update is called.
     ///
-    /// The thread calling update pays the serialization cost. No
-    /// locking occurs during update.
+    /// No locking occurs during update.
     pub fn update(&self, v: Value) {
-        let mut inner = self.0.published.lock();
-        for q in inner.subscribed.values() {
+        for q in self.0.subscribed.load().values() {
             q.push(ToClientMsg::Val(self.0.id, v.clone()))
         }
-        inner.current = v;
+        self.0.current_updates.push((self.0.id, v));
     }
 
     /// Register `tx` to receive writes. You can register multiple
     /// channels, and you can register the same channel on multiple
-    /// `Val` objects.
+    /// `Val` objects. If no channels are registered to receive writes
+    /// they will be ignored.
     pub fn writes(&self, tx: fmpsc::Sender<Batch>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut pb = publisher.0.lock();
-            let id = *pb
+            let e = pb
                 .on_write_chans
                 .entry(ChanWrap(tx.clone()))
-                .or_insert_with(ChanId::new);
+                .or_insert_with(|| (ChanId::new(), HashSet::new()));
+            let id = e.0;
+            e.1.insert(self.0.id);
             let mut gc = Vec::new();
             let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
             ow.retain(|(_, c)| {
@@ -261,13 +270,15 @@ struct PublisherInner {
     hc_subscribed: HashMap<BTreeSet<Addr>, Arc<Subscribed>, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, ValWeak, FxBuildHasher>,
-    on_write_chans: HashMap<ChanWrap<Batch>, ChanId, FxBuildHasher>,
+    on_write_chans: HashMap<ChanWrap<Batch>, (ChanId, HashSet<Id>), FxBuildHasher>,
     on_write: HashMap<Id, Vec<(ChanId, fmpsc::Sender<Batch>)>, FxBuildHasher>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_unpublish: HashSet<Path>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
+    current_updates: Arc<SegQueue<(Id, Value)>>,
+    current: HashMap<Id, Value, FxBuildHasher>,
 }
 
 impl PublisherInner {
@@ -523,6 +534,8 @@ impl Publisher {
             to_unpublish: HashSet::new(),
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
             wait_any_client: Vec::new(),
+            current_updates: Arc::new(SegQueue::new()),
+            current: HashMap::with_hasher(FxBuildHasher::default()),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -591,9 +604,11 @@ impl Publisher {
                 id,
                 path: path.clone(),
                 publisher: self.downgrade(),
-                published: Mutex::new(Published { current: init, subscribed }),
+                subscribed: ArcSwap::new(subscribed),
+                current_updates: pb.current_updates.clone(),
             }));
             pb.by_id.insert(id, val.downgrade());
+            pb.current.insert(id, init);
             if !pb.to_unpublish.remove(&path) {
                 pb.to_publish.insert(path.clone());
             }
@@ -602,14 +617,20 @@ impl Publisher {
         }
     }
 
-    /// Send all queued updates out to subscribers, and send all
-    /// queued publish/unpublish operations to the resolver. When the
-    /// future returned by this function is ready all data has been
-    /// flushed to the underlying OS sockets.
+    /// Flush initiates sending queued updates out to subscribers, and
+    /// also sends all queued publish/unpublish operations to the
+    /// resolver. The semantics of flush are such that any update
+    /// queued before flush is called will go out when it is called,
+    /// and any update queued after flush is called will only go out
+    /// on the next flush. These semantics apply to the initial value
+    /// new clients receive as well, they will receive the last update
+    /// queued before flush was called.
     ///
     /// If you don't want to wait for the future you can just throw it
     /// away, `flush` triggers sending the data whether you await the
-    /// future or not.
+    /// future or not. However if you never wait for any of the
+    /// futures returned by flush a slow client could cause the
+    /// publisher to consume arbitrary amounts of memory.
     ///
     /// If timeout is specified then any client that can't accept the
     /// update within the timeout duration will be disconnected.
@@ -631,6 +652,9 @@ impl Publisher {
                     c.flush_trigger.clone()
                 })
                 .collect::<Vec<_>>();
+            while let Ok((id, v)) = pb.current_updates.pop() {
+                pb.current.insert(id, v);
+            }
             pb.resolver.clone()
         };
         for mut client in clients {
@@ -676,7 +700,7 @@ impl Publisher {
                 Some(ut) => match ut.upgrade() {
                     None => return,
                     Some(ut) => {
-                        if ut.0.published.lock().subscribed.len() > 0 {
+                        if ut.0.subscribed.load().len() > 0 {
                             return;
                         }
                         let (tx, rx) = oneshot::channel();
@@ -703,22 +727,23 @@ fn subscribe(
             let id = *id;
             if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
                 t.clients.get_mut(&addr).unwrap().subscribed.insert(id);
-                let mut pb = ut.0.published.lock();
                 let subs = BTreeSet::from_iter(
-                    iter::once(Addr::from(addr)).chain(pb.subscribed.keys().copied()),
+                    iter::once(Addr::from(addr))
+                        .chain(ut.0.subscribed.load().keys().copied()),
                 );
                 match t.hc_subscribed.entry(subs) {
                     Entry::Occupied(e) => {
-                        pb.subscribed = e.get().clone();
+                        ut.0.subscribed.store(e.get().clone());
                     }
                     Entry::Vacant(e) => {
-                        let mut s = HashMap::clone(&*pb.subscribed);
+                        let mut s = HashMap::clone(&*ut.0.subscribed.load());
                         s.insert(Addr::from(addr), Arc::clone(updates));
-                        pb.subscribed = Arc::new(s);
-                        e.insert(pb.subscribed.clone());
+                        let a = Arc::new(s);
+                        ut.0.subscribed.store(a.clone());
+                        e.insert(a);
                     }
                 }
-                let m = publisher::v1::From::Subscribed(path, id, pb.current.clone());
+                let m = publisher::v1::From::Subscribed(path, id, t.current[&id].clone());
                 con.queue_send(&m)?;
                 if let Some(waiters) = t.wait_clients.remove(&id) {
                     for tx in waiters {
@@ -734,18 +759,19 @@ fn subscribe(
 fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
     if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
         let addr = Addr::from(*addr);
-        let mut inner = ut.0.published.lock();
-        let subs =
-            BTreeSet::from_iter(inner.subscribed.keys().filter(|a| *a != &addr).copied());
+        let subs = BTreeSet::from_iter(
+            ut.0.subscribed.load().keys().filter(|a| *a != &addr).copied(),
+        );
         match t.hc_subscribed.entry(subs) {
             Entry::Occupied(e) => {
-                inner.subscribed = e.get().clone();
+                ut.0.subscribed.store(e.get().clone());
             }
             Entry::Vacant(e) => {
-                let mut h = HashMap::clone(&*inner.subscribed);
+                let mut h = HashMap::clone(&*ut.0.subscribed.load());
                 h.remove(&addr);
-                inner.subscribed = Arc::new(h);
-                e.insert(inner.subscribed.clone());
+                let a = Arc::new(h);
+                ut.0.subscribed.store(a.clone());
+                e.insert(a);
             }
         }
         if let Some(cl) = t.clients.get_mut(&addr.0) {
