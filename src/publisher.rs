@@ -1,5 +1,6 @@
 pub use crate::protocol::publisher::v1::Value;
 use crate::{
+    auth::Permissions,
     channel::Channel,
     config,
     os::{self, ClientCtx, Krb5Ctx, ServerCtx},
@@ -261,7 +262,7 @@ enum ToClientMsg {
 struct Client {
     flush_trigger: Sender<Option<Duration>>,
     msg_queue: Arc<SegQueue<ToClientMsg>>,
-    subscribed: HashSet<Id, FxBuildHasher>,
+    subscribed: HashMap<Id, Permissions, FxBuildHasher>,
 }
 
 struct PublisherInner {
@@ -712,13 +713,16 @@ fn subscribe(
     con: &mut Channel<ServerCtx>,
     addr: SocketAddr,
     path: Path,
+    permissions: Permissions,
 ) -> Result<()> {
     match t.by_path.get(&path) {
         None => con.queue_send(&publisher::v1::From::NoSuchValue(path))?,
         Some(id) => {
             let id = *id;
             if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
-                t.clients.get_mut(&addr).unwrap().subscribed.insert(id);
+                if let Some(cl) = t.clients.get_mut(&addr) {
+                    cl.subscribed.insert(id, permissions);
+                }
                 let mut inner = ut.0.locked.lock();
                 let subs = BTreeSet::from_iter(
                     iter::once(Addr::from(addr)).chain(inner.subscribed.keys().copied()),
@@ -751,9 +755,8 @@ fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
     if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
         let addr = Addr::from(*addr);
         let mut inner = ut.0.locked.lock();
-        let subs = BTreeSet::from_iter(
-            inner.subscribed.keys().filter(|a| *a != &addr).copied(),
-        );
+        let subs =
+            BTreeSet::from_iter(inner.subscribed.keys().filter(|a| *a != &addr).copied());
         match t.hc_subscribed.entry(subs) {
             Entry::Occupied(e) => {
                 inner.subscribed = e.get().clone();
@@ -794,7 +797,14 @@ async fn handle_batch(
         for msg in msgs {
             match msg {
                 Subscribe { path, resolver, token } => match auth {
-                    Auth::Anonymous => subscribe(&mut *pb, updates, con, *addr, path)?,
+                    Auth::Anonymous => subscribe(
+                        &mut *pb,
+                        updates,
+                        con,
+                        *addr,
+                        path,
+                        Permissions::all(),
+                    )?,
                     Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                         None => con.queue_send(&From::Denied(path))?,
                         Some(ctx) => match ctx.unwrap(&token) {
@@ -804,16 +814,33 @@ async fn handle_batch(
                                 let tok = PermissionToken::decode(&mut b);
                                 match tok {
                                     Err(_) => con.queue_send(&From::Denied(path))?,
-                                    Ok(PermissionToken(a_path, ts)) => {
+                                    Ok(PermissionToken {
+                                        path: a_path,
+                                        permissions,
+                                        timestamp,
+                                    }) => {
+                                        let permissions =
+                                            Permissions::from_bits(permissions);
                                         let age = std::cmp::max(
-                                            u64::saturating_sub(now, ts),
-                                            u64::saturating_sub(ts, now),
+                                            u64::saturating_sub(now, timestamp),
+                                            u64::saturating_sub(timestamp, now),
                                         );
-                                        if age > 300 || &*a_path != &*path {
+                                        if age > 300
+                                            || &*a_path != &*path
+                                            || permissions.is_none()
+                                            || !permissions
+                                                .unwrap()
+                                                .contains(Permissions::SUBSCRIBE)
+                                        {
                                             con.queue_send(&From::Denied(path))?
                                         } else {
                                             subscribe(
-                                                &mut *pb, updates, con, *addr, path,
+                                                &mut *pb,
+                                                updates,
+                                                con,
+                                                *addr,
+                                                path,
+                                                permissions.unwrap(),
                                             )?
                                         }
                                     }
@@ -828,14 +855,19 @@ async fn handle_batch(
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
                 Write(id, v) => {
-                    // CR estokes: authorization!
-                    if let Some(ow) = pb.on_write.get(&id) {
-                        for (cid, ch) in ow.iter() {
-                            write_batches
-                                .entry(*cid)
-                                .or_insert_with(|| (Batch::new(), ch.clone()))
-                                .0
-                                .push((id, v.clone()))
+                    if let Some(cl) = pb.clients.get(&addr) {
+                        if let Some(perms) = cl.subscribed.get(&id) {
+                            if perms.contains(Permissions::WRITE) {
+                                if let Some(ow) = pb.on_write.get(&id) {
+                                    for (cid, ch) in ow.iter() {
+                                        write_batches
+                                            .entry(*cid)
+                                            .or_insert_with(|| (Batch::new(), ch.clone()))
+                                            .0
+                                            .push((id, v.clone()))
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1010,7 +1042,7 @@ async fn accept_loop(
                         pb.clients.insert(addr, Client {
                             flush_trigger: tx,
                             msg_queue: updates.clone(),
-                            subscribed: HashSet::with_hasher(FxBuildHasher::default()),
+                            subscribed: HashMap::with_hasher(FxBuildHasher::default()),
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
@@ -1021,7 +1053,7 @@ async fn accept_loop(
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();
                                 if let Some(cl) = pb.clients.remove(&addr) {
-                                    for id in cl.subscribed {
+                                    for (id, _) in cl.subscribed {
                                         unsubscribe(&mut *pb, &addr, id);
                                     }
                                     pb.hc_subscribed.retain(|_, v| {

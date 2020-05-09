@@ -1,6 +1,6 @@
 use crate::{
-    chars::Chars, os::Krb5Ctx, path::Path, protocol::resolver::v1::PermissionToken,
-    secstore::SecStoreInner, utils,
+    auth::Permissions, chars::Chars, os::Krb5Ctx, path::Path,
+    protocol::resolver::v1::PermissionToken, secstore::SecStoreInner, utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -190,6 +190,7 @@ impl<T> StoreInner<T> {
         sec: &SecStoreInner,
         krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
         now: u64,
+        perm: Permissions,
         path: &Path,
     ) -> Result<Vec<(SocketAddr, Bytes)>> {
         self.by_path
@@ -203,7 +204,11 @@ impl<T> StoreInner<T> {
                             if !krb5_spns.contains_key(addr) {
                                 krb5_spns.insert(*addr, spn.clone());
                             }
-                            let msg = utils::pack(&PermissionToken(path.clone(), now))?;
+                            let msg = utils::pack(&PermissionToken {
+                                path: path.clone(),
+                                permissions: perm.bits(),
+                                timestamp: now
+                            })?;
                             let tok = utils::bytes(&*ctx.wrap(true, &*msg)?);
                             Ok((*addr, tok))
                         }

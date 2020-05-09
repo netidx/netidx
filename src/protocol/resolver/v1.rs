@@ -451,30 +451,36 @@ impl Pack for FromRead {
     }
 }
 
-/// This is the format of the Vec<u8> passed back with each
-/// Resolved msg, however it is encrypted with the publisher's
-/// resolver security context. This allows the subscriber to prove
-/// to the publisher that the resolver authorized it to subscribe
-/// to the specified path (because the subsciber can't decrypt or
-/// fabricate the token without the session key shared by the
-/// resolver server and the publisher).
+/// This is the format of the Vec<u8> passed back with each Resolved
+/// msg, however it is encrypted with the publisher's resolver
+/// security context. This allows the subscriber to prove to the
+/// publisher that the resolver authorized it to do whaterver action
+/// it is requesting to the specified path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PermissionToken(pub Path, pub u64);
+pub struct PermissionToken {
+    pub path: Path,
+    pub permissions: u32,
+    pub timestamp: u64,
+}
 
 impl Pack for PermissionToken {
     fn len(&self) -> usize {
-        <Path as Pack>::len(&self.0) + <u64 as Pack>::len(&self.1)
+        <Path as Pack>::len(&self.path)
+            + <u32 as Pack>::len(&self.permissions)
+            + <u64 as Pack>::len(&self.timestamp)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        <Path as Pack>::encode(&self.0, buf)?;
-        <u64 as Pack>::encode(&self.1, buf)
+        <Path as Pack>::encode(&self.path, buf)?;
+        <u32 as Pack>::encode(&self.permissions, buf)?;
+        <u64 as Pack>::encode(&self.timestamp, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let path = <Path as Pack>::decode(buf)?;
-        let time = <u64 as Pack>::decode(buf)?;
-        Ok(PermissionToken(path, time))
+        let permissions = <u32 as Pack>::decode(buf)?;
+        let timestamp = <u64 as Pack>::decode(buf)?;
+        Ok(PermissionToken { path, permissions, timestamp })
     }
 }
 

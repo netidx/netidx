@@ -6,10 +6,11 @@ bitflags! {
     pub struct Permissions: u32 {
         const DENY             = 0x01;
         const SUBSCRIBE        = 0x02;
-        const LIST             = 0x04;
-        const PUBLISH          = 0x08;
-        const PUBLISH_DEFAULT  = 0x10;
-        const PUBLISH_REFERRAL = 0x20;
+        const WRITE            = 0x04;
+        const LIST             = 0x08;
+        const PUBLISH          = 0x10;
+        const PUBLISH_DEFAULT  = 0x20;
+        const PUBLISH_REFERRAL = 0x40;
     }
 }
 
@@ -30,6 +31,9 @@ impl TryFrom<&str> for Permissions {
                 's' => {
                     p |= Permissions::SUBSCRIBE;
                 }
+                'w' => {
+                    p |= Permissions::WRITE;
+                }
                 'l' => {
                     p |= Permissions::LIST;
                 }
@@ -44,7 +48,7 @@ impl TryFrom<&str> for Permissions {
                 }
                 c => {
                     return Err(anyhow!(
-                        "unrecognized permission bit {}, valid bits are !spldr",
+                        "unrecognized permission bit {}, valid bits are !swpldr",
                         c
                     ))
                 }

@@ -331,39 +331,43 @@ fn handle_batch_read(
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let s = store.read();
     let sec = secstore.map(|s| s.store.read());
-    for m in msgs {
+    'main: for m in msgs {
         match m {
-            ToRead::Resolve(paths) => {
-                if allowed_for(secstore, uifo, &paths, Permissions::SUBSCRIBE) {
-                    con.queue_send(&match sec {
-                        None => FromRead::Resolved(Resolved {
-                            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
-                            resolver: id,
-                            addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
-                        }),
-                        Some(ref sec) => {
-                            let mut krb5_spns =
-                                HashMap::with_hasher(FxBuildHasher::default());
-                            let addrs = paths
-                                .iter()
-                                .map(|p| {
-                                    Ok(s.resolve_and_sign(
-                                        &**sec,
-                                        &mut krb5_spns,
-                                        now,
-                                        p,
-                                    )?)
-                                })
-                                .collect::<Result<Vec<_>>>()?;
-                            FromRead::Resolved(Resolved {
-                                krb5_spns,
-                                resolver: id,
-                                addrs,
-                            })
+            ToRead::Resolve(paths) => match secstore {
+                None => {
+                    let m = FromRead::Resolved(Resolved {
+                        krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
+                        resolver: id,
+                        addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
+                    });
+                    con.queue_send(&m)?;
+                }
+                Some(ref secstore) => {
+                    let mut krb5_spns =
+                        HashMap::with_hasher(FxBuildHasher::default());
+                    let sec = sec.as_ref().unwrap();
+                    let pmap = secstore.pmap();
+                    let mut addrs = Vec::with_capacity(paths.len());
+                    for p in paths.iter() {
+                        let perm = pmap.permissions(&*p, &**uifo);
+                        if !perm.contains(Permissions::SUBSCRIBE) {
+                            con.queue_send(&FromRead::Error("denied".into()))?;
+                            continue 'main;
                         }
-                    })?
-                } else {
-                    con.queue_send(&FromRead::Error("denied".into()))?
+                        addrs.push(s.resolve_and_sign(
+                            &**sec,
+                            &mut krb5_spns,
+                            now,
+                            perm,
+                            p,
+                        )?);
+                    }
+                    let m = FromRead::Resolved(Resolved {
+                        krb5_spns,
+                        resolver: id,
+                        addrs,
+                    });
+                    con.queue_send(&m)?
                 }
             }
             ToRead::List(path) => {

@@ -317,6 +317,20 @@ impl Pack for u64 {
     }
 }
 
+impl Pack for u32 {
+    fn len(&self) -> usize {
+        mem::size_of::<u32>()
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(buf.put_u32(*self))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+        Ok(buf.get_u32())
+    }
+}
+
 impl<T: Pack> Pack for Vec<T> {
     fn len(&self) -> usize {
         self.iter().fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
