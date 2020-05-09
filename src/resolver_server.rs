@@ -147,8 +147,7 @@ async fn client_loop_write(
                 Err(e) => {
                     batch.clear();
                     con = None;
-                    // CR estokes: use proper log module
-                    println!("error reading message: {}", e)
+                    info!("write client loop error reading message: {}", e)
                 },
                 Ok(()) => {
                     act = true;
