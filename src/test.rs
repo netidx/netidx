@@ -112,12 +112,21 @@ mod publisher {
                 let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
+                let (tx, mut rx) = mpsc::channel(10);
+                vp.writes(tx);
                 let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
                     vp.update(Value::U64(314159 + c));
                     publisher.flush(None).await.unwrap();
-                    c += 1
+                    if let Some(mut batch) = rx.next().await {
+                        for (_, v) in batch.consume() {
+                            match v {
+                                Value::U64(v) => { c = v; },
+                                v => panic!("unexpected value written {:?}", v)
+                            }
+                        }
+                    }
                 }
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
@@ -135,11 +144,13 @@ mod publisher {
                             match v {
                                 Value::U64(v) => {
                                     if c == 0 {
-                                        c = dbg!(v);
+                                        c = v;
                                         i = v;
+                                        vs.write(Value::U64(2));
                                     } else {
-                                        assert_eq!(c + 1, dbg!(v));
-                                        c += 1
+                                        assert_eq!(c + 1, v);
+                                        c += 1;
+                                        vs.write(Value::U64(c - i + 2));
                                     }
                                 }
                                 _ => panic!("unexpected value from publisher"),
