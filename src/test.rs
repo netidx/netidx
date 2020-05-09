@@ -122,7 +122,7 @@ mod publisher {
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
-            let vs = subscriber.subscribe_val("/app/v0".into(), None).await.unwrap();
+            let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);
