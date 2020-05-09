@@ -3,21 +3,18 @@ pub mod resolver_server {
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
-        collections::HashMap, convert::AsRef, net::SocketAddr, path::Path as FsPath,
-        fs::read_to_string, time::Duration,
+        collections::HashMap, convert::AsRef, fs::read_to_string, net::SocketAddr,
+        path::Path as FsPath, time::Duration,
     };
 
     mod file {
-        use std::net::SocketAddr;
         use super::ResolverId;
+        use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) enum Auth {
             Anonymous,
-            Krb5 {
-                spn: String,
-                permissions: String,
-            },
+            Krb5 { spn: String, permissions: String },
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,10 +39,7 @@ pub mod resolver_server {
     #[derive(Debug, Clone)]
     pub enum Auth {
         Anonymous,
-        Krb5 {
-            spn: String,
-            permissions: PMap,
-        },
+        Krb5 { spn: String, permissions: PMap },
     }
 
     #[derive(Debug, Clone)]
@@ -65,16 +59,9 @@ pub mod resolver_server {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,
-                file::Auth::Krb5 {
-                    spn,
-                    permissions,
-                } => {
-                    let permissions: PMap =
-                        from_str(&read_to_string(&permissions)?)?;
-                    Auth::Krb5 {
-                        spn,
-                        permissions,
-                    }
+                file::Auth::Krb5 { spn, permissions } => {
+                    let permissions: PMap = from_str(&read_to_string(&permissions)?)?;
+                    Auth::Krb5 { spn, permissions }
                 }
             };
             Ok(Config {
@@ -95,13 +82,13 @@ pub mod resolver {
     use crate::protocol::resolver::v1::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
-    use std::{convert::AsRef, net::SocketAddr, path::Path};
+    use std::{collections::HashMap, convert::AsRef, net::SocketAddr, path::Path};
     use tokio::fs::read_to_string;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {
         Anonymous,
-        Krb5 { target_spn: String },
+        Krb5 { target_spns: HashMap<ResolverId, String> },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

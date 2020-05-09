@@ -1,8 +1,8 @@
 use crate::{
-    os::{self, Krb5Ctx, ClientCtx},
     channel::Channel,
     chars::Chars,
     config::{self, resolver::Auth as CAuth},
+    os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     protocol::resolver::{
         self,
@@ -14,14 +14,9 @@ use crate::{
     },
     utils,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use futures::{
-    future::select_ok,
-    stream::Fuse,
-    prelude::*,
-    select_biased,
-};
+use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
@@ -84,19 +79,22 @@ async fn connect_read(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let addr = choose_read_addr(resolver);
-        let con = try_cf!("connect", continue, TcpStream::connect(&addr.1).await);
+        let (rid, addr) = choose_read_addr(resolver);
+        let con = try_cf!("connect", continue, TcpStream::connect(&addr).await);
         let mut con = Channel::new(con);
         try_cf!("send version", continue, con.send_one(&1u64).await);
         let _ver: u64 = try_cf!("recv version", continue, con.receive().await);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { upn, .. }, CAuth::Krb5 { target_spn }) => match sc {
+            (Auth::Krb5 { upn, .. }, CAuth::Krb5 { target_spns }) => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
                     let upn = upn.as_ref().map(|s| s.as_bytes());
-                    let target_spn = target_spn.as_bytes();
+                    let target_spn = target_spns
+                        .get(&rid)
+                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", rid))?
+                        .as_bytes();
                     let (ctx, tok) =
                         try_cf!("create ctx", continue, create_ctx(upn, target_spn));
                     (ClientAuthRead::Initiate(tok), Some(ctx))
@@ -219,12 +217,20 @@ async fn connect_write(
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
             (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { upn, spn }, CAuth::Krb5 { target_spn }) => {
+            (Auth::Krb5 { upn, spn }, CAuth::Krb5 { target_spns }) => {
                 match ctxts.read().get(&resolver_addr.0) {
                     Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                     None => {
                         let upnr = upn.as_ref().map(|s| s.as_bytes());
-                        let target_spn = target_spn.as_bytes();
+                        let target_spn = target_spns
+                            .get(&resolver_addr.0)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "no target spn for resolver {:?}",
+                                    resolver_addr.0
+                                )
+                            })?
+                            .as_bytes();
                         let (ctx, token) =
                             try_cf!("ctx", continue, create_ctx(upnr, target_spn));
                         let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
