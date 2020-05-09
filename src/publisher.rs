@@ -178,7 +178,7 @@ impl Drop for ValInner {
 pub struct Val(Arc<ValInner>);
 
 impl Val {
-    fn downgrade(&self) -> ValWeak {
+    pub fn downgrade(&self) -> ValWeak {
         ValWeak(Arc::downgrade(&self.0))
     }
 
@@ -243,10 +243,10 @@ impl Val {
 }
 
 #[derive(Clone)]
-struct ValWeak(Weak<ValInner>);
+pub struct ValWeak(Weak<ValInner>);
 
 impl ValWeak {
-    fn upgrade(&self) -> Option<Val> {
+    pub fn upgrade(&self) -> Option<Val> {
         Weak::upgrade(&self.0).map(Val)
     }
 }

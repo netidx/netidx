@@ -72,6 +72,8 @@ enum ToCon {
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Value>),
     Stream { id: Id, sub_id: SubId, tx: Sender<Batch>, last: bool },
+    Write(Id, Value),
+    Flush(oneshot::Sender<()>),
 }
 
 #[derive(Debug)]
@@ -137,6 +139,13 @@ impl Val {
             id: self.0.id,
         };
         let _ = self.0.connection.unbounded_send(m);
+    }
+
+    /// Write a value back to the publisher. This will start going out
+    /// as soon as this method returns, and you can call `flush` on
+    /// the subscriber to get pushback in case of a slow publisher.
+    pub fn write(&self, v: Value) {
+        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v));
     }
 
     pub fn id(&self) -> SubId {
@@ -263,6 +272,20 @@ impl DVal {
         }
     }
 
+    /// Write a value back to the publisher, see `Val::write`. If we
+    /// aren't currently connected the write will be dropped and this
+    /// method will return `false`
+    pub fn write(&self, v: Value) -> bool {
+        let t = self.0.lock();
+        match t.sub {
+            None => false,
+            Some(ref sub) => {
+                sub.write(v);
+                true
+            }
+        }
+    }
+        
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
@@ -378,7 +401,7 @@ impl Subscriber {
                     update_retry(&mut *subscriber, retry);
                 } else {
                     let r = subscriber
-                        .subscribe_vals(batch.keys().cloned(), Some(timeout))
+                        .subscribe(batch.keys().cloned(), Some(timeout))
                         .await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
@@ -471,7 +494,7 @@ impl Subscriber {
     /// `subscribe_vals_ut` future in a `time::timeout`. In the case
     /// timeout is specified, `subscribe_vals_ut` is guaranteed to
     /// complete no later than `now + timeout`.
-    pub async fn subscribe_vals(
+    pub async fn subscribe(
         &self,
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
@@ -685,12 +708,12 @@ impl Subscriber {
     /// Subscribe to one value. This is sufficient for a small number
     /// of paths, but if you need to subscribe to a lot of values it
     /// is more efficent to use `subscribe_vals_ut`
-    pub async fn subscribe_val(
+    pub async fn subscribe_one(
         &self,
         path: Path,
         timeout: Option<Duration>,
     ) -> Result<Val> {
-        self.subscribe_vals(iter::once(path), timeout).await.pop().unwrap().1
+        self.subscribe(iter::once(path), timeout).await.pop().unwrap().1
     }
 
     /// Create a durable value subscription to `path`.
@@ -704,7 +727,7 @@ impl Subscriber {
     /// subscription for a given path, calling
     /// `subscribe_val_durable_ut` again for the same path will just
     /// return another pointer to it.
-    pub fn durable_subscribe_val(&self, path: Path) -> DVal {
+    pub fn durable_subscribe(&self, path: Path) -> DVal {
         let mut t = self.0.lock();
         if let Some(s) = t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
         {
@@ -723,6 +746,25 @@ impl Subscriber {
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
         s
+    }
+
+    /// This will return when all pending operations are flushed out
+    /// to the publishers. This is primarially used to provide
+    /// pushback in the case you want to do a lot of writes, any you
+    /// need pushback in case a publisher is slow to process them,
+    /// however it applies to subscribe/unsubscribe as well.
+    pub async fn flush(&self) {
+        let flushes = {
+            let t = self.0.lock();
+            t.connections.values().map(|c| {
+                let (tx, rx) = oneshot::channel();
+                let _ = c.unbounded_send(ToCon::Flush(tx));
+                rx
+            }).collect::<Vec<_>>()
+        };
+        for flush in flushes {
+            let _ = flush.await;
+        }
     }
 }
 
@@ -1115,6 +1157,12 @@ async fn connection(
                             .or_insert_with(ChanId::new);
                         sub.streams.push((sub_id, *id, tx));
                     }
+                }
+                Some(BatchItem::InBatch(ToCon::Write(id, v))) => {
+                    try_cf!(write_con.queue_send(&To::Write(id, v)))
+                }
+                Some(BatchItem::InBatch(ToCon::Flush(tx))) => {
+                    let _ = tx.send(());
                 }
             },
         }
