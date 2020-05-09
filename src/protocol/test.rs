@@ -128,7 +128,9 @@ mod resolver {
     }
 
     fn permission_token() -> impl Strategy<Value = PermissionToken> {
-        (path(), any::<u64>()).prop_map(|(path, ts)| PermissionToken(path, ts))
+        (path(), any::<u32>(), any::<u64>()).prop_map(|(path, permissions, timestamp)| {
+            PermissionToken { path, permissions, timestamp }
+        })
     }
 
     fn to_write() -> impl Strategy<Value = ToWrite> {
