@@ -1,7 +1,7 @@
 use crate::publisher::SValue;
 use bytes::BytesMut;
 use futures::{
-    channel::mpsc::{self, Sender, Receiver},
+    channel::mpsc::{self, Receiver, Sender},
     prelude::*,
     select_biased,
     stream::{self, FusedStream},
@@ -10,42 +10,47 @@ use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::Auth,
-    subscriber::{DVal, SubId, Subscriber, Batch},
+    subscriber::{Batch, DVState, DVal, SubId, Subscriber},
     utils::{BatchItem, Batched, BytesWriter},
 };
 use std::{
     collections::{HashMap, HashSet},
-    result::Result,
     str::FromStr,
 };
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
 };
+use anyhow::{anyhow, Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum In {
     Add(String),
     Drop(String),
+    Write(String, SValue),
 }
 
 impl FromStr for In {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         if let Ok(i) = serde_json::from_str(s) {
             Ok(i)
         } else if s.starts_with("DROP|") && s.len() > 5 {
             Ok(In::Drop(String::from(&s[5..])))
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(String::from(&s[4..])))
-        } else {
-            let p = String::from(s);
-            if Path::is_absolute(&p) {
-                Err(format!("path is not absolute {}", p))
-            } else {
-                Ok(In::Add(p))
+        } else if s.starts_with("WRITE|") && s.len() > 6 {
+            match s[6..].find("|") {
+                None => Err(anyhow!("in write expected | between path and value")),
+                Some(i) => {
+                    let path = String::from(&s[6..i]);
+                    let val = serde_json::from_str(&s[i..])?;
+                    Ok(In::Write(path, val))
+                }
             }
+        } else {
+            Ok(In::Add(String::from(s)))
         }
     }
 }
@@ -72,7 +77,7 @@ struct Ctx {
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, DVal>,
     subscriber: Subscriber,
-    requests: Box<dyn FusedStream<Item = BatchItem<Result<String, io::Error>>> + Unpin>,
+    requests: Box<dyn FusedStream<Item = BatchItem<Result<String>>> + Unpin>,
     updates: Batched<Receiver<Batch>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
@@ -80,6 +85,7 @@ struct Ctx {
     to_stderr: BytesMut,
     add: HashSet<String>,
     drop: HashSet<String>,
+    write: Vec<(String, SValue)>,
 }
 
 impl Ctx {
@@ -91,7 +97,7 @@ impl Ctx {
             subscriber,
             subscriptions: HashMap::new(),
             requests: {
-                let stdin = BufReader::new(io::stdin()).lines();
+                let stdin = BufReader::new(io::stdin()).lines().map_err(Error::from);
                 Box::new(Batched::new(
                     stream::iter(paths).map(|p| Ok(p)).chain(stdin),
                     1000,
@@ -104,16 +110,21 @@ impl Ctx {
             to_stderr: BytesMut::new(),
             add: HashSet::new(),
             drop: HashSet::new(),
+            write: Vec::new(),
         }
     }
 
-    fn process_request(&mut self, r: Option<BatchItem<Result<String, io::Error>>>) {
+    async fn process_request(&mut self, r: Option<BatchItem<Result<String>>>) {
         match r {
             None | Some(BatchItem::InBatch(Err(_))) => {
+                // This handles the case the user did something like
+                // call us with stdin redirected from a file and we
+                // read EOF, or a hereis doc, or input is piped into
+                // us. We don't want to die in any of these cases.
                 self.requests = Box::new(stream::pending());
             }
             Some(BatchItem::InBatch(Ok(l))) => match l.parse::<In>() {
-                Err(e) => eprintln!("{}", e),
+                Err(e) => eprintln!("parse error: {}", e),
                 Ok(In::Add(p)) => {
                     if !self.drop.remove(&p) {
                         self.add.insert(p);
@@ -123,6 +134,9 @@ impl Ctx {
                     if !self.add.remove(&p) {
                         self.drop.insert(p);
                     }
+                }
+                Ok(In::Write(p, v)) => {
+                    self.write.push((p, v));
                 }
             },
             Some(BatchItem::EndBatch) => {
@@ -144,6 +158,23 @@ impl Ctx {
                         s
                     });
                 }
+                self.subscriber.flush().await;
+                for (p, v) in self.write.drain(..) {
+                    match self.subscriptions.get(p.as_str()) {
+                        None => {
+                            eprintln!("write to unknown path {}, subscribe first?", p)
+                        }
+                        Some(dv) => match dv.state() {
+                            DVState::Subscribed => {
+                                dv.write(v.into());
+                            }
+                            DVState::Unsubscribed => eprintln!(
+                                "write to failed subscription {} ignored retry later?",
+                                p
+                            ),
+                        },
+                    }
+                }
             }
         }
     }
@@ -151,7 +182,7 @@ impl Ctx {
     async fn process_update(
         &mut self,
         u: Option<BatchItem<Batch>>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<()> {
         Ok(match u {
             None => unreachable!(),
             Some(BatchItem::EndBatch) => {
@@ -164,11 +195,13 @@ impl Ctx {
                     self.stderr.write_all(&*to_write).await?;
                 }
             }
-            Some(BatchItem::InBatch(mut batch)) => for (id, value) in batch.consume() {
-                if let Some(path) = self.paths.get(&id) {
-                    let value = SValue::from_value(value);
-                    Out { path: &**path, value }
-                        .write(&mut self.to_stdout, &mut self.to_stderr);
+            Some(BatchItem::InBatch(mut batch)) => {
+                for (id, value) in batch.consume() {
+                    if let Some(path) = self.paths.get(&id) {
+                        let value = SValue::from(value);
+                        Out { path: &**path, value }
+                            .write(&mut self.to_stdout, &mut self.to_stderr);
+                    }
                 }
             }
         })
@@ -186,7 +219,7 @@ async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
                     Err(_) => break,
                 }
             },
-            r = ctx.requests.next() => ctx.process_request(r)
+            r = ctx.requests.next() => ctx.process_request(r).await
         }
     }
 }

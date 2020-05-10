@@ -9,7 +9,7 @@ use json_pubsub::{
     resolver::Auth,
     utils::{self, BatchItem, Batched},
 };
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration, convert::{From, Into}};
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader},
     runtime::Runtime,
@@ -58,21 +58,8 @@ pub(crate) enum SValue {
     Bytes(Vec<u8>),
 }
 
-impl SValue {
-    pub fn to_value(self) -> Value {
-        match self {
-            SValue::U32(n) => Value::U32(n),
-            SValue::I32(n) => Value::I32(n),
-            SValue::U64(n) => Value::U64(n),
-            SValue::I64(n) => Value::I64(n),
-            SValue::F32(n) => Value::F32(n),
-            SValue::F64(n) => Value::F64(n),
-            SValue::String(s) => Value::String(Chars::from(s)),
-            SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
-        }
-    }
-
-    pub fn from_value(v: Value) -> Self {
+impl From<Value> for SValue {
+    fn from(v: Value) -> Self {
         match v {
             Value::U32(n) => SValue::U32(n),
             Value::I32(n) => SValue::I32(n),
@@ -82,6 +69,21 @@ impl SValue {
             Value::F64(n) => SValue::F64(n),
             Value::String(c) => SValue::String(String::from(c.as_ref())),
             Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
+        }
+    }
+}
+
+impl Into<Value> for SValue {
+    fn into(self) -> Value {
+        match self {
+            SValue::U32(n) => Value::U32(n),
+            SValue::I32(n) => Value::I32(n),
+            SValue::U64(n) => Value::U64(n),
+            SValue::I64(n) => Value::I64(n),
+            SValue::F32(n) => Value::F32(n),
+            SValue::F64(n) => Value::F64(n),
+            SValue::String(s) => Value::String(Chars::from(s)),
+            SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
         }
     }
 }
@@ -140,14 +142,14 @@ pub(crate) fn run(
                         };
                         match published.get(path) {
                             Some(p) => {
-                                p.update(val.to_value());
+                                p.update(val.into());
                             }
                             None => {
                                 let path = Path::from(path);
                                 let publ = try_cf!(
                                     "failed to publish",
                                     continue,
-                                    publisher.publish(path.clone(), val.to_value())
+                                    publisher.publish(path.clone(), val.into())
                                 );
                                 published.insert(path, publ);
                             }
