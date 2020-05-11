@@ -185,6 +185,7 @@ pub enum DvState {
 enum SubState {
     Unsubscribed,
     Subscribed(Val),
+    #[allow(dead_code)] // I want the future option
     FatalError(Error),
 }
 
@@ -441,22 +442,6 @@ impl Subscriber {
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
-                            Err(e)
-                                if e.is::<PermissionDenied>()
-                                    || e.is::<ResolverError>() =>
-                            {
-                                warn!("fatal subscription error {}: {}", p, e);
-                                for s in mem::replace(&mut ds.states, vec![]) {
-                                    let _ = s.unbounded_send((
-                                        ds.sub_id,
-                                        DvState::FatalError(format!("{}", e)),
-                                    ));
-                                }
-                                ds.sub = SubState::FatalError(e);
-                                ds.streams.clear();
-                                subscriber.durable_dead.remove(&p);
-                                subscriber.durable_alive.remove(&p);
-                            }
                             Err(e) => {
                                 ds.tries += 1;
                                 ds.next_try = now + Duration::from_secs(ds.tries as u64);
