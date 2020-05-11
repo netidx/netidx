@@ -1,3 +1,4 @@
+pub use crate::protocol::publisher::v1::Value;
 use crate::{
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
@@ -6,7 +7,7 @@ use crate::{
     path::Path,
     protocol::{
         self,
-        publisher::v1::{From, Id, To, Value},
+        publisher::v1::{From, Id, To},
         resolver::v1::{Resolved, ResolverId},
     },
     resolver::{Auth, ResolverError, ResolverRead},
@@ -174,7 +175,7 @@ impl Val {
 }
 
 #[derive(Debug)]
-pub enum DVState {
+pub enum DvState {
     Subscribed,
     Unsubscribed,
     FatalError(String),
@@ -188,21 +189,21 @@ enum SubState {
 }
 
 #[derive(Debug)]
-struct DValInner {
+struct DvalInner {
     sub_id: SubId,
     sub: SubState,
     streams: Vec<Sender<Batch>>,
-    states: Vec<UnboundedSender<(SubId, DVState)>>,
+    states: Vec<UnboundedSender<(SubId, DvState)>>,
     tries: usize,
     next_try: Instant,
 }
 
 #[derive(Debug, Clone)]
-struct DValWeak(Weak<Mutex<DValInner>>);
+struct DvalWeak(Weak<Mutex<DvalInner>>);
 
-impl DValWeak {
-    fn upgrade(&self) -> Option<DVal> {
-        Weak::upgrade(&self.0).map(|s| DVal(s))
+impl DvalWeak {
+    fn upgrade(&self) -> Option<Dval> {
+        Weak::upgrade(&self.0).map(|s| Dval(s))
     }
 }
 
@@ -235,11 +236,11 @@ impl DValWeak {
 /// that `DUVal` and `DVal` be considered the default value
 /// subscription type where semantics allow.
 #[derive(Debug, Clone)]
-pub struct DVal(Arc<Mutex<DValInner>>);
+pub struct Dval(Arc<Mutex<DvalInner>>);
 
-impl DVal {
-    fn downgrade(&self) -> DValWeak {
-        DValWeak(Arc::downgrade(&self.0))
+impl Dval {
+    fn downgrade(&self) -> DvalWeak {
+        DvalWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last value published by the publisher, or None if the
@@ -259,26 +260,26 @@ impl DVal {
     pub fn state_updates(
         &self,
         include_current: bool,
-        tx: UnboundedSender<(SubId, DVState)>,
+        tx: UnboundedSender<(SubId, DvState)>,
     ) {
         let mut t = self.0.lock();
         t.states.retain(|c| !c.is_closed());
         if include_current {
             let current = match t.sub {
-                SubState::Unsubscribed => DVState::Unsubscribed,
-                SubState::Subscribed(_) => DVState::Subscribed,
-                SubState::FatalError(ref e) => DVState::FatalError(format!("{}", e)),
+                SubState::Unsubscribed => DvState::Unsubscribed,
+                SubState::Subscribed(_) => DvState::Subscribed,
+                SubState::FatalError(ref e) => DvState::FatalError(format!("{}", e)),
             };
             let _ = tx.unbounded_send((t.sub_id, current));
         }
         t.states.push(tx);
     }
 
-    pub fn state(&self) -> DVState {
+    pub fn state(&self) -> DvState {
         match self.0.lock().sub {
-            SubState::Unsubscribed => DVState::Unsubscribed,
-            SubState::Subscribed(_) => DVState::Subscribed,
-            SubState::FatalError(ref e) => DVState::FatalError(format!("{}", e)),
+            SubState::Unsubscribed => DvState::Unsubscribed,
+            SubState::Subscribed(_) => DvState::Subscribed,
+            SubState::FatalError(ref e) => DvState::FatalError(format!("{}", e)),
         }
     }
 
@@ -332,8 +333,8 @@ struct SubscriberInner {
     resolver: ResolverRead,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
-    durable_dead: HashMap<Path, DValWeak>,
-    durable_alive: HashMap<Path, DValWeak>,
+    durable_dead: HashMap<Path, DvalWeak>,
+    durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: Auth,
 }
@@ -448,7 +449,7 @@ impl Subscriber {
                                 for s in mem::replace(&mut ds.states, vec![]) {
                                     let _ = s.unbounded_send((
                                         ds.sub_id,
-                                        DVState::FatalError(format!("{}", e)),
+                                        DvState::FatalError(format!("{}", e)),
                                     ));
                                 }
                                 ds.sub = SubState::FatalError(e);
@@ -470,7 +471,7 @@ impl Subscriber {
                                 let mut i = 0;
                                 while i < ds.states.len() {
                                     match ds.states[i]
-                                        .unbounded_send((ds.sub_id, DVState::Subscribed))
+                                        .unbounded_send((ds.sub_id, DvState::Subscribed))
                                     {
                                         Ok(()) => {
                                             i += 1;
@@ -787,7 +788,7 @@ impl Subscriber {
     /// subscription for a given path, calling
     /// `subscribe_val_durable_ut` again for the same path will just
     /// return another pointer to it.
-    pub fn durable_subscribe(&self, path: Path) -> DVal {
+    pub fn durable_subscribe(&self, path: Path) -> Dval {
         let mut t = self.0.lock();
         if let Some(s) = t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
         {
@@ -795,7 +796,7 @@ impl Subscriber {
                 return s;
             }
         }
-        let s = DVal(Arc::new(Mutex::new(DValInner {
+        let s = Dval(Arc::new(Mutex::new(DvalInner {
             sub_id: SubId::new(),
             sub: SubState::Unsubscribed,
             streams: Vec::new(),
@@ -845,7 +846,7 @@ fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketA
             let mut i = 0;
             while i < inner.states.len() {
                 match inner.states[i]
-                    .unbounded_send((inner.sub_id, DVState::Unsubscribed))
+                    .unbounded_send((inner.sub_id, DvState::Unsubscribed))
                 {
                     Ok(()) => {
                         i += 1;

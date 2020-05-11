@@ -3,7 +3,7 @@ use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
-    subscriber::{DVState, DVal, Subscriber},
+    subscriber::{DvState, Dval, Subscriber},
 };
 use std::time::Duration;
 use tokio::{runtime::Runtime, time::Instant};
@@ -18,7 +18,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let subs = paths
             .into_iter()
             .map(|path| subscriber.durable_subscribe(path))
-            .collect::<Vec<DVal>>();
+            .collect::<Vec<Dval>>();
         let (tx, mut vals) = mpsc::channel(100000);
         for s in subs.iter() {
             s.updates(true, tx.clone())
@@ -43,20 +43,25 @@ pub(crate) fn run(config: Config, auth: Auth) {
                     if elapsed > one_second {
                         let mut subscribed = 0;
                         let mut unsubscribed = 0;
+                        let mut fatal = 0;
                         for s in subs.iter() {
                             match s.state() {
-                                DVState::Unsubscribed => {
+                                DvState::Unsubscribed => {
                                     unsubscribed += 1;
                                 }
-                                DVState::Subscribed => {
+                                DvState::Subscribed => {
                                     subscribed += 1;
+                                }
+                                DvState::FatalError(_) => {
+                                    fatal += 1;
                                 }
                             }
                         }
                         println!(
-                            "subscribed: {} unsubscribed: {} rx: {:.0} rx(avg): {:.0} batch(avg): {:.0}",
+                            "subscribed: {} unsubscribed: {}({}) rx: {:.0} rx(avg): {:.0} batch(avg): {:.0}",
                             subscribed,
                             unsubscribed,
+                            fatal,
                             n as f64 / elapsed.as_secs_f64(),
                             total as f64 / since_start.as_secs_f64(),
                             batch_size as f64 / nbatches as f64

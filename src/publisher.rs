@@ -1,3 +1,4 @@
+pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::Permissions,
     channel::Channel,
@@ -6,10 +7,7 @@ use crate::{
     pack::Pack,
     path::Path,
     protocol::{
-        publisher::{
-            self,
-            v1::{Id, Value},
-        },
+        publisher::{self, v1::Id},
         resolver::v1::ResolverId,
     },
     resolver::{Auth, ResolverWrite},

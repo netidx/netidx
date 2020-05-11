@@ -1,7 +1,8 @@
 use crate::publisher::SValue;
+use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use futures::{
-    channel::mpsc::{self, Receiver, Sender},
+    channel::mpsc::{self, Receiver, Sender, UnboundedSender, UnboundedReceiver},
     prelude::*,
     select_biased,
     stream::{self, FusedStream},
@@ -10,7 +11,7 @@ use json_pubsub::{
     config::resolver::Config,
     path::Path,
     resolver::Auth,
-    subscriber::{Batch, DVState, DVal, SubId, Subscriber},
+    subscriber::{Batch, DvState, Dval, SubId, Subscriber},
     utils::{BatchItem, Batched, BytesWriter},
 };
 use std::{
@@ -21,7 +22,6 @@ use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
 };
-use anyhow::{anyhow, Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum In {
@@ -73,12 +73,14 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    sender: Sender<Batch>,
+    sender_updates: Sender<Batch>,
+    sender_states: UnboundedSender<(SubId, DvState)>,
     paths: HashMap<SubId, Path>,
-    subscriptions: HashMap<Path, DVal>,
+    subscriptions: HashMap<Path, Dval>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String>>> + Unpin>,
     updates: Batched<Receiver<Batch>>,
+    states: UnboundedReceiver<(SubId, DvState)>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -90,9 +92,11 @@ struct Ctx {
 
 impl Ctx {
     fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
-        let (sender, updates) = mpsc::channel(100);
+        let (sender_updates, updates) = mpsc::channel(100);
+        let (sender_states, states) = mpsc::unbounded();
         Ctx {
-            sender,
+            sender_updates,
+            sender_states,
             paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
@@ -104,6 +108,7 @@ impl Ctx {
                 ))
             },
             updates: Batched::new(updates, 100_000),
+            states,
             stdout: io::stdout(),
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
@@ -150,11 +155,13 @@ impl Ctx {
                     let subscriptions = &mut self.subscriptions;
                     let paths = &mut self.paths;
                     let subscriber = &self.subscriber;
-                    let sender = self.sender.clone();
+                    let sender_updates = self.sender_updates.clone();
+                    let sender_states = self.sender_states.clone();
                     subscriptions.entry(p.clone()).or_insert_with(|| {
                         let s = subscriber.durable_subscribe(p.clone());
                         paths.insert(s.id(), p.clone());
-                        s.updates(true, sender);
+                        s.updates(true, sender_updates);
+                        s.state_updates(true, sender_states);
                         s
                     });
                 }
@@ -165,10 +172,10 @@ impl Ctx {
                             eprintln!("write to unknown path {}, subscribe first?", p)
                         }
                         Some(dv) => match dv.state() {
-                            DVState::Subscribed => {
+                            DvState::Subscribed => {
                                 dv.write(v.into());
                             }
-                            DVState::Unsubscribed => eprintln!(
+                            DvState::Unsubscribed | DvState::FatalError(_) => eprintln!(
                                 "write to failed subscription {} ignored retry later?",
                                 p
                             ),
@@ -179,12 +186,9 @@ impl Ctx {
         }
     }
 
-    async fn process_update(
-        &mut self,
-        u: Option<BatchItem<Batch>>,
-    ) -> Result<()> {
+    async fn process_update(&mut self, u: Option<BatchItem<Batch>>) -> Result<()> {
         Ok(match u {
-            None => unreachable!(),
+            None => unreachable!(), // channel will never close
             Some(BatchItem::EndBatch) => {
                 if self.to_stdout.len() > 0 {
                     let to_write = self.to_stdout.split().freeze();
@@ -206,6 +210,26 @@ impl Ctx {
             }
         })
     }
+
+    fn process_state_change(&mut self, u: Option<(SubId, DvState)>) {
+        match u {
+            None => unreachable!(), // channel will never close
+            Some((id, DvState::Unsubscribed)) => eprintln!(
+                "subscription to {} now Unsubscribed",
+                self.paths.get(&id).map(|p| p.as_ref()).unwrap_or("{unknown}")
+            ),
+            Some((id, DvState::Subscribed)) => eprintln!(
+                "subscription to {} now Subscribed",
+                self.paths.get(&id).map(|p| p.as_ref()).unwrap_or("{unknown}")
+            ),
+            Some((id, DvState::FatalError(e))) => {
+                if let Some(path) = self.paths.remove(&id) {
+                    self.subscriptions.remove(&path);
+                    eprintln!("subscription to {} is dead {}", path, e);
+                }
+            }
+        }
+    }
 }
 
 async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
@@ -219,6 +243,7 @@ async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
                     Err(_) => break,
                 }
             },
+            u = ctx.states.next() => ctx.process_state_change(u),
             r = ctx.requests.next() => ctx.process_request(r).await
         }
     }
