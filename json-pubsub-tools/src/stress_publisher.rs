@@ -17,7 +17,7 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
         .into_iter()
         .map(|i| {
             let path = Path::from(format!("/bench/{}", i));
-            publisher.publish(path, Value::U64(v)).expect("encode")
+            publisher.publish(path, Value::V64(v)).expect("encode")
         })
         .collect::<Vec<_>>();
     publisher.flush(None).await.expect("publish");

@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use std::{
     clone::Clone,
     collections::{
-        BTreeSet, Bound,
+        BTreeMap, BTreeSet, Bound,
         Bound::{Excluded, Included, Unbounded},
         HashMap, HashSet,
     },
@@ -17,6 +17,7 @@ use std::{
     iter,
     net::SocketAddr,
     ops::Deref,
+    result,
     sync::{Arc, Weak},
 };
 
@@ -82,6 +83,8 @@ pub(crate) struct StoreInner<T> {
     by_path: HashMap<Path, Addrs>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
+    defaults: BTreeSet<Path>,
+    referrals: BTreeMap<Path, Vec<(SocketAddr, u64)>>,
     addrs: HCAddrs,
     clinfos: HashMap<SocketAddr, T, FxBuildHasher>,
 }
@@ -131,13 +134,38 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr) {
+    fn check_referral(&self, path: &Path) -> result::Result<(), &Vec<(SocketAddr, u64)>> {
+        let r = self
+            .referrals
+            .range::<str, (Bound<&str>, Bound<&str>)>((
+                Unbounded,
+                Excluded(path.as_ref()),
+            ))
+            .next_back();
+        match r {
+            None => Ok(()),
+            Some((p, v)) if path.starts_with(p.as_ref()) => Err(v),
+            Some(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn publish(
+        &mut self,
+        path: Path,
+        addr: SocketAddr,
+        default: bool,
+    ) -> result::Result<(), &Vec<(SocketAddr, u64)>> {
+        self.check_referral(&path)?;
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
         self.add_parents(path.as_ref());
         let n = Path::levels(path.as_ref());
-        self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path);
+        self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
+        if default {
+            self.defaults.insert(path);
+        }
+        Ok(())
     }
 
     pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
@@ -160,6 +188,7 @@ impl<T> StoreInner<T> {
                 }
                 None => {
                     self.by_path.remove(&path);
+                    self.defaults.remove(&path);
                     let n = Path::levels(path.as_ref());
                     self.by_level.get_mut(&n).into_iter().for_each(|s| {
                         s.remove(&path);
@@ -178,11 +207,31 @@ impl<T> StoreInner<T> {
         })
     }
 
+    fn resolve_default(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
+        let default = self
+            .defaults
+            .range::<str, (Bound<&str>, Bound<&str>)>((
+                Unbounded,
+                Excluded(path.as_ref()),
+            ))
+            .next_back();
+        match default {
+            None => Vec::new(),
+            Some(p) if path.starts_with(p.as_ref()) => {
+                match self.by_path.get(p.as_ref()) {
+                    None => Vec::new(),
+                    Some(a) => a.iter().map(|a| (*a, Bytes::new())).collect(),
+                }
+            }
+            Some(_) => Vec::new(),
+        }
+    }
+
     pub(crate) fn resolve(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
         self.by_path
-            .get(&**path)
+            .get(path.as_ref())
             .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
-            .unwrap_or_else(|| Vec::new())
+            .unwrap_or_else(|| self.resolve_default(path))
     }
 
     pub(crate) fn resolve_and_sign(
@@ -193,29 +242,44 @@ impl<T> StoreInner<T> {
         perm: Permissions,
         path: &Path,
     ) -> Result<Vec<(SocketAddr, Bytes)>> {
+        fn sign_path(
+            sec: &SecStoreInner,
+            krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
+            addr: SocketAddr,
+            path: &Path,
+            perm: Permissions,
+            now: u64,
+        ) -> Result<(SocketAddr, Bytes)> {
+            match sec.get_write(&addr) {
+                None => Ok((addr, Bytes::new())),
+                Some((spn, ctx)) => {
+                    if !krb5_spns.contains_key(&addr) {
+                        krb5_spns.insert(addr, spn.clone());
+                    }
+                    let msg = utils::pack(&PermissionToken {
+                        path: path.clone(),
+                        permissions: perm.bits(),
+                        timestamp: now,
+                    })?;
+                    let tok = utils::bytes(&*ctx.wrap(true, &*msg)?);
+                    Ok((addr, tok))
+                }
+            }
+        }
         self.by_path
             .get(&*path)
             .map(|addrs| {
                 Ok(addrs
                     .iter()
-                    .map(|addr| match sec.get_write(&addr) {
-                        None => Ok((*addr, Bytes::new())),
-                        Some((spn, ctx)) => {
-                            if !krb5_spns.contains_key(addr) {
-                                krb5_spns.insert(*addr, spn.clone());
-                            }
-                            let msg = utils::pack(&PermissionToken {
-                                path: path.clone(),
-                                permissions: perm.bits(),
-                                timestamp: now
-                            })?;
-                            let tok = utils::bytes(&*ctx.wrap(true, &*msg)?);
-                            Ok((*addr, tok))
-                        }
-                    })
+                    .map(|addr| sign_path(sec, krb5_spns, *addr, path, perm, now))
                     .collect::<Result<Vec<(SocketAddr, Bytes)>>>()?)
             })
-            .unwrap_or_else(|| Ok(vec![]))
+            .unwrap_or_else(|| {
+                self.resolve_default(path)
+                    .into_iter()
+                    .map(|(a, _)| sign_path(sec, krb5_spns, a, path, perm, now))
+                    .collect::<Result<Vec<(SocketAddr, Bytes)>>>()
+            })
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
@@ -265,6 +329,7 @@ impl<T> Store<T> {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
+            defaults: BTreeSet::new(),
             addrs: HCAddrs::new(),
             clinfos: HashMap::with_hasher(FxBuildHasher::default()),
         })))

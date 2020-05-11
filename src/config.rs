@@ -1,5 +1,5 @@
 pub mod resolver_server {
-    use crate::protocol::resolver::v1::ResolverId;
+    use crate::{protocol::resolver::v1::ResolverId, path::Path};
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
@@ -19,6 +19,8 @@ pub mod resolver_server {
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
+            pub(super) root: String,
+            pub(super) parents: Vec<SocketAddr>,
             pub(super) pid_file: String,
             pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
@@ -44,6 +46,8 @@ pub mod resolver_server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
+        pub root: Path,
+        pub parents: Vec<SocketAddr>,
         pub pid_file: String,
         pub id: ResolverId,
         pub addr: SocketAddr,
@@ -64,7 +68,16 @@ pub mod resolver_server {
                     Auth::Krb5 { spn, permissions }
                 }
             };
+            let root = Path::from(cfg.root);
+            if !Path::is_absolute(&root) {
+                bail!("the root path must be absolute")
+            }
+            if root.as_ref() != "/" && cfg.parents.is_empty() {
+                bail!("if the root is not / then you must configure a parent")
+            }
             Ok(Config {
+                root,
+                parents: cfg.parents,
                 pid_file: cfg.pid_file,
                 id: cfg.id,
                 addr: cfg.addr,
