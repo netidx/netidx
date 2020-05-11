@@ -26,13 +26,14 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
     loop {
         v += 1;
         for p in published.iter() {
-            p.update(Value::U64(v));
+            p.update(Value::V64(v));
             sent += 1;
         }
         publisher.flush(None).await.expect("flush");
         let now = Instant::now();
         let elapsed = now - last_stat;
         if elapsed > one_second {
+            v = 0;
             select! {
                 _ = publisher.wait_any_client().fuse() => (),
                 _ = signal::ctrl_c().fuse() => break,
