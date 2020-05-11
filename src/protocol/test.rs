@@ -124,6 +124,7 @@ mod resolver {
         prop_oneof![
             resolved().prop_map(FromRead::Resolved),
             collection::vec(path(), (0, 1000)).prop_map(FromRead::List),
+            Just(FromRead::Denied),
             chars().prop_map(FromRead::Error)
         ]
     }
@@ -147,6 +148,7 @@ mod resolver {
         prop_oneof![
             Just(FromWrite::Published),
             Just(FromWrite::Unpublished),
+            Just(FromWrite::Denied),
             chars().prop_map(FromWrite::Error)
         ]
     }
@@ -224,9 +226,13 @@ mod publisher {
     fn value() -> impl Strategy<Value = Value> {
         prop_oneof![
             any::<u32>().prop_map(Value::U32),
+            any::<u32>().prop_map(Value::V32),
             any::<i32>().prop_map(Value::I32),
+            any::<i32>().prop_map(Value::Z32),
             any::<u64>().prop_map(Value::U64),
+            any::<u64>().prop_map(Value::V64),
             any::<i64>().prop_map(Value::I64),
+            any::<i64>().prop_map(Value::Z64),
             any::<f32>().prop_map(Value::F32),
             any::<f64>().prop_map(Value::F64),
             chars().prop_map(Value::String),

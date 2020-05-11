@@ -175,13 +175,29 @@ impl Pack for To {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {
+    /// full 4 byte u32
     U32(u32),
+    /// LEB128 varint, 1 or more bytes depending on value
+    V32(u32),
+    /// full 4 byte i32
     I32(i32),
+    /// LEB128 varint zigzag encoded 1 or more bytes depending on abs(value)
+    Z32(i32),
+    /// full 8 byte u64
     U64(u64),
+    /// LEB128 varint, 1 - 10 bytes depending on value
+    V64(u64),
+    /// full 8 byte i64
     I64(i64),
+    /// LEB128 varint zigzag encoded, 1 - 10 bytes depending on abs(value)
+    Z64(i64),
+    /// 4 byte ieee754 single precision float
     F32(f32),
+    /// 8 byte ieee754 double precision float
     F64(f64),
+    /// unicode string, zero copy decode
     String(Chars),
+    /// byte array, zero copy decode
     Bytes(Bytes),
 }
 
@@ -189,9 +205,13 @@ impl Pack for Value {
     fn len(&self) -> usize {
         1 + match self {
             Value::U32(_) => mem::size_of::<u32>(),
+            Value::V32(v) => pack::varint_len(*v as u64),
             Value::I32(_) => mem::size_of::<i32>(),
+            Value::Z32(v) => pack::varint_len(pack::i32_zz(*v) as u64),
             Value::U64(_) => mem::size_of::<u64>(),
+            Value::V64(v) => pack::varint_len(*v),
             Value::I64(_) => mem::size_of::<i64>(),
+            Value::Z64(v) => pack::varint_len(pack::i64_zz(*v) as u64),
             Value::F32(_) => mem::size_of::<f32>(),
             Value::F64(_) => mem::size_of::<f64>(),
             Value::String(c) => <Chars as Pack>::len(c),
@@ -205,32 +225,48 @@ impl Pack for Value {
                 buf.put_u8(0);
                 Ok(buf.put_u32(*i))
             }
-            Value::I32(i) => {
+            Value::V32(i) => {
                 buf.put_u8(1);
+                Ok(pack::encode_varint(*i as u64, buf))
+            }
+            Value::I32(i) => {
+                buf.put_u8(2);
                 Ok(buf.put_i32(*i))
             }
+            Value::Z32(i) => {
+                buf.put_u8(3);
+                Ok(pack::encode_varint(pack::i32_zz(*i) as u64, buf))
+            }
             Value::U64(i) => {
-                buf.put_u8(2);
+                buf.put_u8(4);
                 Ok(buf.put_u64(*i))
             }
+            Value::V64(i) => {
+                buf.put_u8(5);
+                Ok(pack::encode_varint(*i, buf))
+            }
             Value::I64(i) => {
-                buf.put_u8(3);
+                buf.put_u8(6);
                 Ok(buf.put_i64(*i))
             }
+            Value::Z64(i) => {
+                buf.put_u8(7);
+                Ok(pack::encode_varint(pack::i64_zz(*i), buf))
+            }
             Value::F32(i) => {
-                buf.put_u8(4);
+                buf.put_u8(8);
                 Ok(buf.put_f32(*i))
             }
             Value::F64(i) => {
-                buf.put_u8(5);
+                buf.put_u8(9);
                 Ok(buf.put_f64(*i))
             }
             Value::String(s) => {
-                buf.put_u8(6);
+                buf.put_u8(10);
                 <Chars as Pack>::encode(s, buf)
             }
             Value::Bytes(b) => {
-                buf.put_u8(7);
+                buf.put_u8(11);
                 <Bytes as Pack>::encode(b, buf)
             }
         }
@@ -239,13 +275,17 @@ impl Pack for Value {
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Value::U32(buf.get_u32())),
-            1 => Ok(Value::I32(buf.get_i32())),
-            2 => Ok(Value::U64(buf.get_u64())),
-            3 => Ok(Value::I64(buf.get_i64())),
-            4 => Ok(Value::F32(buf.get_f32())),
-            5 => Ok(Value::F64(buf.get_f64())),
-            6 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
-            7 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
+            1 => Ok(Value::V32(pack::decode_varint(buf)? as u32)),
+            2 => Ok(Value::I32(buf.get_i32())),
+            3 => Ok(Value::Z32(pack::i32_uzz(pack::decode_varint(buf)? as u32))),
+            4 => Ok(Value::U64(buf.get_u64())),
+            5 => Ok(Value::V64(pack::decode_varint(buf)?)),
+            6 => Ok(Value::I64(buf.get_i64())),
+            7 => Ok(Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?))),
+            8 => Ok(Value::F32(buf.get_f32())),
+            9 => Ok(Value::F64(buf.get_f64())),
+            10 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
+            11 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)), // taking it to 11
             _ => Err(PackError::UnknownTag),
         }
     }

@@ -98,13 +98,8 @@ impl Pack for Bytes {
     }
 }
 
-pub(crate) fn varint_len(mut value: u64) -> usize {
-    let mut len = 1;
-    while value >= 0x80 {
-        value >>= 7;
-        len += 1;
-    }
-    len
+pub fn varint_len(value: u64) -> usize {
+    ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
 }
 
 pub(crate) fn encode_varint(mut value: u64, buf: &mut BytesMut) {
@@ -117,6 +112,24 @@ pub(crate) fn encode_varint(mut value: u64, buf: &mut BytesMut) {
             value >>= 7;
         }
     }
+}
+
+pub(crate) fn i32_zz(n: i32) -> u32 {
+    ((n << 1) ^ (n >> 31)) as u32
+}
+
+pub(crate) fn i32_uzz(n: u32) -> i32 {
+    let n = n as i32;
+    (n >> 1) ^ ((n << 31) >> 31)
+}
+
+pub(crate) fn i64_zz(n: i64) -> u64 {
+    ((n << 1) ^ (n >> 63)) as u64
+}
+
+pub(crate) fn i64_uzz(n: u64) -> i64 {
+    let n = n as i64;
+    (n >> 1) ^ ((n << 63) >> 63)
 }
 
 pub(crate) fn decode_varint(buf: &mut BytesMut) -> Result<u64, PackError> {
