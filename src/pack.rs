@@ -119,8 +119,7 @@ pub(crate) fn i32_zz(n: i32) -> u32 {
 }
 
 pub(crate) fn i32_uzz(n: u32) -> i32 {
-    let n = n as i32;
-    (n >> 1) ^ ((n << 31) >> 31)
+    ((n >> 1) as i32) ^ (((n as i32) << 31) >> 31)
 }
 
 pub(crate) fn i64_zz(n: i64) -> u64 {
@@ -128,8 +127,7 @@ pub(crate) fn i64_zz(n: i64) -> u64 {
 }
 
 pub(crate) fn i64_uzz(n: u64) -> i64 {
-    let n = n as i64;
-    (n >> 1) ^ ((n << 63) >> 63)
+    ((n >> 1) as i64) ^ (((n as i64) << 63) >> 63)
 }
 
 pub(crate) fn decode_varint(buf: &mut BytesMut) -> Result<u64, PackError> {
