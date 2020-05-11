@@ -14,7 +14,7 @@ use crate::{
     },
     utils,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
@@ -23,6 +23,7 @@ use parking_lot::RwLock;
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
+    error, fmt,
     fmt::Debug,
     net::SocketAddr,
     sync::Arc,
@@ -34,6 +35,21 @@ use tokio::{
     task,
     time::{self, Instant, Interval},
 };
+
+#[derive(Debug, Clone)]
+pub enum ResolverError {
+    Denied,
+    Unexpected,
+    Error(Chars),
+}
+
+impl fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "resolver error: {:?}", self)
+    }
+}
+
+impl error::Error for ResolverError {}
 
 static TTL: u64 = 120;
 
@@ -179,14 +195,18 @@ impl ResolverRead {
     pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
         match send(&self.0, resolver::v1::ToRead::Resolve(paths)).await? {
             resolver::v1::FromRead::Resolved(r) => Ok(r),
-            _ => bail!("unexpected response"),
+            resolver::v1::FromRead::Denied => Err(Error::from(ResolverError::Denied)),
+            resolver::v1::FromRead::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 
     pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
         match send(&self.0, resolver::v1::ToRead::List(p)).await? {
             resolver::v1::FromRead::List(v) => Ok(v),
-            _ => bail!("unexpected response"),
+            resolver::v1::FromRead::Denied => Err(Error::from(ResolverError::Denied)),
+            resolver::v1::FromRead::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 }
@@ -489,21 +509,27 @@ impl ResolverWrite {
     pub async fn publish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Publish(paths)).await? {
             FromWrite::Published => Ok(()),
-            _ => bail!("unexpected response"),
+            FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
+            FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 
     pub async fn unpublish(&self, paths: Vec<Path>) -> Result<()> {
         match send(&self.sender, ToWrite::Unpublish(paths)).await? {
             FromWrite::Unpublished => Ok(()),
-            _ => bail!("unexpected response"),
+            FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
+            FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 
     pub async fn clear(&self) -> Result<()> {
         match send(&self.sender, ToWrite::Clear).await? {
             FromWrite::Unpublished => Ok(()),
-            _ => bail!("unexpected response"),
+            FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
+            FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 

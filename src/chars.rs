@@ -1,4 +1,4 @@
-use crate::utils::{Pack, PackError};
+use crate::pack::{Pack, PackError};
 use bytes::{Bytes, BytesMut};
 use std::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},

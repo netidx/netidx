@@ -1,16 +1,19 @@
-pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::Permissions,
     channel::Channel,
     config,
     os::{self, ClientCtx, Krb5Ctx, ServerCtx},
+    pack::Pack,
     path::Path,
     protocol::{
-        publisher::{self, v1::Id},
+        publisher::{
+            self,
+            v1::{Id, Value},
+        },
         resolver::v1::ResolverId,
     },
     resolver::{Auth, ResolverWrite},
-    utils::{self, ChanId, ChanWrap, Pack},
+    utils::{self, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;

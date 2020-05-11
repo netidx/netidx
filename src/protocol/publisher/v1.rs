@@ -2,7 +2,7 @@ use crate::{
     chars::Chars,
     path::Path,
     protocol::resolver::v1::ResolverId,
-    utils::{self, Pack, PackError},
+    pack::{self, Pack, PackError},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{mem, result};
@@ -27,15 +27,15 @@ impl Id {
 
 impl Pack for Id {
     fn len(&self) -> usize {
-        utils::varint_len(self.0)
+        pack::varint_len(self.0)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        Ok(utils::encode_varint(self.0, buf))
+        Ok(pack::encode_varint(self.0, buf))
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        Ok(Id(utils::decode_varint(buf)?))
+        Ok(Id(pack::decode_varint(buf)?))
     }
 }
 

@@ -41,6 +41,7 @@
 #[macro_use] extern crate pin_utils;
 #[macro_use] extern crate bitflags;
 
+mod pack;
 #[macro_use] pub mod utils;
 mod os;
 pub mod chars;

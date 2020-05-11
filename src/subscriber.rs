@@ -1,34 +1,32 @@
-pub use crate::protocol::publisher::v1::Value;
 use crate::{
-    os::{self, ClientCtx, Krb5Ctx},
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
     config,
+    os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     protocol::{
         self,
-        publisher::v1::{From, Id, To},
+        publisher::v1::{From, Id, To, Value},
         resolver::v1::{Resolved, ResolverId},
     },
-    resolver::{Auth, ResolverRead},
-    utils::{self, BatchItem, Batched, ChanWrap, ChanId},
+    resolver::{Auth, ResolverError, ResolverRead},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{
-    // CR estokes: switch to tokio when it has is_closed.
     channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
-    select,
-    select_biased,
+    select, select_biased,
 };
 use fxhash::FxBuildHasher;
-use log::info;
+use log::{info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
     cmp::{max, Eq, PartialEq},
     collections::{hash_map::Entry, HashMap},
+    error, fmt,
     hash::Hash,
     iter, mem,
     net::SocketAddr,
@@ -44,6 +42,28 @@ use tokio::{
 };
 
 const BATCH: usize = 100_000;
+
+#[derive(Debug)]
+pub struct PermissionDenied;
+
+impl fmt::Display for PermissionDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "permission denied")
+    }
+}
+
+impl error::Error for PermissionDenied {}
+
+#[derive(Debug)]
+pub struct NoSuchValue;
+
+impl fmt::Display for NoSuchValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no such value")
+    }
+}
+
+impl error::Error for NoSuchValue {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubId(u64);
@@ -153,16 +173,24 @@ impl Val {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub enum DVState {
     Subscribed,
     Unsubscribed,
+    FatalError(String),
+}
+
+#[derive(Debug)]
+enum SubState {
+    Unsubscribed,
+    Subscribed(Val),
+    FatalError(Error),
 }
 
 #[derive(Debug)]
 struct DValInner {
     sub_id: SubId,
-    sub: Option<Val>,
+    sub: SubState,
     streams: Vec<Sender<Batch>>,
     states: Vec<UnboundedSender<(SubId, DVState)>>,
     tries: usize,
@@ -217,11 +245,11 @@ impl DVal {
     /// Get the last value published by the publisher, or None if the
     /// subscription is currently dead.
     pub async fn last(&self) -> Option<Value> {
-        let sub = self.0.lock().sub.clone();
-        match sub {
-            None => None,
-            Some(sub) => sub.last().await,
-        }
+        let sub = match self.0.lock().sub {
+            SubState::Unsubscribed | SubState::FatalError(_) => return None,
+            SubState::Subscribed(ref sub) => sub.clone(),
+        };
+        sub.last().await
     }
 
     /// Return a stream that produces a value when the state of the
@@ -237,8 +265,9 @@ impl DVal {
         t.states.retain(|c| !c.is_closed());
         if include_current {
             let current = match t.sub {
-                None => DVState::Unsubscribed,
-                Some(_) => DVState::Subscribed,
+                SubState::Unsubscribed => DVState::Unsubscribed,
+                SubState::Subscribed(_) => DVState::Subscribed,
+                SubState::FatalError(ref e) => DVState::FatalError(format!("{}", e)),
             };
             let _ = tx.unbounded_send((t.sub_id, current));
         }
@@ -246,10 +275,10 @@ impl DVal {
     }
 
     pub fn state(&self) -> DVState {
-        if self.0.lock().sub.is_none() {
-            DVState::Unsubscribed
-        } else {
-            DVState::Subscribed
+        match self.0.lock().sub {
+            SubState::Unsubscribed => DVState::Unsubscribed,
+            SubState::Subscribed(_) => DVState::Subscribed,
+            SubState::FatalError(ref e) => DVState::FatalError(format!("{}", e)),
         }
     }
 
@@ -260,8 +289,11 @@ impl DVal {
     pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Batch>) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
+        if let SubState::FatalError(_) = t.sub {
+            return;
+        }
         t.streams.push(tx.clone());
-        if let Some(ref sub) = t.sub {
+        if let SubState::Subscribed(ref sub) = t.sub {
             let m = ToCon::Stream {
                 tx,
                 sub_id: t.sub_id,
@@ -278,14 +310,14 @@ impl DVal {
     pub fn write(&self, v: Value) -> bool {
         let t = self.0.lock();
         match t.sub {
-            None => false,
-            Some(ref sub) => {
+            SubState::Unsubscribed | SubState::FatalError(_) => false,
+            SubState::Subscribed(ref sub) => {
                 sub.write(v);
                 true
             }
         }
     }
-        
+
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
@@ -368,6 +400,7 @@ impl Subscriber {
         }
         async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
             if let Some(subscriber) = subscriber.upgrade() {
+                info!("doing resubscriptions");
                 let now = Instant::now();
                 let (mut batch, timeout) = {
                     let mut b = HashMap::new();
@@ -400,20 +433,39 @@ impl Subscriber {
                     let mut subscriber = subscriber.0.lock();
                     update_retry(&mut *subscriber, retry);
                 } else {
-                    let r = subscriber
-                        .subscribe(batch.keys().cloned(), Some(timeout))
-                        .await;
+                    let r =
+                        subscriber.subscribe(batch.keys().cloned(), Some(timeout)).await;
                     let mut subscriber = subscriber.0.lock();
                     let now = Instant::now();
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
-                            Err(_) => {
-                                // CR estokes: log this error?
+                            Err(e)
+                                if e.is::<PermissionDenied>()
+                                    || e.is::<ResolverError>() =>
+                            {
+                                warn!("fatal subscription error {}: {}", p, e);
+                                for s in mem::replace(&mut ds.states, vec![]) {
+                                    let _ = s.unbounded_send((
+                                        ds.sub_id,
+                                        DVState::FatalError(format!("{}", e)),
+                                    ));
+                                }
+                                ds.sub = SubState::FatalError(e);
+                                ds.streams.clear();
+                                subscriber.durable_dead.remove(&p);
+                                subscriber.durable_alive.remove(&p);
+                            }
+                            Err(e) => {
                                 ds.tries += 1;
                                 ds.next_try = now + Duration::from_secs(ds.tries as u64);
+                                warn!(
+                                    "resubscription error {}: {}, next try: {:?}",
+                                    p, e, ds.next_try
+                                );
                             }
                             Ok(sub) => {
+                                info!("resubscription success {}", p);
                                 ds.tries = 0;
                                 let mut i = 0;
                                 while i < ds.states.len() {
@@ -438,7 +490,7 @@ impl Subscriber {
                                             id: sub.0.id,
                                         });
                                 }
-                                ds.sub = Some(sub);
+                                ds.sub = SubState::Subscribed(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
                                 subscriber.durable_alive.insert(p.clone(), w.clone());
                             }
@@ -568,14 +620,22 @@ impl Subscriber {
                         );
                     }
                 }
-                Ok(Err(e)) => {
-                    for p in to_resolve {
-                        pending.insert(
-                            p.clone(),
-                            St::Error(anyhow!("resolving path: {} failed: {}", p, e)),
-                        );
+                Ok(Err(e)) => match e.downcast::<ResolverError>() {
+                    Ok(e) => {
+                        for p in to_resolve {
+                            let e = Error::from(e.clone()).context(p.clone());
+                            pending.insert(p.clone(), St::Error(e));
+                        }
                     }
-                }
+                    Err(e) => {
+                        for p in to_resolve {
+                            pending.insert(
+                                p.clone(),
+                                St::Error(anyhow!("resolving {} failed: {}", p, e)),
+                            );
+                        }
+                    }
+                },
                 Ok(Ok(Resolved { addrs, resolver, krb5_spns })) => {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
@@ -737,7 +797,7 @@ impl Subscriber {
         }
         let s = DVal(Arc::new(Mutex::new(DValInner {
             sub_id: SubId::new(),
-            sub: None,
+            sub: SubState::Unsubscribed,
             streams: Vec::new(),
             states: Vec::new(),
             tries: 0,
@@ -756,11 +816,14 @@ impl Subscriber {
     pub async fn flush(&self) {
         let flushes = {
             let t = self.0.lock();
-            t.connections.values().map(|c| {
-                let (tx, rx) = oneshot::channel();
-                let _ = c.unbounded_send(ToCon::Flush(tx));
-                rx
-            }).collect::<Vec<_>>()
+            t.connections
+                .values()
+                .map(|c| {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = c.unbounded_send(ToCon::Flush(tx));
+                    rx
+                })
+                .collect::<Vec<_>>()
         };
         for flush in flushes {
             let _ = flush.await;
@@ -778,7 +841,7 @@ fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketA
     if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
-            inner.sub = None;
+            inner.sub = SubState::Unsubscribed;
             let mut i = 0;
             while i < inner.states.len() {
                 match inner.states[i]
@@ -944,12 +1007,12 @@ async fn process_batch(
             From::Heartbeat => (),
             From::NoSuchValue(path) => {
                 if let Some(r) = pending.remove(&path) {
-                    let _ = r.finished.send(Err(anyhow!("no such value")));
+                    let _ = r.finished.send(Err(Error::from(NoSuchValue)));
                 }
             }
             From::Denied(path) => {
                 if let Some(r) = pending.remove(&path) {
-                    let _ = r.finished.send(Err(anyhow!("access denied")));
+                    let _ = r.finished.send(Err(Error::from(PermissionDenied)));
                 }
             }
             From::Unsubscribed(id) => {

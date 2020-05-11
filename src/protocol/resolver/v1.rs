@@ -1,7 +1,7 @@
 use crate::{
     chars::Chars,
     path::Path,
-    utils::{Pack, PackError},
+    pack::{Pack, PackError},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fxhash::FxBuildHasher;
@@ -412,6 +412,7 @@ impl Pack for Resolved {
 pub enum FromRead {
     Resolved(Resolved),
     List(Vec<Path>),
+    Denied,
     Error(Chars),
 }
 
@@ -420,6 +421,7 @@ impl Pack for FromRead {
         1 + match self {
             FromRead::Resolved(r) => Resolved::len(r),
             FromRead::List(l) => <Vec<Path> as Pack>::len(l),
+            FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
         }
     }
@@ -434,8 +436,9 @@ impl Pack for FromRead {
                 buf.put_u8(1);
                 <Vec<Path> as Pack>::encode(l, buf)
             }
+            FromRead::Denied => Ok(buf.put_u8(2)),
             FromRead::Error(e) => {
-                buf.put_u8(2);
+                buf.put_u8(3);
                 <Chars as Pack>::encode(e, buf)
             }
         }
@@ -445,7 +448,8 @@ impl Pack for FromRead {
         match buf.get_u8() {
             0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
             1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
-            2 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
+            2 => Ok(FromRead::Denied),
+            3 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -536,6 +540,7 @@ impl Pack for ToWrite {
 pub enum FromWrite {
     Published,
     Unpublished,
+    Denied,
     Error(Chars),
 }
 
@@ -544,6 +549,7 @@ impl Pack for FromWrite {
         1 + match self {
             FromWrite::Published => 0,
             FromWrite::Unpublished => 0,
+            FromWrite::Denied => 0,
             FromWrite::Error(c) => <Chars as Pack>::len(c),
         }
     }
@@ -552,8 +558,9 @@ impl Pack for FromWrite {
         match self {
             FromWrite::Published => Ok(buf.put_u8(0)),
             FromWrite::Unpublished => Ok(buf.put_u8(1)),
+            FromWrite::Denied => Ok(buf.put_u8(2)),
             FromWrite::Error(c) => {
-                buf.put_u8(2);
+                buf.put_u8(3);
                 <Chars as Pack>::encode(c, buf)
             }
         }
@@ -563,7 +570,8 @@ impl Pack for FromWrite {
         match buf.get_u8() {
             0 => Ok(FromWrite::Published),
             1 => Ok(FromWrite::Unpublished),
-            2 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
+            2 => Ok(FromWrite::Denied),
+            3 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
