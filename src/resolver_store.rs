@@ -1,6 +1,11 @@
 use crate::{
-    auth::Permissions, chars::Chars, os::Krb5Ctx, path::Path,
-    protocol::resolver::v1::PermissionToken, secstore::SecStoreInner, utils,
+    auth::Permissions,
+    chars::Chars,
+    os::Krb5Ctx,
+    path::Path,
+    protocol::resolver::v1::{PermissionToken, Referral},
+    secstore::SecStoreInner,
+    utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -17,7 +22,6 @@ use std::{
     iter,
     net::SocketAddr,
     ops::Deref,
-    result,
     sync::{Arc, Weak},
 };
 
@@ -78,6 +82,12 @@ impl HCAddrs {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum OrReferral<T> {
+    Local(T),
+    Referral(Referral),
+}
+
 #[derive(Debug)]
 pub(crate) struct StoreInner<T> {
     by_path: HashMap<Path, Addrs>,
@@ -134,7 +144,7 @@ impl<T> StoreInner<T> {
         }
     }
 
-    fn check_referral(&self, path: &Path) -> result::Result<(), &Vec<(SocketAddr, u64)>> {
+    fn check_referral(&self, path: &Path) -> Option<Vec<(SocketAddr, u64)>> {
         let r = self
             .referrals
             .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -143,9 +153,9 @@ impl<T> StoreInner<T> {
             ))
             .next_back();
         match r {
-            None => Ok(()),
-            Some((p, v)) if path.starts_with(p.as_ref()) => Err(v),
-            Some(_) => Ok(()),
+            None => None,
+            Some((p, v)) if path.starts_with(p.as_ref()) => Some(v.clone()),
+            Some(_) => None,
         }
     }
 
@@ -154,8 +164,10 @@ impl<T> StoreInner<T> {
         path: Path,
         addr: SocketAddr,
         default: bool,
-    ) -> result::Result<(), &Vec<(SocketAddr, u64)>> {
-        self.check_referral(&path)?;
+    ) -> OrReferral<()> {
+        if let Some(r) = self.check_referral(&path) {
+            return OrReferral::Referral(r);
+        }
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
@@ -165,10 +177,13 @@ impl<T> StoreInner<T> {
         if default {
             self.defaults.insert(path);
         }
-        Ok(())
+        OrReferral::Local(())
     }
 
-    pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
+    pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) -> OrReferral<()> {
+        if let Some(r) = self.check_referral(&path) {
+            return OrReferral::Referral(r);
+        }
         let client_gone = self
             .by_addr
             .get_mut(&addr)
@@ -197,6 +212,26 @@ impl<T> StoreInner<T> {
                 }
             },
         }
+        OrReferral::Local(())
+    }
+
+    pub(crate) fn add_referral(&mut self, path: Path, addr: SocketAddr, ttl: u64) {
+        let mut paths = Vec::new();
+        self.list_sub(&path, &mut paths);
+        for p in paths {
+            if let Some(addrs) = self.by_path.get(&p) {
+                for addr in addrs.iter() {
+                    match self.unpublish(p.clone(), *addr) {
+                        OrReferral::Referral(_) => unreachable!(),
+                        OrReferral::Local(()) => (),
+                    }
+                }
+            }
+        }
+        self.referrals
+            .entry(path.clone())
+            .or_insert_with(|| Vec::new())
+            .push((addr, ttl));
     }
 
     pub(crate) fn unpublish_addr(&mut self, addr: SocketAddr) {
@@ -227,11 +262,22 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
-        self.by_path
+    pub(crate) fn resolve(&self, path: &Path) -> OrReferral<Vec<(SocketAddr, Bytes)>> {
+        let r = self
+            .by_path
             .get(path.as_ref())
             .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
-            .unwrap_or_else(|| self.resolve_default(path))
+            .unwrap_or_else(|| self.resolve_default(path));
+        // adding a referral removes everything under it, so if we
+        // find a local result, we don't need to do the slow lookup in
+        // the btreemap. Since the resolver caches referrals locally
+        // finding one here should be rare.
+        if r.is_empty() {
+            if let Some(r) = self.check_referral(path) {
+                return OrReferral::Referral(r);
+            }
+        }
+        OrReferral::Local(r)
     }
 
     pub(crate) fn resolve_and_sign(
@@ -241,7 +287,7 @@ impl<T> StoreInner<T> {
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> Result<Vec<(SocketAddr, Bytes)>> {
+    ) -> OrReferral<Result<Vec<(SocketAddr, Bytes)>>> {
         fn sign_path(
             sec: &SecStoreInner,
             krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
@@ -266,7 +312,8 @@ impl<T> StoreInner<T> {
                 }
             }
         }
-        self.by_path
+        let r = self
+            .by_path
             .get(&*path)
             .map(|addrs| {
                 Ok(addrs
@@ -279,10 +326,16 @@ impl<T> StoreInner<T> {
                     .into_iter()
                     .map(|(a, _)| sign_path(sec, krb5_spns, a, path, perm, now))
                     .collect::<Result<Vec<(SocketAddr, Bytes)>>>()
-            })
+            });
+        if r.is_ok() && r.unwrap().is_empty() {
+            if let Some(r) = self.check_referral(path) {
+                return OrReferral::Referral(r);
+            }
+        }
+        OrReferral::Local(r)
     }
 
-    pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
+    fn list_int(&self, parent: &Path) -> Vec<Path> {
         self.by_level
             .get(&(Path::levels(&**parent) + 1))
             .map(|l| {
@@ -292,6 +345,20 @@ impl<T> StoreInner<T> {
                     .collect()
             })
             .unwrap_or_else(Vec::new)
+    }
+
+    fn list_sub(&self, path: &Path, paths: &mut Vec<Path>) {
+        for p in self.list_int(path) {
+            paths.push(p.clone());
+            self.list_sub(&p, paths);
+        }
+    }
+
+    pub(crate) fn list(&self, parent: &Path) -> OrReferral<Vec<Path>> {
+        if let Some(r) = self.check_referral(parent) {
+            return OrReferral::Referral(r);
+        }
+        OrReferral::Local(self.list_int(parent))
     }
 
     pub(crate) fn gc(&mut self) {
@@ -330,6 +397,7 @@ impl<T> Store<T> {
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
             defaults: BTreeSet::new(),
+            referrals: BTreeMap::new(),
             addrs: HCAddrs::new(),
             clinfos: HashMap::with_hasher(FxBuildHasher::default()),
         })))
