@@ -9,11 +9,11 @@ use crate::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+            FromWrite, Referral, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
-    resolver_store::Store,
+    resolver_store::{Store, StoreInner},
     secstore::SecStore,
     utils,
 };
@@ -21,6 +21,7 @@ use anyhow::Result;
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
+use parking_lot::RwLockWriteGuard;
 use rand::Rng;
 use std::{
     collections::HashMap,
@@ -65,28 +66,80 @@ fn handle_batch_write(
     msgs: impl Iterator<Item = ToWrite>,
 ) -> Result<()> {
     let mut s = store.write();
+    fn check_refs(
+        s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
+        paths: &mut Vec<Path>,
+    ) -> Vec<Referral> {
+        let mut refs = HashMap::new();
+        paths.retain(|p| match s.check_referral(&p) {
+            None => true,
+            Some(r) => {
+                refs.insert(r.path.clone(), r);
+                false
+            }
+        });
+        refs.into_iter().collect()
+    }
+    let publish = |s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
+                   con: &mut Channel<ServerCtx>,
+                   paths: &mut Vec<Path>,
+                   default: bool|
+     -> Result<()> {
+        if !paths.iter().all(Path::is_absolute) {
+            con.queue_send(&FromWrite::Error("absolute paths required".into()))?
+        } else {
+            let r = check_refs(&mut s, paths);
+            let perm =
+                if default { Permissions::PUBLISH_DEFAULT } else { Permissions::PUBLISH };
+            if allowed_for(secstore, uifo, &*paths, perm) {
+                for path in paths {
+                    s.publish(path, write_addr, default);
+                }
+                con.queue_send(&FromWrite::Published(r))?
+            } else if r.len() > 0 {
+                con.queue_send(&FromWrite::Published(r))?
+            } else {
+                con.queue_send(&FromWrite::Denied)?
+            }
+        }
+    };
     for m in msgs {
         match m {
             ToWrite::Heartbeat => (),
-            ToWrite::Publish(paths) => {
+            ToWrite::Publish(mut paths) => publish(&mut s, con, &mut paths, false)?,
+            ToWrite::PublishDefault(path) => {
+                let mut paths = vec![path];
+                publish(&mut s, con, &mut paths, true)?
+            }
+            ToWrite::Unpublish(mut paths) => {
                 if !paths.iter().all(Path::is_absolute) {
                     con.queue_send(&FromWrite::Error("absolute paths required".into()))?
                 } else {
-                    if allowed_for(secstore, uifo, &paths, Permissions::PUBLISH) {
-                        for path in paths {
-                            s.publish(path, write_addr);
-                        }
-                        con.queue_send(&FromWrite::Published)?
-                    } else {
-                        con.queue_send(&FromWrite::Error("denied".into()))?
+                    let r = check_refs(&mut s, &mut paths);
+                    for path in paths {
+                        s.unpublish(path, write_addr);
                     }
+                    con.queue_send(&FromWrite::Unpublished(r))?
                 }
             }
-            ToWrite::Unpublish(paths) => {
-                for path in paths {
-                    s.unpublish(path, write_addr);
+            ToWrite::Referral { path, server, ttl } => {
+                if !Path::is_absolute(&path) {
+                    con.queue_send(&FromWrite::Error("absolute paths required".into()))?
+                } else {
+                    let perms = secstore
+                        .map(|s| s.pmap().permissions(&path, uifo))
+                        .unwrap_or(Permissions::all());
+                    let mut paths = vec![path];
+                    let r = check_refs(&mut s, &mut paths);
+                    if paths.len() > 0 && perms.contains(Permissions::PUBLISH_REFERRAL) {
+                        s.add_referral(paths[0], server, ttl);
+                        con.queue_send(&FromWrite::Referred(r))?
+                    } else if r.len() > 0 {
+                        con.queue_send(&FromWrite::Referred(r))?
+                    } else {
+                        con.queue_send(&FromWrite::Denied)?
+                    }
                 }
-                con.queue_send(&FromWrite::Unpublished)?
             }
             ToWrite::Clear => {
                 s.unpublish_addr(write_addr);
@@ -342,8 +395,7 @@ fn handle_batch_read(
                     con.queue_send(&m)?;
                 }
                 Some(ref secstore) => {
-                    let mut krb5_spns =
-                        HashMap::with_hasher(FxBuildHasher::default());
+                    let mut krb5_spns = HashMap::with_hasher(FxBuildHasher::default());
                     let sec = sec.as_ref().unwrap();
                     let pmap = secstore.pmap();
                     let mut addrs = Vec::with_capacity(paths.len());
@@ -361,14 +413,11 @@ fn handle_batch_read(
                             p,
                         )?);
                     }
-                    let m = FromRead::Resolved(Resolved {
-                        krb5_spns,
-                        resolver: id,
-                        addrs,
-                    });
+                    let m =
+                        FromRead::Resolved(Resolved { krb5_spns, resolver: id, addrs });
                     con.queue_send(&m)?
                 }
-            }
+            },
             ToRead::List(path) => {
                 let allowed = secstore
                     .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
