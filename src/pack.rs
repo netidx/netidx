@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
     cmp::Eq,
     collections::HashMap,
@@ -174,11 +174,12 @@ impl Pack for u32 {
 
 impl<T: Pack> Pack for Vec<T> {
     fn len(&self) -> usize {
-        self.iter().fold(mem::size_of::<u32>(), |len, t| len + <T as Pack>::len(t))
+        self.iter()
+            .fold(varint_len(self.len() as u64), |len, t| len + <T as Pack>::len(t))
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
-        buf.put_u32(Vec::len(self) as u32);
+        encode_varint(Vec::len(self) as u64, buf)?;
         for t in self {
             <T as Pack>::encode(t, buf)?
         }
@@ -186,7 +187,7 @@ impl<T: Pack> Pack for Vec<T> {
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
-        let elts = buf.get_u32() as usize;
+        let elts = decode_varint(buf)? as usize;
         let mut data = Vec::with_capacity(elts);
         for _ in 0..elts {
             data.push(<T as Pack>::decode(buf)?);
@@ -202,13 +203,13 @@ where
     R: Default + BuildHasher,
 {
     fn len(&self) -> usize {
-        self.iter().fold(mem::size_of::<u32>(), |len, (k, v)| {
+        self.iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
             len + <K as Pack>::len(k) + <V as Pack>::len(v)
         })
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
-        buf.put_u32(HashMap::len(self) as u32);
+        encode_varint(self.len() as u64, buf)?;
         for (k, v) in self {
             <K as Pack>::encode(k, buf)?;
             <V as Pack>::encode(v, buf)?;
@@ -217,7 +218,7 @@ where
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
-        let elts = buf.get_u32() as usize;
+        let elts = decode_varint(buf)? as usize;
         let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
         for _ in 0..elts {
             let k = <K as Pack>::decode(buf)?;
