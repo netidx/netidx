@@ -434,7 +434,7 @@ impl Pack for Referral {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
-    Resolved(Resolved),
+    Resolved(Resolved, Vec<Referral>),
     List(Vec<Path>),
     Referral(Referral),
     Denied,
@@ -444,7 +444,9 @@ pub enum FromRead {
 impl Pack for FromRead {
     fn len(&self) -> usize {
         1 + match self {
-            FromRead::Resolved(r) => Resolved::len(r),
+            FromRead::Resolved(a, r) => {
+                Resolved::len(a) + <Vec<Referral> as Pack>::len(r)
+            }
             FromRead::List(l) => <Vec<Path> as Pack>::len(l),
             FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
@@ -454,9 +456,10 @@ impl Pack for FromRead {
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         match self {
-            FromRead::Resolved(r) => {
+            FromRead::Resolved(a, r) => {
                 buf.put_u8(0);
-                Resolved::encode(r, buf)
+                Resolved::encode(a, buf)?;
+                <Vec<Referral> as Pack>::encode(r, buf)
             }
             FromRead::List(l) => {
                 buf.put_u8(1);
@@ -476,7 +479,11 @@ impl Pack for FromRead {
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
+            0 => {
+                let a = Resolved::decode(buf)?;
+                let r = <Vec<Referral> as Pack>::decode(buf)?;
+                Ok(FromRead::Resolved(a, r))
+            },
             1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
             2 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
             3 => Ok(FromRead::Denied),
@@ -489,8 +496,8 @@ impl Pack for FromRead {
 /// This is the format of the Vec<u8> passed back with each Resolved
 /// msg, however it is encrypted with the publisher's resolver
 /// security context. This allows the subscriber to prove to the
-/// publisher that the resolver authorized it to do whaterver action
-/// it is requesting to the specified path.
+/// publisher that the resolver authorized it to do whatever action it
+/// is requesting to the specified path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PermissionToken {
     pub path: Path,

@@ -144,7 +144,7 @@ impl<T> StoreInner<T> {
         }
     }
 
-    fn check_referral(&self, path: &Path) -> Option<Vec<(SocketAddr, u64)>> {
+    fn check_referral(&self, path: &Path) -> Option<Referral> {
         let r = self
             .referrals
             .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -154,7 +154,9 @@ impl<T> StoreInner<T> {
             .next_back();
         match r {
             None => None,
-            Some((p, v)) if path.starts_with(p.as_ref()) => Some(v.clone()),
+            Some((p, v)) if path.starts_with(p.as_ref()) => {
+                Some(Referral { path: p.clone(), addrs: v.clone() })
+            }
             Some(_) => None,
         }
     }
@@ -215,7 +217,15 @@ impl<T> StoreInner<T> {
         OrReferral::Local(())
     }
 
-    pub(crate) fn add_referral(&mut self, path: Path, addr: SocketAddr, ttl: u64) {
+    pub(crate) fn add_referral(
+        &mut self,
+        path: Path,
+        addr: SocketAddr,
+        ttl: u64,
+    ) -> OrReferral<()> {
+        if let Some(r) = self.check_referral(path) {
+            return OrReferral::Referral(r);
+        }
         let mut paths = Vec::new();
         self.list_sub(&path, &mut paths);
         for p in paths {
@@ -232,6 +242,7 @@ impl<T> StoreInner<T> {
             .entry(path.clone())
             .or_insert_with(|| Vec::new())
             .push((addr, ttl));
+        OrReferral::Local(())
     }
 
     pub(crate) fn unpublish_addr(&mut self, addr: SocketAddr) {
