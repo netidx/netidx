@@ -1,15 +1,19 @@
 pub mod resolver_server {
-    use crate::{protocol::resolver::v1::ResolverId, path::Path};
+    use crate::{path::Path, protocol::resolver::v1::ResolverId};
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
-        collections::HashMap, convert::AsRef, fs::read_to_string, net::SocketAddr,
-        path::Path as FsPath, time::Duration,
+        collections::{BTreeMap, HashMap},
+        convert::AsRef,
+        fs::read_to_string,
+        net::SocketAddr,
+        path::Path as FsPath,
+        time::Duration,
     };
 
     mod file {
         use super::ResolverId;
-        use std::net::SocketAddr;
+        use std::{collections::HashMap, net::SocketAddr};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) enum Auth {
@@ -19,8 +23,8 @@ pub mod resolver_server {
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
-            pub(super) root: String,
-            pub(super) parents: Vec<SocketAddr>,
+            pub(super) parent: Option<(String, (u64, Vec<SocketAddr>))>,
+            pub(super) children: HashMap<String, (u64, Vec<SocketAddr>)>,
             pub(super) pid_file: String,
             pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
@@ -46,8 +50,8 @@ pub mod resolver_server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
-        pub root: Path,
-        pub parents: Vec<SocketAddr>,
+        pub parent: Option<(Path, (u64, Vec<SocketAddr>))>,
+        pub children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
         pub pid_file: String,
         pub id: ResolverId,
         pub addr: SocketAddr,
@@ -68,16 +72,37 @@ pub mod resolver_server {
                     Auth::Krb5 { spn, permissions }
                 }
             };
-            let root = Path::from(cfg.root);
-            if !Path::is_absolute(&root) {
-                bail!("the root path must be absolute")
-            }
-            if root.as_ref() != "/" && cfg.parents.is_empty() {
-                bail!("if the root is not / then you must configure a parent")
-            }
+            let parent = match cfg.parent {
+                None => None,
+                Some((p, c)) => {
+                    let p = Path::from(p);
+                    if !Path::is_absolute(&p) {
+                        bail!("the root path must be absolute")
+                    }
+                    Some((p, c))
+                }
+            };
+            let children = {
+                let root = parent.as_ref().map(|(ref p, _)| p.as_ref()).unwrap_or("/");
+                let mut m = BTreeMap::new();
+                for (p, c) in cfg.children {
+                    let p = Path::from(p);
+                    if !Path::is_absolute(&p) {
+                        bail!("child paths must be absolute {}", p)
+                    }
+                    if !p.starts_with(&*root) {
+                        bail!("child paths much be under the root path {}", p)
+                    }
+                    if Path::levels(&*p) <= Path::levels(&*root) {
+                        bail!("child paths must be deeper than  the root {}", p);
+                    }
+                    m.insert(p, c);
+                }
+                m
+            };
             Ok(Config {
-                root,
-                parents: cfg.parents,
+                parent,
+                children,
                 pid_file: cfg.pid_file,
                 id: cfg.id,
                 addr: cfg.addr,

@@ -10,7 +10,6 @@ bitflags! {
         const LIST             = 0x08;
         const PUBLISH          = 0x10;
         const PUBLISH_DEFAULT  = 0x20;
-        const PUBLISH_REFERRAL = 0x40;
     }
 }
 
@@ -43,12 +42,9 @@ impl TryFrom<&str> for Permissions {
                 'd' => {
                     p |= Permissions::PUBLISH_DEFAULT;
                 }
-                'r' => {
-                    p |= Permissions::PUBLISH_REFERRAL;
-                }
                 c => {
                     return Err(anyhow!(
-                        "unrecognized permission bit {}, valid bits are !swpldr",
+                        "unrecognized permission bit {}, valid bits are !swlpd",
                         c
                     ))
                 }

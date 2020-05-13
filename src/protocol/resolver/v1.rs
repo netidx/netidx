@@ -410,9 +410,9 @@ impl Pack for Resolved {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Referral {
-    path: Path,
-    ttl: u64,
-    addrs: Vec<SocketAddr>,
+    pub path: Path,
+    pub ttl: u64,
+    pub addrs: Vec<SocketAddr>,
 }
 
 impl Pack for Referral {
@@ -440,7 +440,7 @@ impl Pack for Referral {
 pub enum FromRead {
     Resolved(Resolved, Vec<Referral>),
     List(Vec<Path>),
-    Referral(Referral),
+    ListReferral(Referral),
     Denied,
     Error(Chars),
 }
@@ -452,7 +452,7 @@ impl Pack for FromRead {
                 Resolved::len(a) + <Vec<Referral> as Pack>::len(r)
             }
             FromRead::List(l) => <Vec<Path> as Pack>::len(l),
-            FromRead::Referral(r) => <Referral as Pack>::len(r),
+            FromRead::ListReferral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
         }
@@ -469,7 +469,7 @@ impl Pack for FromRead {
                 buf.put_u8(1);
                 <Vec<Path> as Pack>::encode(l, buf)
             }
-            FromRead::Referral(r) => {
+            FromRead::ListReferral(r) => {
                 buf.put_u8(2);
                 <Referral as Pack>::encode(r, buf)
             }
@@ -489,7 +489,7 @@ impl Pack for FromRead {
                 Ok(FromRead::Resolved(a, r))
             }
             1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
-            2 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
+            2 => Ok(FromRead::ListReferral(<Referral as Pack>::decode(buf)?)),
             3 => Ok(FromRead::Denied),
             4 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
@@ -538,8 +538,6 @@ pub enum ToWrite {
     PublishDefault(Path),
     /// Stop publishing the list of paths
     Unpublish(Vec<Path>),
-    /// Add a referral based at `Path` pointing to `SocketAddr` cached for `ttl`
-    Referral { path: Path, server: SocketAddr, ttl: u64 },
     /// Clear all values you've published
     Clear,
     /// Tell the resolver that we are still alive
@@ -552,11 +550,6 @@ impl Pack for ToWrite {
             ToWrite::Publish(p) => <Vec<Path> as Pack>::len(p),
             ToWrite::PublishDefault(p) => <Path as Pack>::len(p),
             ToWrite::Unpublish(p) => <Vec<Path> as Pack>::len(p),
-            ToWrite::Referral { path, server, ttl } => {
-                <Path as Pack>::len(path)
-                    + <SocketAddr as Pack>::len(server)
-                    + <u64 as Pack>::len(ttl)
-            }
             ToWrite::Clear => 0,
             ToWrite::Heartbeat => 0,
         }
@@ -576,14 +569,8 @@ impl Pack for ToWrite {
                 buf.put_u8(2);
                 <Vec<Path> as Pack>::encode(p, buf)
             }
-            ToWrite::Referral { path, server, ttl } => {
-                buf.put_u8(3);
-                <Path as Pack>::encode(path, buf)?;
-                <SocketAddr as Pack>::encode(server, buf)?;
-                <u64 as Pack>::encode(ttl, buf)
-            }
-            ToWrite::Clear => Ok(buf.put_u8(4)),
-            ToWrite::Heartbeat => Ok(buf.put_u8(5)),
+            ToWrite::Clear => Ok(buf.put_u8(3)),
+            ToWrite::Heartbeat => Ok(buf.put_u8(4)),
         }
     }
 
@@ -592,14 +579,8 @@ impl Pack for ToWrite {
             0 => Ok(ToWrite::Publish(<Vec<Path> as Pack>::decode(buf)?)),
             1 => Ok(ToWrite::PublishDefault(<Path as Pack>::decode(buf)?)),
             2 => Ok(ToWrite::Unpublish(<Vec<Path> as Pack>::decode(buf)?)),
-            3 => {
-                let path = <Path as Pack>::decode(buf)?;
-                let server = <SocketAddr as Pack>::decode(buf)?;
-                let ttl = <u64 as Pack>::decode(buf)?;
-                Ok(ToWrite::Referral { path, server, ttl })
-            }
-            4 => Ok(ToWrite::Clear),
-            5 => Ok(ToWrite::Heartbeat),
+            3 => Ok(ToWrite::Clear),
+            4 => Ok(ToWrite::Heartbeat),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -609,7 +590,6 @@ impl Pack for ToWrite {
 pub enum FromWrite {
     Published(Vec<Referral>),
     Unpublished(Vec<Referral>),
-    Referred,
     Denied,
     Error(Chars),
 }
@@ -619,7 +599,6 @@ impl Pack for FromWrite {
         1 + match self {
             FromWrite::Published(r) => <Vec<Referral> as Pack>::len(r),
             FromWrite::Unpublished(r) => <Vec<Referral> as Pack>::len(r),
-            FromWrite::Referred => 0,
             FromWrite::Denied => 0,
             FromWrite::Error(c) => <Chars as Pack>::len(c),
         }
@@ -635,10 +614,9 @@ impl Pack for FromWrite {
                 buf.put_u8(1);
                 <Vec<Referral> as Pack>::encode(r, buf)
             },
-            FromWrite::Referred => Ok(buf.put_u8(2)),
-            FromWrite::Denied => Ok(buf.put_u8(3)),
+            FromWrite::Denied => Ok(buf.put_u8(2)),
             FromWrite::Error(c) => {
-                buf.put_u8(4);
+                buf.put_u8(3);
                 <Chars as Pack>::encode(c, buf)
             }
         }
@@ -648,9 +626,8 @@ impl Pack for FromWrite {
         match buf.get_u8() {
             0 => Ok(FromWrite::Published(<Vec<Referral> as Pack>::decode(buf)?)),
             1 => Ok(FromWrite::Unpublished(<Vec<Referral> as Pack>::decode(buf)?)),
-            2 => Ok(FromWrite::Referred),
-            3 => Ok(FromWrite::Denied),
-            4 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
+            2 => Ok(FromWrite::Denied),
+            3 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }

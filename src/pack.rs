@@ -179,7 +179,7 @@ impl<T: Pack> Pack for Vec<T> {
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
-        encode_varint(Vec::len(self) as u64, buf)?;
+        encode_varint(Vec::len(self) as u64, buf);
         for t in self {
             <T as Pack>::encode(t, buf)?
         }
@@ -209,7 +209,7 @@ where
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
-        encode_varint(self.len() as u64, buf)?;
+        encode_varint(self.len() as u64, buf);
         for (k, v) in self {
             <K as Pack>::encode(k, buf)?;
             <V as Pack>::encode(v, buf)?;

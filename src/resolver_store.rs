@@ -88,7 +88,8 @@ pub(crate) struct StoreInner<T> {
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
     defaults: BTreeSet<Path>,
-    referrals: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
+    parent: Option<(Path, (u64, Vec<SocketAddr>))>,
+    children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
     addrs: HCAddrs,
     clinfos: HashMap<SocketAddr, T, FxBuildHasher>,
 }
@@ -139,17 +140,26 @@ impl<T> StoreInner<T> {
     }
 
     pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
+        if let Some((root, (ttl, addrs))) = self.parent.as_ref() {
+            if !path.starts_with(root.as_ref()) {
+                return Some(Referral {
+                    path: root.clone(),
+                    ttl: *ttl,
+                    addrs: addrs.clone(),
+                });
+            }
+        }
         let r = self
-            .referrals
+            .children
             .range::<str, (Bound<&str>, Bound<&str>)>((
                 Unbounded,
-                Excluded(path.as_ref()),
+                Included(path.as_ref()),
             ))
             .next_back();
         match r {
             None => None,
             Some((p, (ttl, addrs))) if path.starts_with(p.as_ref()) => {
-                Some(Referral { path: p.clone(), ttl, addrs: addrs.clone() })
+                Some(Referral { path: p.clone(), ttl: *ttl, addrs: addrs.clone() })
             }
             Some(_) => None,
         }
@@ -198,22 +208,6 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn add_referral(&mut self, path: Path, addr: SocketAddr, ttl: u64) {
-        let mut paths = Vec::new();
-        self.list_sub(&path, &mut paths);
-        for p in paths {
-            if let Some(addrs) = self.by_path.get(&p) {
-                for addr in addrs.iter() {
-                    self.unpublish(p.clone(), *addr);
-                }
-            }
-        }
-        self.referrals
-            .entry(path.clone())
-            .or_insert_with(|| Vec::new())
-            .push((addr, ttl));
-    }
-
     pub(crate) fn unpublish_addr(&mut self, addr: SocketAddr) {
         self.by_addr.remove(&addr).into_iter().for_each(|paths| {
             for path in paths {
@@ -246,7 +240,7 @@ impl<T> StoreInner<T> {
         self.by_path
             .get(path.as_ref())
             .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
-            .unwrap_or_else(|| self.resolve_default(path));
+            .unwrap_or_else(|| self.resolve_default(path))
     }
 
     pub(crate) fn resolve_and_sign(
@@ -297,13 +291,6 @@ impl<T> StoreInner<T> {
             })
     }
 
-    fn list_sub(&self, path: &Path, paths: &mut Vec<Path>) {
-        for p in self.list(path) {
-            paths.push(p.clone());
-            self.list_sub(&p, paths);
-        }
-    }
-
     pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
         self.by_level
             .get(&(Path::levels(&**parent) + 1))
@@ -346,13 +333,17 @@ impl<T> Deref for Store<T> {
 }
 
 impl<T> Store<T> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(
+        parent: Option<(Path, (u64, Vec<SocketAddr>))>,
+        children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
+    ) -> Self {
         Store(Arc::new(RwLock::new(StoreInner {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
             defaults: BTreeSet::new(),
-            referrals: BTreeMap::new(),
+            parent,
+            children,
             addrs: HCAddrs::new(),
             clinfos: HashMap::with_hasher(FxBuildHasher::default()),
         })))
