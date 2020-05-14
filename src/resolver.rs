@@ -16,18 +16,13 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use futures::{
-    future::{select_ok, IntoStream},
-    prelude::*,
-    select_biased,
-    stream::{Fuse, SelectAll},
-};
+use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     error, fmt,
     fmt::Debug,
     net::SocketAddr,
@@ -42,7 +37,7 @@ use tokio::{
 };
 
 #[derive(Debug, Clone)]
-pub enum ResolverError {
+pub(crate) enum ResolverError {
     Denied,
     Unexpected,
     Error(Chars),
@@ -56,10 +51,16 @@ impl fmt::Display for ResolverError {
 
 impl error::Error for ResolverError {}
 
+#[derive(Debug, Clone)]
+pub(crate) enum OrReferral<T> {
+    Local(T),
+    Referral(Referral),
+}
+
 static TTL: u64 = 120;
 
 #[derive(Debug, Clone)]
-pub enum Auth {
+pub(crate) enum Auth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
 }
@@ -185,44 +186,11 @@ async fn connection_read(
     Ok(())
 }
 
-async fn read_mgr(
-    receiver: mpsc::UnboundedReceiver<ToCon<ToRead, FromRead>>,
-    default: Referral,
-    desired_auth: Auth,
-) -> Result<()> {
-    type Chan = mpsc::UnboundedSender<ToCon<ToRead, FromRead>>;
-    let (default, default_join) = {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let jh = task::spawn(connection_read(rx, default, desired_auth.clone()));
-        (tx, jh.fuse())
-    };
-    let mut receiver = receiver.fuse();
-    let mut cached_referrals: BTreeMap<Path, (Instant, Chan)> = BTreeMap::new();
-    let sent: SelectAll<IntoStream<oneshot::Receiver<(u64, FromRead)>>> =
-        SelectAll::new();
-    let mut outstanding: HashMap<u64, oneshot::Sender<FromRead>> = HashMap::new();
-    let mut next_id: u64 = 0;
-    loop {
-        select_biased! {
-            r = default_join => break Ok(r?),
-            (id, r) = send.next() => match r {
-                
-            },
-            m = receiver.next() => match m {
-                
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct ResolverRead(mpsc::UnboundedSender<ToCon<ToRead, FromRead>>);
+pub(crate) struct ResolverRead(mpsc::UnboundedSender<ToCon<ToRead, FromRead>>);
 
 impl ResolverRead {
-    pub fn new(
-        resolver: config::resolver::Config,
-        desired_auth: Auth,
-    ) -> Result<ResolverRead> {
+    pub(crate) fn new(resolver: Referral, desired_auth: Auth) -> Result<ResolverRead> {
         let (sender, receiver) = mpsc::unbounded_channel();
         task::spawn(async move {
             let _ = connection_read(receiver, resolver, desired_auth).await;
@@ -230,18 +198,20 @@ impl ResolverRead {
         Ok(ResolverRead(sender))
     }
 
-    pub async fn resolve(&self, paths: Vec<Path>) -> Result<Resolved> {
-        match send(&self.0, resolver::v1::ToRead::Resolve(paths)).await? {
-            resolver::v1::FromRead::Resolved(r) => Ok(r),
+    pub(crate) async fn resolve(&self, path: Path) -> Result<OrReferral<Resolved>> {
+        match send(&self.0, resolver::v1::ToRead::Resolve(path)).await? {
+            resolver::v1::FromRead::Resolved(r) => Ok(OrReferral::Local(r)),
+            resolver::v1::FromRead::Referral(r) => Ok(OrReferral::Referral(r)),
             resolver::v1::FromRead::Denied => Err(Error::from(ResolverError::Denied)),
             resolver::v1::FromRead::Error(e) => Err(Error::from(ResolverError::Error(e))),
             _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 
-    pub async fn list(&self, p: Path) -> Result<Vec<Path>> {
+    pub(crate) async fn list(&self, p: Path) -> Result<OrReferral<Vec<Path>>> {
         match send(&self.0, resolver::v1::ToRead::List(p)).await? {
-            resolver::v1::FromRead::List(v) => Ok(v),
+            resolver::v1::FromRead::List(v) => Ok(OrReferral::Local(v)),
+            resolver::v1::FromRead::Referral(r) => Ok(OrReferral::Referral(r)),
             resolver::v1::FromRead::Denied => Err(Error::from(ResolverError::Denied)),
             resolver::v1::FromRead::Error(e) => Err(Error::from(ResolverError::Error(e))),
             _ => Err(Error::from(ResolverError::Unexpected)),
@@ -250,11 +220,11 @@ impl ResolverRead {
 }
 
 async fn connect_write(
-    resolver: &config::resolver::Config,
-    resolver_addr: (ResolverId, SocketAddr),
+    resolver: &Referral,
+    resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
-    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     desired_auth: &Auth,
 ) -> Result<(u64, Channel<ClientCtx>)> {
     let mut backoff = 0;
@@ -267,35 +237,33 @@ async fn connect_write(
         let con = try_cf!(
             "write_con connect",
             continue,
-            TcpStream::connect(&resolver_addr.1).await
+            TcpStream::connect(&resolver_addr).await
         );
         let mut con = Channel::new(con);
         try_cf!("send version", continue, con.send_one(&1u64).await);
         let _version: u64 = try_cf!("receive version", continue, con.receive().await);
-        let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
-            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { upn, spn }, CAuth::Krb5 { target_spns }) => {
-                match ctxts.read().get(&resolver_addr.0) {
-                    Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
-                    None => {
-                        let upnr = upn.as_ref().map(|s| s.as_bytes());
-                        let target_spn = target_spns
-                            .get(&resolver_addr.0)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "no target spn for resolver {:?}",
-                                    resolver_addr.0
-                                )
-                            })?
-                            .as_bytes();
-                        let (ctx, token) =
-                            try_cf!("ctx", continue, create_ctx(upnr, target_spn));
-                        let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                        (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
-                    }
-                }
+        let (auth, ctx) = match desired_auth {
+            Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
+            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+                bail!("authentication unavailable")
             }
+            Auth::Krb5 { upn, spn } => match ctxts.read().get(&resolver_addr) {
+                Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
+                None => {
+                    let upnr = upn.as_ref().map(|s| s.as_bytes());
+                    let target_spn = resolver
+                        .krb5_spns
+                        .get(&resolver_addr)
+                        .ok_or_else(|| {
+                            anyhow!("no target spn for resolver {:?}", resolver_addr)
+                        })?
+                        .as_bytes();
+                    let (ctx, token) =
+                        try_cf!("ctx", continue, create_ctx(upnr, target_spn));
+                    let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                    (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+                }
+            },
         };
         let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
         debug!("write_con connection established hello {:?}", h);
@@ -323,10 +291,11 @@ async fn connect_write(
                 info!("write_con processing resolver mutual authentication");
                 try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
                 info!("write_con mutual authentication succeeded");
-                if r.resolver_id != resolver_addr.0 {
-                    bail!("resolver id mismatch, bad configuration");
+                {
+                    let mut ctxts = ctxts.write();
+                    ctxts.insert(r.resolver_id, ctx.clone());
+                    ctxts.insert(resolver_addr, ctx.clone());
                 }
-                ctxts.write().insert(r.resolver_id, ctx.clone());
                 con.set_ctx(ctx).await;
                 info!("write_con all traffic now encrypted");
             }
@@ -342,11 +311,13 @@ async fn connect_write(
                 break Ok((r.ttl, con));
             } else {
                 info!("write_con ttl is expired, republishing {}", len);
-                try_cf!(
-                    "republish",
-                    continue,
-                    con.send_one(&ToWrite::Publish(names)).await
-                );
+                for p in &names {
+                    match con.queue_send(&ToWrite::Publish(p.clone())) {
+                        Ok(()) => (),
+                        Err(e) => warn!("republish failed to encode {}, {}", p, e),
+                    }
+                }
+                try_cf!("republish", continue, con.flush().await);
                 match try_cf!("replublish reply", continue, con.receive().await) {
                     FromWrite::Published => {
                         info!(
@@ -364,12 +335,12 @@ async fn connect_write(
 
 async fn connection_write(
     receiver: mpsc::UnboundedReceiver<ToCon<Arc<ToWrite>, FromWrite>>,
-    resolver: config::resolver::Config,
-    resolver_addr: (ResolverId, SocketAddr),
+    resolver: Referral,
+    resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
 ) -> Result<()> {
     let mut con: Option<Channel<ClientCtx>> = None;
     let hb = Duration::from_secs(TTL / 2);
@@ -462,15 +433,15 @@ async fn connection_write(
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<ToCon<ToWrite, FromWrite>>,
-    resolver: config::resolver::Config,
+    resolver: Referral,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
     let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
     let senders = {
         let mut senders = Vec::new();
-        for addr in &resolver.servers {
+        for addr in &resolver.addrs {
             let (sender, receiver) = mpsc::unbounded_channel();
             let addr = *addr;
             let resolver = resolver.clone();
@@ -506,12 +477,10 @@ async fn write_mgr(
         }))
         .await?
         .0;
-        if let ToWrite::Publish(paths) = &*m {
+        if let ToWrite::Publish(path) = &*m {
             match r {
                 FromWrite::Published => {
-                    for p in paths {
-                        published.write().insert(p.clone());
-                    }
+                    published.write().insert(path.clone());
                 }
                 _ => (),
             }
@@ -522,58 +491,50 @@ async fn write_mgr(
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverWrite {
-    sender: mpsc::UnboundedSender<ToCon<ToWrite, FromWrite>>,
-    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
-}
+pub(crate) struct ResolverWrite(mpsc::UnboundedSender<ToCon<ToWrite, FromWrite>>);
 
 impl ResolverWrite {
-    pub fn new(
-        resolver: config::resolver::Config,
+    pub(crate) fn new(
+        resolver: Referral,
         desired_auth: Auth,
         write_addr: SocketAddr,
+        ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     ) -> Result<ResolverWrite> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
-        let ctxts_c = ctxts.clone();
         task::spawn(async move {
             let r =
-                write_mgr(receiver, resolver, desired_auth, ctxts_c, write_addr).await;
+                write_mgr(receiver, resolver, desired_auth, ctxts, write_addr).await;
             info!("resolver: write manager exited {:?}", r);
         });
-        Ok(ResolverWrite { sender, ctxts })
+        Ok(ResolverWrite(sender))
     }
 
-    pub async fn publish(&self, paths: Vec<Path>) -> Result<()> {
-        match send(&self.sender, ToWrite::Publish(paths)).await? {
-            FromWrite::Published => Ok(()),
+    pub(crate) async fn publish(&self, paths: Path) -> Result<OrReferral<()>> {
+        match send(&self.0, ToWrite::Publish(paths)).await? {
+            FromWrite::Published => Ok(OrReferral::Local(())),
+            FromWrite::Referral(r) => Ok(OrReferral::Referral(r)),
             FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
             FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
             _ => Err(Error::from(ResolverError::Unexpected)),
         }
     }
 
-    pub async fn unpublish(&self, paths: Vec<Path>) -> Result<()> {
-        match send(&self.sender, ToWrite::Unpublish(paths)).await? {
+    pub(crate) async fn unpublish(&self, path: Path) -> Result<OrReferral<()>> {
+        match send(&self.0, ToWrite::Unpublish(path)).await? {
+            FromWrite::Unpublished => Ok(OrReferral::Local(())),
+            FromWrite::Referral(r) => Ok(OrReferral::Referral(r)),
+            FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
+            FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
+            _ => Err(Error::from(ResolverError::Unexpected)),
+        }
+    }
+
+    pub(crate) async fn clear(&self) -> Result<()> {
+        match send(&self.0, ToWrite::Clear).await? {
             FromWrite::Unpublished => Ok(()),
             FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
             FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
             _ => Err(Error::from(ResolverError::Unexpected)),
         }
-    }
-
-    pub async fn clear(&self) -> Result<()> {
-        match send(&self.sender, ToWrite::Clear).await? {
-            FromWrite::Unpublished => Ok(()),
-            FromWrite::Denied => Err(Error::from(ResolverError::Denied)),
-            FromWrite::Error(e) => Err(Error::from(ResolverError::Error(e))),
-            _ => Err(Error::from(ResolverError::Unexpected)),
-        }
-    }
-
-    pub(crate) fn ctxts(
-        &self,
-    ) -> Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>> {
-        self.ctxts.clone()
     }
 }
