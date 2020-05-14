@@ -8,21 +8,26 @@ use crate::{
         self,
         v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, Referral, Resolved, ResolverId, ServerAuthWrite,
-            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+            FromRead, FromWrite, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
         },
     },
     utils,
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
+use futures::{
+    future::{select_ok, IntoStream},
+    prelude::*,
+    select_biased,
+    stream::{Fuse, SelectAll},
+};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::{
     cmp::max,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error, fmt,
     fmt::Debug,
     net::SocketAddr,
@@ -79,13 +84,13 @@ fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes
     }
 }
 
-fn choose_read_addr(resolver: &config::resolver::Config) -> (ResolverId, SocketAddr) {
+fn choose_read_addr(resolver: &Referral) -> SocketAddr {
     use rand::{thread_rng, Rng};
-    resolver.servers[thread_rng().gen_range(0, resolver.servers.len())]
+    resolver.addrs[thread_rng().gen_range(0, resolver.addrs.len())]
 }
 
 async fn connect_read(
-    resolver: &config::resolver::Config,
+    resolver: &Referral,
     sc: &mut Option<(CtxId, ClientCtx)>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
@@ -95,21 +100,24 @@ async fn connect_read(
             time::delay_for(Duration::from_secs(backoff)).await;
         }
         backoff += 1;
-        let (rid, addr) = choose_read_addr(resolver);
+        let addr = choose_read_addr(resolver);
         let con = try_cf!("connect", continue, TcpStream::connect(&addr).await);
         let mut con = Channel::new(con);
         try_cf!("send version", continue, con.send_one(&1u64).await);
         let _ver: u64 = try_cf!("recv version", continue, con.receive().await);
-        let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
-            (Auth::Krb5 { .. }, CAuth::Anonymous) => bail!("authentication unavailable"),
-            (Auth::Krb5 { upn, .. }, CAuth::Krb5 { target_spns }) => match sc {
+        let (auth, ctx) = match desired_auth {
+            Auth::Anonymous => (ClientAuthRead::Anonymous, None),
+            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+                bail!("authentication unavailable")
+            }
+            Auth::Krb5 { upn, .. } => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
                     let upn = upn.as_ref().map(|s| s.as_bytes());
-                    let target_spn = target_spns
-                        .get(&rid)
-                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", rid))?
+                    let target_spn = resolver
+                        .krb5_spns
+                        .get(&addr)
+                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?
                         .as_bytes();
                     let (ctx, tok) =
                         try_cf!("create ctx", continue, create_ctx(upn, target_spn));
@@ -145,7 +153,7 @@ async fn connect_read(
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ToCon<ToRead, FromRead>>,
-    resolver: config::resolver::Config,
+    resolver: Referral,
     desired_auth: Auth,
 ) -> Result<()> {
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
@@ -175,6 +183,36 @@ async fn connection_read(
         let _ = reply.send(r);
     }
     Ok(())
+}
+
+async fn read_mgr(
+    receiver: mpsc::UnboundedReceiver<ToCon<ToRead, FromRead>>,
+    default: Referral,
+    desired_auth: Auth,
+) -> Result<()> {
+    type Chan = mpsc::UnboundedSender<ToCon<ToRead, FromRead>>;
+    let (default, default_join) = {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let jh = task::spawn(connection_read(rx, default, desired_auth.clone()));
+        (tx, jh.fuse())
+    };
+    let mut receiver = receiver.fuse();
+    let mut cached_referrals: BTreeMap<Path, (Instant, Chan)> = BTreeMap::new();
+    let sent: SelectAll<IntoStream<oneshot::Receiver<(u64, FromRead)>>> =
+        SelectAll::new();
+    let mut outstanding: HashMap<u64, oneshot::Sender<FromRead>> = HashMap::new();
+    let mut next_id: u64 = 0;
+    loop {
+        select_biased! {
+            r = default_join => break Ok(r?),
+            (id, r) = send.next() => match r {
+                
+            },
+            m = receiver.next() => match m {
+                
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

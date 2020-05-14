@@ -309,8 +309,8 @@ impl Pack for ServerHelloWrite {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToRead {
-    /// Resolve the list of paths to addresses/ports
-    Resolve(Vec<Path>),
+    /// Resolve path to addresses/ports
+    Resolve(Path),
     /// List the paths published under the specified root path
     List(Path),
 }
@@ -318,16 +318,15 @@ pub enum ToRead {
 impl Pack for ToRead {
     fn len(&self) -> usize {
         1 + match self {
-            ToRead::Resolve(paths) => <Vec<Path> as Pack>::len(paths),
-            ToRead::List(path) => <Path as Pack>::len(path),
+            ToRead::Resolve(path) | ToRead::List(path) => <Path as Pack>::len(path),
         }
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         match self {
-            ToRead::Resolve(paths) => {
+            ToRead::Resolve(path) => {
                 buf.put_u8(0);
-                <Vec<Path> as Pack>::encode(paths, buf)
+                <Path as Pack>::encode(path, buf)
             }
             ToRead::List(path) => {
                 buf.put_u8(1);
@@ -339,8 +338,8 @@ impl Pack for ToRead {
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
             0 => {
-                let paths = <Vec<Path> as Pack>::decode(buf)?;
-                Ok(ToRead::Resolve(paths))
+                let path = <Path as Pack>::decode(buf)?;
+                Ok(ToRead::Resolve(path))
             }
             1 => {
                 let path = <Path as Pack>::decode(buf)?;
@@ -355,14 +354,14 @@ impl Pack for ToRead {
 pub struct Resolved {
     pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
     pub resolver: SocketAddr,
-    pub addrs: Vec<Vec<(SocketAddr, Bytes)>>,
+    pub addrs: Vec<(SocketAddr, Bytes)>,
 }
 
 impl Pack for Resolved {
     fn len(&self) -> usize {
         <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
             + <SocketAddr as Pack>::len(&self.resolver)
-            + <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::len(&self.addrs)
+            + <Vec<(SocketAddr, Bytes)> as Pack>::len(&self.addrs)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -371,13 +370,13 @@ impl Pack for Resolved {
             buf,
         )?;
         <SocketAddr as Pack>::encode(&self.resolver, buf)?;
-        <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)
+        <Vec<(SocketAddr, Bytes)> as Pack>::encode(&self.addrs, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
         let resolver = <SocketAddr as Pack>::decode(buf)?;
-        let addrs = <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
+        let addrs = <Vec<(SocketAddr, Bytes)> as Pack>::decode(buf)?;
         Ok(Resolved { krb5_spns, resolver, addrs })
     }
 }
@@ -416,9 +415,9 @@ impl Pack for Referral {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
-    Resolved(Resolved, Vec<Referral>),
+    Resolved(Resolved),
     List(Vec<Path>),
-    ListReferral(Referral),
+    Referral(Referral),
     Denied,
     Error(Chars),
 }
@@ -426,11 +425,9 @@ pub enum FromRead {
 impl Pack for FromRead {
     fn len(&self) -> usize {
         1 + match self {
-            FromRead::Resolved(a, r) => {
-                Resolved::len(a) + <Vec<Referral> as Pack>::len(r)
-            }
+            FromRead::Resolved(a) => Resolved::len(a),
             FromRead::List(l) => <Vec<Path> as Pack>::len(l),
-            FromRead::ListReferral(r) => <Referral as Pack>::len(r),
+            FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
         }
@@ -438,16 +435,15 @@ impl Pack for FromRead {
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         match self {
-            FromRead::Resolved(a, r) => {
+            FromRead::Resolved(a) => {
                 buf.put_u8(0);
-                Resolved::encode(a, buf)?;
-                <Vec<Referral> as Pack>::encode(r, buf)
+                Resolved::encode(a, buf)
             }
             FromRead::List(l) => {
                 buf.put_u8(1);
                 <Vec<Path> as Pack>::encode(l, buf)
             }
-            FromRead::ListReferral(r) => {
+            FromRead::Referral(r) => {
                 buf.put_u8(2);
                 <Referral as Pack>::encode(r, buf)
             }
@@ -461,13 +457,9 @@ impl Pack for FromRead {
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
-            0 => {
-                let a = Resolved::decode(buf)?;
-                let r = <Vec<Referral> as Pack>::decode(buf)?;
-                Ok(FromRead::Resolved(a, r))
-            }
+            0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
             1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
-            2 => Ok(FromRead::ListReferral(<Referral as Pack>::decode(buf)?)),
+            2 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
             3 => Ok(FromRead::Denied),
             4 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
@@ -510,12 +502,12 @@ impl Pack for PermissionToken {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToWrite {
-    /// Publish the list of paths
-    Publish(Vec<Path>),
+    /// Publish the path
+    Publish(Path),
     /// Add a default publisher to path
     PublishDefault(Path),
-    /// Stop publishing the list of paths
-    Unpublish(Vec<Path>),
+    /// Stop publishing the path
+    Unpublish(Path),
     /// Clear all values you've published
     Clear,
     /// Tell the resolver that we are still alive
@@ -525,9 +517,9 @@ pub enum ToWrite {
 impl Pack for ToWrite {
     fn len(&self) -> usize {
         1 + match self {
-            ToWrite::Publish(p) => <Vec<Path> as Pack>::len(p),
+            ToWrite::Publish(p) => <Path as Pack>::len(p),
             ToWrite::PublishDefault(p) => <Path as Pack>::len(p),
-            ToWrite::Unpublish(p) => <Vec<Path> as Pack>::len(p),
+            ToWrite::Unpublish(p) => <Path as Pack>::len(p),
             ToWrite::Clear => 0,
             ToWrite::Heartbeat => 0,
         }
@@ -537,7 +529,7 @@ impl Pack for ToWrite {
         match self {
             ToWrite::Publish(p) => {
                 buf.put_u8(0);
-                <Vec<Path> as Pack>::encode(p, buf)
+                <Path as Pack>::encode(p, buf)
             }
             ToWrite::PublishDefault(p) => {
                 buf.put_u8(1);
@@ -545,7 +537,7 @@ impl Pack for ToWrite {
             }
             ToWrite::Unpublish(p) => {
                 buf.put_u8(2);
-                <Vec<Path> as Pack>::encode(p, buf)
+                <Path as Pack>::encode(p, buf)
             }
             ToWrite::Clear => Ok(buf.put_u8(3)),
             ToWrite::Heartbeat => Ok(buf.put_u8(4)),
@@ -554,9 +546,9 @@ impl Pack for ToWrite {
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(ToWrite::Publish(<Vec<Path> as Pack>::decode(buf)?)),
+            0 => Ok(ToWrite::Publish(<Path as Pack>::decode(buf)?)),
             1 => Ok(ToWrite::PublishDefault(<Path as Pack>::decode(buf)?)),
-            2 => Ok(ToWrite::Unpublish(<Vec<Path> as Pack>::decode(buf)?)),
+            2 => Ok(ToWrite::Unpublish(<Path as Pack>::decode(buf)?)),
             3 => Ok(ToWrite::Clear),
             4 => Ok(ToWrite::Heartbeat),
             _ => Err(Error::UnknownTag),
@@ -566,8 +558,9 @@ impl Pack for ToWrite {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromWrite {
-    Published(Vec<Referral>),
-    Unpublished(Vec<Referral>),
+    Published,
+    Unpublished,
+    Referral(Referral),
     Denied,
     Error(Chars),
 }
@@ -575,8 +568,9 @@ pub enum FromWrite {
 impl Pack for FromWrite {
     fn len(&self) -> usize {
         1 + match self {
-            FromWrite::Published(r) => <Vec<Referral> as Pack>::len(r),
-            FromWrite::Unpublished(r) => <Vec<Referral> as Pack>::len(r),
+            FromWrite::Published => 0,
+            FromWrite::Unpublished => 0,
+            FromWrite::Referral(r) => <Referral as Pack>::len(r),
             FromWrite::Denied => 0,
             FromWrite::Error(c) => <Chars as Pack>::len(c),
         }
@@ -584,17 +578,15 @@ impl Pack for FromWrite {
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         match self {
-            FromWrite::Published(r) => {
-                buf.put_u8(0);
-                <Vec<Referral> as Pack>::encode(r, buf)
-            },
-            FromWrite::Unpublished(r) => {
-                buf.put_u8(1);
-                <Vec<Referral> as Pack>::encode(r, buf)
-            },
-            FromWrite::Denied => Ok(buf.put_u8(2)),
+            FromWrite::Published => Ok(buf.put_u8(0)),
+            FromWrite::Unpublished => Ok(buf.put_u8(1)),
+            FromWrite::Referral(r) => {
+                buf.put_u8(2);
+                <Referral as Pack>::encode(r, buf)
+            }
+            FromWrite::Denied => Ok(buf.put_u8(3)),
             FromWrite::Error(c) => {
-                buf.put_u8(3);
+                buf.put_u8(4);
                 <Chars as Pack>::encode(c, buf)
             }
         }
@@ -602,10 +594,11 @@ impl Pack for FromWrite {
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(FromWrite::Published(<Vec<Referral> as Pack>::decode(buf)?)),
-            1 => Ok(FromWrite::Unpublished(<Vec<Referral> as Pack>::decode(buf)?)),
-            2 => Ok(FromWrite::Denied),
-            3 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
+            0 => Ok(FromWrite::Published),
+            1 => Ok(FromWrite::Unpublished),
+            2 => Ok(FromWrite::Referral(<Referral as Pack>::decode(buf)?)),
+            3 => Ok(FromWrite::Denied),
+            4 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }

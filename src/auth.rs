@@ -141,18 +141,6 @@ impl PMap {
         Ok(PMap(pmap))
     }
 
-    pub(crate) fn allowed_forall<'a>(
-        &'a self,
-        mut paths: impl Iterator<Item = &'a str>,
-        desired_rights: Permissions,
-        user: &UserInfo,
-    ) -> bool {
-        paths.all(|p| {
-            let actual_rights = self.permissions(p, user);
-            actual_rights & desired_rights == desired_rights
-        })
-    }
-
     pub(crate) fn allowed(
         &self,
         path: &str,

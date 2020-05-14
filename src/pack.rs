@@ -84,17 +84,21 @@ impl Pack for net::SocketAddr {
 
 impl Pack for Bytes {
     fn len(&self) -> usize {
-        Bytes::len(self) + mem::size_of::<u32>()
+        varint_len(Bytes::len(self) as u64) + Bytes::len(self)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
-        buf.put_u32(Bytes::len(self) as u32);
+        encode_varint(Bytes::len(self) as u64, buf);
         Ok(buf.extend_from_slice(&*self))
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
-        let len = buf.get_u32();
-        Ok(buf.split_to(len as usize).freeze())
+        let len = decode_varint(buf)?;
+        if len as usize > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            Ok(buf.split_to(len as usize).freeze())
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use crate::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
+            FromWrite, Resolved, ServerAuthWrite, ServerHelloRead,
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
@@ -43,20 +43,6 @@ use tokio::{
 
 type ClientInfo = Option<oneshot::Sender<()>>;
 
-fn allowed_for(
-    secstore: Option<&SecStore>,
-    uifo: &Arc<UserInfo>,
-    paths: &Vec<Path>,
-    perm: Permissions,
-) -> bool {
-    secstore
-        .map(|s| {
-            let paths = paths.iter().map(|p| p.as_ref());
-            s.pmap().allowed_forall(paths, perm, uifo)
-        })
-        .unwrap_or(true)
-}
-
 fn handle_batch_write(
     store: &Store<ClientInfo>,
     con: &mut Channel<ServerCtx>,
@@ -66,41 +52,21 @@ fn handle_batch_write(
     msgs: impl Iterator<Item = ToWrite>,
 ) -> Result<()> {
     let mut s = store.write();
-    fn check_refs(
-        s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
-        paths: &mut Vec<Path>,
-    ) -> Vec<Referral> {
-        let mut refs = HashMap::new();
-        paths.retain(|p| {
-            let mut retain = true;
-            s.check_referral(&p, |r| {
-                retain = false;
-                if !refs.contains_key(r.path.as_ref()) {
-                    refs.insert(r.path.clone(), r.clone());
-                }
-            });
-            retain
-        });
-        refs.into_iter().map(|(_, r)| r).collect()
-    }
     let publish = |s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
                    con: &mut Channel<ServerCtx>,
-                   paths: &mut Vec<Path>,
+                   path: Path,
                    default: bool|
      -> Result<()> {
-        if !paths.iter().all(Path::is_absolute) {
+        if !Path::is_absolute(&*path) {
             con.queue_send(&FromWrite::Error("absolute paths required".into()))?
+        } else if let Some(r) = s.check_referral(&path) {
+            con.queue_send(&FromWrite::Referral(r))?
         } else {
-            let r = check_refs(s, paths);
             let perm =
                 if default { Permissions::PUBLISH_DEFAULT } else { Permissions::PUBLISH };
-            if allowed_for(secstore, uifo, &*paths, perm) {
-                for path in paths.drain(..) {
-                    s.publish(path, write_addr, default);
-                }
-                con.queue_send(&FromWrite::Published(r))?
-            } else if r.len() > 0 {
-                con.queue_send(&FromWrite::Published(r))?
+            if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true) {
+                s.publish(path, write_addr, default);
+                con.queue_send(&FromWrite::Published)?
             } else {
                 con.queue_send(&FromWrite::Denied)?
             }
@@ -110,26 +76,22 @@ fn handle_batch_write(
     for m in msgs {
         match m {
             ToWrite::Heartbeat => (),
-            ToWrite::Publish(mut paths) => publish(&mut s, con, &mut paths, false)?,
-            ToWrite::PublishDefault(path) => {
-                let mut paths = vec![path];
-                publish(&mut s, con, &mut paths, true)?
-            }
-            ToWrite::Unpublish(mut paths) => {
-                if !paths.iter().all(Path::is_absolute) {
+            ToWrite::Publish(path) => publish(&mut s, con, path, false)?,
+            ToWrite::PublishDefault(path) => publish(&mut s, con, path, true)?,
+            ToWrite::Unpublish(path) => {
+                if !Path::is_absolute(&*path) {
                     con.queue_send(&FromWrite::Error("absolute paths required".into()))?
+                } else if let Some(r) = s.check_referral(&path) {
+                    con.queue_send(&FromWrite::Referral(r))?
                 } else {
-                    let r = check_refs(&mut s, &mut paths);
-                    for path in paths {
-                        s.unpublish(path, write_addr);
-                    }
-                    con.queue_send(&FromWrite::Unpublished(r))?
+                    s.unpublish(path, write_addr);
+                    con.queue_send(&FromWrite::Unpublished)?
                 }
             }
             ToWrite::Clear => {
                 s.unpublish_addr(write_addr);
                 s.gc();
-                con.queue_send(&FromWrite::Unpublished(vec![]))?
+                con.queue_send(&FromWrite::Unpublished)?
             }
         }
     }
@@ -368,71 +330,53 @@ fn handle_batch_read(
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let s = store.read();
     let sec = secstore.map(|s| s.store.read());
-    'main: for m in msgs {
+    for m in msgs {
         match m {
-            ToRead::Resolve(paths) => {
-                let refs = {
-                    let mut refs = HashMap::new();
-                    for p in paths.iter() {
-                        s.check_referral(p, |r| {
-                            if !refs.contains_key(&r.path) {
-                                refs.insert(r.path.clone(), r.clone());
-                            }
-                        })
-                    }
-                    refs.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
-                };
-                match secstore {
-                    None => {
-                        let a = Resolved {
-                            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
-                            resolver: id,
-                            addrs: paths.iter().map(|p| s.resolve(p)).collect::<Vec<_>>(),
-                        };
-                        con.queue_send(&FromRead::Resolved(a, refs))?;
-                    }
-                    Some(ref secstore) => {
-                        let mut krb5_spns =
-                            HashMap::with_hasher(FxBuildHasher::default());
-                        let sec = sec.as_ref().unwrap();
-                        let pmap = secstore.pmap();
-                        let mut addrs = Vec::with_capacity(paths.len());
-                        for p in paths.iter() {
-                            let perm = pmap.permissions(&*p, &**uifo);
-                            if !perm.contains(Permissions::SUBSCRIBE) {
-                                con.queue_send(&FromRead::Error("denied".into()))?;
-                                continue 'main;
-                            }
-                            addrs.push(s.resolve_and_sign(
-                                &**sec,
-                                &mut krb5_spns,
-                                now,
-                                perm,
-                                p,
-                            )?);
+            ToRead::Resolve(path) => {
+                if let Some(r) = s.check_referral(&path) {
+                    con.queue_send(&FromRead::Referral(r))?
+                } else {
+                    match secstore {
+                        None => {
+                            let a = Resolved {
+                                krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
+                                resolver: id,
+                                addrs: s.resolve(&path),
+                            };
+                            con.queue_send(&FromRead::Resolved(a))?;
                         }
-                        let a = Resolved { krb5_spns, resolver: id, addrs };
-                        con.queue_send(&FromRead::Resolved(a, refs))?
+                        Some(ref secstore) => {
+                            let perm = secstore.pmap().permissions(&*path, &**uifo);
+                            if !perm.contains(Permissions::SUBSCRIBE) {
+                                con.queue_send(&FromRead::Denied)?;
+                            } else {
+                                let mut krb5_spns =
+                                    HashMap::with_hasher(FxBuildHasher::default());
+                                let addrs = s.resolve_and_sign(
+                                    &**sec.as_ref().unwrap(),
+                                    &mut krb5_spns,
+                                    now,
+                                    perm,
+                                    &path,
+                                )?;
+                                let a = Resolved { krb5_spns, resolver: id, addrs };
+                                con.queue_send(&FromRead::Resolved(a))?
+                            }
+                        }
                     }
                 }
             }
             ToRead::List(path) => {
-                let referral = {
-                    let mut rf = None;
-                    s.check_referral(&path, |r| rf = Some(r.clone()));
-                    rf
-                };
-                match referral {
-                    Some(r) => con.queue_send(&FromRead::ListReferral(r))?,
-                    None => {
-                        let allowed = secstore
-                            .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
-                            .unwrap_or(true);
-                        if allowed {
-                            con.queue_send(&FromRead::List(s.list(&path)))?
-                        } else {
-                            con.queue_send(&FromRead::Error("denied".into()))?
-                        }
+                if let Some(r) = s.check_referral(&path) {
+                    con.queue_send(&FromRead::Referral(r))?
+                } else {
+                    let allowed = secstore
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
+                        .unwrap_or(true);
+                    if allowed {
+                        con.queue_send(&FromRead::List(s.list(&path)))?
+                    } else {
+                        con.queue_send(&FromRead::Denied)?
                     }
                 }
             }

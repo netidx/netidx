@@ -139,10 +139,10 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn check_referral<F: FnMut(&Referral)>(&self, path: &Path, mut f: F) {
+    pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
         if let Some(r) = self.parent.as_ref() {
             if !path.starts_with(r.path.as_ref()) {
-                return f(&r);
+                return Some(r.clone());
             }
         }
         let r = self
@@ -153,11 +153,11 @@ impl<T> StoreInner<T> {
             ))
             .next_back();
         match r {
-            None => (),
+            None => None,
             Some((p, r)) if path.starts_with(p.as_ref()) => {
-                f(r);
+                Some(r.clone())
             }
-            Some(_) => (),
+            Some(_) => None,
         }
     }
 
