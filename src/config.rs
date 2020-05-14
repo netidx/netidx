@@ -127,8 +127,9 @@ pub mod resolver_server {
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             utils::check_addr(cfg.addr.ip(), &[])?;
-            if cfg.addr.port() == 0 {
-                bail!("You must specify a non zero port {:?}", cfg.addr);
+            let addr = cfg.addr;
+            if addr.port() == 0 {
+                bail!("You must specify a non zero port {:?}", addr);
             }
             let auth = match cfg.auth {
                 file::Auth::Anonymous => Auth::Anonymous,
@@ -137,14 +138,14 @@ pub mod resolver_server {
                     Auth::Krb5 { spn, permissions }
                 }
             };
-            let parent = cfg.parent.map(|r| r.check(Some(cfg.addr))).transpose()?;
+            let parent = cfg.parent.map(|r| r.check(Some(addr))).transpose()?;
             let children = {
                 let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
                 let children = cfg
                     .children
                     .into_iter()
                     .map(|r| {
-                        let r = r.check(Some(cfg.addr))?;
+                        let r = r.check(Some(addr))?;
                         Ok((r.path.clone(), r))
                     })
                     .collect::<Result<BTreeMap<Path, Referral>>>()?;
@@ -174,7 +175,7 @@ pub mod resolver_server {
                 parent,
                 children,
                 pid_file: cfg.pid_file,
-                addr: cfg.addr,
+                addr,
                 max_connections: cfg.max_connections,
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
@@ -217,7 +218,7 @@ pub mod resolver {
     impl Config {
         pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
             let cfg: file::Config = from_str(&read_to_string(file).await?)?;
-            let cfg = Config { resolver: cfg.resolver.check()?, auth: cfg.auth };
+            let cfg = Config { resolver: cfg.resolver.check(None)?, auth: cfg.auth };
             match cfg.auth {
                 Auth::Anonymous => {
                     if !cfg.resolver.krb5_spns.is_empty() {
