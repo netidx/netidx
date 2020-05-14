@@ -8,8 +8,8 @@ use crate::{
         self,
         v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            FromRead, FromWrite, Referral, Resolved, ResolverId, ServerAuthWrite,
+            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
         },
     },
     utils,

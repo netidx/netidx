@@ -1,9 +1,13 @@
 pub mod resolver_server {
-    use crate::{path::Path, protocol::resolver::v1::ResolverId};
+    use crate::{chars::Chars, path::Path, protocol::resolver::v1::Referral, utils};
     use anyhow::Result;
     use serde_json::from_str;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{
+            BTreeMap, Bound,
+            Bound::{Excluded, Unbounded},
+            HashMap,
+        },
         convert::AsRef,
         fs::read_to_string,
         net::SocketAddr,
@@ -12,7 +16,8 @@ pub mod resolver_server {
     };
 
     mod file {
-        use super::ResolverId;
+        use super::{Chars, Path, Referral as Pref};
+        use anyhow::Result;
         use std::{collections::HashMap, net::SocketAddr};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,12 +26,47 @@ pub mod resolver_server {
             Krb5 { spn: String, permissions: String },
         }
 
+        pub(super) struct Referral {
+            pub(super) path: String,
+            pub(super) ttl: u64,
+            pub(super) addrs: Vec<SocketAddr>,
+            pub(super) krb5_spns: HashMap<SocketAddr, String>,
+        }
+
+        impl Referral {
+            fn check(self) -> Result<Pref> {
+                let path = Path::from(self.path);
+                if !Path::is_absolute(&path) {
+                    bail!("absolute referral path is required")
+                }
+                if self.addrs.is_empty() {
+                    bail!("empty referral addrs")
+                }
+                if !self.krb5_spns.is_empty() {
+                    for a in &self.addrs {
+                        if !self.krb5_spns.contains_key(a) {
+                            bail!("spn for server {:?} is required", a)
+                        }
+                    }
+                }
+                Ok(Pref {
+                    path,
+                    ttl: self.ttl,
+                    addrs: self.addrs,
+                    krb5_spns: self
+                        .krb5_spns
+                        .into_iter()
+                        .map(|(a, s)| (a, Chars::from(s)))
+                        .collect(),
+                })
+            }
+        }
+
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
-            pub(super) parent: Option<(String, (u64, Vec<SocketAddr>))>,
-            pub(super) children: HashMap<String, (u64, Vec<SocketAddr>)>,
+            pub(super) parent: Option<Referral>,
+            pub(super) children: Vec<Referral>,
             pub(super) pid_file: String,
-            pub(super) id: ResolverId,
             pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
             pub(super) reader_ttl: u64,
@@ -50,10 +90,9 @@ pub mod resolver_server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
-        pub parent: Option<(Path, (u64, Vec<SocketAddr>))>,
-        pub children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
+        pub parent: Option<Referral>,
+        pub children: BTreeMap<Path, Referral>,
         pub pid_file: String,
-        pub id: ResolverId,
         pub addr: SocketAddr,
         pub max_connections: usize,
         pub reader_ttl: Duration,
@@ -72,39 +111,47 @@ pub mod resolver_server {
                     Auth::Krb5 { spn, permissions }
                 }
             };
-            let parent = match cfg.parent {
-                None => None,
-                Some((p, c)) => {
-                    let p = Path::from(p);
-                    if !Path::is_absolute(&p) {
-                        bail!("the root path must be absolute")
-                    }
-                    Some((p, c))
-                }
-            };
+            let parent = cfg.parent.map(|r| r.check()).transpose()?;
             let children = {
-                let root = parent.as_ref().map(|(ref p, _)| p.as_ref()).unwrap_or("/");
-                let mut m = BTreeMap::new();
-                for (p, c) in cfg.children {
-                    let p = Path::from(p);
-                    if !Path::is_absolute(&p) {
-                        bail!("child paths must be absolute {}", p)
+                let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
+                let children = cfg
+                    .children
+                    .into_iter()
+                    .map(|r| {
+                        let r = r.check()?;
+                        Ok((r.path.clone(), r))
+                    })
+                    .collect::<Result<BTreeMap<Path, Referral>>>()?;
+                for r in children.iter() {
+                    if !r.path.starts_with(&*root) {
+                        bail!("child paths much be under the root path {}", r.path)
                     }
-                    if !p.starts_with(&*root) {
-                        bail!("child paths much be under the root path {}", p)
+                    if Path::levels(&*r.path) <= Path::levels(&*root) {
+                        bail!("child paths must be deeper than  the root {}", r.path);
                     }
-                    if Path::levels(&*p) <= Path::levels(&*root) {
-                        bail!("child paths must be deeper than  the root {}", p);
+                    let res = children.range::<str, (Bound<&str>, Bound<&str>)>((
+                        Excluded(r.path.as_ref()),
+                        Unbounded,
+                    ));
+                    match res.next() {
+                        None => (),
+                        Some((p, _)) => {
+                            if r.path.starts_with(p.as_ref()) {
+                                bail!("can't put a referral {} below {}", p, r.path);
+                            }
+                        }
                     }
-                    m.insert(p, c);
                 }
-                m
+                children
             };
+            utils::check_addr(cfg.addr.ip(), &[])?;
+            if cfg.addr.port() == 0 {
+                bail!("You must specify a non zero port {:?}", cfg.addr);
+            }
             Ok(Config {
                 parent,
                 children,
                 pid_file: cfg.pid_file,
-                id: cfg.id,
                 addr: cfg.addr,
                 max_connections: cfg.max_connections,
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
@@ -117,27 +164,42 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
-    use crate::protocol::resolver::v1::ResolverId;
     use anyhow::Result;
     use serde_json::from_str;
-    use std::{collections::HashMap, convert::AsRef, net::SocketAddr, path::Path};
+    use std::{
+        collections::{HashMap, HashSet},
+        convert::AsRef,
+        net::SocketAddr,
+        path::Path,
+    };
     use tokio::fs::read_to_string;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Auth {
         Anonymous,
-        Krb5 { target_spns: HashMap<ResolverId, String> },
+        Krb5 { target_spns: HashMap<SocketAddr, String> },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Config {
-        pub servers: Vec<(ResolverId, SocketAddr)>,
+        pub servers: HashSet<SocketAddr>,
         pub auth: Auth,
     }
 
     impl Config {
         pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
-            Ok(from_str(&read_to_string(file).await?)?)
+            let cfg: Config = from_str(&read_to_string(file).await?)?;
+            match cfg.auth {
+                Auth::Anonymous => (),
+                Auth::Krb5 { ref target_spns } => {
+                    for addr in cfg.servers.iter() {
+                        if !target_spns.contains_key(addr) {
+                            bail!("missing target spn for server {:?}", addr)
+                        }
+                    }
+                }
+            }
+            Ok(cfg)
         }
     }
 }

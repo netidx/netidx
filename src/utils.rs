@@ -118,10 +118,10 @@ macro_rules! try_cf {
 pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
     match ip {
         IpAddr::V4(ip) if ip.is_link_local() => {
-            bail!("can't publish a link local address");
+            bail!("addr is a link local address");
         }
         IpAddr::V4(ip) if ip.is_broadcast() => {
-            bail!("can't publish to broadcast");
+            bail!("addr is a broadcast address");
         }
         IpAddr::V4(ip) if ip.is_private() => {
             let ok = resolvers.iter().all(|a| match a.ip() {
@@ -130,19 +130,19 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
                 _ => false,
             });
             if !ok {
-                bail!("can't publish private addresses to a global resolver")
+                bail!("addr is a private address, and the resolver is not")
             }
         }
         _ => (),
     }
     if ip.is_unspecified() {
-        bail!("can't publish to an unspecified address");
+        bail!("addr is an unspecified address");
     }
     if ip.is_multicast() {
-        bail!("can't publish a multicast address");
+        bail!("addr is a multicast address");
     }
     if ip.is_loopback() && !resolvers.iter().all(|a| a.ip().is_loopback()) {
-        bail!("can't publish a loopback address to a remote server");
+        bail!("addr is a loopback address and the resolver is not");
     }
     Ok(())
 }

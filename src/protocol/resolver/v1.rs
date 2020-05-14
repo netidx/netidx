@@ -40,32 +40,6 @@ impl Pack for CtxId {
     }
 }
 
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-pub struct ResolverId(u64);
-
-impl ResolverId {
-    #[cfg(test)]
-    pub(crate) fn mk(i: u64) -> ResolverId {
-        ResolverId(i)
-    }
-}
-
-impl Pack for ResolverId {
-    fn len(&self) -> usize {
-        <u64 as Pack>::len(&self.0)
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        self.0.encode(buf)
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        Ok(ResolverId(u64::decode(buf)?))
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientAuthRead {
     Anonymous,
@@ -305,31 +279,31 @@ impl Pack for ServerAuthWrite {
 pub struct ServerHelloWrite {
     pub ttl: u64,
     pub ttl_expired: bool,
-    pub resolver_id: ResolverId,
     pub auth: ServerAuthWrite,
+    pub resolver_id: SocketAddr,
 }
 
 impl Pack for ServerHelloWrite {
     fn len(&self) -> usize {
         <u64 as Pack>::len(&self.ttl)
             + <bool as Pack>::len(&self.ttl_expired)
-            + ResolverId::len(&self.resolver_id)
             + ServerAuthWrite::len(&self.auth)
+            + <SocketAddr as Pack>::len(&self.resolver_id)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <bool as Pack>::encode(&self.ttl_expired, buf)?;
-        ResolverId::encode(&self.resolver_id, buf)?;
-        ServerAuthWrite::encode(&self.auth, buf)
+        ServerAuthWrite::encode(&self.auth, buf)?;
+        <SocketAddr as Pack>::encode(&self.resolver_id, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let ttl = <u64 as Pack>::decode(buf)?;
         let ttl_expired = <bool as Pack>::decode(buf)?;
-        let resolver_id = ResolverId::decode(buf)?;
         let auth = ServerAuthWrite::decode(buf)?;
-        Ok(ServerHelloWrite { ttl, ttl_expired, resolver_id, auth })
+        let resolver_id = <SocketAddr as Pack>::decode(buf)?;
+        Ok(ServerHelloWrite { ttl, ttl_expired, auth, resolver_id })
     }
 }
 
@@ -380,14 +354,14 @@ impl Pack for ToRead {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
     pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
-    pub resolver: ResolverId,
+    pub resolver: SocketAddr,
     pub addrs: Vec<Vec<(SocketAddr, Bytes)>>,
 }
 
 impl Pack for Resolved {
     fn len(&self) -> usize {
         <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
-            + ResolverId::len(&self.resolver)
+            + <SocketAddr as Pack>::len(&self.resolver)
             + <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::len(&self.addrs)
     }
 
@@ -396,13 +370,13 @@ impl Pack for Resolved {
             &self.krb5_spns,
             buf,
         )?;
-        ResolverId::encode(&self.resolver, buf)?;
+        <SocketAddr as Pack>::encode(&self.resolver, buf)?;
         <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
-        let resolver = ResolverId::decode(buf)?;
+        let resolver = <SocketAddr as Pack>::decode(buf)?;
         let addrs = <Vec<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
         Ok(Resolved { krb5_spns, resolver, addrs })
     }
@@ -413,6 +387,7 @@ pub struct Referral {
     pub path: Path,
     pub ttl: u64,
     pub addrs: Vec<SocketAddr>,
+    pub krb5_spns: HashMap<SocketAddr, Chars>,
 }
 
 impl Pack for Referral {
@@ -420,19 +395,22 @@ impl Pack for Referral {
         <Path as Pack>::len(&self.path)
             + <u64 as Pack>::len(&self.ttl)
             + <Vec<SocketAddr> as Pack>::len(&self.addrs)
+            + <HashMap<SocketAddr, Chars> as Pack>::len(&self.krb5_spns)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <Path as Pack>::encode(&self.path, buf)?;
         <u64 as Pack>::encode(&self.ttl, buf)?;
-        <Vec<SocketAddr> as Pack>::encode(&self.addrs, buf)
+        <Vec<SocketAddr> as Pack>::encode(&self.addrs, buf)?;
+        <HashMap<SocketAddr, Chars> as Pack>::encode(&self.krb5_spns, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let path = <Path as Pack>::decode(buf)?;
         let ttl = <u64 as Pack>::decode(buf)?;
         let addrs = <Vec<SocketAddr> as Pack>::decode(buf)?;
-        Ok(Referral { path, ttl, addrs })
+        let krb5_spns = <HashMap<SocketAddr, Chars> as Pack>::decode(buf)?;
+        Ok(Referral { path, ttl, addrs, krb5_spns })
     }
 }
 

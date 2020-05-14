@@ -1,11 +1,10 @@
 use crate::{
     chars::Chars,
     path::Path,
-    protocol::resolver::v1::ResolverId,
     pack::{self, Pack, PackError},
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{mem, result};
+use std::{mem, result, net::SocketAddr};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -62,7 +61,7 @@ pub enum Hello {
     /// context will replace any old one, if it fails the new
     /// context will be thrown away and the old one will continue
     /// to be associated with the write address.
-    ResolverAuthenticate(ResolverId, Bytes),
+    ResolverAuthenticate(SocketAddr, Bytes),
 }
 
 impl Pack for Hello {
@@ -70,8 +69,8 @@ impl Pack for Hello {
         1 + match self {
             Hello::Anonymous => 0,
             Hello::Token(tok) => <Bytes as Pack>::len(tok),
-            Hello::ResolverAuthenticate(id, tok) => {
-                ResolverId::len(id) + <Bytes as Pack>::len(tok)
+            Hello::ResolverAuthenticate(addr, tok) => {
+                <SocketAddr as Pack>::len(addr) + <Bytes as Pack>::len(tok)
             }
         }
     }
@@ -85,7 +84,7 @@ impl Pack for Hello {
             }
             Hello::ResolverAuthenticate(id, tok) => {
                 buf.put_u8(2);
-                ResolverId::encode(id, buf)?;
+                <SocketAddr as Pack>::encode(id, buf)?;
                 <Bytes as Pack>::encode(tok, buf)
             }
         }
@@ -96,9 +95,9 @@ impl Pack for Hello {
             0 => Ok(Hello::Anonymous),
             1 => Ok(Hello::Token(<Bytes as Pack>::decode(buf)?)),
             2 => {
-                let id = ResolverId::decode(buf)?;
+                let addr = <SocketAddr as Pack>::decode(buf)?;
                 let tok = <Bytes as Pack>::decode(buf)?;
-                Ok(Hello::ResolverAuthenticate(id, tok))
+                Ok(Hello::ResolverAuthenticate(addr, tok))
             }
             _ => Err(PackError::UnknownTag),
         }
@@ -112,7 +111,7 @@ pub enum To {
     /// token is a proof from the resolver server that this
     /// subscription is permitted. In the case of an anonymous
     /// connection this proof will be empty.
-    Subscribe { path: Path, resolver: ResolverId, token: Bytes },
+    Subscribe { path: Path, resolver: SocketAddr, token: Bytes },
     /// Unsubscribe from the specified value, this will always result
     /// in an Unsubscibed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
@@ -126,7 +125,7 @@ impl Pack for To {
         1 + match self {
             To::Subscribe { path, resolver, token } => {
                 <Path as Pack>::len(path)
-                    + ResolverId::len(resolver)
+                    + <SocketAddr as Pack>::len(resolver)
                     + <Bytes as Pack>::len(token)
             }
             To::Unsubscribe(id) => Id::len(id),
@@ -139,7 +138,7 @@ impl Pack for To {
             To::Subscribe { path, resolver, token } => {
                 buf.put_u8(0);
                 <Path as Pack>::encode(path, buf)?;
-                ResolverId::encode(resolver, buf)?;
+                <SocketAddr as Pack>::encode(resolver, buf)?;
                 <Bytes as Pack>::encode(token, buf)
             }
             To::Unsubscribe(id) => {
@@ -158,7 +157,7 @@ impl Pack for To {
         match buf.get_u8() {
             0 => {
                 let path = <Path as Pack>::decode(buf)?;
-                let resolver = ResolverId::decode(buf)?;
+                let resolver = <SocketAddr as Pack>::decode(buf)?;
                 let token = <Bytes as Pack>::decode(buf)?;
                 Ok(To::Subscribe { path, resolver, token })
             }
@@ -181,7 +180,7 @@ pub enum Value {
     V32(u32),
     /// full 4 byte i32
     I32(i32),
-    /// LEB128 varint zigzag encoded 1 or more bytes depending on abs(value)
+    /// LEB128 varint zigzag encoded, 1 or more bytes depending on abs(value)
     Z32(i32),
     /// full 8 byte u64
     U64(u64),

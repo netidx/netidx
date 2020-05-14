@@ -9,7 +9,7 @@ use crate::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Referral, Resolved, ResolverId, ServerAuthWrite, ServerHelloRead,
+            FromWrite, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
@@ -71,12 +71,15 @@ fn handle_batch_write(
         paths: &mut Vec<Path>,
     ) -> Vec<Referral> {
         let mut refs = HashMap::new();
-        paths.retain(|p| match s.check_referral(&p) {
-            None => true,
-            Some(r) => {
-                refs.insert(r.path.clone(), r);
-                false
-            }
+        paths.retain(|p| {
+            let mut retain = true;
+            s.check_referral(&p, |r| {
+                retain = false;
+                if !refs.contains_key(r.path.as_ref()) {
+                    refs.insert(r.path.clone(), r.clone());
+                }
+            });
+            retain
         });
         refs.into_iter().map(|(_, r)| r).collect()
     }
@@ -215,7 +218,7 @@ async fn hello_client_write(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
-    resolver_id: ResolverId,
+    resolver_id: SocketAddr,
     hello: ClientHelloWrite,
 ) -> Result<()> {
     info!("hello_write starting negotiation");
@@ -359,7 +362,7 @@ fn handle_batch_read(
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
-    id: ResolverId,
+    id: SocketAddr,
     msgs: impl Iterator<Item = ToRead>,
 ) -> Result<()> {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -371,11 +374,11 @@ fn handle_batch_read(
                 let refs = {
                     let mut refs = HashMap::new();
                     for p in paths.iter() {
-                        if let Some(r) = s.check_referral(p) {
+                        s.check_referral(p, |r| {
                             if !refs.contains_key(&r.path) {
-                                refs.insert(r.path.clone(), r);
+                                refs.insert(r.path.clone(), r.clone());
                             }
-                        }
+                        })
                     }
                     refs.into_iter().map(|(_, r)| r).collect::<Vec<_>>()
                 };
@@ -437,7 +440,7 @@ async fn client_loop_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
-    id: ResolverId,
+    id: SocketAddr,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
     let mut batch: Vec<ToRead> = Vec::new();
@@ -478,7 +481,7 @@ async fn hello_client_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
-    id: ResolverId,
+    id: SocketAddr,
     hello: ClientAuthRead,
 ) -> Result<()> {
     async fn send(
@@ -526,7 +529,7 @@ async fn hello_client(
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
-    id: ResolverId,
+    id: SocketAddr,
 ) -> Result<()> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);

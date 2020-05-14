@@ -88,8 +88,8 @@ pub(crate) struct StoreInner<T> {
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
     defaults: BTreeSet<Path>,
-    parent: Option<(Path, (u64, Vec<SocketAddr>))>,
-    children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
+    parent: Option<Referral>,
+    children: BTreeMap<Path, Referral>,
     addrs: HCAddrs,
     clinfos: HashMap<SocketAddr, T, FxBuildHasher>,
 }
@@ -139,14 +139,10 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
-        if let Some((root, (ttl, addrs))) = self.parent.as_ref() {
-            if !path.starts_with(root.as_ref()) {
-                return Some(Referral {
-                    path: root.clone(),
-                    ttl: *ttl,
-                    addrs: addrs.clone(),
-                });
+    pub(crate) fn check_referral<F: FnMut(&Referral)>(&self, path: &Path, f: F) {
+        if let Some(r) = self.parent.as_ref() {
+            if !path.starts_with(r.path.as_ref()) {
+                return f(&r);
             }
         }
         let r = self
@@ -157,11 +153,11 @@ impl<T> StoreInner<T> {
             ))
             .next_back();
         match r {
-            None => None,
-            Some((p, (ttl, addrs))) if path.starts_with(p.as_ref()) => {
-                Some(Referral { path: p.clone(), ttl: *ttl, addrs: addrs.clone() })
+            None => (),
+            Some((p, r)) if path.starts_with(p.as_ref()) => {
+                f(r);
             }
-            Some(_) => None,
+            Some(_) => (),
         }
     }
 
