@@ -416,19 +416,26 @@ fn handle_batch_read(
                     }
                 }
             }
-            ToRead::List(path) => match s.check_referral(&path) {
-                Some(r) => con.queue_send(&FromRead::ListReferral(r))?,
-                None => {
-                    let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
-                        .unwrap_or(true);
-                    if allowed {
-                        con.queue_send(&FromRead::List(s.list(&path)))?
-                    } else {
-                        con.queue_send(&FromRead::Error("denied".into()))?
+            ToRead::List(path) => {
+                let referral = {
+                    let mut rf = None;
+                    s.check_referral(&path, |r| rf = Some(r.clone()));
+                    rf
+                };
+                match referral {
+                    Some(r) => con.queue_send(&FromRead::ListReferral(r))?,
+                    None => {
+                        let allowed = secstore
+                            .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
+                            .unwrap_or(true);
+                        if allowed {
+                            con.queue_send(&FromRead::List(s.list(&path)))?
+                        } else {
+                            con.queue_send(&FromRead::Error("denied".into()))?
+                        }
                     }
                 }
-            },
+            }
         }
     }
     Ok(())
@@ -584,7 +591,7 @@ async fn server_loop(
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = cfg.max_connections;
-    let id = cfg.id;
+    let id = cfg.addr;
     let _ = ready.send(local_addr);
     loop {
         select_biased! {

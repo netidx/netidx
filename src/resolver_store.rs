@@ -139,7 +139,7 @@ impl<T> StoreInner<T> {
         }
     }
 
-    pub(crate) fn check_referral<F: FnMut(&Referral)>(&self, path: &Path, f: F) {
+    pub(crate) fn check_referral<F: FnMut(&Referral)>(&self, path: &Path, mut f: F) {
         if let Some(r) = self.parent.as_ref() {
             if !path.starts_with(r.path.as_ref()) {
                 return f(&r);
@@ -217,7 +217,7 @@ impl<T> StoreInner<T> {
             .defaults
             .range::<str, (Bound<&str>, Bound<&str>)>((
                 Unbounded,
-                Excluded(path.as_ref()),
+                Included(path.as_ref()),
             ))
             .next_back();
         match default {
@@ -330,8 +330,8 @@ impl<T> Deref for Store<T> {
 
 impl<T> Store<T> {
     pub(crate) fn new(
-        parent: Option<(Path, (u64, Vec<SocketAddr>))>,
-        children: BTreeMap<Path, (u64, Vec<SocketAddr>)>,
+        parent: Option<Referral>,
+        children: BTreeMap<Path, Referral>,
     ) -> Self {
         Store(Arc::new(RwLock::new(StoreInner {
             by_path: HashMap::new(),

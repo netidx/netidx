@@ -26,6 +26,7 @@ pub mod resolver_server {
             Krb5 { spn: String, permissions: String },
         }
 
+        #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Referral {
             pub(super) path: String,
             pub(super) ttl: u64,
@@ -34,7 +35,7 @@ pub mod resolver_server {
         }
 
         impl Referral {
-            fn check(self) -> Result<Pref> {
+            pub(super) fn check(self) -> Result<Pref> {
                 let path = Path::from(self.path);
                 if !Path::is_absolute(&path) {
                     bail!("absolute referral path is required")
@@ -122,14 +123,14 @@ pub mod resolver_server {
                         Ok((r.path.clone(), r))
                     })
                     .collect::<Result<BTreeMap<Path, Referral>>>()?;
-                for r in children.iter() {
-                    if !r.path.starts_with(&*root) {
-                        bail!("child paths much be under the root path {}", r.path)
+                for (p, r) in children.iter() {
+                    if !p.starts_with(&*root) {
+                        bail!("child paths much be under the root path {}", p)
                     }
-                    if Path::levels(&*r.path) <= Path::levels(&*root) {
-                        bail!("child paths must be deeper than  the root {}", r.path);
+                    if Path::levels(&*p) <= Path::levels(&*root) {
+                        bail!("child paths must be deeper than  the root {}", p);
                     }
-                    let res = children.range::<str, (Bound<&str>, Bound<&str>)>((
+                    let mut res = children.range::<str, (Bound<&str>, Bound<&str>)>((
                         Excluded(r.path.as_ref()),
                         Unbounded,
                     ));
