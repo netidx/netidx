@@ -1,20 +1,16 @@
 use crate::{
     channel::Channel,
     chars::Chars,
-    config::{self, resolver::Auth as CAuth},
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
-    protocol::resolver::{
-        self,
-        v1::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
-        },
+    protocol::resolver::v1::{
+        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
+        FromWrite, Referral, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
+        ToWrite,
     },
     utils::{self, BatchItem, Batched},
 };
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
@@ -462,7 +458,7 @@ async fn connection_write(
 
 async fn write_mgr(
     receiver: mpsc::UnboundedReceiver<ToWrite>,
-    reply: mpsc::UnboundedSender<FromWrite>,
+    reply: mpsc::UnboundedSender<Result<FromWrite>>,
     resolver: Referral,
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
@@ -513,19 +509,27 @@ async fn write_mgr(
                     let _ = s.send((Arc::clone(&tx_batch), tx)).await;
                     waiters.push(rx);
                 }
-                let rx_batch = select_ok(waiters).await?.0;
-                let mut published = published.write();
-                for (tx, rx) in tx_batch.iter().zip(rx_batch.into_iter()) {
-                    if let ToWrite::Publish(path) = tx {
-                        match rx {
-                            FromWrite::Published => {
-                                published.insert(path.clone());
-                            }
-                            _ => (),
+                match select_ok(waiters).await {
+                    Err(e) => {
+                        for _ in tx_batch.iter() {
+                            reply.send(Err(anyhow!("{}", e)))?;
                         }
                     }
-                    reply.send(rx)?;
-                }
+                    Ok((rx_batch, _)) => {
+                        let mut published = published.write();
+                        for (tx, rx) in tx_batch.iter().zip(rx_batch.into_iter()) {
+                            if let ToWrite::Publish(path) = tx {
+                                match rx {
+                                    FromWrite::Published => {
+                                        published.insert(path.clone());
+                                    }
+                                    _ => (),
+                                }
+                            }
+                            reply.send(Ok(rx))?;
+                        }
+                    }
+                };
             }
         }
     }
@@ -540,7 +544,7 @@ impl ResolverWrite {
         resolver: Referral,
         desired_auth: Auth,
         write_addr: SocketAddr,
-        reply: mpsc::UnboundedSender<FromWrite>,
+        reply: mpsc::UnboundedSender<Result<FromWrite>>,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     ) -> Result<ResolverWrite> {
         let (sender, receiver) = mpsc::unbounded_channel();
