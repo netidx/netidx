@@ -8,9 +8,9 @@ use crate::{
         FromWrite, Referral, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
         ToWrite,
     },
-    utils::{self, BatchItem, Batched},
+    utils,
 };
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
@@ -71,11 +71,6 @@ fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes
         None => bail!("client ctx first step produced no token"),
         Some(tok) => Ok((ctx, utils::bytes(&*tok))),
     }
-}
-
-fn choose_read_addr(resolver: &Referral) -> SocketAddr {
-    use rand::{thread_rng, Rng};
-    resolver.addrs[thread_rng().gen_range(0, resolver.addrs.len())]
 }
 
 // continue with timeout
@@ -158,32 +153,23 @@ async fn connect_read(
     }
 }
 
+type ReadBatch = (Vec<ToRead>, oneshot::Sender<Vec<FromRead>>);
+
 async fn connection_read(
-    receiver: mpsc::UnboundedReceiver<ToRead>,
-    reply: mpsc::UnboundedSender<Result<FromRead>>,
+    mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
     resolver: Referral,
     desired_auth: Auth,
 ) {
-    let mut receiver = Batched::new(receiver, 100_000);
-    let mut tx_batch = Vec::new();
-    let mut rx_batch = Vec::new();
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
         match receiver.next().await {
             None => break,
-            Some(BatchItem::InBatch(m)) => {
-                tx_batch.push(m);
-            }
-            Some(BatchItem::EndBatch) => {
+            Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
+                let mut rx_batch = Vec::new();
                 loop {
                     if tries >= 3 {
-                        for m in tx_batch.drain(..) {
-                            if let Err(_) = reply.send(Err(anyhow!("failed"))) {
-                                break 'main;
-                            }
-                        }
                         break;
                     }
                     if tries > 0 {
@@ -206,14 +192,7 @@ async fn connection_read(
                         match c.queue_send(m) {
                             Ok(()) => (),
                             Err(e) => {
-                                // bad batch, don't retry
-                                for _ in &tx_batch {
-                                    if let Err(_) = reply.send(Err(anyhow!("{}", e))) {
-                                        break 'main;
-                                    }
-                                }
                                 c.clear();
-                                tx_batch.clear();
                                 continue 'main;
                             }
                         }
@@ -227,7 +206,8 @@ async fn connection_read(
                             while rx_batch.len() < tx_batch.len() {
                                 match c.receive_batch(&mut rx_batch).await {
                                     Ok(()) => (),
-                                    Err(_) => {
+                                    Err(e) => {
+                                        warn!("read connection failed {}", e);
                                         err = true;
                                         break;
                                     }
@@ -236,12 +216,7 @@ async fn connection_read(
                             if err {
                                 con = None;
                             } else {
-                                tx_batch.clear();
-                                for m in rx_batch.drain(..) {
-                                    if let Err(_) = reply.send(Ok(m)) {
-                                        break 'main;
-                                    }
-                                }
+                                let _ = reply.send(rx_batch);
                                 break;
                             }
                         }
@@ -252,25 +227,23 @@ async fn connection_read(
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ResolverRead(mpsc::UnboundedSender<ToRead>);
+#[derive(Debug)]
+pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
-    pub(crate) fn new(
-        resolver: Referral,
-        desired_auth: Auth,
-        sender: mpsc::UnboundedSender<Result<FromRead>>,
-    ) -> Result<ResolverRead> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub(crate) fn new(resolver: Referral, desired_auth: Auth) -> Result<ResolverRead> {
+        let (to_tx, to_rx) = mpsc::unbounded_channel();
         task::spawn(async move {
-            connection_read(rx, sender, resolver, desired_auth).await;
+            connection_read(to_rx, resolver, desired_auth).await;
             info!("read task shutting down")
         });
-        Ok(ResolverRead(tx))
+        Ok(ResolverRead(to_tx))
     }
 
-    pub(crate) fn send(&self, m: ToRead) -> Result<()> {
-        Ok(self.0.send(m)?)
+    pub(crate) async fn send(&self, batch: Vec<ToRead>) -> Result<Vec<FromRead>> {
+        let (tx, rx) = oneshot::channel();
+        self.0.send((batch, tx))?;
+        Ok(rx.await?)
     }
 }
 
@@ -516,15 +489,15 @@ async fn connection_write(
     }
 }
 
+type WriteBatch = (Vec<ToWrite>, oneshot::Sender<Vec<FromWrite>>);
+
 async fn write_mgr(
-    receiver: mpsc::UnboundedReceiver<ToWrite>,
-    reply: mpsc::UnboundedSender<Result<FromWrite>>,
+    mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
     resolver: Referral,
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
-    let mut receiver = Batched::new(receiver, 100_000);
     let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut senders = {
         let mut senders = Vec::new();
@@ -552,68 +525,56 @@ async fn write_mgr(
         }
         senders
     };
-    let mut batch = Vec::new();
-    while let Some(m) = receiver.next().await {
-        match m {
-            BatchItem::InBatch(m) => {
-                batch.push(m);
-            }
-            BatchItem::EndBatch => {
-                let tx_batch = Arc::new(mem::replace(&mut batch, Vec::new()));
-                let mut waiters = Vec::new();
-                for s in senders.iter_mut() {
-                    let (tx, rx) = oneshot::channel();
-                    let _ = s.send((Arc::clone(&tx_batch), tx)).await;
-                    waiters.push(rx);
-                }
-                match select_ok(waiters).await {
-                    Err(e) => {
-                        for _ in tx_batch.iter() {
-                            reply.send(Err(anyhow!("{}", e)))?;
-                        }
-                    }
-                    Ok((rx_batch, _)) => {
-                        let mut published = published.write();
-                        for (tx, rx) in tx_batch.iter().zip(rx_batch.into_iter()) {
-                            if let ToWrite::Publish(path) = tx {
-                                match rx {
-                                    FromWrite::Published => {
-                                        published.insert(path.clone());
-                                    }
-                                    _ => (),
-                                }
+    while let Some((batch, reply)) = receiver.next().await {
+        let tx_batch = Arc::new(batch);
+        let mut waiters = Vec::new();
+        for s in senders.iter_mut() {
+            let (tx, rx) = oneshot::channel();
+            let _ = s.send((Arc::clone(&tx_batch), tx)).await;
+            waiters.push(rx);
+        }
+        match select_ok(waiters).await {
+            Err(e) => warn!("write_mgr: write failed on all writers {}", e),
+            Ok((rx_batch, _)) => {
+                let mut published = published.write();
+                for (tx, rx) in tx_batch.iter().zip(rx_batch.iter()) {
+                    if let ToWrite::Publish(path) = tx {
+                        match rx {
+                            FromWrite::Published => {
+                                published.insert(path.clone());
                             }
-                            reply.send(Ok(rx))?;
+                            _ => (),
                         }
                     }
-                };
+                }
+                let _ = reply.send(rx_batch);
             }
         }
     }
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ResolverWrite(mpsc::UnboundedSender<ToWrite>);
+#[derive(Debug)]
+pub(crate) struct ResolverWrite(mpsc::UnboundedSender<WriteBatch>);
 
 impl ResolverWrite {
     pub(crate) fn new(
         resolver: Referral,
         desired_auth: Auth,
         write_addr: SocketAddr,
-        reply: mpsc::UnboundedSender<Result<FromWrite>>,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     ) -> Result<ResolverWrite> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (to_tx, to_rx) = mpsc::unbounded_channel();
         task::spawn(async move {
-            let r = write_mgr(receiver, reply, resolver, desired_auth, ctxts, write_addr)
-                .await;
+            let r = write_mgr(to_rx, resolver, desired_auth, ctxts, write_addr).await;
             info!("resolver: write manager exited {:?}", r);
         });
-        Ok(ResolverWrite(sender))
+        Ok(ResolverWrite(to_tx))
     }
 
-    pub(crate) fn send(&self, m: ToWrite) -> Result<()> {
-        Ok(self.0.send(m)?)
+    pub(crate) async fn send(&self, batch: Vec<ToWrite>) -> Result<Vec<FromWrite>> {
+        let (tx, rx) = oneshot::channel();
+        self.0.send((batch, tx))?;
+        Ok(rx.await?)
     }
 }

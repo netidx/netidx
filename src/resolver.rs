@@ -4,8 +4,5 @@ use crate::resolver_single::{
 };
 use std::{collections::BTreeMap};
 
-
-
 pub struct ResolverReadInner {
-    
 }
