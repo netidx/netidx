@@ -133,6 +133,12 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
         }
     }
 
+    /// Clear unflused queued messages
+    pub(crate) fn clear(&mut self) {
+        self.boundries.clear();
+        self.buf.clear();
+    }
+
     /// Queue and flush one message.
     pub(crate) async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<()> {
         self.queue_send(msg)?;
@@ -321,6 +327,10 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
 
     pub(crate) fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.queue_send(msg)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.write.clear();
     }
 
     pub(crate) async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {

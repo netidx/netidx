@@ -10,12 +10,13 @@ use crate::{
     },
     utils::{self, BatchItem, Batched},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
@@ -32,6 +33,8 @@ use tokio::{
     task,
     time::{self, Instant, Interval},
 };
+
+const HELLO_TO: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub enum ResolverError {
@@ -75,22 +78,40 @@ fn choose_read_addr(resolver: &Referral) -> SocketAddr {
     resolver.addrs[thread_rng().gen_range(0, resolver.addrs.len())]
 }
 
+// continue with timeout
+macro_rules! cwt {
+    ($msg:expr, $e:expr) => {
+        try_cf!(
+            $msg,
+            continue,
+            try_cf!($msg, continue, time::timeout(HELLO_TO, $e).await)
+        )
+    };
+}
+
 async fn connect_read(
     resolver: &Referral,
     sc: &mut Option<(CtxId, ClientCtx)>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
-    let mut backoff = 0;
+    let mut addrs = resolver.addrs.clone();
+    addrs.as_mut_slice().shuffle(&mut thread_rng());
+    let mut n = 0;
     loop {
-        if backoff > 0 {
-            time::delay_for(Duration::from_secs(backoff)).await;
+        let addr = addrs[n % addrs.len()];
+        let tries = n / addrs.len();
+        if tries >= 3 {
+            bail!("can't connect to any resolver servers");
         }
-        backoff += 1;
-        let addr = choose_read_addr(resolver);
-        let con = try_cf!("connect", continue, TcpStream::connect(&addr).await);
+        if n % addrs.len() == 0 && tries > 0 {
+            let wait = thread_rng().gen_range(1, 4);
+            time::delay_for(Duration::from_secs(wait)).await;
+        }
+        n += 1;
+        let con = cwt!("connect", TcpStream::connect(&addr));
         let mut con = Channel::new(con);
-        try_cf!("send version", continue, con.send_one(&1u64).await);
-        let _ver: u64 = try_cf!("recv version", continue, con.receive().await);
+        cwt!("send version", con.send_one(&1u64));
+        let _ver: u64 = cwt!("recv version", con.receive());
         let (auth, ctx) = match desired_auth {
             Auth::Anonymous => (ClientAuthRead::Anonymous, None),
             Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
@@ -111,8 +132,8 @@ async fn connect_read(
                 }
             },
         };
-        try_cf!("hello", continue, con.send_one(&ClientHello::ReadOnly(auth)).await);
-        let r: ServerHelloRead = try_cf!("hello reply", continue, con.receive().await);
+        cwt!("hello", con.send_one(&ClientHello::ReadOnly(auth)));
+        let r: ServerHelloRead = cwt!("hello reply", con.receive());
         if let Some(ref ctx) = ctx {
             con.set_ctx(ctx.clone()).await
         }
@@ -139,62 +160,96 @@ async fn connect_read(
 
 async fn connection_read(
     receiver: mpsc::UnboundedReceiver<ToRead>,
-    reply: mpsc::UnboundedSender<FromRead>,
+    reply: mpsc::UnboundedSender<Result<FromRead>>,
     resolver: Referral,
     desired_auth: Auth,
-) -> Result<()> {
+) {
     let mut receiver = Batched::new(receiver, 100_000);
     let mut tx_batch = Vec::new();
     let mut rx_batch = Vec::new();
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
     let mut con: Option<Channel<ClientCtx>> = None;
-    while let Some(m) = receiver.next().await {
-        match m {
-            BatchItem::InBatch(m) => {
+    'main: loop {
+        match receiver.next().await {
+            None => break,
+            Some(BatchItem::InBatch(m)) => {
                 tx_batch.push(m);
             }
-            BatchItem::EndBatch => loop {
-                let c = match con {
-                    Some(ref mut c) => c,
-                    None => {
-                        con =
-                            Some(connect_read(&resolver, &mut ctx, &desired_auth).await?);
-                        con.as_mut().unwrap()
+            Some(BatchItem::EndBatch) => {
+                let mut tries: usize = 0;
+                loop {
+                    if tries >= 3 {
+                        for m in tx_batch.drain(..) {
+                            if let Err(_) = reply.send(Err(anyhow!("failed"))) {
+                                break 'main;
+                            }
+                        }
+                        break;
                     }
-                };
-                for m in &tx_batch {
-                    c.queue_send(m)?
-                }
-                match c.flush().await {
-                    Err(_) => {
-                        con = None;
+                    if tries > 0 {
+                        let wait = thread_rng().gen_range(1, 4);
+                        time::delay_for(Duration::from_secs(wait)).await
                     }
-                    Ok(()) => {
-                        let mut err = false;
-                        while rx_batch.len() < tx_batch.len() {
-                            match c.receive_batch(&mut rx_batch).await {
-                                Ok(()) => (),
-                                Err(_) => {
-                                    err = true;
-                                    break;
+                    tries += 1;
+                    let c = match con {
+                        Some(ref mut c) => c,
+                        None => {
+                            con = Some(try_cf!(
+                                "connect read",
+                                continue,
+                                connect_read(&resolver, &mut ctx, &desired_auth).await
+                            ));
+                            con.as_mut().unwrap()
+                        }
+                    };
+                    for m in &tx_batch {
+                        match c.queue_send(m) {
+                            Ok(()) => (),
+                            Err(e) => {
+                                // bad batch, don't retry
+                                for _ in &tx_batch {
+                                    if let Err(_) = reply.send(Err(anyhow!("{}", e))) {
+                                        break 'main;
+                                    }
+                                }
+                                c.clear();
+                                tx_batch.clear();
+                                continue 'main;
+                            }
+                        }
+                    }
+                    match c.flush().await {
+                        Err(_) => {
+                            con = None;
+                        }
+                        Ok(()) => {
+                            let mut err = false;
+                            while rx_batch.len() < tx_batch.len() {
+                                match c.receive_batch(&mut rx_batch).await {
+                                    Ok(()) => (),
+                                    Err(_) => {
+                                        err = true;
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        if err {
-                            con = None;
-                        } else {
-                            tx_batch.clear();
-                            for m in rx_batch.drain(..) {
-                                reply.send(m)?
+                            if err {
+                                con = None;
+                            } else {
+                                tx_batch.clear();
+                                for m in rx_batch.drain(..) {
+                                    if let Err(_) = reply.send(Ok(m)) {
+                                        break 'main;
+                                    }
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                 }
-            },
+            }
         }
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -204,11 +259,12 @@ impl ResolverRead {
     pub(crate) fn new(
         resolver: Referral,
         desired_auth: Auth,
-        sender: mpsc::UnboundedSender<FromRead>,
+        sender: mpsc::UnboundedSender<Result<FromRead>>,
     ) -> Result<ResolverRead> {
         let (tx, rx) = mpsc::unbounded_channel();
         task::spawn(async move {
-            let _ = connection_read(rx, sender, resolver, desired_auth).await;
+            connection_read(rx, sender, resolver, desired_auth).await;
+            info!("read task shutting down")
         });
         Ok(ResolverRead(tx))
     }
@@ -216,6 +272,12 @@ impl ResolverRead {
     pub(crate) fn send(&self, m: ToRead) -> Result<()> {
         Ok(self.0.send(m)?)
     }
+}
+
+macro_rules! wt {
+    ($e:expr) => {
+        time::timeout(HELLO_TO, $e).await
+    };
 }
 
 async fn connect_write(
@@ -227,10 +289,10 @@ async fn connect_write(
     desired_auth: &Auth,
 ) -> Result<(u64, Channel<ClientCtx>)> {
     info!("write_con connecting to resolver {:?}", resolver_addr);
-    let con = TcpStream::connect(&resolver_addr).await?;
+    let con = wt!(TcpStream::connect(&resolver_addr))??;
     let mut con = Channel::new(con);
-    con.send_one(&1u64).await?;
-    let _version: u64 = con.receive().await?;
+    wt!(con.send_one(&1u64))??;
+    let _version: u64 = wt!(con.receive())??;
     let (auth, ctx) = match desired_auth {
         Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
         Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
@@ -255,8 +317,8 @@ async fn connect_write(
     };
     let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
     debug!("write_con connection established hello {:?}", h);
-    con.send_one(&h).await?;
-    let r: ServerHelloWrite = con.receive().await?;
+    wt!(con.send_one(&h))??;
+    let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
     match (desired_auth, r.auth) {
         (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
@@ -318,14 +380,14 @@ async fn connect_write(
 }
 
 async fn connection_write(
-    mut receiver: mpsc::Receiver<(Arc<Vec<ToWrite>>, oneshot::Sender<Vec<FromWrite>>)>,
+    receiver: mpsc::Receiver<(Arc<Vec<ToWrite>>, oneshot::Sender<Vec<FromWrite>>)>,
     resolver: Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
-) -> Result<()> {
+) {
     let mut con: Option<Channel<ClientCtx>> = None;
     let hb = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(TTL / 10);
@@ -341,7 +403,7 @@ async fn connection_write(
         *hb = time::interval_at(now + heartbeat, heartbeat).fuse();
         *dc = time::interval_at(now + linger, linger).fuse();
     }
-    loop {
+    'main: loop {
         select_biased! {
             _ = dc.next() => {
                 if act {
@@ -389,12 +451,11 @@ async fn connection_write(
                 Some((tx_batch, reply)) => {
                     act = true;
                     let mut tries: u64 = 0;
-                    let mut backoff: u64 = 0;
                     while tries < 4 {
                         tries += 1;
-                        backoff += 1;
-                        if backoff > 1 {
-                            time::delay_for(Duration::from_secs(backoff - 1)).await;
+                        if tries > 1 {
+                            let wait = thread_rng().gen_range(1, 4);
+                            time::delay_for(Duration::from_secs(wait)).await;
                         }
                         let c = match con {
                             Some(ref mut c) => c,
@@ -420,7 +481,7 @@ async fn connection_write(
                             }
                         };
                         for m in &*tx_batch {
-                            c.queue_send(m)?
+                            try_cf!("queue send", continue, 'main, c.queue_send(m))
                         }
                         match c.flush().await {
                             Err(e) => {
@@ -453,7 +514,6 @@ async fn connection_write(
             }
         }
     }
-    Ok(())
 }
 
 async fn write_mgr(
@@ -477,7 +537,7 @@ async fn write_mgr(
             let ctxts = ctxts.clone();
             senders.push(sender);
             task::spawn(async move {
-                let r = connection_write(
+                connection_write(
                     receiver,
                     resolver,
                     addr,
@@ -487,10 +547,7 @@ async fn write_mgr(
                     ctxts.clone(),
                 )
                 .await;
-                info!(
-                    "resolver: write manager connection for {:?} exited: {:?}",
-                    addr, r
-                );
+                info!("write task for {:?} exited", addr);
             });
         }
         senders
