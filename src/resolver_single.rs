@@ -1,0 +1,558 @@
+use crate::{
+    channel::Channel,
+    chars::Chars,
+    config::{self, resolver::Auth as CAuth},
+    os::{self, ClientCtx, Krb5Ctx},
+    path::Path,
+    protocol::resolver::{
+        self,
+        v1::{
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromRead, FromWrite, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
+        },
+    },
+    utils::{self, BatchItem, Batched},
+};
+use anyhow::{anyhow, Error, Result};
+use bytes::Bytes;
+use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
+use fxhash::FxBuildHasher;
+use log::{debug, info, warn};
+use parking_lot::RwLock;
+use std::{
+    cmp::max,
+    collections::{HashMap, HashSet},
+    error, fmt,
+    fmt::Debug,
+    mem,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot},
+    task,
+    time::{self, Instant, Interval},
+};
+
+#[derive(Debug, Clone)]
+pub enum ResolverError {
+    Denied,
+    Unexpected,
+    Error(Chars),
+}
+
+impl fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "resolver error: {:?}", self)
+    }
+}
+
+impl error::Error for ResolverError {}
+
+#[derive(Debug, Clone)]
+pub(crate) enum OrReferral<T> {
+    Local(T),
+    Referral(Referral),
+}
+
+static TTL: u64 = 120;
+
+#[derive(Debug, Clone)]
+pub enum Auth {
+    Anonymous,
+    Krb5 { upn: Option<String>, spn: Option<String> },
+}
+
+fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes)> {
+    let ctx = os::create_client_ctx(upn, target_spn)?;
+    match ctx.step(None)? {
+        None => bail!("client ctx first step produced no token"),
+        Some(tok) => Ok((ctx, utils::bytes(&*tok))),
+    }
+}
+
+fn choose_read_addr(resolver: &Referral) -> SocketAddr {
+    use rand::{thread_rng, Rng};
+    resolver.addrs[thread_rng().gen_range(0, resolver.addrs.len())]
+}
+
+async fn connect_read(
+    resolver: &Referral,
+    sc: &mut Option<(CtxId, ClientCtx)>,
+    desired_auth: &Auth,
+) -> Result<Channel<ClientCtx>> {
+    let mut backoff = 0;
+    loop {
+        if backoff > 0 {
+            time::delay_for(Duration::from_secs(backoff)).await;
+        }
+        backoff += 1;
+        let addr = choose_read_addr(resolver);
+        let con = try_cf!("connect", continue, TcpStream::connect(&addr).await);
+        let mut con = Channel::new(con);
+        try_cf!("send version", continue, con.send_one(&1u64).await);
+        let _ver: u64 = try_cf!("recv version", continue, con.receive().await);
+        let (auth, ctx) = match desired_auth {
+            Auth::Anonymous => (ClientAuthRead::Anonymous, None),
+            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+                bail!("authentication unavailable")
+            }
+            Auth::Krb5 { upn, .. } => match sc {
+                Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
+                None => {
+                    let upn = upn.as_ref().map(|s| s.as_bytes());
+                    let target_spn = resolver
+                        .krb5_spns
+                        .get(&addr)
+                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?
+                        .as_bytes();
+                    let (ctx, tok) =
+                        try_cf!("create ctx", continue, create_ctx(upn, target_spn));
+                    (ClientAuthRead::Initiate(tok), Some(ctx))
+                }
+            },
+        };
+        try_cf!("hello", continue, con.send_one(&ClientHello::ReadOnly(auth)).await);
+        let r: ServerHelloRead = try_cf!("hello reply", continue, con.receive().await);
+        if let Some(ref ctx) = ctx {
+            con.set_ctx(ctx.clone()).await
+        }
+        match (desired_auth, r) {
+            (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
+            (Auth::Anonymous, _) => {
+                info!("server requires authentication");
+                continue;
+            }
+            (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
+                info!("could not authenticate resolver server");
+                continue;
+            }
+            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
+            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
+                let ctx = ctx.unwrap();
+                try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
+                *sc = Some((id, ctx));
+            }
+        };
+        break Ok(con);
+    }
+}
+
+async fn connection_read(
+    receiver: mpsc::UnboundedReceiver<ToRead>,
+    reply: mpsc::UnboundedSender<FromRead>,
+    resolver: Referral,
+    desired_auth: Auth,
+) -> Result<()> {
+    let mut receiver = Batched::new(receiver, 100_000);
+    let mut tx_batch = Vec::new();
+    let mut rx_batch = Vec::new();
+    let mut ctx: Option<(CtxId, ClientCtx)> = None;
+    let mut con: Option<Channel<ClientCtx>> = None;
+    while let Some(m) = receiver.next().await {
+        match m {
+            BatchItem::InBatch(m) => {
+                tx_batch.push(m);
+            }
+            BatchItem::EndBatch => loop {
+                let c = match con {
+                    Some(ref mut c) => c,
+                    None => {
+                        con =
+                            Some(connect_read(&resolver, &mut ctx, &desired_auth).await?);
+                        con.as_mut().unwrap()
+                    }
+                };
+                for m in &tx_batch {
+                    c.queue_send(m)?
+                }
+                match c.flush().await {
+                    Err(_) => {
+                        con = None;
+                    }
+                    Ok(()) => {
+                        let mut err = false;
+                        while rx_batch.len() < tx_batch.len() {
+                            match c.receive_batch(&mut rx_batch).await {
+                                Ok(()) => (),
+                                Err(_) => {
+                                    err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if err {
+                            con = None;
+                        } else {
+                            tx_batch.clear();
+                            for m in rx_batch.drain(..) {
+                                reply.send(m)?
+                            }
+                            break;
+                        }
+                    }
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolverRead(mpsc::UnboundedSender<ToRead>);
+
+impl ResolverRead {
+    pub(crate) fn new(
+        resolver: Referral,
+        desired_auth: Auth,
+        sender: mpsc::UnboundedSender<FromRead>,
+    ) -> Result<ResolverRead> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        task::spawn(async move {
+            let _ = connection_read(rx, sender, resolver, desired_auth).await;
+        });
+        Ok(ResolverRead(tx))
+    }
+
+    pub(crate) fn send(&self, m: ToRead) -> Result<()> {
+        Ok(self.0.send(m)?)
+    }
+}
+
+async fn connect_write(
+    resolver: &Referral,
+    resolver_addr: SocketAddr,
+    write_addr: SocketAddr,
+    published: &Arc<RwLock<HashSet<Path>>>,
+    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    desired_auth: &Auth,
+) -> Result<(u64, Channel<ClientCtx>)> {
+    info!("write_con connecting to resolver {:?}", resolver_addr);
+    let con = TcpStream::connect(&resolver_addr).await?;
+    let mut con = Channel::new(con);
+    con.send_one(&1u64).await?;
+    let _version: u64 = con.receive().await?;
+    let (auth, ctx) = match desired_auth {
+        Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
+        Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+            bail!("authentication unavailable")
+        }
+        Auth::Krb5 { upn, spn } => match ctxts.read().get(&resolver_addr) {
+            Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
+            None => {
+                let upnr = upn.as_ref().map(|s| s.as_bytes());
+                let target_spn = resolver
+                    .krb5_spns
+                    .get(&resolver_addr)
+                    .ok_or_else(|| {
+                        anyhow!("no target spn for resolver {:?}", resolver_addr)
+                    })?
+                    .as_bytes();
+                let (ctx, token) = create_ctx(upnr, target_spn)?;
+                let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+            }
+        },
+    };
+    let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
+    debug!("write_con connection established hello {:?}", h);
+    con.send_one(&h).await?;
+    let r: ServerHelloWrite = con.receive().await?;
+    debug!("write_con resolver hello {:?}", r);
+    match (desired_auth, r.auth) {
+        (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
+        (Auth::Anonymous, _) => {
+            bail!("server requires authentication");
+        }
+        (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous) => {
+            bail!("could not authenticate resolver server");
+        }
+        (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => {
+            if let Some(ref ctx) = ctx {
+                con.set_ctx(ctx.clone()).await;
+                info!("write_con all traffic now encrypted");
+            }
+        }
+        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
+            let ctx = ctx.unwrap();
+            info!("write_con processing resolver mutual authentication");
+            ctx.step(Some(&tok))?;
+            info!("write_con mutual authentication succeeded");
+            {
+                let mut ctxts = ctxts.write();
+                ctxts.insert(r.resolver_id, ctx.clone());
+                ctxts.insert(resolver_addr, ctx.clone());
+            }
+            con.set_ctx(ctx).await;
+            info!("write_con all traffic now encrypted");
+        }
+    }
+    if !r.ttl_expired {
+        info!("connected to resolver {:?} for write", resolver_addr);
+        Ok((r.ttl, con))
+    } else {
+        let names: Vec<Path> = published.read().iter().cloned().collect();
+        let len = names.len();
+        if len == 0 {
+            info!("connected to resolver {:?} for write", resolver_addr);
+            Ok((r.ttl, con))
+        } else {
+            info!("write_con ttl is expired, republishing {}", len);
+            for p in &names {
+                con.queue_send(&ToWrite::Publish(p.clone()))?
+            }
+            con.flush().await?;
+            for p in &names {
+                match try_cf!("replublish reply", continue, con.receive().await) {
+                    FromWrite::Published => (),
+                    r => warn!("unexpected republish reply for {} {:?}", p, r),
+                }
+            }
+            info!(
+                "connected to resolver {:?} for write (republished {})",
+                resolver_addr,
+                names.len()
+            );
+            Ok((r.ttl, con))
+        }
+    }
+}
+
+async fn connection_write(
+    mut receiver: mpsc::Receiver<(Arc<Vec<ToWrite>>, oneshot::Sender<Vec<FromWrite>>)>,
+    resolver: Referral,
+    resolver_addr: SocketAddr,
+    write_addr: SocketAddr,
+    published: Arc<RwLock<HashSet<Path>>>,
+    desired_auth: Auth,
+    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+) -> Result<()> {
+    let mut con: Option<Channel<ClientCtx>> = None;
+    let hb = Duration::from_secs(TTL / 2);
+    let linger = Duration::from_secs(TTL / 10);
+    let now = Instant::now();
+    let mut act = false;
+    let mut receiver = receiver.fuse();
+    let mut hb = time::interval_at(now + hb, hb).fuse();
+    let mut dc = time::interval_at(now + linger, linger).fuse();
+    fn set_ttl(ttl: u64, hb: &mut Fuse<Interval>, dc: &mut Fuse<Interval>) {
+        let linger = Duration::from_secs(max(1, ttl / 10));
+        let heartbeat = Duration::from_secs(max(1, ttl / 2));
+        let now = Instant::now();
+        *hb = time::interval_at(now + heartbeat, heartbeat).fuse();
+        *dc = time::interval_at(now + linger, linger).fuse();
+    }
+    loop {
+        select_biased! {
+            _ = dc.next() => {
+                if act {
+                   act = false;
+                } else if con.is_some() {
+                    info!("write_con dropping inactive connection");
+                    con = None;
+                }
+            },
+            _ = hb.next() => {
+                if act {
+                    act = false;
+                } else {
+                    match con {
+                        Some(ref mut c) => match c.send_one(&ToWrite::Heartbeat).await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                info!("write_con heartbeat send error {}", e);
+                                con = None;
+                            }
+                        }
+                        None => {
+                            let r = connect_write(
+                                &resolver, resolver_addr, write_addr, &published,
+                                &ctxts, &desired_auth
+                            ).await;
+                            match r {
+                                Ok((ttl, c)) => {
+                                    set_ttl(ttl, &mut hb, &mut dc);
+                                    con = Some(c);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "write connection to {:?} failed {}",
+                                        resolver_addr, e
+                                    );
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+            batch = receiver.next() => match batch {
+                None => break,
+                Some((tx_batch, reply)) => {
+                    act = true;
+                    let mut tries: u64 = 0;
+                    let mut backoff: u64 = 0;
+                    while tries < 4 {
+                        tries += 1;
+                        backoff += 1;
+                        if backoff > 1 {
+                            time::delay_for(Duration::from_secs(backoff - 1)).await;
+                        }
+                        let c = match con {
+                            Some(ref mut c) => c,
+                            None => {
+                                let r = connect_write(
+                                    &resolver, resolver_addr, write_addr, &published,
+                                    &ctxts, &desired_auth
+                                ).await;
+                                match r {
+                                    Ok((ttl, c)) => {
+                                        set_ttl(ttl, &mut hb, &mut dc);
+                                        con = Some(c);
+                                        con.as_mut().unwrap()
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "failed to connect to resolver {:?} {}",
+                                            resolver_addr, e
+                                        );
+                                        continue
+                                    }
+                                }
+                            }
+                        };
+                        for m in &*tx_batch {
+                            c.queue_send(m)?
+                        }
+                        match c.flush().await {
+                            Err(e) => {
+                                info!("write_con connection send error {}", e);
+                                con = None;
+                            }
+                            Ok(()) => {
+                                let mut err = false;
+                                let mut rx_batch = Vec::new();
+                                while rx_batch.len() < tx_batch.len() {
+                                    match c.receive_batch(&mut rx_batch).await {
+                                        Ok(()) => (),
+                                        Err(e) => {
+                                            info!("write_con connection recv error {}", e);
+                                            err = true;
+                                            break
+                                        }
+                                    }
+                                }
+                                if err {
+                                    con = None;
+                                } else {
+                                    let _ = reply.send(rx_batch);
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn write_mgr(
+    receiver: mpsc::UnboundedReceiver<ToWrite>,
+    reply: mpsc::UnboundedSender<FromWrite>,
+    resolver: Referral,
+    desired_auth: Auth,
+    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    write_addr: SocketAddr,
+) -> Result<()> {
+    let mut receiver = Batched::new(receiver, 100_000);
+    let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
+    let mut senders = {
+        let mut senders = Vec::new();
+        for addr in &resolver.addrs {
+            let (sender, receiver) = mpsc::channel(100);
+            let addr = *addr;
+            let resolver = resolver.clone();
+            let published = published.clone();
+            let desired_auth = desired_auth.clone();
+            let ctxts = ctxts.clone();
+            senders.push(sender);
+            task::spawn(async move {
+                let r = connection_write(
+                    receiver,
+                    resolver,
+                    addr,
+                    write_addr,
+                    published,
+                    desired_auth.clone(),
+                    ctxts.clone(),
+                )
+                .await;
+                info!(
+                    "resolver: write manager connection for {:?} exited: {:?}",
+                    addr, r
+                );
+            });
+        }
+        senders
+    };
+    let mut batch = Vec::new();
+    while let Some(m) = receiver.next().await {
+        match m {
+            BatchItem::InBatch(m) => {
+                batch.push(m);
+            }
+            BatchItem::EndBatch => {
+                let tx_batch = Arc::new(mem::replace(&mut batch, Vec::new()));
+                let mut waiters = Vec::new();
+                for s in senders.iter_mut() {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = s.send((Arc::clone(&tx_batch), tx)).await;
+                    waiters.push(rx);
+                }
+                let rx_batch = select_ok(waiters).await?.0;
+                let mut published = published.write();
+                for (tx, rx) in tx_batch.iter().zip(rx_batch.into_iter()) {
+                    if let ToWrite::Publish(path) = tx {
+                        match rx {
+                            FromWrite::Published => {
+                                published.insert(path.clone());
+                            }
+                            _ => (),
+                        }
+                    }
+                    reply.send(rx)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolverWrite(mpsc::UnboundedSender<ToWrite>);
+
+impl ResolverWrite {
+    pub(crate) fn new(
+        resolver: Referral,
+        desired_auth: Auth,
+        write_addr: SocketAddr,
+        reply: mpsc::UnboundedSender<FromWrite>,
+        ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    ) -> Result<ResolverWrite> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        task::spawn(async move {
+            let r = write_mgr(receiver, reply, resolver, desired_auth, ctxts, write_addr)
+                .await;
+            info!("resolver: write manager exited {:?}", r);
+        });
+        Ok(ResolverWrite(sender))
+    }
+
+    pub(crate) fn send(&self, m: ToWrite) -> Result<()> {
+        Ok(self.0.send(m)?)
+    }
+}
