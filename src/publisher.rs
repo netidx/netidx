@@ -8,10 +8,10 @@ use crate::{
     path::Path,
     protocol::{
         publisher::{self, v1::Id},
-        resolver::v1::ResolverId,
+        resolver::v1::Referral,
     },
     resolver::{Auth, ResolverWrite},
-    utils::{self, ChanId, ChanWrap},
+    utils::{self, ChanId, ChanWrap, Pooled},
 };
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
@@ -28,10 +28,10 @@ use std::{
     iter::{self, FromIterator},
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    ops::{Deref, DerefMut},
     str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
-    vec::Drain,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -46,40 +46,7 @@ use tokio::{
 
 static MAX_CLIENTS: usize = 768;
 
-lazy_static! {
-    static ref BATCHES: Mutex<Vec<Vec<(Id, Value)>>> = Mutex::new(Vec::new());
-}
-
-#[derive(Debug)]
-pub struct Batch(Vec<(Id, Value)>);
-
-impl Drop for Batch {
-    fn drop(&mut self) {
-        let mut batches = BATCHES.lock();
-        if batches.len() < 1000 {
-            batches.push(mem::replace(&mut self.0, Vec::new()));
-        }
-    }
-}
-
-impl Batch {
-    fn new() -> Self {
-        let v = BATCHES.lock().pop().unwrap_or_else(Vec::new);
-        Batch(v)
-    }
-
-    fn push(&mut self, v: (Id, Value)) {
-        self.0.push(v);
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn consume<'a>(&'a mut self) -> Drain<'a, (Id, Value)> {
-        self.0.drain(..)
-    }
-}
+make_pool!(pub, BATCHES, Batch, (Id, Value), 1000);
 
 // a socketaddr wrapper that implements Ord so we can put clients in a
 // set.
@@ -482,13 +449,12 @@ impl Publisher {
 
     /// Create a new publisher using the specified resolver and bind config.
     pub async fn new(
-        resolver: config::resolver::Config,
+        resolver: Referral,
         desired_auth: Auth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
-        let resolvers = resolver.servers.iter().map(|(_, a)| *a).collect::<Vec<_>>();
         let ip = bind_cfg.select()?;
-        utils::check_addr(ip, &resolvers)?;
+        utils::check_addr(ip, &resolver.addrs)?;
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => {
                 let l = TcpListener::bind(&addr).await?;
@@ -519,7 +485,7 @@ impl Publisher {
                 }
             }
         };
-        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
+        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
         let (stop, receive_stop) = oneshot::channel();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
@@ -634,13 +600,13 @@ impl Publisher {
     /// Otherwise flush will wait as long as necessary to flush the
     /// update to every client.
     pub async fn flush(&self, timeout: Option<Duration>) -> Result<()> {
-        let mut to_publish = Vec::new();
-        let mut to_unpublish = Vec::new();
+        let mut to_publish;
+        let mut to_unpublish;
         let clients;
         let resolver = {
             let mut pb = self.0.lock();
-            to_publish.extend(pb.to_publish.drain());
-            to_unpublish.extend(pb.to_unpublish.drain());
+            to_publish = mem::replace(&mut pb.to_publish, HashSet::new());
+            to_unpublish = mem::replace(&mut pb.to_unpublish, HashSet::new());
             clients = pb
                 .clients
                 .values()
@@ -655,10 +621,12 @@ impl Publisher {
             let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
-            resolver.publish(to_publish).await?
+            resolver.publish(to_publish.drain()).await?;
+            self.0.lock().to_publish = to_publish;
         }
         if to_unpublish.len() > 0 {
-            resolver.unpublish(to_unpublish).await?
+            resolver.unpublish(to_unpublish.drain()).await?;
+            self.0.lock().to_unpublish = to_unpublish;
         }
         Ok(())
     }
@@ -782,7 +750,7 @@ async fn handle_batch(
     msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher>,
-    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
 ) -> Result<()> {
@@ -897,7 +865,7 @@ fn client_arrived(publisher: &PublisherWeak) {
 
 async fn hello_client(
     publisher: &PublisherWeak,
-    ctxts: &Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
@@ -953,7 +921,7 @@ async fn hello_client(
 async fn client_loop(
     t: PublisherWeak,
     updates: Arc<SegQueue<ToClientMsg>>,
-    ctxts: Arc<RwLock<HashMap<ResolverId, ClientCtx, FxBuildHasher>>>,
+    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     addr: SocketAddr,
     flushes: Receiver<Option<Duration>>,
     s: TcpStream,

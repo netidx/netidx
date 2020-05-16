@@ -8,7 +8,7 @@ use crate::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite,
         ToReadBatch as IToReadBatch, ToWriteBatch as IToWriteBatch,
     },
-    utils::Batch,
+    utils::Pooled,
 };
 use anyhow::Result;
 use futures::future;
@@ -20,6 +20,7 @@ use std::{
         Bound::{self, Included, Unbounded},
         HashMap,
     },
+    iter::IntoIterator,
     marker::PhantomData,
     mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -71,8 +72,8 @@ impl Router {
         batch: &B,
     ) -> impl Iterator<Item = (Option<Path>, O)>
     where
-        B: Batch<T> + 'static,
-        O: Batch<(usize, T)> + 'static,
+        B: Pooled<T> + 'static,
+        O: Pooled<(usize, T)> + 'static,
         T: ToPath + Clone + 'static,
     {
         let now = Instant::now();
@@ -116,12 +117,10 @@ impl Router {
         for p in gc {
             self.cached.remove(p.as_ref());
         }
-        batches
-            .into_iter()
-            .map(|(p, batch)| match p {
-                None => (None, batch),
-                Some(p) => (Some(p), batch),
-            })
+        batches.into_iter().map(|(p, batch)| match p {
+            None => (None, batch),
+            Some(p) => (Some(p), batch),
+        })
     }
 
     fn get_referral(&self, path: &Path) -> Option<&Referral> {
@@ -160,8 +159,8 @@ trait Connection<T, F, B, O>
 where
     T: ToPath,
     F: ToReferral,
-    B: Batch<(usize, T)>,
-    O: Batch<(usize, F)>,
+    B: Pooled<(usize, T)>,
+    O: Pooled<(usize, F)>,
 {
     fn new(
         resolver: Referral,
@@ -228,10 +227,10 @@ where
     C: Connection<T, F, Bi, Oi> + Clone + 'static,
     T: ToPath + Clone + 'static,
     F: ToReferral + Clone + 'static,
-    B: Batch<T> + 'static,
-    O: Batch<F> + 'static,
-    Bi: Batch<(usize, T)> + 'static,
-    Oi: Batch<(usize, F)> + 'static,
+    B: Pooled<T> + 'static,
+    O: Pooled<F> + 'static,
+    Bi: Pooled<(usize, T)> + 'static,
+    Oi: Pooled<(usize, F)> + 'static,
 {
     fn new(
         default: Referral,
@@ -362,6 +361,48 @@ impl ResolverWrite {
 
     pub async fn send(&self, batch: &ToWriteBatch) -> Result<FromWriteBatch> {
         self.0.send(batch).await
+    }
+
+    async fn send_expect<F, I>(&self, batch: I, f: F, expected: FromWrite) -> Result<()>
+    where
+        F: Fn(Path) -> ToWrite,
+        I: IntoIterator<Item = Path>,
+    {
+        let mut to = ToWriteBatch::new();
+        let len = to.len();
+        to.extend(batch.into_iter().map(f));
+        let mut from = self.0.send(&to).await?;
+        if from.len() != to.len() {
+            bail!("unexpected number of responses {} vs expected {}", from.len(), len);
+        }
+        for (i, reply) in from.drain(..).enumerate() {
+            if reply != expected {
+                bail!("unexpected response to {:?}, {:?}", &to[i], reply)
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn publish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
+        self.send_expect(batch, ToWrite::Publish, FromWrite::Published).await
+    }
+
+    pub async fn unpublish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
+        self.send_expect(batch, ToWrite::Unpublish, FromWrite::Unpublished).await
+    }
+
+    pub async fn clear(&self) -> Result<()> {
+        let mut batch = ToWriteBatch::new();
+        batch.push(ToWrite::Clear);
+        let r = self.0.send(&batch).await?;
+        if r.len() != 1 {
+            bail!("unexpected response to clear command {:?}", r)
+        } else {
+            match &r[0] {
+                FromWrite::Unpublished => Ok(()),
+                m => bail!("unexpected response to clear command {:?}", m),
+            }
+        }
     }
 
     pub(crate) fn ctxts(

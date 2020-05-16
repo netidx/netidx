@@ -8,7 +8,7 @@ use crate::{
         FromWrite, Referral, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
         ToWrite,
     },
-    utils::{self, Batch},
+    utils::{self, Pooled},
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;

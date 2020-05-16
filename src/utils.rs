@@ -216,7 +216,7 @@ impl<T> Hash for ChanWrap<T> {
     }
 }
 
-pub trait Batch<T>: Deref<Target = Vec<T>> + DerefMut<Target = Vec<T>> {
+pub trait Pooled<T>: Deref<Target = Vec<T>> + DerefMut<Target = Vec<T>> {
     fn new() -> Self;
 }
 
@@ -260,7 +260,7 @@ macro_rules! make_pool_items {
             }
         }
 
-        impl Batch<$type> for $tname {
+        impl Pooled<$type> for $tname {
             fn new() -> Self {
                 $tname::new()
             }
