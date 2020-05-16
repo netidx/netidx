@@ -66,10 +66,15 @@ impl Router {
         Router { default, cached: BTreeMap::new() }
     }
 
-    fn route_batch<B: Batch<T>, O: Batch<(usize, T)>, T: ToPath + Clone>(
+    fn route_batch<B, O, T>(
         &mut self,
         batch: &B,
-    ) -> Vec<(Option<Referral>, O)> {
+    ) -> impl Iterator<Item = (Option<Path>, O)>
+    where
+        B: Batch<T> + 'static,
+        O: Batch<(usize, T)> + 'static,
+        T: ToPath + Clone + 'static,
+    {
         let now = Instant::now();
         let mut batches = HashMap::new();
         let mut gc = Vec::new();
@@ -115,9 +120,12 @@ impl Router {
             .into_iter()
             .map(|(p, batch)| match p {
                 None => (None, batch),
-                Some(p) => (Some(self.cached[p.as_ref()].1.clone()), batch),
+                Some(p) => (Some(p), batch),
             })
-            .collect()
+    }
+
+    fn get_referral(&self, path: &Path) -> Option<&Referral> {
+        self.cached.get(path.as_ref()).map(|(_, r)| r)
     }
 
     fn add_referral(&mut self, r: Referral) {
@@ -175,7 +183,7 @@ impl Connection<ToRead, FromRead, IToReadBatch, IFromReadBatch> for SingleRead {
     }
 
     fn send(&mut self, batch: IToReadBatch) -> oneshot::Receiver<IFromReadBatch> {
-        self.send(batch)
+        SingleRead::send(self, batch)
     }
 }
 
@@ -190,7 +198,7 @@ impl Connection<ToWrite, FromWrite, IToWriteBatch, IFromWriteBatch> for SingleWr
     }
 
     fn send(&mut self, batch: IToWriteBatch) -> oneshot::Receiver<IFromWriteBatch> {
-        self.send(batch)
+        SingleWrite::send(self, batch)
     }
 }
 
@@ -255,20 +263,23 @@ where
             {
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
-                for (r, batch) in inner.router.route_batch(batch).into_iter() {
+                if inner.by_path.len() > MAX_REFERRALS {
+                    inner.by_path.clear(); // a workable sledgehammer
+                }
+                for (r, batch) in inner.router.route_batch(batch) {
                     match r {
                         None => waiters.push(inner.default.send(batch)),
-                        Some(r) => match inner.by_path.get_mut(&r.path) {
+                        Some(rp) => match inner.by_path.get_mut(&rp) {
                             Some(con) => waiters.push(con.send(batch)),
                             None => {
-                                let path = r.path.clone();
+                                let r = inner.router.get_referral(&rp).unwrap().clone();
                                 let mut con = C::new(
-                                    r.clone(),
+                                    r,
                                     inner.desired_auth.clone(),
                                     inner.writer_addr,
                                     inner.ctxts.clone(),
                                 );
-                                inner.by_path.insert(path, con.clone());
+                                inner.by_path.insert(rp, con.clone());
                                 waiters.push(con.send(batch))
                             }
                         },
@@ -318,7 +329,7 @@ pub struct ResolverRead(
 );
 
 impl ResolverRead {
-    fn new(default: Referral, desired_auth: Auth) -> Self {
+    pub fn new(default: Referral, desired_auth: Auth) -> Self {
         ResolverRead(ResolverWrap::new(
             default,
             desired_auth,
@@ -326,7 +337,7 @@ impl ResolverRead {
         ))
     }
 
-    async fn send(&self, batch: &ToReadBatch) -> Result<FromReadBatch> {
+    pub async fn send(&self, batch: &ToReadBatch) -> Result<FromReadBatch> {
         self.0.send(batch).await
     }
 }
@@ -345,15 +356,17 @@ pub struct ResolverWrite(
 );
 
 impl ResolverWrite {
-    fn new(default: Referral, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
+    pub fn new(default: Referral, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
         ResolverWrite(ResolverWrap::new(default, desired_auth, writer_addr))
     }
 
-    async fn send(&self, batch: &ToWriteBatch) -> Result<FromWriteBatch> {
+    pub async fn send(&self, batch: &ToWriteBatch) -> Result<FromWriteBatch> {
         self.0.send(batch).await
     }
 
-    fn ctxts(&self) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
+    pub(crate) fn ctxts(
+        &self,
+    ) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
         self.0.ctxts()
     }
 }
