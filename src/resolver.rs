@@ -3,7 +3,12 @@ use crate::{
     os::ClientCtx,
     path::Path,
     protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
-    resolver_single::{ResolverRead as SingleRead, ResolverWrite as SingleWrite},
+    resolver_single::{
+        FromReadBatch as IFromReadBatch, FromWriteBatch as IFromWriteBatch,
+        ResolverRead as SingleRead, ResolverWrite as SingleWrite,
+        ToReadBatch as IToReadBatch, ToWriteBatch as IToWriteBatch,
+    },
+    utils::Batch,
 };
 use anyhow::Result;
 use futures::future;
@@ -18,6 +23,7 @@ use std::{
     marker::PhantomData,
     mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::{Deref, DerefMut},
     result,
     sync::Arc,
     time::Duration,
@@ -60,41 +66,39 @@ impl Router {
         Router { default, cached: BTreeMap::new() }
     }
 
-    fn route_batch<T: ToPath + Clone>(
+    fn route_batch<B: Batch<T>, O: Batch<(usize, T)>, T: ToPath + Clone>(
         &mut self,
-        batch: &Vec<T>,
-    ) -> Vec<(Option<Referral>, Vec<(usize, T)>)> {
+        batch: &B,
+    ) -> Vec<(Option<Referral>, O)> {
         let now = Instant::now();
         let mut batches = HashMap::new();
         let mut gc = Vec::new();
         let mut id = 0;
-        for v in batch {
+        for v in batch.iter() {
             let v = v.clone();
             match v.path() {
-                None => batches.entry(None).or_insert_with(Vec::new).push((id, v)),
+                None => batches.entry(None).or_insert_with(O::new).push((id, v)),
                 Some(path) => {
                     let mut r = self.cached.range::<str, (Bound<&str>, Bound<&str>)>((
                         Unbounded,
                         Included(&*path),
                     ));
                     match r.next_back() {
-                        None => {
-                            batches.entry(None).or_insert_with(Vec::new).push((id, v))
-                        }
-                        Some((p, (exp, r))) => {
+                        None => batches.entry(None).or_insert_with(O::new).push((id, v)),
+                        Some((p, (exp, _))) => {
                             if !path.starts_with(p.as_ref()) {
-                                batches.entry(None).or_insert_with(Vec::new).push((id, v))
+                                batches.entry(None).or_insert_with(O::new).push((id, v))
                             } else {
                                 if &now < exp {
                                     batches
                                         .entry(Some(p.clone()))
-                                        .or_insert_with(Vec::new)
+                                        .or_insert_with(O::new)
                                         .push((id, v))
                                 } else {
                                     gc.push(p.clone());
                                     batches
                                         .entry(None)
-                                        .or_insert_with(Vec::new)
+                                        .or_insert_with(O::new)
                                         .push((id, v))
                                 }
                             }
@@ -144,10 +148,12 @@ impl ToReferral for FromWrite {
     }
 }
 
-trait Connection<T, F>
+trait Connection<T, F, B, O>
 where
     T: ToPath,
     F: ToReferral,
+    B: Batch<(usize, T)>,
+    O: Batch<(usize, F)>,
 {
     fn new(
         resolver: Referral,
@@ -155,10 +161,10 @@ where
         writer_addr: SocketAddr,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     ) -> Self;
-    fn send(&mut self, batch: Vec<(usize, T)>) -> oneshot::Receiver<Vec<(usize, F)>>;
+    fn send(&mut self, batch: B) -> oneshot::Receiver<O>;
 }
 
-impl Connection<ToRead, FromRead> for SingleRead {
+impl Connection<ToRead, FromRead, IToReadBatch, IFromReadBatch> for SingleRead {
     fn new(
         resolver: Referral,
         desired_auth: Auth,
@@ -168,15 +174,12 @@ impl Connection<ToRead, FromRead> for SingleRead {
         SingleRead::new(resolver, desired_auth)
     }
 
-    fn send(
-        &mut self,
-        batch: Vec<(usize, ToRead)>,
-    ) -> oneshot::Receiver<Vec<(usize, FromRead)>> {
+    fn send(&mut self, batch: IToReadBatch) -> oneshot::Receiver<IFromReadBatch> {
         self.send(batch)
     }
 }
 
-impl Connection<ToWrite, FromWrite> for SingleWrite {
+impl Connection<ToWrite, FromWrite, IToWriteBatch, IFromWriteBatch> for SingleWrite {
     fn new(
         resolver: Referral,
         desired_auth: Auth,
@@ -186,102 +189,101 @@ impl Connection<ToWrite, FromWrite> for SingleWrite {
         SingleWrite::new(resolver, desired_auth, writer_addr, ctxts)
     }
 
-    fn send(
-        &mut self,
-        batch: Vec<(usize, ToWrite)>,
-    ) -> oneshot::Receiver<Vec<(usize, FromWrite)>> {
+    fn send(&mut self, batch: IToWriteBatch) -> oneshot::Receiver<IFromWriteBatch> {
         self.send(batch)
     }
 }
 
+make_pool!(pub, TOREADPOOL, ToReadBatch, ToRead, 1000);
+make_pool!(pub, FROMREADPOOL, FromReadBatch, FromRead, 1000);
+make_pool!(pub, TOWRITEPOOL, ToWriteBatch, ToWrite, 1000);
+make_pool!(pub, FROMWRITEPOOL, FromWriteBatch, FromWrite, 1000);
+
 #[derive(Debug)]
-struct ResolverWrapInner<C> {
+struct ResolverWrapInner<C, T, F, B, O, Bi, Oi> {
     router: Router,
     desired_auth: Auth,
     default: C,
     by_path: HashMap<Path, C>,
     writer_addr: SocketAddr,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    phantom: PhantomData<(T, F, B, O, Bi, Oi)>,
 }
 
 #[derive(Debug, Clone)]
-struct ResolverWrap<C, T, F>(Arc<Mutex<ResolverWrapInner<C>>>, PhantomData<(T, F)>);
+struct ResolverWrap<C, T, F, B, O, Bi, Oi>(
+    Arc<Mutex<ResolverWrapInner<C, T, F, B, O, Bi, Oi>>>,
+);
 
-impl<C, T, F> ResolverWrap<C, T, F>
+impl<C, T, F, B, O, Bi, Oi> ResolverWrap<C, T, F, B, O, Bi, Oi>
 where
-    C: Connection<T, F> + Clone + 'static,
+    C: Connection<T, F, Bi, Oi> + Clone + 'static,
     T: ToPath + Clone + 'static,
     F: ToReferral + Clone + 'static,
+    B: Batch<T> + 'static,
+    O: Batch<F> + 'static,
+    Bi: Batch<(usize, T)> + 'static,
+    Oi: Batch<(usize, F)> + 'static,
 {
     fn new(
         default: Referral,
         desired_auth: Auth,
         writer_addr: SocketAddr,
-    ) -> ResolverWrap<C, T, F> {
+    ) -> ResolverWrap<C, T, F, B, O, Bi, Oi> {
         let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let router = Router::new(default.clone());
         let default = C::new(default, desired_auth.clone(), writer_addr, ctxts.clone());
-        ResolverWrap(
-            Arc::new(Mutex::new(ResolverWrapInner {
-                router,
-                desired_auth,
-                default,
-                by_path: HashMap::new(),
-                writer_addr,
-                ctxts,
-            })),
-            PhantomData,
-        )
+        ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
+            router,
+            desired_auth,
+            default,
+            by_path: HashMap::new(),
+            writer_addr,
+            ctxts,
+            phantom: PhantomData,
+        })))
     }
 
     fn ctxts(&self) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
-        let inner = self.0.lock();
-        inner.ctxts.clone()
+        self.0.lock().ctxts.clone()
     }
 
-    async fn send(&self, batch: Vec<T>) -> Result<Vec<F>> {
+    async fn send(&self, batch: &B) -> Result<O> {
         let mut referrals = 0;
         loop {
-            let mut batches = {
-                let mut inner = self.0.lock();
-                inner
-                    .router
-                    .route_batch(&batch)
-                    .into_iter()
-                    .map(|(r, batch)| match r {
-                        None => (inner.default.clone(), batch),
-                        Some(r) => match inner.by_path.get(&r.path) {
-                            Some(con) => (con.clone(), batch),
+            let mut waiters = Vec::new();
+            {
+                let mut guard = self.0.lock();
+                let inner = &mut *guard;
+                for (r, batch) in inner.router.route_batch(batch).into_iter() {
+                    match r {
+                        None => waiters.push(inner.default.send(batch)),
+                        Some(r) => match inner.by_path.get_mut(&r.path) {
+                            Some(con) => waiters.push(con.send(batch)),
                             None => {
                                 let path = r.path.clone();
-                                let con = C::new(
-                                    r,
+                                let mut con = C::new(
+                                    r.clone(),
                                     inner.desired_auth.clone(),
                                     inner.writer_addr,
                                     inner.ctxts.clone(),
                                 );
                                 inner.by_path.insert(path, con.clone());
-                                (con, batch)
+                                waiters.push(con.send(batch))
                             }
                         },
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let mut waiters = Vec::with_capacity(batches.len());
-            for (c, b) in batches.iter_mut() {
-                let batch = mem::replace(b, Vec::new());
-                waiters.push(c.send(batch))
+                    }
+                }
             }
             let res = future::join_all(waiters).await;
-            let mut finished = Vec::with_capacity(batch.len());
+            let mut finished = Oi::new();
             let mut referral = false;
             for r in res {
-                let r = r?;
-                for (id, reply) in r {
+                let mut r = r?;
+                for (id, reply) in r.drain(..) {
                     match reply.referral() {
                         Ok(r) => {
-                            let mut inner = self.0.lock();
-                            inner.router.add_referral(r);
+                            self.0.lock().router.add_referral(r);
                             referral = true;
                         }
                         Err(m) => finished.push((id, m)),
@@ -289,8 +291,10 @@ where
                 }
             }
             if !referral {
+                let mut res = O::new();
                 finished.sort_by_key(|(id, _)| *id);
-                break Ok(finished.into_iter().map(|(_, m)| m).collect());
+                res.extend(finished.drain(..).map(|(_, m)| m));
+                break Ok(res);
             }
             referrals += 1;
             if referrals > MAX_REFERRALS {
@@ -301,7 +305,17 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverRead(ResolverWrap<SingleRead, ToRead, FromRead>);
+pub struct ResolverRead(
+    ResolverWrap<
+        SingleRead,
+        ToRead,
+        FromRead,
+        ToReadBatch,
+        FromReadBatch,
+        IToReadBatch,
+        IFromReadBatch,
+    >,
+);
 
 impl ResolverRead {
     fn new(default: Referral, desired_auth: Auth) -> Self {
@@ -312,20 +326,30 @@ impl ResolverRead {
         ))
     }
 
-    async fn send(&self, batch: Vec<ToRead>) -> Result<Vec<FromRead>> {
+    async fn send(&self, batch: &ToReadBatch) -> Result<FromReadBatch> {
         self.0.send(batch).await
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverWrite(ResolverWrap<SingleWrite, ToWrite, FromWrite>);
+pub struct ResolverWrite(
+    ResolverWrap<
+        SingleWrite,
+        ToWrite,
+        FromWrite,
+        ToWriteBatch,
+        FromWriteBatch,
+        IToWriteBatch,
+        IFromWriteBatch,
+    >,
+);
 
 impl ResolverWrite {
     fn new(default: Referral, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
         ResolverWrite(ResolverWrap::new(default, desired_auth, writer_addr))
     }
 
-    async fn send(&self, batch: Vec<ToWrite>) -> Result<Vec<FromWrite>> {
+    async fn send(&self, batch: &ToWriteBatch) -> Result<FromWriteBatch> {
         self.0.send(batch).await
     }
 

@@ -8,14 +8,14 @@ use crate::{
         FromWrite, Referral, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
         ToWrite,
     },
-    utils,
+    utils::{self, Batch},
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
     cmp::max,
@@ -24,6 +24,7 @@ use std::{
     fmt::Debug,
     mem,
     net::SocketAddr,
+    ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
 };
@@ -153,7 +154,11 @@ async fn connect_read(
     }
 }
 
-type ReadBatch = (Vec<(usize, ToRead)>, oneshot::Sender<Vec<(usize, FromRead)>>);
+make_pool!(pub(crate), TOREADPOOL, ToReadBatch, (usize, ToRead), 1000);
+make_pool!(pub(crate), FROMREADPOOL, FromReadBatch, (usize, FromRead), 1000);
+make_pool!(RAWFROMREADPOOL, RawFromReadBatch, FromRead, 1000);
+
+type ReadBatch = (ToReadBatch, oneshot::Sender<FromReadBatch>);
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
@@ -167,7 +172,6 @@ async fn connection_read(
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
-                let mut rx_batch = Vec::new();
                 loop {
                     if tries >= 3 {
                         break;
@@ -188,7 +192,7 @@ async fn connection_read(
                             con.as_mut().unwrap()
                         }
                     };
-                    for (_, m) in &tx_batch {
+                    for (_, m) in &*tx_batch {
                         match c.queue_send(m) {
                             Ok(()) => (),
                             Err(e) => {
@@ -203,8 +207,9 @@ async fn connection_read(
                         }
                         Ok(()) => {
                             let mut err = false;
+                            let mut rx_batch = RawFromReadBatch::new();
                             while rx_batch.len() < tx_batch.len() {
-                                match c.receive_batch(&mut rx_batch).await {
+                                match c.receive_batch(&mut *rx_batch).await {
                                     Ok(()) => (),
                                     Err(e) => {
                                         warn!("read connection failed {}", e);
@@ -216,13 +221,14 @@ async fn connection_read(
                             if err {
                                 con = None;
                             } else {
-                                let _ = reply.send(
+                                let mut result = FromReadBatch::new();
+                                result.extend(
                                     rx_batch
-                                        .into_iter()
+                                        .drain(..)
                                         .enumerate()
-                                        .map(|(i, m)| (tx_batch[i].0, m))
-                                        .collect(),
+                                        .map(|(i, m)| (tx_batch[i].0, m)),
                                 );
+                                let _ = reply.send(result);
                                 break;
                             }
                         }
@@ -246,10 +252,7 @@ impl ResolverRead {
         ResolverRead(to_tx)
     }
 
-    pub(crate) fn send(
-        &self,
-        batch: Vec<(usize, ToRead)>,
-    ) -> oneshot::Receiver<Vec<(usize, FromRead)>> {
+    pub(crate) fn send(&self, batch: ToReadBatch) -> oneshot::Receiver<FromReadBatch> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.send((batch, tx));
         rx
@@ -361,11 +364,12 @@ async fn connect_write(
     }
 }
 
+make_pool!(pub(crate), TOWRITEPOOL, ToWriteBatch, (usize, ToWrite), 1000);
+make_pool!(pub(crate), FROMWRITEPOOL, FromWriteBatch, (usize, FromWrite), 1000);
+make_pool!(RAWFROMWRITEPOOL, RawFromWriteBatch, FromWrite, 1000);
+
 async fn connection_write(
-    receiver: mpsc::Receiver<(
-        Arc<Vec<(usize, ToWrite)>>,
-        oneshot::Sender<Vec<(usize, FromWrite)>>,
-    )>,
+    receiver: mpsc::Receiver<(Arc<ToWriteBatch>, oneshot::Sender<FromWriteBatch>)>,
     resolver: Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
@@ -465,7 +469,7 @@ async fn connection_write(
                                 }
                             }
                         };
-                        for (_, m) in &*tx_batch {
+                        for (_, m) in &**tx_batch {
                             try_cf!("queue send {}", continue, 'main, c.queue_send(m))
                         }
                         match c.flush().await {
@@ -475,9 +479,9 @@ async fn connection_write(
                             }
                             Ok(()) => {
                                 let mut err = false;
-                                let mut rx_batch = Vec::new();
+                                let mut rx_batch = RawFromWriteBatch::new();
                                 while rx_batch.len() < tx_batch.len() {
-                                    match c.receive_batch(&mut rx_batch).await {
+                                    match c.receive_batch(&mut *rx_batch).await {
                                         Ok(()) => (),
                                         Err(e) => {
                                             info!("write_con connection recv error {}", e);
@@ -489,13 +493,11 @@ async fn connection_write(
                                 if err {
                                     con = None;
                                 } else {
-                                    let _ = reply.send(
-                                        rx_batch
-                                            .into_iter()
-                                            .enumerate()
-                                            .map(|(i, m)| (tx_batch[i].0, m))
-                                            .collect()
-                                    );
+                                    let mut result = FromWriteBatch::new();
+                                    for (i, m) in rx_batch.drain(..).enumerate() {
+                                        result.push((tx_batch[i].0, m))
+                                    }
+                                    let _ = reply.send(result);
                                     break
                                 }
                             }
@@ -507,7 +509,7 @@ async fn connection_write(
     }
 }
 
-type WriteBatch = (Vec<(usize, ToWrite)>, oneshot::Sender<Vec<(usize, FromWrite)>>);
+type WriteBatch = (ToWriteBatch, oneshot::Sender<FromWriteBatch>);
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
@@ -590,10 +592,7 @@ impl ResolverWrite {
         ResolverWrite(to_tx)
     }
 
-    pub(crate) fn send(
-        &self,
-        batch: Vec<(usize, ToWrite)>,
-    ) -> oneshot::Receiver<Vec<(usize, FromWrite)>> {
+    pub(crate) fn send(&self, batch: ToWriteBatch) -> oneshot::Receiver<FromWriteBatch> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.send((batch, tx));
         rx

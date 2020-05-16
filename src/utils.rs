@@ -2,11 +2,11 @@ use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::{
+    channel::mpsc,
     prelude::*,
     sink::Sink,
     stream::FusedStream,
     task::{Context, Poll},
-    channel::mpsc,
 };
 use std::{
     cell::RefCell,
@@ -18,7 +18,6 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     str,
-    any::{Any, TypeId}
 };
 
 macro_rules! bail {
@@ -200,85 +199,6 @@ pub fn bytes(t: &[u8]) -> Bytes {
     bytesmut(t).freeze()
 }
 
-// CR estokes: unused?
-pub struct BytesWriter<'a>(pub &'a mut BytesMut);
-
-impl Write for BytesWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.extend(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-// CR estokes: unused?
-pub struct BytesDeque(VecDeque<Bytes>);
-
-impl BytesDeque {
-    pub fn new() -> Self {
-        BytesDeque(VecDeque::new())
-    }
-
-    pub fn with_capacity(c: usize) -> Self {
-        BytesDeque(VecDeque::with_capacity(c))
-    }
-}
-
-impl Deref for BytesDeque {
-    type Target = VecDeque<Bytes>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for BytesDeque {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Buf for BytesDeque {
-    fn remaining(&self) -> usize {
-        self.0.iter().fold(0, |s, b| s + b.remaining())
-    }
-
-    fn bytes(&self) -> &[u8] {
-        if self.0.len() == 0 {
-            &[]
-        } else {
-            self.0[0].bytes()
-        }
-    }
-
-    fn advance(&mut self, mut cnt: usize) {
-        while cnt > 0 && self.0.len() > 0 {
-            let b = &mut self.0[0];
-            let n = min(cnt, b.remaining());
-            b.advance(n);
-            cnt -= n;
-            if b.remaining() == 0 {
-                self.0.pop_front();
-            }
-        }
-        if cnt > 0 {
-            panic!("Buf::advance called with cnt - remaining = {} ", cnt);
-        }
-    }
-
-    fn bytes_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
-        let mut i = 0;
-        while i < self.0.len() && i < dst.len() {
-            dst[i] = IoSlice::new(&self.0[i].bytes());
-            i += 1;
-        }
-        i
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct ChanWrap<T>(pub(crate) mpsc::Sender<T>);
 
@@ -294,6 +214,76 @@ impl<T> Hash for ChanWrap<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hash_receiver(state)
     }
+}
+
+pub trait Batch<T>: Deref<Target = Vec<T>> + DerefMut<Target = Vec<T>> {
+    fn new() -> Self;
+}
+
+macro_rules! make_pool_items {
+    ($typedef:item, $gname:ident, $tname:ident, $type:ty, $max:expr) => {
+        lazy_static! {
+            static ref $gname: Mutex<Vec<Vec<$type>>> = Mutex::new(Vec::new());
+        }
+
+        #[derive(Debug, Clone)]
+        $typedef
+
+        impl $tname {
+            fn new() -> Self {
+                let v = $gname.lock().pop();
+                $tname(v.unwrap_or_else(Vec::new))
+            }
+        }
+
+        impl Deref for $tname {
+            type Target = Vec<$type>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl DerefMut for $tname {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+
+        impl Drop for $tname {
+            fn drop(&mut self) {
+                self.clear();
+                let mut batches = $gname.lock();
+                if batches.len() < $max {
+                    batches.push(mem::replace(&mut self.0, Vec::new()));
+                }
+            }
+        }
+
+        impl Batch<$type> for $tname {
+            fn new() -> Self {
+                $tname::new()
+            }
+        }
+    }
+}
+
+macro_rules! make_pool {
+    ($gname:ident, $tname:ident, $type:ty, $max:expr) => {
+        make_pool_items!(struct $tname(Vec<$type>);, $gname, $tname, $type, $max);
+    };
+    (pub, $gname:ident, $tname:ident, $type:ty, $max:expr) => {
+        make_pool_items!(pub struct $tname(Vec<$type>);, $gname, $tname, $type, $max);
+    };
+    (pub(crate), $gname:ident, $tname:ident, $type:ty, $max:expr) => {
+        make_pool_items!(
+            pub(crate) struct $tname(Vec<$type>);,
+            $gname,
+            $tname,
+            $type,
+            $max
+        );
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
