@@ -466,7 +466,7 @@ async fn connection_write(
                             }
                         };
                         for (_, m) in &*tx_batch {
-                            try_cf!("queue send", continue, 'main, c.queue_send(m))
+                            try_cf!("queue send {}", continue, 'main, c.queue_send(m))
                         }
                         match c.flush().await {
                             Err(e) => {

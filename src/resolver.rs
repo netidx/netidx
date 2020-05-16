@@ -17,7 +17,7 @@ use std::{
     },
     marker::PhantomData,
     mem,
-    net::{SocketAddr, IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     result,
     sync::Arc,
     time::Duration,
@@ -220,11 +220,11 @@ where
     ) -> ResolverWrap<C, T, F> {
         let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let router = Router::new(default.clone());
-        let default = C::new(default, desired_auth, writer_addr, ctxts.clone());
+        let default = C::new(default, desired_auth.clone(), writer_addr, ctxts.clone());
         ResolverWrap(
             Arc::new(Mutex::new(ResolverWrapInner {
                 router,
-                desired_auth: desired_auth.clone(),
+                desired_auth,
                 default,
                 by_path: HashMap::new(),
                 writer_addr,
@@ -308,11 +308,28 @@ impl ResolverRead {
         ResolverRead(ResolverWrap::new(
             default,
             desired_auth,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
         ))
     }
 
     async fn send(&self, batch: Vec<ToRead>) -> Result<Vec<FromRead>> {
         self.0.send(batch).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolverWrite(ResolverWrap<SingleWrite, ToWrite, FromWrite>);
+
+impl ResolverWrite {
+    fn new(default: Referral, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
+        ResolverWrite(ResolverWrap::new(default, desired_auth, writer_addr))
+    }
+
+    async fn send(&self, batch: Vec<ToWrite>) -> Result<Vec<FromWrite>> {
+        self.0.send(batch).await
+    }
+
+    fn ctxts(&self) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
+        self.0.ctxts()
     }
 }
