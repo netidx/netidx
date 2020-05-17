@@ -218,6 +218,36 @@ impl ValWeak {
     }
 }
 
+pub struct DefaultHandle {
+    chan: fmpsc::UnboundedReceiver<(Path, oneshot::Sender<()>)>,
+    path: Path,
+    publisher: PublisherWeak,
+}
+
+impl Deref for DefaultHandle {
+    type Target = fmpsc::UnboundedReceiver<(Path, oneshot::Sender<()>)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.chan
+    }
+}
+
+impl DerefMut for DefaultHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.chan
+    }
+}
+
+impl Drop for DefaultHandle {
+    fn drop(&mut self) {
+        if let Some(t) = self.publisher.upgrade() {
+            let mut pb = t.0.lock();
+            pb.default.remove(self.path.as_ref());
+            pb.to_unpublish.insert(self.path.clone());
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ToClientMsg {
     Val(Id, Value),
@@ -582,11 +612,7 @@ impl Publisher {
         }
     }
 
-    pub fn publish_default(
-        &self,
-        base: Path,
-        chan: fmpsc::UnboundedSender<(Path, oneshot::Sender<()>)>,
-    ) -> Result<()> {
+    pub fn publish_default(&self, base: Path) -> Result<DefaultHandle> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(base.as_ref()) {
             bail!("can't publish a relative path")
@@ -598,8 +624,13 @@ impl Publisher {
                     pb.to_publish_default.insert(base.clone());
                 }
             }
-            pb.default.insert(base, chan);
-            Ok(())
+            let (tx, rx) = fmpsc::unbounded();
+            pb.default.insert(base.clone(), tx);
+            Ok(DefaultHandle {
+                chan: rx,
+                path: base,
+                publisher: self.downgrade()
+            })
         }
     }
 
