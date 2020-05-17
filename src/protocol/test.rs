@@ -1,9 +1,4 @@
-use crate::{
-    chars::Chars,
-    path::Path,
-    pack::Pack,
-    utils::pack,
-};
+use crate::{chars::Chars, pack::Pack, path::Path, utils::pack};
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use std::fmt::Debug;
@@ -31,8 +26,8 @@ mod resolver {
     use super::*;
     use crate::protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, PermissionToken, Resolved, ResolverId, ServerAuthWrite,
-        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, PermissionToken, Resolved, ServerAuthWrite, ServerHelloRead,
+        ServerHelloWrite, ToRead, ToWrite,
     };
     use fxhash::FxBuildHasher;
     use proptest::{collection, option};
@@ -85,19 +80,19 @@ mod resolver {
     }
 
     fn server_hello_write() -> impl Strategy<Value = ServerHelloWrite> {
-        (any::<u64>(), any::<bool>(), any::<u64>(), server_auth_write()).prop_map(
+        (any::<u64>(), any::<bool>(), any::<SocketAddr>(), server_auth_write()).prop_map(
             |(ttl, ttl_expired, resolver_id, auth)| ServerHelloWrite {
                 ttl,
                 ttl_expired,
                 auth,
-                resolver_id: ResolverId::mk(resolver_id),
+                resolver_id,
             },
         )
     }
 
     fn to_read() -> impl Strategy<Value = ToRead> {
         prop_oneof![
-            collection::vec(path(), (0, 100)).prop_map(ToRead::Resolve),
+            path().prop_map(ToRead::Resolve),
             path().prop_map(ToRead::List)
         ]
     }
@@ -110,9 +105,8 @@ mod resolver {
                 hm.extend(h.into_iter());
                 hm
             });
-        let resolver = any::<u64>().prop_map(ResolverId::mk);
-        let addr = collection::vec((any::<SocketAddr>(), bytes()), (0, 10));
-        let addrs = collection::vec(addr, (0, 100));
+        let resolver = any::<SocketAddr>();
+        let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10));
         (krb5_spns, resolver, addrs).prop_map(|(krb5_spns, resolver, addrs)| Resolved {
             krb5_spns,
             resolver,
@@ -137,8 +131,8 @@ mod resolver {
 
     fn to_write() -> impl Strategy<Value = ToWrite> {
         prop_oneof![
-            collection::vec(path(), (0, 1000)).prop_map(ToWrite::Publish),
-            collection::vec(path(), (0, 1000)).prop_map(ToWrite::Unpublish),
+            path().prop_map(ToWrite::Publish),
+            path().prop_map(ToWrite::Unpublish),
             Just(ToWrite::Clear),
             Just(ToWrite::Heartbeat)
         ]
@@ -198,25 +192,23 @@ mod resolver {
 
 mod publisher {
     use super::*;
-    use crate::protocol::{
-        publisher::v1::{From, Hello, Id, To, Value},
-        resolver::v1::ResolverId,
-    };
+    use crate::protocol::publisher::v1::{From, Hello, Id, To, Value};
+    use std::net::SocketAddr;
 
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
             Just(Hello::Anonymous),
             bytes().prop_map(Hello::Token),
-            (any::<u64>(), bytes())
-                .prop_map(|(i, b)| Hello::ResolverAuthenticate(ResolverId::mk(i), b))
+            (any::<SocketAddr>(), bytes())
+                .prop_map(|(i, b)| Hello::ResolverAuthenticate(i, b))
         ]
     }
 
     fn to() -> impl Strategy<Value = To> {
         prop_oneof![
-            (path(), any::<u64>(), bytes()).prop_map(|(p, i, b)| To::Subscribe {
+            (path(), any::<SocketAddr>(), bytes()).prop_map(|(p, i, b)| To::Subscribe {
                 path: p,
-                resolver: ResolverId::mk(i),
+                resolver: i,
                 token: b
             }),
             any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i)))

@@ -1,11 +1,13 @@
-use crate::{config, protocol::resolver::v1::ResolverId};
-use std::{net::SocketAddr, time::Duration};
+use crate::{config, path::Path, protocol::resolver::v1::Referral};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 fn server_config() -> config::resolver_server::Config {
     use config::resolver_server::{Auth, Config};
+    use std::collections::BTreeMap;
     Config {
+        parent: None,
+        children: BTreeMap::new(),
         pid_file: "".into(),
-        id: ResolverId::mk(0),
         addr: "127.0.0.1:0".parse().unwrap(),
         max_connections: 768,
         hello_timeout: Duration::from_secs(10),
@@ -17,7 +19,15 @@ fn server_config() -> config::resolver_server::Config {
 
 fn client_config(server: SocketAddr) -> config::resolver::Config {
     use config::resolver::{Auth, Config};
-    Config { servers: vec![(ResolverId::mk(0), server)], auth: Auth::Anonymous }
+    Config {
+        resolver: Referral {
+            path: Path::from("/"),
+            ttl: u64::MAX,
+            addrs: vec![server],
+            krb5_spns: HashMap::new(),
+        },
+        auth: Auth::Anonymous,
+    }
 }
 
 mod resolver {
@@ -41,22 +51,22 @@ mod resolver {
             let server = Server::new(server_config(), false).await.expect("start server");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let cfg = client_config(*server.local_addr());
-            let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr).unwrap();
-            let r = ResolverRead::new(cfg, Auth::Anonymous).unwrap();
+            let w = ResolverWrite::new(cfg.resolver.clone(), Auth::Anonymous, paddr);
+            let r = ResolverRead::new(cfg.resolver.clone(), Auth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             w.publish(paths.clone()).await.unwrap();
-            for addrs in r.resolve(paths.clone()).await.unwrap().addrs {
-                assert_eq!(addrs.len(), 1);
-                assert_eq!(addrs[0].0, paddr);
+            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
+                assert_eq!(r.addrs.len(), 1);
+                assert_eq!(r.addrs[0].0, paddr);
             }
-            assert_eq!(r.list(p("/")).await.unwrap(), vec![p("/app"), p("/foo")]);
+            assert_eq!(&*r.list(p("/")).await.unwrap(), &*vec![p("/app"), p("/foo")]);
             assert_eq!(
-                r.list(p("/foo")).await.unwrap(),
-                vec![p("/foo/bar"), p("/foo/baz")]
+                &*r.list(p("/foo")).await.unwrap(),
+                &*vec![p("/foo/bar"), p("/foo/baz")]
             );
             assert_eq!(
-                r.list(p("/app")).await.unwrap(),
-                vec![p("/app/v0"), p("/app/v1")]
+                &*r.list(p("/app")).await.unwrap(),
+                &*vec![p("/app/v0"), p("/app/v1")]
             );
         });
     }
@@ -71,18 +81,21 @@ mod publisher {
         subscriber::{Subscriber, Value},
     };
     use futures::{channel::mpsc, prelude::*};
-    use std::{time::Duration, net::{SocketAddr, IpAddr}};
+    use std::{
+        net::{IpAddr, SocketAddr},
+        time::Duration,
+    };
     use tokio::{runtime::Runtime, sync::oneshot, task, time};
 
     #[test]
     fn bindcfg() {
         let addr: IpAddr = "192.168.0.0".parse().unwrap();
         let netmask: IpAddr = "255.255.0.0".parse().unwrap();
-        assert_eq!(BindCfg::Match {addr, netmask}, "192.168.0.0/16".parse().unwrap());
+        assert_eq!(BindCfg::Match { addr, netmask }, "192.168.0.0/16".parse().unwrap());
         let addr: IpAddr = "ffff:1c00:2700:3c00::".parse().unwrap();
         let netmask: IpAddr = "ffff:ffff:ffff:ffff::".parse().unwrap();
         let bc: BindCfg = "ffff:1c00:2700:3c00::/64".parse().unwrap();
-        assert_eq!(BindCfg::Match {addr, netmask}, bc);
+        assert_eq!(BindCfg::Match { addr, netmask }, bc);
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         assert_eq!(BindCfg::Exact(addr), "127.0.0.1:1234".parse().unwrap());
         let addr: SocketAddr = "[ffff:1c00:2700:3c00::]:1234".parse().unwrap();
@@ -103,7 +116,7 @@ mod publisher {
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
                 let publisher = Publisher::new(
-                    pcfg,
+                    pcfg.resolver,
                     Auth::Anonymous,
                     "127.0.0.1/32".parse().unwrap(),
                 )
@@ -120,17 +133,19 @@ mod publisher {
                     vp.update(Value::U64(314159 + c));
                     publisher.flush(None).await.unwrap();
                     if let Some(mut batch) = rx.next().await {
-                        for (_, v) in batch.consume() {
+                        for (_, v) in batch.drain(..) {
                             match v {
-                                Value::U64(v) => { c = v; },
-                                v => panic!("unexpected value written {:?}", v)
+                                Value::U64(v) => {
+                                    c = v;
+                                }
+                                v => panic!("unexpected value written {:?}", v),
                             }
                         }
                     }
                 }
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
+            let subscriber = Subscriber::new(cfg.resolver, Auth::Anonymous).unwrap();
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let mut i: u64 = 0;
             let mut c: u64 = 0;
@@ -140,7 +155,7 @@ mod publisher {
                 match rx.next().await {
                     None => panic!("publisher died"),
                     Some(mut batch) => {
-                        for (_, v) in batch.consume() {
+                        for (_, v) in batch.drain(..) {
                             match v {
                                 Value::U64(v) => {
                                     if c == 0 {
@@ -170,7 +185,7 @@ mod publisher {
 mod resolver_store {
     use crate::{path::Path, resolver_store::*};
     use bytes::Bytes;
-    use std::{collections::HashMap, net::SocketAddr};
+    use std::{collections::{BTreeMap, HashMap}, net::SocketAddr};
 
     #[test]
     fn test_resolver_store() {
@@ -185,14 +200,14 @@ mod resolver_store {
                 "127.0.0.1:105",
             ),
         ];
-        let store = Store::<()>::new();
+        let store = Store::<()>::new(None, BTreeMap::new());
         {
             let mut store = store.write();
             for (paths, addr) in &apps {
                 let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
                 let addr = addr.parse::<SocketAddr>().unwrap();
                 for path in parsed.clone() {
-                    store.publish(path.clone(), addr);
+                    store.publish(path.clone(), addr, false);
                     if !store.resolve(&path).contains(&(addr, Bytes::new())) {
                         panic!()
                     }
