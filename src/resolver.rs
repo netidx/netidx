@@ -1,4 +1,4 @@
-pub use crate::resolver_single::{Auth, ResolverError};
+pub use crate::resolver_single::Auth;
 use crate::{
     os::ClientCtx,
     path::Path,

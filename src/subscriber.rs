@@ -2,15 +2,14 @@ pub use crate::protocol::publisher::v1::Value;
 use crate::{
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
-    config,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     protocol::{
         self,
         publisher::v1::{From, Id, To},
-        resolver::v1::{Referral, Resolved},
+        resolver::v1::Referral,
     },
-    resolver::{Auth, ResolverError, ResolverRead},
+    resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
 use anyhow::{anyhow, Error, Result};

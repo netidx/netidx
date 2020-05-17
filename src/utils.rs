@@ -1,6 +1,6 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -10,10 +10,7 @@ use futures::{
 };
 use std::{
     cell::RefCell,
-    cmp::min,
-    collections::VecDeque,
     hash::Hash,
-    io::{self, IoSlice, Write},
     net::{IpAddr, SocketAddr},
     ops::{Deref, DerefMut},
     pin::Pin,

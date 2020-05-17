@@ -2,7 +2,6 @@ pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::Permissions,
     channel::Channel,
-    config,
     os::{self, ClientCtx, Krb5Ctx, ServerCtx},
     pack::Pack,
     path::Path,

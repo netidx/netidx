@@ -20,7 +20,6 @@ use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
-    error, fmt,
     fmt::Debug,
     mem,
     net::SocketAddr,
@@ -36,27 +35,6 @@ use tokio::{
 };
 
 const HELLO_TO: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Clone)]
-pub enum ResolverError {
-    Denied,
-    Unexpected,
-    Error(Chars),
-}
-
-impl fmt::Display for ResolverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "resolver error: {:?}", self)
-    }
-}
-
-impl error::Error for ResolverError {}
-
-#[derive(Debug, Clone)]
-pub(crate) enum OrReferral<T> {
-    Local(T),
-    Referral(Referral),
-}
 
 static TTL: u64 = 120;
 
@@ -196,6 +174,7 @@ async fn connection_read(
                         match c.queue_send(m) {
                             Ok(()) => (),
                             Err(e) => {
+                                warn!("failed to encode {:?}", e);
                                 c.clear();
                                 continue 'main;
                             }
