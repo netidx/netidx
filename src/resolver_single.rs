@@ -251,6 +251,7 @@ async fn connect_write(
     published: &Arc<RwLock<HashSet<Path>>>,
     ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     desired_auth: &Auth,
+    degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
@@ -312,7 +313,7 @@ async fn connect_write(
             info!("write_con all traffic now encrypted");
         }
     }
-    if !r.ttl_expired {
+    if !r.ttl_expired && !*degraded {
         info!("connected to resolver {:?} for write", resolver_addr);
         Ok((r.ttl, con))
     } else {
@@ -320,17 +321,37 @@ async fn connect_write(
         let len = names.len();
         if len == 0 {
             info!("connected to resolver {:?} for write", resolver_addr);
+            if *degraded {
+                con.send_one(&ToWrite::Clear).await?;
+                match con.receive().await? {
+                    FromWrite::Unpublished => { *degraded = false; },
+                    m => warn!("unexpected response to clear {:?}", m),
+                }
+            }
             Ok((r.ttl, con))
         } else {
             info!("write_con ttl is expired, republishing {}", len);
+            if *degraded {
+                con.queue_send(&ToWrite::Clear)?
+            }
             for p in &names {
                 con.queue_send(&ToWrite::Publish(p.clone()))?
             }
             con.flush().await?;
+            if *degraded {
+                match con.receive().await? {
+                    FromWrite::Unpublished => (),
+                    m => warn!("unexpected response to clear {:?}", m),
+                }
+            }
+            *degraded = false;
             for p in &names {
                 match try_cf!("replublish reply", continue, con.receive().await) {
                     FromWrite::Published => (),
-                    r => warn!("unexpected republish reply for {} {:?}", p, r),
+                    r => {
+                        *degraded = true;
+                        warn!("unexpected republish reply for {} {:?}", p, r)
+                    },
                 }
             }
             info!(
@@ -356,6 +377,7 @@ async fn connection_write(
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
 ) {
+    let mut degraded = false;
     let mut con: Option<Channel<ClientCtx>> = None;
     let hb = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(TTL / 10);
@@ -396,7 +418,7 @@ async fn connection_write(
                         None => {
                             let r = connect_write(
                                 &resolver, resolver_addr, write_addr, &published,
-                                &ctxts, &desired_auth
+                                &ctxts, &desired_auth, &mut degraded
                             ).await;
                             match r {
                                 Ok((ttl, c)) => {
@@ -418,19 +440,24 @@ async fn connection_write(
                 None => break,
                 Some((tx_batch, reply)) => {
                     act = true;
-                    let mut tries: u64 = 0;
-                    while tries < 4 {
-                        tries += 1;
-                        if tries > 1 {
+                    let mut tries: usize = 0;
+                    loop {
+                        if tries > 3 {
+                            degraded = true;
+                            warn!("abandoning batch, replica now degraded");
+                            break
+                        }
+                        if tries > 0 {
                             let wait = thread_rng().gen_range(1, 4);
                             time::delay_for(Duration::from_secs(wait)).await;
                         }
+                        tries += 1;
                         let c = match con {
                             Some(ref mut c) => c,
                             None => {
                                 let r = connect_write(
                                     &resolver, resolver_addr, write_addr, &published,
-                                    &ctxts, &desired_auth
+                                    &ctxts, &desired_auth, &mut degraded
                                 ).await;
                                 match r {
                                     Ok((ttl, c)) => {
