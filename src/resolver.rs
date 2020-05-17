@@ -2,7 +2,7 @@ pub use crate::resolver_single::{Auth, ResolverError};
 use crate::{
     os::ClientCtx,
     path::Path,
-    protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
+    protocol::resolver::v1::{FromRead, FromWrite, Referral, Resolved, ToRead, ToWrite},
     resolver_single::{
         FromReadBatch as IFromReadBatch, FromWriteBatch as IFromWriteBatch,
         ResolverRead as SingleRead, ResolverWrite as SingleWrite,
@@ -314,6 +314,8 @@ where
     }
 }
 
+make_pool!(pub, RESOLVEDPOOL, ResolvedBatch, Resolved, 1000);
+
 #[derive(Debug, Clone)]
 pub struct ResolverRead(
     ResolverWrap<
@@ -338,6 +340,47 @@ impl ResolverRead {
 
     pub async fn send(&self, batch: &ToReadBatch) -> Result<FromReadBatch> {
         self.0.send(batch).await
+    }
+
+    pub async fn resolve<I>(&self, batch: I) -> Result<ResolvedBatch>
+    where
+        I: IntoIterator<Item = Path>,
+    {
+        let mut to = ToReadBatch::new();
+        to.extend(batch.into_iter().map(ToRead::Resolve));
+        let mut result = self.send(&to).await?;
+        if result.len() != to.len() {
+            bail!(
+                "unexpected number of resolve results {} expected {}",
+                result.len(),
+                to.len()
+            )
+        } else {
+            let mut out = ResolvedBatch::new();
+            for r in result.drain(..) {
+                match r {
+                    FromRead::Resolved(r) => {
+                        out.push(r);
+                    }
+                    m => bail!("unexpected resolve response {:?}", m),
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    pub async fn list(&self, path: Path) -> Result<Vec<Path>> {
+        let mut to = ToReadBatch::new();
+        to.push(ToRead::List(path));
+        let mut result = self.send(&to).await?;
+        if result.len() != 1 {
+            bail!("expected 1 result from list got {}", result.len());
+        } else {
+            match result.pop().unwrap() {
+                FromRead::List(paths) => Ok(paths),
+                m => bail!("unexpected result from list {:?}", m)
+            }
+        }
     }
 }
 

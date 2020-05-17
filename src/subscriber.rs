@@ -8,10 +8,10 @@ use crate::{
     protocol::{
         self,
         publisher::v1::{From, Id, To},
-        resolver::v1::{Resolved, ResolverId},
+        resolver::v1::{Referral, Resolved},
     },
     resolver::{Auth, ResolverError, ResolverRead},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
@@ -31,9 +31,9 @@ use std::{
     hash::Hash,
     iter, mem,
     net::SocketAddr,
+    ops::{Deref, DerefMut},
     sync::{Arc, Weak},
     time::Duration,
-    vec::Drain,
 };
 use tokio::{
     net::TcpStream,
@@ -81,7 +81,7 @@ impl SubId {
 struct SubscribeValRequest {
     path: Path,
     token: Bytes,
-    resolver: ResolverId,
+    resolver: SocketAddr,
     finished: oneshot::Sender<Result<Val>>,
     con: UnboundedSender<ToCon>,
     deadline: Option<Instant>,
@@ -352,12 +352,9 @@ impl SubscriberWeak {
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    pub fn new(
-        resolver: config::resolver::Config,
-        desired_auth: Auth,
-    ) -> Result<Subscriber> {
+    pub fn new(resolver: Referral, desired_auth: Auth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
-        let resolver = ResolverRead::new(resolver, desired_auth.clone())?;
+        let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
             resolver,
             desired_auth,
@@ -591,55 +588,40 @@ impl Subscriber {
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>();
             let r = match timeout {
-                None => Ok(r.resolve(to_resolve.clone()).await),
-                Some(d) => time::timeout(d, r.resolve(to_resolve.clone())).await,
+                None => Ok(r.resolve(to_resolve.iter().cloned()).await),
+                Some(d) => time::timeout(d, r.resolve(to_resolve.iter().cloned())).await,
             };
             match r {
                 Err(_) => {
                     for p in to_resolve {
-                        pending.insert(
-                            p.clone(),
-                            St::Error(anyhow!(
-                                "resolving path: {} failed: request timed out",
-                                p
-                            )),
-                        );
+                        let e = anyhow!("resolving {} timed out", p);
+                        pending.insert(p, St::Error(e));
                     }
                 }
-                Ok(Err(e)) => match e.downcast::<ResolverError>() {
-                    Ok(e) => {
-                        for p in to_resolve {
-                            let e = Error::from(e.clone()).context(p.clone());
-                            pending.insert(p.clone(), St::Error(e));
-                        }
+                Ok(Err(e)) => {
+                    for p in to_resolve {
+                        let s = St::Error(anyhow!("resolving {} failed {}", p, e));
+                        pending.insert(p, s);
                     }
-                    Err(e) => {
-                        for p in to_resolve {
-                            pending.insert(
-                                p.clone(),
-                                St::Error(anyhow!("resolving {} failed: {}", p, e)),
-                            );
-                        }
-                    }
-                },
-                Ok(Ok(Resolved { addrs, resolver, krb5_spns })) => {
+                }
+                Ok(Ok(mut res)) => {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
-                    for (p, addrs) in to_resolve.into_iter().zip(addrs.into_iter()) {
-                        if addrs.len() == 0 {
+                    for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
+                        if resolved.addrs.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
                             let addr = {
-                                if addrs.len() == 1 {
-                                    addrs[0].clone()
+                                if resolved.addrs.len() == 1 {
+                                    resolved.addrs[0].clone()
                                 } else {
-                                    addrs[pick(addrs.len())].clone()
+                                    resolved.addrs[pick(resolved.addrs.len())].clone()
                                 }
                             };
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = mpsc::unbounded();
-                                let target_spn = match krb5_spns.get(&addr.0) {
+                                let target_spn = match resolved.krb5_spns.get(&addr.0) {
                                     None => Chars::new(),
                                     Some(p) => p.clone(),
                                 };
@@ -658,7 +640,7 @@ impl Subscriber {
                                 SubscribeValRequest {
                                     path: p.clone(),
                                     token: addr.1,
-                                    resolver,
+                                    resolver: resolved.resolver,
                                     finished: tx,
                                     con: con_,
                                     deadline,
@@ -907,40 +889,7 @@ async fn hello_publisher(
 const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
-lazy_static! {
-    static ref BATCHES: Mutex<Vec<Vec<(SubId, Value)>>> = Mutex::new(Vec::new());
-}
-
-#[derive(Debug)]
-pub struct Batch(Vec<(SubId, Value)>);
-
-impl Drop for Batch {
-    fn drop(&mut self) {
-        let mut batches = BATCHES.lock();
-        if batches.len() < 1000 {
-            batches.push(mem::replace(&mut self.0, Vec::new()));
-        }
-    }
-}
-
-impl Batch {
-    fn new() -> Self {
-        let v = BATCHES.lock().pop().unwrap_or_else(Vec::new);
-        Batch(v)
-    }
-
-    fn push(&mut self, v: (SubId, Value)) {
-        self.0.push(v);
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn consume<'a>(&'a mut self) -> Drain<'a, (SubId, Value)> {
-        self.0.drain(..)
-    }
-}
+make_pool!(pub, BATCHES, Batch, (SubId, Value), 1000);
 
 // This is the fast path for the common case where the batch contains
 // only updates. As of 2020-04-30, sending to an mpsc channel is

@@ -56,5 +56,5 @@ mod resolver_single;
 pub mod resolver;
 pub mod resolver_server;
 pub mod publisher;
-//pub mod subscriber;
+pub mod subscriber;
 #[cfg(test)] mod test;
