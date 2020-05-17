@@ -1,4 +1,5 @@
 use crate::{config, path::Path, protocol::resolver::v1::Referral};
+use fxhash::FxBuildHasher;
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 fn server_config() -> config::resolver_server::Config {
@@ -24,7 +25,7 @@ fn client_config(server: SocketAddr) -> config::resolver::Config {
             path: Path::from("/"),
             ttl: u64::MAX,
             addrs: vec![server],
-            krb5_spns: HashMap::new(),
+            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
         },
         auth: Auth::Anonymous,
     }

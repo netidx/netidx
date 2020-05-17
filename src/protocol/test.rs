@@ -26,7 +26,7 @@ mod resolver {
     use super::*;
     use crate::protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, PermissionToken, Resolved, ServerAuthWrite, ServerHelloRead,
+        FromWrite, PermissionToken, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
         ServerHelloWrite, ToRead, ToWrite,
     };
     use fxhash::FxBuildHasher;
@@ -91,33 +91,43 @@ mod resolver {
     }
 
     fn to_read() -> impl Strategy<Value = ToRead> {
-        prop_oneof![
-            path().prop_map(ToRead::Resolve),
-            path().prop_map(ToRead::List)
-        ]
+        prop_oneof![path().prop_map(ToRead::Resolve), path().prop_map(ToRead::List)]
+    }
+
+    fn krb5_spns() -> impl Strategy<Value = HashMap<SocketAddr, Chars, FxBuildHasher>> {
+        collection::hash_map(any::<SocketAddr>(), chars(), (0, 100)).prop_map(|h| {
+            let mut hm =
+                HashMap::with_capacity_and_hasher(h.len(), FxBuildHasher::default());
+            hm.extend(h.into_iter());
+            hm
+        })
     }
 
     fn resolved() -> impl Strategy<Value = Resolved> {
-        let krb5_spns = collection::hash_map(any::<SocketAddr>(), chars(), (0, 100))
-            .prop_map(|h| {
-                let mut hm =
-                    HashMap::with_capacity_and_hasher(h.len(), FxBuildHasher::default());
-                hm.extend(h.into_iter());
-                hm
-            });
         let resolver = any::<SocketAddr>();
         let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10));
-        (krb5_spns, resolver, addrs).prop_map(|(krb5_spns, resolver, addrs)| Resolved {
+        (krb5_spns(), resolver, addrs).prop_map(|(krb5_spns, resolver, addrs)| Resolved {
             krb5_spns,
             resolver,
             addrs,
         })
     }
 
+    fn referral() -> impl Strategy<Value = Referral> {
+        (path(), any::<u64>(), collection::vec(any::<SocketAddr>(), (0, 10)), krb5_spns())
+            .prop_map(|(path, ttl, addrs, krb5_spns)| Referral {
+                path,
+                ttl,
+                addrs,
+                krb5_spns,
+            })
+    }
+
     fn from_read() -> impl Strategy<Value = FromRead> {
         prop_oneof![
             resolved().prop_map(FromRead::Resolved),
             collection::vec(path(), (0, 1000)).prop_map(FromRead::List),
+            referral().prop_map(FromRead::Referral),
             Just(FromRead::Denied),
             chars().prop_map(FromRead::Error)
         ]
@@ -142,6 +152,7 @@ mod resolver {
         prop_oneof![
             Just(FromWrite::Published),
             Just(FromWrite::Unpublished),
+            referral().prop_map(FromWrite::Referral),
             Just(FromWrite::Denied),
             chars().prop_map(FromWrite::Error)
         ]

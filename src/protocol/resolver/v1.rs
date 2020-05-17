@@ -386,7 +386,7 @@ pub struct Referral {
     pub path: Path,
     pub ttl: u64,
     pub addrs: Vec<SocketAddr>,
-    pub krb5_spns: HashMap<SocketAddr, Chars>,
+    pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
 }
 
 impl Pack for Referral {
@@ -394,21 +394,21 @@ impl Pack for Referral {
         <Path as Pack>::len(&self.path)
             + <u64 as Pack>::len(&self.ttl)
             + <Vec<SocketAddr> as Pack>::len(&self.addrs)
-            + <HashMap<SocketAddr, Chars> as Pack>::len(&self.krb5_spns)
+            + <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <Path as Pack>::encode(&self.path, buf)?;
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <Vec<SocketAddr> as Pack>::encode(&self.addrs, buf)?;
-        <HashMap<SocketAddr, Chars> as Pack>::encode(&self.krb5_spns, buf)
+        <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::encode(&self.krb5_spns, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let path = <Path as Pack>::decode(buf)?;
         let ttl = <u64 as Pack>::decode(buf)?;
         let addrs = <Vec<SocketAddr> as Pack>::decode(buf)?;
-        let krb5_spns = <HashMap<SocketAddr, Chars> as Pack>::decode(buf)?;
+        let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
         Ok(Referral { path, ttl, addrs, krb5_spns })
     }
 }
