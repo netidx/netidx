@@ -5,7 +5,7 @@ extern crate serde_derive;
 extern crate json_pubsub;
 
 use json_pubsub::{config, path::Path, publisher::BindCfg, resolver::Auth};
-use std::{fs::read, net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 
 mod publisher;
@@ -36,7 +36,10 @@ enum Sub {
     ResolverServer {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool,
-        #[structopt(long = "delay-reads", help = "don't allow read clients until 1 writer ttl has passed")]
+        #[structopt(
+            long = "delay-reads",
+            help = "don't allow read clients until 1 writer ttl has passed"
+        )]
         delay_reads: bool,
         #[structopt(
             short = "c",
@@ -58,8 +61,11 @@ enum Sub {
     },
     #[structopt(name = "publisher", about = "publish path|data lines from stdin")]
     Publisher {
-        #[structopt(short = "b", long = "bind",
-                    help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000")]
+        #[structopt(
+            short = "b",
+            long = "bind",
+            help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+        )]
         bind: BindCfg,
         #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
         krb5: bool,
@@ -123,8 +129,11 @@ enum ResolverCmd {
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
     Publisher {
-        #[structopt(short = "b", long = "bind",
-                    help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000")]
+        #[structopt(
+            short = "b",
+            long = "bind",
+            help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+        )]
         bind: BindCfg,
         #[structopt(short = "k", long = "krb5", help = "use kerberos v5 security")]
         krb5: bool,
@@ -159,8 +168,7 @@ fn main() {
     env_logger::init();
     let opt = Opt::from_args();
     let cfg: config::resolver::Config =
-        serde_json::from_slice(&*read(opt.config).expect("reading config"))
-            .expect("parsing config");
+        config::resolver::Config::load_sync(opt.config).expect("reading config");
     match opt.cmd {
         Sub::ResolverServer { foreground, config, delay_reads } => {
             resolver_server::run(config, !foreground, delay_reads)

@@ -190,48 +190,21 @@ pub mod resolver {
     use crate::protocol::resolver::v1::Referral;
     use anyhow::Result;
     use serde_json::from_str;
-    use std::{convert::AsRef, path::Path};
+    use std::{convert::AsRef, fs, path::Path};
     use tokio::fs::read_to_string;
 
-    mod file {
-        use super::{super::common_file::Referral, Auth};
-
-        #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(super) struct Config {
-            pub(super) resolver: Referral,
-            pub(super) auth: Auth,
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum Auth {
-        Anonymous,
-        Krb5,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct Config {
-        pub resolver: Referral,
-        pub auth: Auth,
-    }
+    pub type Config = Referral;
 
     impl Config {
         pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
-            let cfg: file::Config = from_str(&read_to_string(file).await?)?;
-            let cfg = Config { resolver: cfg.resolver.check(None)?, auth: cfg.auth };
-            match cfg.auth {
-                Auth::Anonymous => {
-                    if !cfg.resolver.krb5_spns.is_empty() {
-                        bail!("auth is anonymous but spns are configured");
-                    }
-                }
-                Auth::Krb5 => {
-                    if cfg.resolver.krb5_spns.is_empty() {
-                        bail!("auth is krb5 but no spns configured");
-                    }
-                }
-            }
-            Ok(cfg)
+            let cfg: super::common_file::Referral =
+                from_str(&read_to_string(file).await?)?;
+            Ok(cfg.check(None)?)
+        }
+
+        pub fn load_sync<P: AsRef<Path>>(file: P) -> Result<Config> {
+            let cfg: super::common_file::Referral = from_str(&fs::read_to_string(file)?)?;
+            Ok(cfg.check(None)?)
         }
     }
 }

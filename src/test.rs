@@ -19,15 +19,11 @@ fn server_config() -> config::resolver_server::Config {
 }
 
 fn client_config(server: SocketAddr) -> config::resolver::Config {
-    use config::resolver::{Auth, Config};
-    Config {
-        resolver: Referral {
-            path: Path::from("/"),
-            ttl: u64::MAX,
-            addrs: vec![server],
-            krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
-        },
-        auth: Auth::Anonymous,
+    Referral {
+        path: Path::from("/"),
+        ttl: u64::MAX,
+        addrs: vec![server],
+        krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
     }
 }
 
@@ -52,8 +48,8 @@ mod resolver {
             let server = Server::new(server_config(), false).await.expect("start server");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let cfg = client_config(*server.local_addr());
-            let w = ResolverWrite::new(cfg.resolver.clone(), Auth::Anonymous, paddr);
-            let r = ResolverRead::new(cfg.resolver.clone(), Auth::Anonymous);
+            let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
+            let r = ResolverRead::new(cfg.clone(), Auth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             w.publish(paths.clone()).await.unwrap();
             for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
@@ -117,7 +113,7 @@ mod publisher {
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
                 let publisher = Publisher::new(
-                    pcfg.resolver,
+                    pcfg,
                     Auth::Anonymous,
                     "127.0.0.1/32".parse().unwrap(),
                 )
@@ -146,7 +142,7 @@ mod publisher {
                 }
             });
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            let subscriber = Subscriber::new(cfg.resolver, Auth::Anonymous).unwrap();
+            let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let mut i: u64 = 0;
             let mut c: u64 = 0;
@@ -186,7 +182,10 @@ mod publisher {
 mod resolver_store {
     use crate::{path::Path, resolver_store::*};
     use bytes::Bytes;
-    use std::{collections::{BTreeMap, HashMap}, net::SocketAddr};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        net::SocketAddr,
+    };
 
     #[test]
     fn test_resolver_store() {

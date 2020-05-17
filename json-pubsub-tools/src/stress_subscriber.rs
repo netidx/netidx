@@ -1,3 +1,4 @@
+use futures::channel::mpsc;
 use futures::prelude::*;
 use json_pubsub::{
     config::resolver::Config,
@@ -7,12 +8,11 @@ use json_pubsub::{
 };
 use std::time::Duration;
 use tokio::{runtime::Runtime, time::Instant};
-use futures::channel::mpsc;
 
 pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
-        let r = ResolverRead::new(config.clone(), auth.clone()).expect("resolver");
+        let r = ResolverRead::new(config.clone(), auth.clone());
         let paths = r.list(Path::from("/bench")).await.expect("list");
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs = paths
@@ -26,14 +26,14 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let one_second = Duration::from_secs(1);
         let start = Instant::now();
         let mut last_stat = start;
-        let mut total = 0;
-        let mut n = 0;
-        let mut batch_size = 0;
-        let mut nbatches = 0;
+        let mut total: usize = 0;
+        let mut n: usize = 0;
+        let mut batch_size: usize = 0;
+        let mut nbatches: usize = 0;
         while let Some(mut batch) = vals.next().await {
             batch_size += batch.len();
             nbatches += 1;
-            for _ in batch.consume() {
+            for _ in batch.drain(..) {
                 total += 1;
                 n += 1;
                 if n >= subs.len() {

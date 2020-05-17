@@ -12,11 +12,12 @@ use json_pubsub::{
     path::Path,
     resolver::Auth,
     subscriber::{Batch, DvState, Dval, SubId, Subscriber},
-    utils::{BatchItem, Batched, BytesWriter},
+    utils::{BatchItem, Batched},
 };
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    io::Write,
 };
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -52,6 +53,19 @@ impl FromStr for In {
         } else {
             Ok(In::Add(String::from(s)))
         }
+    }
+}
+
+pub struct BytesWriter<'a>(pub &'a mut BytesMut);
+
+impl Write for BytesWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -200,7 +214,7 @@ impl Ctx {
                 }
             }
             Some(BatchItem::InBatch(mut batch)) => {
-                for (id, value) in batch.consume() {
+                for (id, value) in batch.drain(..) {
                     if let Some(path) = self.paths.get(&id) {
                         let value = SValue::from(value);
                         Out { path: &**path, value }
