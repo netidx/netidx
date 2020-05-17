@@ -10,18 +10,19 @@ use crate::{
         resolver::v1::Referral,
     },
     resolver::{Auth, ResolverWrite},
-    utils::{self, ChanId, ChanWrap, Pooled},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
 use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
-use futures::{channel::mpsc as fmpsc, prelude::*, select_biased};
+use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectAll};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
+    boxed::Box,
     cmp::{Ord, Ordering, PartialOrd},
-    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet},
+    collections::{hash_map::Entry, BTreeMap, BTreeSet, Bound, HashMap, HashSet},
     convert::{From, TryFrom},
     default::Default,
     iter::{self, FromIterator},
@@ -40,8 +41,6 @@ use tokio::{
     },
     task, time,
 };
-
-// CR estokes: add a handler for lazy publishing (delegated subtrees)
 
 static MAX_CLIENTS: usize = 768;
 
@@ -243,9 +242,11 @@ struct PublisherInner {
     on_write: HashMap<Id, Vec<(ChanId, fmpsc::Sender<Batch>)>, FxBuildHasher>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
+    to_publish_default: HashSet<Path>,
     to_unpublish: HashSet<Path>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
+    default: BTreeMap<Path, fmpsc::UnboundedSender<(Path, oneshot::Sender<()>)>>,
 }
 
 impl PublisherInner {
@@ -497,9 +498,11 @@ impl Publisher {
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
             to_publish: HashSet::new(),
+            to_publish_default: HashSet::new(),
             to_unpublish: HashSet::new(),
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
             wait_any_client: Vec::new(),
+            default: BTreeMap::new(),
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -550,11 +553,11 @@ impl Publisher {
     pub fn publish(&self, path: Path, init: Value) -> Result<Val> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
-            Err(anyhow!("can't publish to relative path"))
+            bail!("can't publish to relative path")
         } else if pb.stop.is_none() {
-            Err(anyhow!("publisher is dead"))
+            bail!("publisher is dead")
         } else if pb.by_path.contains_key(&path) {
-            Err(anyhow!("already published"))
+            bail!("already published")
         } else {
             let subscribed = pb
                 .hc_subscribed
@@ -579,20 +582,40 @@ impl Publisher {
         }
     }
 
+    pub fn publish_default(
+        &self,
+        base: Path,
+        chan: fmpsc::UnboundedSender<(Path, oneshot::Sender<()>)>,
+    ) -> Result<()> {
+        let mut pb = self.0.lock();
+        if !Path::is_absolute(base.as_ref()) {
+            bail!("can't publish a relative path")
+        } else if pb.stop.is_none() {
+            bail!("publisher is dead")
+        } else {
+            if !pb.to_unpublish.remove(base.as_ref()) {
+                if !pb.default.contains_key(base.as_ref()) {
+                    pb.to_publish_default.insert(base.clone());
+                }
+            }
+            pb.default.insert(base, chan);
+            Ok(())
+        }
+    }
+
     /// Flush initiates sending queued updates out to subscribers, and
     /// also sends all queued publish/unpublish operations to the
     /// resolver. The semantics of flush are such that any update
     /// queued before flush is called will go out when it is called,
     /// and any update queued after flush is called will only go out
-    /// on the next flush. These semantics apply to the initial value
-    /// new clients receive as well, they will receive the last update
-    /// queued before flush was called.
+    /// on the next flush.
     ///
     /// If you don't want to wait for the future you can just throw it
     /// away, `flush` triggers sending the data whether you await the
     /// future or not. However if you never wait for any of the
-    /// futures returned by flush a slow client could cause the
-    /// publisher to consume arbitrary amounts of memory.
+    /// futures returned by flush there won't be any pushback, so a
+    /// slow client could cause the publisher to consume arbitrary
+    /// amounts of memory unless you set an aggressive timeout.
     ///
     /// If timeout is specified then any client that can't accept the
     /// update within the timeout duration will be disconnected.
@@ -600,11 +623,13 @@ impl Publisher {
     /// update to every client.
     pub async fn flush(&self, timeout: Option<Duration>) -> Result<()> {
         let mut to_publish;
+        let mut to_publish_default;
         let mut to_unpublish;
         let clients;
         let resolver = {
             let mut pb = self.0.lock();
             to_publish = mem::replace(&mut pb.to_publish, HashSet::new());
+            to_publish_default = mem::replace(&mut pb.to_publish_default, HashSet::new());
             to_unpublish = mem::replace(&mut pb.to_unpublish, HashSet::new());
             clients = pb
                 .clients
@@ -623,6 +648,10 @@ impl Publisher {
             resolver.publish(to_publish.drain()).await?;
             self.0.lock().to_publish = to_publish;
         }
+        if to_publish_default.len() > 0 {
+            resolver.publish_default(to_publish_default.drain()).await?;
+            self.0.lock().to_publish_default = to_publish_default;
+        }
         if to_unpublish.len() > 0 {
             resolver.unpublish(to_unpublish.drain()).await?;
             self.0.lock().to_unpublish = to_unpublish;
@@ -635,7 +664,7 @@ impl Publisher {
         self.0.lock().clients.len()
     }
 
-    /// Wait for at least one client to connect
+    /// Wait for at least one client to subscribe to at least one value.
     pub async fn wait_any_client(&self) {
         let wait = {
             let mut inner = self.0.lock();
@@ -675,6 +704,10 @@ impl Publisher {
     }
 }
 
+const MAX_DEFERRED: usize = 1000000;
+type DeferredSubs =
+    Batched<SelectAll<Box<dyn Stream<Item = (Path, Permissions)> + Send + Sync + Unpin>>>;
+
 fn subscribe(
     t: &mut PublisherInner,
     updates: &Arc<SegQueue<ToClientMsg>>,
@@ -682,9 +715,35 @@ fn subscribe(
     addr: SocketAddr,
     path: Path,
     permissions: Permissions,
+    deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
     match t.by_path.get(&path) {
-        None => con.queue_send(&publisher::v1::From::NoSuchValue(path))?,
+        None => {
+            let mut r = t.default.range_mut::<str, (Bound<&str>, Bound<&str>)>((
+                Bound::Unbounded,
+                Bound::Included(path.as_ref()),
+            ));
+            loop {
+                match r.next_back() {
+                    Some((base, chan))
+                        if path.starts_with(base.as_ref())
+                            && deferred_subs.inner().len() < MAX_DEFERRED =>
+                    {
+                        let (tx, rx) = oneshot::channel();
+                        if let Ok(()) = chan.unbounded_send((path.clone(), tx)) {
+                            let path = path.clone();
+                            let s = rx.map(move |_| (path, permissions));
+                            deferred_subs.inner_mut().push(Box::new(s.into_stream()));
+                            break;
+                        }
+                    }
+                    _ => {
+                        con.queue_send(&publisher::v1::From::NoSuchValue(path.clone()))?;
+                        break;
+                    }
+                }
+            }
+        }
         Some(id) => {
             let id = *id;
             if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
@@ -752,6 +811,7 @@ async fn handle_batch(
     ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
+    deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
     use crate::protocol::{
         publisher::v1::{From, To::*},
@@ -772,6 +832,7 @@ async fn handle_batch(
                         *addr,
                         path,
                         Permissions::all(),
+                        deferred_subs,
                     )?,
                     Auth::Krb5 { .. } => match ctxts.get(&resolver) {
                         None => con.queue_send(&From::Denied(path))?,
@@ -809,6 +870,7 @@ async fn handle_batch(
                                                 *addr,
                                                 path,
                                                 permissions.unwrap(),
+                                                deferred_subs,
                                             )?
                                         }
                                     }
@@ -933,9 +995,35 @@ async fn client_loop(
     let mut flushes = flushes.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;
+    let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
+    let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
     hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
+            s = deferred_subs.next() => match s {
+                None => (),
+                Some(BatchItem::InBatch(v)) => { deferred_subs_batch.push(v); }
+                Some(BatchItem::EndBatch) => match t.upgrade() {
+                    None => { deferred_subs_batch.clear(); }
+                    Some(t) => {
+                        {
+                            let mut pb = t.0.lock();
+                            for (path, perms) in deferred_subs_batch.drain(..) {
+                                if !pb.by_path.contains_key(path.as_ref()) {
+                                    let m = publisher::v1::From::NoSuchValue(path);
+                                    con.queue_send(&m)?
+                                } else {
+                                    subscribe(
+                                        &mut *pb, &updates, &mut con, addr,
+                                        path, perms, &mut deferred_subs
+                                    )?
+                                }
+                            }
+                        }
+                        con.flush().await?
+                    }
+                }
+            },
             to_cl = flushes.next() => match to_cl {
                 None => break Ok(()),
                 Some(timeout) => {
@@ -967,6 +1055,7 @@ async fn client_loop(
                     handle_batch(
                         &t, &updates, &addr, batch.drain(..), &mut con,
                         &mut write_batches, &ctxts, &desired_auth, now,
+                        &mut deferred_subs,
                     ).await?;
                     con.flush().await?
                 }

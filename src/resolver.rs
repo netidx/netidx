@@ -378,7 +378,7 @@ impl ResolverRead {
         } else {
             match result.pop().unwrap() {
                 FromRead::List(paths) => Ok(paths),
-                m => bail!("unexpected result from list {:?}", m)
+                m => bail!("unexpected result from list {:?}", m),
             }
         }
     }
@@ -428,6 +428,13 @@ impl ResolverWrite {
 
     pub async fn publish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
         self.send_expect(batch, ToWrite::Publish, FromWrite::Published).await
+    }
+
+    pub async fn publish_default<I: IntoIterator<Item = Path>>(
+        &self,
+        batch: I,
+    ) -> Result<()> {
+        self.send_expect(batch, ToWrite::PublishDefault, FromWrite::Published).await
     }
 
     pub async fn unpublish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
