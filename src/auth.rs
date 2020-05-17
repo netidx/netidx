@@ -1,6 +1,6 @@
-use crate::{config, os::Mapper, path::Path};
+use crate::{config, os::Mapper, path::Path, protocol::resolver::v1::Referral};
 use anyhow::{anyhow, Error, Result};
-use std::{collections::HashMap, convert::TryFrom, iter, sync::Arc};
+use std::{collections::{BTreeMap, HashMap}, convert::TryFrom, iter, sync::Arc};
 
 bitflags! {
     pub struct Permissions: u32 {
@@ -47,7 +47,7 @@ impl TryFrom<&str> for Permissions {
                         "unrecognized permission bit {}, valid bits are !swlpd",
                         c
                     ))
-                }
+               }
             }
         }
         Ok(p)
@@ -128,9 +128,19 @@ impl PMap {
     pub(crate) fn from_file(
         file: config::resolver_server::PMap,
         db: &mut UserDb,
+        root: &str,
+        children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
         let mut pmap = HashMap::with_capacity(file.0.len());
         for (path, tbl) in file.0.iter() {
+            if !path.starts_with(root) {
+                bail!("permission entry for parent: {}, entry: {}", root, path)
+            }
+            for child in children.keys() {
+                if path.starts_with(child.as_ref()) {
+                    bail!("permission entry for child: {}, entry: {}", child, path)
+                }
+            }
             let mut entry = HashMap::with_capacity(tbl.len());
             for (ent, perm) in tbl.iter() {
                 let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };

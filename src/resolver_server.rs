@@ -527,7 +527,7 @@ async fn server_loop(
     let secstore = match &cfg.auth {
         Auth::Anonymous => None,
         Auth::Krb5 { spn, permissions } => {
-            Some(SecStore::new(spn.clone(), permissions.clone())?)
+            Some(SecStore::new(spn.clone(), permissions.clone(), &cfg)?)
         }
     };
     let mut listener = TcpListener::bind(cfg.addr).await?;

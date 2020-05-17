@@ -2,7 +2,7 @@ use crate::{
     auth::{PMap, UserDb, UserInfo},
     chars::Chars,
     config,
-    os::{self, Mapper, Krb5Ctx, ServerCtx},
+    os::{self, Krb5Ctx, Mapper, ServerCtx},
     protocol::resolver::v1::CtxId,
 };
 use anyhow::{anyhow, Result};
@@ -67,9 +67,14 @@ pub(crate) struct SecStore {
 }
 
 impl SecStore {
-    pub(crate) fn new(spn: String, pmap: config::resolver_server::PMap) -> Result<Self> {
+    pub(crate) fn new(
+        spn: String,
+        pmap: config::resolver_server::PMap,
+        cfg: &Arc<config::resolver_server::Config>,
+    ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
-        let pmap = PMap::from_file(pmap, &mut userdb)?;
+        let pmap =
+            PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
         Ok(SecStore {
             spn: Arc::new(spn),
             pmap: ArcSwap::from(Arc::new(pmap)),

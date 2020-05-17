@@ -124,6 +124,10 @@ pub mod resolver_server {
     }
 
     impl Config {
+        pub fn root(&self) -> &str {
+            self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
+        }
+
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             utils::check_addr(cfg.addr.ip(), &[])?;
@@ -131,13 +135,6 @@ pub mod resolver_server {
             if addr.port() == 0 {
                 bail!("You must specify a non zero port {:?}", addr);
             }
-            let auth = match cfg.auth {
-                file::Auth::Anonymous => Auth::Anonymous,
-                file::Auth::Krb5 { spn, permissions } => {
-                    let permissions: PMap = from_str(&read_to_string(&permissions)?)?;
-                    Auth::Krb5 { spn, permissions }
-                }
-            };
             let parent = cfg.parent.map(|r| r.check(Some(addr))).transpose()?;
             let children = {
                 let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
@@ -170,6 +167,13 @@ pub mod resolver_server {
                     }
                 }
                 children
+            };
+            let auth = match cfg.auth {
+                file::Auth::Anonymous => Auth::Anonymous,
+                file::Auth::Krb5 { spn, permissions } => {
+                    let permissions: PMap = from_str(&read_to_string(&permissions)?)?;
+                    Auth::Krb5 { spn, permissions }
+                }
             };
             Ok(Config {
                 parent,
