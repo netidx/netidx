@@ -9,6 +9,7 @@ use crate::{
         ToReadBatch as IToReadBatch, ToWriteBatch as IToWriteBatch,
     },
     utils::Pooled,
+    config::resolver::Config,
 };
 use anyhow::Result;
 use futures::future;
@@ -58,13 +59,12 @@ impl ToPath for ToWrite {
 
 #[derive(Debug)]
 struct Router {
-    default: Referral,
     cached: BTreeMap<Path, (Instant, Referral)>,
 }
 
 impl Router {
-    fn new(default: Referral) -> Self {
-        Router { default, cached: BTreeMap::new() }
+    fn new() -> Self {
+        Router { cached: BTreeMap::new() }
     }
 
     fn route_batch<B, O, T>(
@@ -163,7 +163,7 @@ where
     O: Pooled<(usize, F)>,
 {
     fn new(
-        resolver: Referral,
+        resolver: Config,
         desired_auth: Auth,
         writer_addr: SocketAddr,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
@@ -173,7 +173,7 @@ where
 
 impl Connection<ToRead, FromRead, IToReadBatch, IFromReadBatch> for SingleRead {
     fn new(
-        resolver: Referral,
+        resolver: Config,
         desired_auth: Auth,
         _writer_addr: SocketAddr,
         _ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
@@ -188,7 +188,7 @@ impl Connection<ToRead, FromRead, IToReadBatch, IFromReadBatch> for SingleRead {
 
 impl Connection<ToWrite, FromWrite, IToWriteBatch, IFromWriteBatch> for SingleWrite {
     fn new(
-        resolver: Referral,
+        resolver: Config,
         desired_auth: Auth,
         writer_addr: SocketAddr,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
@@ -233,12 +233,12 @@ where
     Oi: Pooled<(usize, F)> + 'static,
 {
     fn new(
-        default: Referral,
+        default: Config,
         desired_auth: Auth,
         writer_addr: SocketAddr,
     ) -> ResolverWrap<C, T, F, B, O, Bi, Oi> {
         let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
-        let router = Router::new(default.clone());
+        let router = Router::new();
         let default = C::new(default, desired_auth.clone(), writer_addr, ctxts.clone());
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
@@ -273,7 +273,7 @@ where
                             None => {
                                 let r = inner.router.get_referral(&rp).unwrap().clone();
                                 let mut con = C::new(
-                                    r,
+                                    Config::from(r),
                                     inner.desired_auth.clone(),
                                     inner.writer_addr,
                                     inner.ctxts.clone(),
@@ -330,7 +330,7 @@ pub struct ResolverRead(
 );
 
 impl ResolverRead {
-    pub fn new(default: Referral, desired_auth: Auth) -> Self {
+    pub fn new(default: Config, desired_auth: Auth) -> Self {
         ResolverRead(ResolverWrap::new(
             default,
             desired_auth,
@@ -398,7 +398,7 @@ pub struct ResolverWrite(
 );
 
 impl ResolverWrite {
-    pub fn new(default: Referral, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
+    pub fn new(default: Config, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
         ResolverWrite(ResolverWrap::new(default, desired_auth, writer_addr))
     }
 

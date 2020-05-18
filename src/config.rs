@@ -24,7 +24,7 @@ mod common_file {
             }
             for addr in &self.addrs {
                 utils::check_addr(addr.ip(), &[])?;
-                if addr.port() == 0 {
+                if addr.port() == 0 && cfg!(not(test)) {
                     bail!("non zero port required {:?}", addr);
                 }
             }
@@ -191,24 +191,59 @@ pub mod resolver_server {
 }
 
 pub mod resolver {
-    use crate::protocol::resolver::v1::Referral;
+    use crate::{protocol::resolver::v1::Referral, utils};
     use anyhow::Result;
+    use fxhash::FxBuildHasher;
     use serde_json::from_str;
-    use std::{convert::AsRef, fs, path::Path};
+    use std::{
+        collections::HashMap, convert::AsRef, convert::From, fs, net::SocketAddr,
+        path::Path,
+    };
     use tokio::fs::read_to_string;
 
-    pub type Config = Referral;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Config {
+        pub addrs: Vec<SocketAddr>,
+        pub krb5_spns: HashMap<SocketAddr, String, FxBuildHasher>,
+    }
+
+    impl From<Referral> for Config {
+        fn from(r: Referral) -> Self {
+            Config {
+                addrs: r.addrs,
+                krb5_spns: r.krb5_spns.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            }
+        }
+    }
 
     impl Config {
+        fn check(&self) -> Result<()> {
+            for addr in &self.addrs {
+                utils::check_addr(addr.ip(), &[])?;
+                if addr.port() == 0 && cfg!(not(test)) {
+                    bail!("non zero port required {:?}", addr);
+                }
+            }
+            if !self.krb5_spns.is_empty() {
+                for a in &self.addrs {
+                    if !self.krb5_spns.contains_key(a) {
+                        bail!("spn for server {:?} is required", a)
+                    }
+                }
+            }
+            Ok(())
+        }
+
         pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
-            let cfg: super::common_file::Referral =
-                from_str(&read_to_string(file).await?)?;
-            Ok(cfg.check(None)?)
+            let cfg: Config = from_str(&read_to_string(file).await?)?;
+            cfg.check()?;
+            Ok(cfg)
         }
 
         pub fn load_sync<P: AsRef<Path>>(file: P) -> Result<Config> {
-            let cfg: super::common_file::Referral = from_str(&fs::read_to_string(file)?)?;
-            Ok(cfg.check(None)?)
+            let cfg: Config = from_str(&fs::read_to_string(file)?)?;
+            cfg.check()?;
+            Ok(cfg)
         }
     }
 }

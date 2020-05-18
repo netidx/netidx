@@ -88,6 +88,18 @@ impl From<String> for Chars {
     }
 }
 
+impl Into<String> for &Chars {
+    fn into(self) -> String {
+        self.as_ref().into()
+    }
+}
+
+impl Into<String> for Chars {
+    fn into(self) -> String {
+        self.as_ref().into()
+    }
+}
+
 impl Deref for Chars {
     type Target = str;
 

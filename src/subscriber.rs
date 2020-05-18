@@ -2,12 +2,12 @@ pub use crate::protocol::publisher::v1::Value;
 use crate::{
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
+    config::resolver::Config,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     protocol::{
         self,
         publisher::v1::{From, Id, To},
-        resolver::v1::Referral,
     },
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
@@ -351,7 +351,7 @@ impl SubscriberWeak {
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    pub fn new(resolver: Referral, desired_auth: Auth) -> Result<Subscriber> {
+    pub fn new(resolver: Config, desired_auth: Auth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {

@@ -3,9 +3,10 @@ use crate::{
     chars::Chars,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
+    config::resolver::Config,
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, Referral, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
+        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
         ToWrite,
     },
     utils::{self, Pooled},
@@ -64,7 +65,7 @@ macro_rules! cwt {
 }
 
 async fn connect_read(
-    resolver: &Referral,
+    resolver: &Config,
     sc: &mut Option<(CtxId, ClientCtx)>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
@@ -140,7 +141,7 @@ type ReadBatch = (ToReadBatch, oneshot::Sender<FromReadBatch>);
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
-    resolver: Referral,
+    resolver: Config,
     desired_auth: Auth,
 ) {
     let mut ctx: Option<(CtxId, ClientCtx)> = None;
@@ -222,7 +223,7 @@ async fn connection_read(
 pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
-    pub(crate) fn new(resolver: Referral, desired_auth: Auth) -> ResolverRead {
+    pub(crate) fn new(resolver: Config, desired_auth: Auth) -> ResolverRead {
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         task::spawn(async move {
             connection_read(to_rx, resolver, desired_auth).await;
@@ -245,7 +246,7 @@ macro_rules! wt {
 }
 
 async fn connect_write(
-    resolver: &Referral,
+    resolver: &Config,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
@@ -370,7 +371,7 @@ make_pool!(RAWFROMWRITEPOOL, RawFromWriteBatch, FromWrite, 1000);
 
 async fn connection_write(
     receiver: mpsc::Receiver<(Arc<ToWriteBatch>, oneshot::Sender<FromWriteBatch>)>,
-    resolver: Referral,
+    resolver: Config,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
@@ -519,7 +520,7 @@ type WriteBatch = (ToWriteBatch, oneshot::Sender<FromWriteBatch>);
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
-    resolver: Referral,
+    resolver: Config,
     desired_auth: Auth,
     ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
     write_addr: SocketAddr,
@@ -585,7 +586,7 @@ pub(crate) struct ResolverWrite(mpsc::UnboundedSender<WriteBatch>);
 
 impl ResolverWrite {
     pub(crate) fn new(
-        resolver: Referral,
+        resolver: Config,
         desired_auth: Auth,
         write_addr: SocketAddr,
         ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,

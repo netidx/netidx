@@ -2,13 +2,11 @@ pub use crate::protocol::publisher::v1::Value;
 use crate::{
     auth::Permissions,
     channel::Channel,
+    config::resolver::Config,
     os::{self, ClientCtx, Krb5Ctx, ServerCtx},
     pack::Pack,
     path::Path,
-    protocol::{
-        publisher::{self, v1::Id},
-        resolver::v1::Referral,
-    },
+    protocol::publisher::{self, v1::Id},
     resolver::{Auth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
@@ -479,7 +477,7 @@ impl Publisher {
 
     /// Create a new publisher using the specified resolver and bind config.
     pub async fn new(
-        resolver: Referral,
+        resolver: Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
@@ -626,11 +624,7 @@ impl Publisher {
             }
             let (tx, rx) = fmpsc::unbounded();
             pb.default.insert(base.clone(), tx);
-            Ok(DefaultHandle {
-                chan: rx,
-                path: base,
-                publisher: self.downgrade()
-            })
+            Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
         }
     }
 
