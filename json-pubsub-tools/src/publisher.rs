@@ -68,6 +68,7 @@ pub(crate) enum SValue {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
+    Null,
 }
 
 impl From<Value> for SValue {
@@ -85,6 +86,7 @@ impl From<Value> for SValue {
             Value::F64(n) => SValue::F64(n),
             Value::String(c) => SValue::String(String::from(c.as_ref())),
             Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
+            Value::Null => SValue::Null,
         }
     }
 }
@@ -104,6 +106,7 @@ impl Into<Value> for SValue {
             SValue::F64(n) => Value::F64(n),
             SValue::String(s) => Value::String(Chars::from(s)),
             SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
+            SValue::Null => Value::Null,
         }
     }
 }
