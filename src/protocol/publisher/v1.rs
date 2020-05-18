@@ -176,11 +176,11 @@ impl Pack for To {
 pub enum Value {
     /// full 4 byte u32
     U32(u32),
-    /// LEB128 varint, 1 or more bytes depending on value
+    /// LEB128 varint, 1 - 5 bytes depending on value
     V32(u32),
     /// full 4 byte i32
     I32(i32),
-    /// LEB128 varint zigzag encoded, 1 or more bytes depending on abs(value)
+    /// LEB128 varint zigzag encoded, 1 - 5 bytes depending on abs(value)
     Z32(i32),
     /// full 8 byte u64
     U64(u64),
