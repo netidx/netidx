@@ -24,7 +24,7 @@ mod common_file {
             }
             for addr in &self.addrs {
                 utils::check_addr(addr.ip(), &[])?;
-                if addr.port() == 0 && cfg!(not(test)) {
+                if cfg!(not(test)) && addr.port() == 0 {
                     bail!("non zero port required {:?}", addr);
                 }
             }
@@ -132,7 +132,7 @@ pub mod resolver_server {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
             utils::check_addr(cfg.addr.ip(), &[])?;
             let addr = cfg.addr;
-            if addr.port() == 0 {
+            if cfg!(not(test)) && addr.port() == 0 {
                 bail!("You must specify a non zero port {:?}", addr);
             }
             let parent = cfg.parent.map(|r| r.check(Some(addr))).transpose()?;
@@ -220,7 +220,7 @@ pub mod resolver {
         fn check(&self) -> Result<()> {
             for addr in &self.addrs {
                 utils::check_addr(addr.ip(), &[])?;
-                if addr.port() == 0 && cfg!(not(test)) {
+                if cfg!(not(test)) && addr.port() == 0 {
                     bail!("non zero port required {:?}", addr);
                 }
             }

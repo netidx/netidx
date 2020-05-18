@@ -1,6 +1,5 @@
-use crate::{config, path::Path, protocol::resolver::v1::Referral};
-use fxhash::FxBuildHasher;
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use crate::config;
+use std::net::SocketAddr;
 
 fn resolver_server_config_simple() -> config::resolver_server::Config {
     use config::resolver_server::Config;
@@ -12,8 +11,7 @@ fn resolver_config_simple(server: SocketAddr) -> config::resolver::Config {
     use config::resolver::Config;
     Config {
         addrs: vec![server],
-        .. Config::load("cfg/simple/resolver.json")
-            .expect("load simple resolver config")
+        ..Config::load("cfg/simple/resolver.json").expect("load simple resolver config")
     }
 }
 
@@ -35,7 +33,7 @@ mod resolver {
         use tokio::runtime::Runtime;
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let cfg = resolver_server_config_simpl();
+            let cfg = resolver_server_config_simple();
             let server = Server::new(cfg, false).await.expect("start server");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let cfg = resolver_config_simple(*server.local_addr());
