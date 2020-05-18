@@ -1,9 +1,0 @@
-* replication, metadata servers are completely independent, the
-  publisher is the real master and is responsible for replicating it's
-  data on the whole cluster
-
-* global namespace. The metadata server's hello message contains the
-  cluster config that specifies all the servers in the local cluster
-  as well as the server's position in the global namespace, and the
-  delegations one level up. Delegations down are dealt with as
-  referrals. Hello will need a ttl.
