@@ -2,28 +2,18 @@ use crate::{config, path::Path, protocol::resolver::v1::Referral};
 use fxhash::FxBuildHasher;
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
-fn server_config() -> config::resolver_server::Config {
-    use config::resolver_server::{Auth, Config};
-    use std::collections::BTreeMap;
-    Config {
-        parent: None,
-        children: BTreeMap::new(),
-        pid_file: "".into(),
-        addr: "127.0.0.1:0".parse().unwrap(),
-        max_connections: 768,
-        hello_timeout: Duration::from_secs(10),
-        reader_ttl: Duration::from_secs(60),
-        writer_ttl: Duration::from_secs(120),
-        auth: Auth::Anonymous,
-    }
+fn resolver_server_config_simple() -> config::resolver_server::Config {
+    use config::resolver_server::Config;
+    Config::load("cfg/simple/resolver-server.json")
+        .expect("load simple resolver server config")
 }
 
-fn client_config(server: SocketAddr) -> config::resolver::Config {
-    Referral {
-        path: Path::from("/"),
-        ttl: u64::MAX,
+fn resolver_config_simple(server: SocketAddr) -> config::resolver::Config {
+    use config::resolver::Config;
+    Config {
         addrs: vec![server],
-        krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
+        .. Config::load("cfg/simple/resolver.json")
+            .expect("load simple resolver config")
     }
 }
 
@@ -45,9 +35,10 @@ mod resolver {
         use tokio::runtime::Runtime;
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let server = Server::new(server_config(), false).await.expect("start server");
+            let cfg = resolver_server_config_simpl();
+            let server = Server::new(cfg, false).await.expect("start server");
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let cfg = client_config(*server.local_addr());
+            let cfg = resolver_config_simple(*server.local_addr());
             let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
             let r = ResolverRead::new(cfg.clone(), Auth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
@@ -107,8 +98,9 @@ mod publisher {
     fn publish_subscribe() {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let server = Server::new(server_config(), false).await.expect("start server");
-            let cfg = client_config(*server.local_addr());
+            let cfg = resolver_server_config_simple();
+            let server = Server::new(cfg, false).await.expect("start server");
+            let cfg = resolver_config_simple(*server.local_addr());
             let pcfg = cfg.clone();
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {

@@ -234,13 +234,13 @@ pub mod resolver {
             Ok(())
         }
 
-        pub async fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
+        pub async fn load_async<P: AsRef<Path>>(file: P) -> Result<Config> {
             let cfg: Config = from_str(&read_to_string(file).await?)?;
             cfg.check()?;
             Ok(cfg)
         }
 
-        pub fn load_sync<P: AsRef<Path>>(file: P) -> Result<Config> {
+        pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
             let cfg: Config = from_str(&fs::read_to_string(file)?)?;
             cfg.check()?;
             Ok(cfg)
