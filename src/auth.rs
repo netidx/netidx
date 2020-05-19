@@ -126,7 +126,7 @@ pub(crate) struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
     pub(crate) fn from_file(
-        file: config::resolver_server::PMap,
+        file: config::PMap,
         db: &mut UserDb,
         root: &str,
         children: &BTreeMap<Path, Referral>,

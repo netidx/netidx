@@ -1,13 +1,12 @@
 use crate::{
     channel::Channel,
     chars::Chars,
+    config::{self, Config},
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
-    config::resolver::Config,
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead,
-        ToWrite,
+        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
     },
     utils::{self, Pooled},
 };
@@ -87,17 +86,16 @@ async fn connect_read(
         let mut con = Channel::new(con);
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
-        let (auth, ctx) = match desired_auth {
-            Auth::Anonymous => (ClientAuthRead::Anonymous, None),
-            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+        let (auth, ctx) = match (desired_auth, &resolver.auth) {
+            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
+            (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
                 bail!("authentication unavailable")
             }
-            Auth::Krb5 { upn, .. } => match sc {
+            (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
                     let upn = upn.as_ref().map(|s| s.as_bytes());
-                    let target_spn = resolver
-                        .krb5_spns
+                    let target_spn = spns
                         .get(&addr)
                         .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?
                         .as_bytes();
@@ -259,27 +257,28 @@ async fn connect_write(
     let mut con = Channel::new(con);
     wt!(con.send_one(&1u64))??;
     let _version: u64 = wt!(con.receive())??;
-    let (auth, ctx) = match desired_auth {
-        Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
-        Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
+    let (auth, ctx) = match (desired_auth, &resolver.auth) {
+        (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
+        (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
             bail!("authentication unavailable")
         }
-        Auth::Krb5 { upn, spn } => match ctxts.read().get(&resolver_addr) {
-            Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
-            None => {
-                let upnr = upn.as_ref().map(|s| s.as_bytes());
-                let target_spn = resolver
-                    .krb5_spns
-                    .get(&resolver_addr)
-                    .ok_or_else(|| {
-                        anyhow!("no target spn for resolver {:?}", resolver_addr)
-                    })?
-                    .as_bytes();
-                let (ctx, token) = create_ctx(upnr, target_spn)?;
-                let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+        (Auth::Krb5 { upn, spn }, config::Auth::Krb5(spns)) => {
+            match ctxts.read().get(&resolver_addr) {
+                Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
+                None => {
+                    let upnr = upn.as_ref().map(|s| s.as_bytes());
+                    let target_spn = spns
+                        .get(&resolver_addr)
+                        .ok_or_else(|| {
+                            anyhow!("no target spn for resolver {:?}", resolver_addr)
+                        })?
+                        .as_bytes();
+                    let (ctx, token) = create_ctx(upnr, target_spn)?;
+                    let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                    (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+                }
             }
-        },
+        }
     };
     let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
     debug!("write_con connection established hello {:?}", h);
@@ -325,7 +324,9 @@ async fn connect_write(
             if *degraded {
                 con.send_one(&ToWrite::Clear).await?;
                 match con.receive().await? {
-                    FromWrite::Unpublished => { *degraded = false; },
+                    FromWrite::Unpublished => {
+                        *degraded = false;
+                    }
                     m => warn!("unexpected response to clear {:?}", m),
                 }
             }
@@ -352,7 +353,7 @@ async fn connect_write(
                     r => {
                         *degraded = true;
                         warn!("unexpected republish reply for {} {:?}", p, r)
-                    },
+                    }
                 }
             }
             info!(

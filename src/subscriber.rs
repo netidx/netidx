@@ -2,7 +2,7 @@ pub use crate::protocol::publisher::v1::Value;
 use crate::{
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
-    config::resolver::Config,
+    config::Config,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     protocol::{

@@ -69,8 +69,8 @@ pub(crate) struct SecStore {
 impl SecStore {
     pub(crate) fn new(
         spn: String,
-        pmap: config::resolver_server::PMap,
-        cfg: &Arc<config::resolver_server::Config>,
+        pmap: config::PMap,
+        cfg: &Arc<config::Config>,
     ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap =

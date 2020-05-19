@@ -9,7 +9,7 @@ use crate::{
         ToReadBatch as IToReadBatch, ToWriteBatch as IToWriteBatch,
     },
     utils::Pooled,
-    config::resolver::Config,
+    config::Config,
 };
 use anyhow::Result;
 use futures::future;

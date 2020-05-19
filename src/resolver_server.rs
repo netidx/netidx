@@ -2,15 +2,15 @@ use crate::{
     auth::{Permissions, UserInfo, ANONYMOUS},
     channel::Channel,
     chars::Chars,
-    config::resolver_server::{Auth, Config},
+    config,
     os::{Krb5Ctx, Krb5ServerCtx, ServerCtx},
     path::Path,
     protocol::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Resolved, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            FromWrite, Resolved, ServerAuthWrite, ServerHelloRead, ServerHelloWrite,
+            ToRead, ToWrite,
         },
     },
     resolver_store::{Store, StoreInner},
@@ -99,7 +99,7 @@ fn handle_batch_write(
 }
 
 async fn client_loop_write(
-    cfg: Arc<Config>,
+    cfg: Arc<config::Config>,
     store: Store<ClientInfo>,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
@@ -174,7 +174,7 @@ async fn client_loop_write(
 }
 
 async fn hello_client_write(
-    cfg: Arc<Config>,
+    cfg: Arc<config::Config>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
@@ -186,7 +186,7 @@ async fn hello_client_write(
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
     async fn send(
-        cfg: &Arc<Config>,
+        cfg: &Arc<config::Config>,
         con: &mut Channel<ServerCtx>,
         hello: ServerHelloWrite,
     ) -> Result<()> {
@@ -386,7 +386,7 @@ fn handle_batch_read(
 }
 
 async fn client_loop_read(
-    cfg: Arc<Config>,
+    cfg: Arc<config::Config>,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -427,7 +427,7 @@ async fn client_loop_read(
 }
 
 async fn hello_client_read(
-    cfg: Arc<Config>,
+    cfg: Arc<config::Config>,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -436,7 +436,7 @@ async fn hello_client_read(
     hello: ClientAuthRead,
 ) -> Result<()> {
     async fn send(
-        cfg: &Arc<Config>,
+        cfg: &Arc<config::Config>,
         con: &mut Channel<ServerCtx>,
         hello: ServerHelloRead,
     ) -> Result<()> {
@@ -473,7 +473,7 @@ async fn hello_client_read(
 }
 
 async fn hello_client(
-    cfg: Arc<Config>,
+    cfg: Arc<config::Config>,
     delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
@@ -513,7 +513,8 @@ async fn hello_client(
 }
 
 async fn server_loop(
-    cfg: Config,
+    cfg: config::Config,
+    permissions: config::PMap,
     delay_reads: bool,
     id: usize,
     stop: oneshot::Receiver<()>,
@@ -525,18 +526,18 @@ async fn server_loop(
     let connections = Arc::new(AtomicUsize::new(0));
     let published: Store<ClientInfo> =
         Store::new(cfg.parent.clone(), cfg.children.clone());
+    let id = cfg.addrs[id];
     let secstore = match &cfg.auth {
-        Auth::Anonymous => None,
-        Auth::Krb5 { spn, permissions } => {
-            Some(SecStore::new(spn.clone(), permissions.clone(), &cfg)?)
+        config::Auth::Anonymous => None,
+        config::Auth::Krb5(spns) => {
+            Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
-    let mut listener = TcpListener::bind(cfg.addrs[id]).await?;
+    let mut listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = cfg.max_connections;
-    let id = cfg.addrs[id];
     let _ = ready.send(local_addr);
     loop {
         select_biased! {
@@ -592,10 +593,15 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
+    pub async fn new(
+        cfg: config::Config,
+        permissions: config::PMap,
+        delay_reads: bool,
+        id: usize,
+    ) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, delay_reads, id, recv_stop, send_ready);
+        let tsk = server_loop(cfg, permissions, delay_reads, id, recv_stop, send_ready);
         let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,
