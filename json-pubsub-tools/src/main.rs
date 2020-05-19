@@ -44,11 +44,16 @@ enum Sub {
         #[structopt(
             short = "c",
             long = "config",
-            help = "override the default server config file",
-            default_value = "./resolver-server.conf",
+            help = "choose the config file to load",
             parse(from_os_str)
         )]
         config: PathBuf,
+        #[structopt(
+            long = "id",
+            help = "choose the bind address, from the addrs field of the config",
+            default_value = "0"
+        )]
+        id: usize,
     },
     #[structopt(name = "resolver", about = "Query a resolver server")]
     Resolver {
@@ -168,10 +173,10 @@ fn main() {
     env_logger::init();
     let opt = Opt::from_args();
     let cfg: config::resolver::Config =
-        config::resolver::Config::load_sync(opt.config).expect("reading config");
+        config::resolver::Config::load(opt.config).expect("reading config");
     match opt.cmd {
-        Sub::ResolverServer { foreground, config, delay_reads } => {
-            resolver_server::run(config, !foreground, delay_reads)
+        Sub::ResolverServer { foreground, config, delay_reads, id } => {
+            resolver_server::run(config, !foreground, delay_reads, id)
         }
         Sub::Resolver { krb5, upn, cmd } => {
             resolver::run(cfg, cmd, auth(krb5, upn, None))

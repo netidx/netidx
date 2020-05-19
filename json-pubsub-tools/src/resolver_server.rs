@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 use daemonize::Daemonize;
 use std::path::PathBuf;
 
-pub(crate) fn run(config: PathBuf, daemonize: bool, delay_reads: bool) {
+pub(crate) fn run(config: PathBuf, daemonize: bool, delay_reads: bool, id: usize) {
     let cfg = Config::load(&config).expect("failed to load config");
     if daemonize {
         Daemonize::new()
@@ -17,7 +17,7 @@ pub(crate) fn run(config: PathBuf, daemonize: bool, delay_reads: bool) {
     }
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let server = Server::new(cfg, delay_reads).await.expect("starting server");
+        let server = Server::new(cfg, delay_reads, id).await.expect("starting server");
         future::pending::<()>().await;
         drop(server)
     });
