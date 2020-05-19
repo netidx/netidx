@@ -515,6 +515,7 @@ async fn hello_client(
 async fn server_loop(
     cfg: Config,
     delay_reads: bool,
+    id: usize,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr> {
@@ -530,12 +531,12 @@ async fn server_loop(
             Some(SecStore::new(spn.clone(), permissions.clone(), &cfg)?)
         }
     };
-    let mut listener = TcpListener::bind(cfg.addr).await?;
+    let mut listener = TcpListener::bind(cfg.addrs[id]).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = cfg.max_connections;
-    let id = cfg.addr;
+    let id = cfg.addrs[id];
     let _ = ready.send(local_addr);
     loop {
         select_biased! {
@@ -591,10 +592,10 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: Config, delay_reads: bool) -> Result<Server> {
+    pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);
+        let tsk = server_loop(cfg, delay_reads, id, recv_stop, send_ready);
         let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,

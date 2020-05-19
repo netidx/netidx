@@ -14,7 +14,7 @@ mod common_file {
     }
 
     impl Referral {
-        pub(super) fn check(self, us: Option<SocketAddr>) -> Result<Pref> {
+        pub(super) fn check(self, us: Option<&Vec<SocketAddr>>) -> Result<Pref> {
             let path = Path::from(self.path);
             if !Path::is_absolute(&path) {
                 bail!("absolute referral path is required")
@@ -38,9 +38,11 @@ mod common_file {
             if self.ttl == 0 {
                 bail!("ttl must be non zero");
             }
-            if let Some(ref us) = us {
-                if self.addrs.contains(&us) {
-                    bail!("server may not be it's own parent");
+            if let Some(us) = us {
+                for a in us {
+                    if self.addrs.contains(a) {
+                        bail!("server may not be it's own parent");
+                    }
                 }
             }
             Ok(Pref {
@@ -89,11 +91,11 @@ pub mod resolver_server {
             pub(super) parent: Option<Referral>,
             pub(super) children: Vec<Referral>,
             pub(super) pid_file: String,
-            pub(super) addr: SocketAddr,
             pub(super) max_connections: usize,
             pub(super) reader_ttl: u64,
             pub(super) writer_ttl: u64,
             pub(super) hello_timeout: u64,
+            pub(super) addrs: Vec<SocketAddr>,
             pub(super) auth: Auth,
         }
     }
@@ -115,11 +117,11 @@ pub mod resolver_server {
         pub parent: Option<Referral>,
         pub children: BTreeMap<Path, Referral>,
         pub pid_file: String,
-        pub addr: SocketAddr,
         pub max_connections: usize,
         pub reader_ttl: Duration,
         pub writer_ttl: Duration,
         pub hello_timeout: Duration,
+        pub addrs: Vec<SocketAddr>,
         pub auth: Auth,
     }
 
@@ -130,19 +132,24 @@ pub mod resolver_server {
 
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             let cfg: file::Config = from_str(&read_to_string(file)?)?;
-            utils::check_addr(cfg.addr.ip(), &[])?;
-            let addr = cfg.addr;
-            if cfg!(not(test)) && addr.port() == 0 {
-                bail!("You must specify a non zero port {:?}", addr);
+            if cfg.addrs.len() < 1 {
+                bail!("you must specify at least one address");
             }
-            let parent = cfg.parent.map(|r| r.check(Some(addr))).transpose()?;
+            for addr in &cfg.addrs {
+                utils::check_addr(addr.ip(), &[])?;
+                if cfg!(not(test)) && addr.port() == 0 {
+                    bail!("You must specify a non zero port {:?}", addr);
+                }
+            }
+            let addrs = cfg.addrs;
+            let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
             let children = {
                 let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
                 let children = cfg
                     .children
                     .into_iter()
                     .map(|r| {
-                        let r = r.check(Some(addr))?;
+                        let r = r.check(Some(&addrs))?;
                         Ok((r.path.clone(), r))
                     })
                     .collect::<Result<BTreeMap<Path, Referral>>>()?;
@@ -179,7 +186,7 @@ pub mod resolver_server {
                 parent,
                 children,
                 pid_file: cfg.pid_file,
-                addr,
+                addrs,
                 max_connections: cfg.max_connections,
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
