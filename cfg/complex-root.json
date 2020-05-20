@@ -3,22 +3,22 @@
     "children": [
         {
             "path": "/app/huge-app0",
-            "ttl": 86400,
+            "ttl": 3600,
             "addrs": ["127.0.0.1:1210", "127.0.0.1:1211"],
             "krb5_spns": {}
         },
         {
             "path": "/app/huge-app1",
-            "ttl": 86400,
+            "ttl": 3600,
             "addrs": ["127.0.0.1:1220", "127.0.0.1:1221"],
             "krb5_spns": {}
         }
     ],
-    "pid_file": "/tmp/resolver-server-root0.pid",
-    "addr": "127.0.0.1:1200",
+    "pid_file": "",
+    "addrs": ["127.0.0.1:1200", "127.0.0.1:1201"],
     "max_connections": 768,
-    "reader_ttl": 120,
-    "writer_ttl": 600,
     "hello_timeout": 10,
+    "reader_ttl": 60,
+    "writer_ttl": 120,
     "auth": "Anonymous"
 }

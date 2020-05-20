@@ -93,10 +93,13 @@ pub(crate) mod file {
 fn lookup_txt(name: &str) -> Result<String> {
     use trust_dns_resolver::Resolver;
     let resolver = Resolver::from_system_conf()?;
-    for txt in resolver.txt_lookup(name)?.iter() {
-        todo!()
+    let mut s = String::new();
+    if let Some(txt) = resolver.txt_lookup(name)?.iter().next() {
+        for data in txt.txt_data() {
+            s.push_str(&*String::from_utf8_lossy(&*data))
+        }
     }
-    todo!()
+    Ok(s)
 }
 
 type Permissions = String;
@@ -127,10 +130,10 @@ impl PMap {
     }
 
     /// If you wish you can store your netindex permission map in a
-    /// DNS TXT record. The default name is
-    /// "netindex-permissions" where <your-fqdn> is
-    /// replaced with the fully qualified domain name of the machine
-    /// this function is run on. Or you can specify a custom name.
+    /// DNS TXT record. The default name is "netindex-permissions"
+    /// where <your-fqdn> is replaced with the fully qualified domain
+    /// name of the machine this function is run on. Or you can
+    /// specify a custom name.
     pub fn load_from_dns(name: Option<&str>) -> Result<PMap> {
         PMap::parse(&lookup_txt(name.unwrap_or("netindex-permissions"))?)
     }
@@ -254,12 +257,7 @@ impl Config {
     /// find the config at that name, you may need this for a complex
     /// configuration, for example if you have multiple clusters in a
     /// hierarchy but only one DNS domain. If no name is specified
-    /// then the default name is, "netindex". In a large
-    /// organization you would generally have a DNS server for each
-    /// site/subdivision, and a corresponding netindex server cluster,
-    /// and so you would only need to add one TXT record to each DNS
-    /// server for everything to just work transparantly without any
-    /// config files.
+    /// then the default name is, "netindex".
     pub fn load_from_dns(name: Option<&str>) -> Result<Config> {
         Config::parse(&lookup_txt(name.unwrap_or("netindex"))?)
     }
