@@ -1,10 +1,10 @@
 use crate::{
     chars::Chars,
-    path::Path,
     pack::{self, Pack, PackError},
+    path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{mem, result, net::SocketAddr};
+use std::{mem, net::SocketAddr, result};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -199,7 +199,11 @@ pub enum Value {
     /// byte array, zero copy decode
     Bytes(Bytes),
     /// no value
-    Null
+    Null,
+    /// boolean true
+    True,
+    /// boolean false
+    False,
 }
 
 impl Pack for Value {
@@ -217,7 +221,7 @@ impl Pack for Value {
             Value::F64(_) => mem::size_of::<f64>(),
             Value::String(c) => <Chars as Pack>::len(c),
             Value::Bytes(b) => <Bytes as Pack>::len(b),
-            Value::Null => 0
+            Value::Null | Value::True | Value::False => 0,
         }
     }
 
@@ -272,6 +276,8 @@ impl Pack for Value {
                 <Bytes as Pack>::encode(b, buf)
             }
             Value::Null => Ok(buf.put_u8(12)),
+            Value::True => Ok(buf.put_u8(13)),
+            Value::False => Ok(buf.put_u8(14)),
         }
     }
 
@@ -290,6 +296,8 @@ impl Pack for Value {
             10 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
             11 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
             12 => Ok(Value::Null),
+            13 => Ok(Value::True),
+            14 => Ok(Value::False),
             _ => Err(PackError::UnknownTag),
         }
     }
