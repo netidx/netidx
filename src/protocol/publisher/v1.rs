@@ -198,8 +198,6 @@ pub enum Value {
     String(Chars),
     /// byte array, zero copy decode
     Bytes(Bytes),
-    /// no value
-    Null,
     /// boolean true
     True,
     /// boolean false
@@ -221,7 +219,7 @@ impl Pack for Value {
             Value::F64(_) => mem::size_of::<f64>(),
             Value::String(c) => <Chars as Pack>::len(c),
             Value::Bytes(b) => <Bytes as Pack>::len(b),
-            Value::Null | Value::True | Value::False => 0,
+            Value::True | Value::False => 0,
         }
     }
 
@@ -275,9 +273,8 @@ impl Pack for Value {
                 buf.put_u8(11);
                 <Bytes as Pack>::encode(b, buf)
             }
-            Value::Null => Ok(buf.put_u8(12)),
-            Value::True => Ok(buf.put_u8(13)),
-            Value::False => Ok(buf.put_u8(14)),
+            Value::True => Ok(buf.put_u8(12)),
+            Value::False => Ok(buf.put_u8(13)),
         }
     }
 
@@ -295,9 +292,8 @@ impl Pack for Value {
             9 => Ok(Value::F64(buf.get_f64())),
             10 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
             11 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
-            12 => Ok(Value::Null),
-            13 => Ok(Value::True),
-            14 => Ok(Value::False),
+            12 => Ok(Value::True),
+            13 => Ok(Value::False),
             _ => Err(PackError::UnknownTag),
         }
     }
