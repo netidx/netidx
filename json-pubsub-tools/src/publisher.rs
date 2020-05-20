@@ -3,7 +3,7 @@ use bytes::Bytes;
 use futures::prelude::*;
 use json_pubsub::{
     chars::Chars,
-    config::resolver::Config,
+    config::Config,
     path::Path,
     publisher::{BindCfg, Publisher, Val, Value},
     resolver::Auth,
@@ -27,6 +27,7 @@ pub enum Typ {
     Z64,
     F32,
     F64,
+    Bool,
     String,
     Json,
 }
@@ -46,10 +47,11 @@ impl FromStr for Typ {
             "z64" => Ok(Typ::Z64),
             "f32" => Ok(Typ::F32),
             "f64" => Ok(Typ::F64),
+            "bool" => Ok(Typ::Bool),
             "string" => Ok(Typ::String),
             "json" => Ok(Typ::Json),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, string, json", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, json", s))
         }
     }
 }
@@ -69,6 +71,8 @@ pub(crate) enum SValue {
     String(String),
     Bytes(Vec<u8>),
     Null,
+    True,
+    False,
 }
 
 impl From<Value> for SValue {
@@ -87,6 +91,8 @@ impl From<Value> for SValue {
             Value::String(c) => SValue::String(String::from(c.as_ref())),
             Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
             Value::Null => SValue::Null,
+            Value::True => SValue::True,
+            Value::False => SValue::False,
         }
     }
 }
@@ -107,6 +113,8 @@ impl Into<Value> for SValue {
             SValue::String(s) => Value::String(Chars::from(s)),
             SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
             SValue::Null => Value::Null,
+            SValue::True => Value::True,
+            SValue::False => Value::False,
         }
     }
 }
@@ -123,6 +131,10 @@ fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
         Typ::Z64 => SValue::Z64(s.parse::<i64>()?),
         Typ::F32 => SValue::F32(s.parse::<f32>()?),
         Typ::F64 => SValue::F64(s.parse::<f64>()?),
+        Typ::Bool => match s.parse::<bool>()? {
+            true => SValue::True,
+            false => SValue::False,
+        },
         Typ::String => SValue::String(String::from(s)),
         Typ::Json => serde_json::from_str(s)?,
     })

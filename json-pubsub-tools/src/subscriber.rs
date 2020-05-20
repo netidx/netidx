@@ -8,7 +8,7 @@ use futures::{
     stream::{self, FusedStream},
 };
 use json_pubsub::{
-    config::resolver::Config,
+    config::Config,
     path::Path,
     resolver::Auth,
     subscriber::{Batch, DvState, Dval, SubId, Subscriber},

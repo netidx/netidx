@@ -1,6 +1,6 @@
 use super::ResolverCmd;
 use json_pubsub::{
-    config::resolver::Config,
+    config::Config,
     path::Path,
     resolver::{Auth, ResolverRead, ResolverWrite},
 };

@@ -1,6 +1,6 @@
 use futures::{prelude::*, select};
 use json_pubsub::{
-    config::resolver::Config,
+    config::Config,
     path::Path,
     publisher::{BindCfg, Publisher, Value},
     resolver::Auth,

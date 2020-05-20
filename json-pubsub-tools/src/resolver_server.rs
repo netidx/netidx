@@ -1,23 +1,25 @@
-use json_pubsub::{
-    resolver_server::Server,
-    config::resolver_server::Config,
-};
-use futures::future;
-use tokio::runtime::Runtime;
 use daemonize::Daemonize;
-use std::path::PathBuf;
+use futures::future;
+use json_pubsub::{config, resolver_server::Server};
+use tokio::runtime::Runtime;
 
-pub(crate) fn run(config: PathBuf, daemonize: bool, delay_reads: bool, id: usize) {
-    let cfg = Config::load(&config).expect("failed to load config");
+pub(crate) fn run(
+    config: config::Config,
+    permissions: config::PMap,
+    daemonize: bool,
+    delay_reads: bool,
+    id: usize,
+) {
     if daemonize {
-        Daemonize::new()
-            .pid_file(&*cfg.pid_file)
-            .start()
-            .expect("failed to daemonize");
+        let mut file = config.pid_file.clone();
+        file.push_str(&format!("{}.pid", id));
+        Daemonize::new().pid_file(file).start().expect("failed to daemonize");
     }
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let server = Server::new(cfg, delay_reads, id).await.expect("starting server");
+        let server = Server::new(config, permissions, delay_reads, id)
+            .await
+            .expect("starting server");
         future::pending::<()>().await;
         drop(server)
     });

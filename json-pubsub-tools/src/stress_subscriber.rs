@@ -1,7 +1,7 @@
 use futures::channel::mpsc;
 use futures::prelude::*;
 use json_pubsub::{
-    config::resolver::Config,
+    config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
     subscriber::{DvState, Dval, Subscriber},
