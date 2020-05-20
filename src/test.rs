@@ -1,10 +1,4 @@
 use crate::config;
-use std::net::SocketAddr;
-
-fn config_simple() -> config::Config {
-    use config::resolver_server::Config;
-    Config::load("cfg/simple.json").expect("load simple config")
-}
 
 mod resolver {
     use super::*;
@@ -24,10 +18,12 @@ mod resolver {
         use tokio::runtime::Runtime;
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let cfg = config_simple();
+            let mut cfg = config::Config::load_from_file("cfg/simple.json")
+                .expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
                 .expect("start server");
+            cfg.addrs[0] = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
             let r = ResolverRead::new(cfg, Auth::Anonymous);
@@ -46,6 +42,7 @@ mod resolver {
                 &*r.list(p("/app")).await.unwrap(),
                 &*vec![p("/app/v0"), p("/app/v1")]
             );
+            drop(server)
         });
     }
 }
@@ -88,10 +85,12 @@ mod publisher {
     fn publish_subscribe() {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let cfg = config_simple();
+            let mut cfg = config::Config::load_from_file("cfg/simple.json")
+                .expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
                 .expect("start server");
+            cfg.addrs[0] = *server.local_addr();
             let pcfg = cfg.clone();
             let (tx, ready) = oneshot::channel();
             task::spawn(async move {
