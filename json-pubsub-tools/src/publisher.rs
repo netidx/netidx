@@ -9,7 +9,12 @@ use json_pubsub::{
     resolver::Auth,
     utils::{self, BatchItem, Batched},
 };
-use std::{collections::HashMap, str::FromStr, time::Duration, convert::{From, Into}};
+use std::{
+    collections::HashMap,
+    convert::{From, Into},
+    str::FromStr,
+    time::Duration,
+};
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader},
     runtime::Runtime,
