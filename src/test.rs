@@ -122,17 +122,17 @@ mod resolver {
             assert_eq!(r.addrs.len(), 1);
             assert_eq!(r.addrs[0].0, addr);
             assert_eq!(r.krb5_spns.len(), 0);
-            match dbg!(p.as_ref()) {
+            match p.as_ref() {
                 "/tmp/x" | "/tmp/y" | "/tmp/z" => assert!(
-                    dbg!(r.resolver) == ctx.cfg_root.addrs[0]
+                    r.resolver == ctx.cfg_root.addrs[0]
                         || r.resolver == ctx.cfg_root.addrs[1]
                 ),
                 "/app/huge0/x" | "/app/huge0/y" | "/app/huge0/z" => assert!(
-                    dbg!(r.resolver) == ctx.cfg_huge0.addrs[0]
+                    r.resolver == ctx.cfg_huge0.addrs[0]
                         || r.resolver == ctx.cfg_huge0.addrs[1]
                 ),
                 "/app/huge1/x" | "/app/huge1/y" | "/app/huge1/z" => assert!(
-                    dbg!(r.resolver) == ctx.cfg_huge1.addrs[0]
+                    r.resolver == ctx.cfg_huge1.addrs[0]
                         || r.resolver == ctx.cfg_huge1.addrs[1]
                 ),
                 p => unreachable!("unexpected path {}", p),
