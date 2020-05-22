@@ -10,7 +10,7 @@ mod resolver {
     use std::net::SocketAddr;
     use tokio::runtime::Runtime;
 
-    fn p(p: &str) -> Path {
+    fn p(p: &'static str) -> Path {
         Path::from(p)
     }
 
@@ -46,16 +46,16 @@ mod resolver {
     }
 
     struct Ctx {
-        root: (Server, Server),
-        huge0: (Server, Server),
-        huge1: (Server, Server),
+        _root: (Server, Server),
+        _huge0: (Server, Server),
+        _huge1: (Server, Server),
         cfg_root: config::Config,
         cfg_huge0: config::Config,
         cfg_huge1: config::Config,
     }
 
     impl Ctx {
-        fn new() -> Ctx {
+        async fn new() -> Ctx {
             let pmap = config::PMap::default();
             let cfg_root = config::Config::load_from_file("cfg/complex-root.json")
                 .expect("root config");
@@ -82,9 +82,9 @@ mod resolver {
                 .await
                 .expect("huge1 server0");
             Ctx {
-                root: (server0_root, server1_root),
-                huge0: (server0_huge0, server1_huge0),
-                huge1: (server0_huge1, server1_huge1),
+                _root: (server0_root, server1_root),
+                _huge0: (server0_huge0, server1_huge0),
+                _huge1: (server0_huge1, server1_huge1),
                 cfg_root,
                 cfg_huge0,
                 cfg_huge1,
@@ -92,12 +92,62 @@ mod resolver {
         }
     }
 
+    async fn check_list(r: &ResolverRead) {
+        let mut l = r.list(p("/")).await.unwrap();
+        l.sort();
+        assert_eq!(&l, &[p("/app"), p("/tmp")]);
+        let mut l = r.list(p("/tmp")).await.unwrap();
+        l.sort();
+        assert_eq!(&l, &[p("/tmp/x"), p("/tmp/y"), p("/tmp/z")]);
+        let mut l = r.list(p("/app")).await.unwrap();
+        l.sort();
+        assert_eq!(&l, &[p("/app/huge0"), p("/app/huge1")]);
+        let mut l = r.list(p("/app/huge0")).await.unwrap();
+        l.sort();
+        assert_eq!(&l, &[p("/app/huge0/x"), p("/app/huge0/y"), p("/app/huge0/z")]);
+        let mut l = r.list(p("/app/huge1")).await.unwrap();
+        l.sort();
+        assert_eq!(&l, &[p("/app/huge1/x"), p("/app/huge1/y"), p("/app/huge1/z")]);
+    }
+
+    async fn check_resolve(
+        ctx: &Ctx,
+        r: &ResolverRead,
+        paths: &[Path],
+        addr: SocketAddr,
+    ) {
+        let mut answer = r.resolve(paths.iter().cloned()).await.unwrap();
+        let mut i = 0;
+        for (p, r) in paths.iter().zip(answer.drain(..)) {
+            assert_eq!(r.addrs.len(), 1);
+            assert_eq!(r.addrs[0].0, addr);
+            assert_eq!(r.krb5_spns.len(), 0);
+            match dbg!(p.as_ref()) {
+                "/tmp/x" | "/tmp/y" | "/tmp/z" => assert!(
+                    dbg!(r.resolver) == ctx.cfg_root.addrs[0]
+                        || r.resolver == ctx.cfg_root.addrs[1]
+                ),
+                "/app/huge0/x" | "/app/huge0/y" | "/app/huge0/z" => assert!(
+                    dbg!(r.resolver) == ctx.cfg_huge0.addrs[0]
+                        || r.resolver == ctx.cfg_huge0.addrs[1]
+                ),
+                "/app/huge1/x" | "/app/huge1/y" | "/app/huge1/z" => assert!(
+                    dbg!(r.resolver) == ctx.cfg_huge1.addrs[0]
+                        || r.resolver == ctx.cfg_huge1.addrs[1]
+                ),
+                p => unreachable!("unexpected path {}", p),
+            }
+            i += 1
+        }
+        assert_eq!(i, paths.len());
+    }
+
     #[test]
     fn publish_resolve_complex() {
         Runtime::new().unwrap().block_on(async {
-            let ctx = Ctx::new();
+            let ctx = Ctx::new().await;
             let waddr: SocketAddr = "127.0.0.1:5543".parse().unwrap();
-            let paths = &[
+            let paths = [
                 "/tmp/x",
                 "/tmp/y",
                 "/tmp/z",
@@ -108,11 +158,20 @@ mod resolver {
                 "/app/huge1/y",
                 "/app/huge1/z",
             ]
-            .into_iter()
-            .map(Path::from)
+            .iter()
+            .map(|r| Path::from(*r))
             .collect::<Vec<_>>();
-            let mut w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
+            let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
             w.publish(paths.iter().cloned()).await.unwrap();
+            let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
+            check_list(&r_root).await;
+            check_resolve(&ctx, &r_root, &paths, waddr).await;
+            let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
+            check_list(&r_huge0).await;
+            check_resolve(&ctx, &r_huge0, &paths, waddr).await;
+            let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
+            check_list(&r_huge1).await;
+            check_resolve(&ctx, &r_huge1, &paths, waddr).await;
         })
     }
 }

@@ -1,6 +1,6 @@
 {
     "parent": {
-        "path": "/app/huge-app0",
+        "path": "/app/huge0",
         "ttl": 3600,
         "addrs": ["127.0.0.1:1200", "127.0.0.1:1201"],
         "krb5_spns": {}

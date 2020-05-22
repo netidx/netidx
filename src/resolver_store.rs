@@ -103,6 +103,7 @@ impl<T> StoreInner<T> {
             }
             let n = Path::levels(p) + 1;
             let save = self.by_path.contains_key(p)
+                || self.children.contains_key(p)
                 || self
                     .by_level
                     .get(&n)
@@ -333,7 +334,7 @@ impl<T> Store<T> {
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
     ) -> Self {
-        Store(Arc::new(RwLock::new(StoreInner {
+        let mut inner = StoreInner {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
@@ -342,6 +343,16 @@ impl<T> Store<T> {
             children,
             addrs: HCAddrs::new(),
             clinfos: HashMap::with_hasher(FxBuildHasher::default()),
-        })))
+        };
+        let children = inner.children.keys().cloned().collect::<Vec<_>>();
+        for child in children {
+            // since we want child to be in levels as well as
+            // dirname(child) we add a fake level below child. This
+            // will never be seen, since all requests for any path
+            // under child result in a referral, and anyway it won't
+            // even be added anywhere.
+            inner.add_parents(child.append("z").as_ref());
+        }
+        Store(Arc::new(RwLock::new(inner)))
     }
 }
