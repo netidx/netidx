@@ -134,7 +134,7 @@ impl<T> StoreInner<T> {
             let n = Path::levels(p);
             let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
             if !l.contains(p) {
-                l.insert(Path::from(p));
+                l.insert(Path::from(String::from(p)));
             }
         }
     }

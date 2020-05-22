@@ -76,9 +76,9 @@ impl Pack for Chars {
     }
 }
 
-impl<'a> From<&'a str> for Chars {
-    fn from(src: &'a str) -> Chars {
-        Chars(Bytes::copy_from_slice(src.as_bytes()))
+impl From<&'static str> for Chars {
+    fn from(src: &'static str) -> Chars {
+        Chars(Bytes::from(src.as_bytes()))
     }
 }
 

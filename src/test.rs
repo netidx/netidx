@@ -8,16 +8,15 @@ mod resolver {
         resolver_server::Server,
     };
     use std::net::SocketAddr;
+    use tokio::runtime::Runtime;
 
     fn p(p: &str) -> Path {
         Path::from(p)
     }
 
     #[test]
-    fn publish_resolve() {
-        use tokio::runtime::Runtime;
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async {
+    fn publish_resolve_simple() {
+        Runtime::new().unwrap().block_on(async {
             let mut cfg = config::Config::load_from_file("cfg/simple.json")
                 .expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
@@ -44,6 +43,77 @@ mod resolver {
             );
             drop(server)
         });
+    }
+
+    struct Ctx {
+        root: (Server, Server),
+        huge0: (Server, Server),
+        huge1: (Server, Server),
+        cfg_root: config::Config,
+        cfg_huge0: config::Config,
+        cfg_huge1: config::Config,
+    }
+
+    impl Ctx {
+        fn new() -> Ctx {
+            let pmap = config::PMap::default();
+            let cfg_root = config::Config::load_from_file("cfg/complex-root.json")
+                .expect("root config");
+            let cfg_huge0 = config::Config::load_from_file("cfg/complex-huge0.json")
+                .expect("huge0 config");
+            let cfg_huge1 = config::Config::load_from_file("cfg/complex-huge1.json")
+                .expect("huge1 config");
+            let server0_root = Server::new(cfg_root.clone(), pmap.clone(), false, 0)
+                .await
+                .expect("root server 0");
+            let server1_root = Server::new(cfg_root.clone(), pmap.clone(), false, 1)
+                .await
+                .expect("root server 1");
+            let server0_huge0 = Server::new(cfg_huge0.clone(), pmap.clone(), false, 0)
+                .await
+                .expect("huge0 server0");
+            let server1_huge0 = Server::new(cfg_huge0.clone(), pmap.clone(), false, 1)
+                .await
+                .expect("huge0 server1");
+            let server0_huge1 = Server::new(cfg_huge1.clone(), pmap.clone(), false, 0)
+                .await
+                .expect("huge1 server0");
+            let server1_huge1 = Server::new(cfg_huge1.clone(), pmap.clone(), false, 1)
+                .await
+                .expect("huge1 server0");
+            Ctx {
+                root: (server0_root, server1_root),
+                huge0: (server0_huge0, server1_huge0),
+                huge1: (server0_huge1, server1_huge1),
+                cfg_root,
+                cfg_huge0,
+                cfg_huge1,
+            }
+        }
+    }
+
+    #[test]
+    fn publish_resolve_complex() {
+        Runtime::new().unwrap().block_on(async {
+            let ctx = Ctx::new();
+            let waddr: SocketAddr = "127.0.0.1:5543".parse().unwrap();
+            let paths = &[
+                "/tmp/x",
+                "/tmp/y",
+                "/tmp/z",
+                "/app/huge0/x",
+                "/app/huge0/y",
+                "/app/huge0/z",
+                "/app/huge1/x",
+                "/app/huge1/y",
+                "/app/huge1/z",
+            ]
+            .into_iter()
+            .map(Path::from)
+            .collect::<Vec<_>>();
+            let mut w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
+            w.publish(paths.iter().cloned()).await.unwrap();
+        })
     }
 }
 

@@ -7,7 +7,6 @@ use std::{
     iter::Iterator,
     ops::Deref,
     result::Result,
-    str::FromStr,
 };
 
 pub static ESC: char = '\\';
@@ -82,8 +81,8 @@ impl From<String> for Path {
     }
 }
 
-impl<'a> From<&'a str> for Path {
-    fn from(s: &str) -> Path {
+impl From<&'static str> for Path {
+    fn from(s: &'static str) -> Path {
         if is_canonical(s) {
             Path(Chars::from(s))
         } else {
@@ -95,18 +94,10 @@ impl<'a> From<&'a str> for Path {
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {
         if is_canonical(s.as_str()) {
-            Path(Chars::from(s.as_str()))
+            Path(Chars::from(s.clone()))
         } else {
             Path(Chars::from(canonize(s.as_str())))
         }
-    }
-}
-
-impl FromStr for Path {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Path::from(s))
     }
 }
 

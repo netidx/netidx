@@ -240,7 +240,6 @@ mod publisher {
             any::<f64>().prop_map(Value::F64),
             chars().prop_map(Value::String),
             bytes().prop_map(Value::Bytes),
-            Just(Value::Null),
             Just(Value::True),
             Just(Value::False),
         ]
