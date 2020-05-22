@@ -49,9 +49,11 @@ mod resolver {
         _root: (Server, Server),
         _huge0: (Server, Server),
         _huge1: (Server, Server),
+        _huge1_sub: (Server, Server),
         cfg_root: config::Config,
         cfg_huge0: config::Config,
         cfg_huge1: config::Config,
+        cfg_huge1_sub: config::Config,
     }
 
     impl Ctx {
@@ -63,6 +65,9 @@ mod resolver {
                 .expect("huge0 config");
             let cfg_huge1 = config::Config::load_from_file("cfg/complex-huge1.json")
                 .expect("huge1 config");
+            let cfg_huge1_sub =
+                config::Config::load_from_file("cfg/complex-huge1-sub.json")
+                    .expect("huge1 sub config");
             let server0_root = Server::new(cfg_root.clone(), pmap.clone(), false, 0)
                 .await
                 .expect("root server 0");
@@ -81,13 +86,23 @@ mod resolver {
             let server1_huge1 = Server::new(cfg_huge1.clone(), pmap.clone(), false, 1)
                 .await
                 .expect("huge1 server0");
+            let server0_huge1_sub =
+                Server::new(cfg_huge1_sub.clone(), pmap.clone(), false, 0)
+                    .await
+                    .expect("huge1 sub server0");
+            let server1_huge1_sub =
+                Server::new(cfg_huge1_sub.clone(), pmap.clone(), false, 1)
+                    .await
+                    .expect("huge1 sub server0");
             Ctx {
                 _root: (server0_root, server1_root),
                 _huge0: (server0_huge0, server1_huge0),
                 _huge1: (server0_huge1, server1_huge1),
+                _huge1_sub: (server0_huge1_sub, server1_huge1_sub),
                 cfg_root,
                 cfg_huge0,
                 cfg_huge1,
+                cfg_huge1_sub,
             }
         }
     }
@@ -107,7 +122,21 @@ mod resolver {
         assert_eq!(&l, &[p("/app/huge0/x"), p("/app/huge0/y"), p("/app/huge0/z")]);
         let mut l = r.list(p("/app/huge1")).await.unwrap();
         l.sort();
-        assert_eq!(&l, &[p("/app/huge1/x"), p("/app/huge1/y"), p("/app/huge1/z")]);
+        assert_eq!(
+            &l,
+            &[
+                p("/app/huge1/sub"),
+                p("/app/huge1/x"),
+                p("/app/huge1/y"),
+                p("/app/huge1/z")
+            ]
+        );
+        let mut l = r.list(p("/app/huge1/sub")).await.unwrap();
+        l.sort();
+        assert_eq!(
+            &l,
+            &[p("/app/huge1/sub/x"), p("/app/huge1/sub/y"), p("/app/huge1/sub/z")]
+        );
     }
 
     async fn check_resolve(
@@ -135,6 +164,10 @@ mod resolver {
                     r.resolver == ctx.cfg_huge1.addrs[0]
                         || r.resolver == ctx.cfg_huge1.addrs[1]
                 ),
+                "/app/huge1/sub/x" | "/app/huge1/sub/y" | "/app/huge1/sub/z" => assert!(
+                    r.resolver == ctx.cfg_huge1_sub.addrs[0]
+                        || r.resolver == ctx.cfg_huge1_sub.addrs[1]
+                ),
                 p => unreachable!("unexpected path {}", p),
             }
             i += 1
@@ -155,6 +188,9 @@ mod resolver {
             "/app/huge1/x",
             "/app/huge1/y",
             "/app/huge1/z",
+            "/app/huge1/sub/x",
+            "/app/huge1/sub/y",
+            "/app/huge1/sub/z",
         ]
         .iter()
         .map(|r| Path::from(*r))
@@ -170,6 +206,9 @@ mod resolver {
         let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
         check_list(&r_huge1).await;
         check_resolve(&ctx, &r_huge1, &paths, waddr).await;
+        let r_huge1_sub = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
+        check_list(&r_huge1_sub).await;
+        check_resolve(&ctx, &r_huge1_sub, &paths, waddr).await;
     }
 
     #[test]
