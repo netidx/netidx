@@ -143,7 +143,12 @@ impl<T> StoreInner<T> {
     pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
         if let Some(r) = self.parent.as_ref() {
             if !path.starts_with(r.path.as_ref()) {
-                return Some(r.clone());
+                return Some(Referral {
+                    path: Path::from("/"),
+                    ttl: r.ttl,
+                    addrs: r.addrs.clone(),
+                    krb5_spns: r.krb5_spns.clone(),
+                });
             }
         }
         let r = self

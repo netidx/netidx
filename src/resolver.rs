@@ -1,5 +1,6 @@
 pub use crate::resolver_single::Auth;
 use crate::{
+    config::Config,
     os::ClientCtx,
     path::Path,
     protocol::resolver::v1::{FromRead, FromWrite, Referral, Resolved, ToRead, ToWrite},
@@ -9,7 +10,6 @@ use crate::{
         ToReadBatch as IToReadBatch, ToWriteBatch as IToWriteBatch,
     },
     utils::Pooled,
-    config::Config,
 };
 use anyhow::Result;
 use futures::future;
@@ -89,23 +89,29 @@ impl Router {
                         Unbounded,
                         Included(&*path),
                     ));
-                    match r.next_back() {
-                        None => batches.entry(None).or_insert_with(O::new).push((id, v)),
-                        Some((p, (exp, _))) => {
-                            if !path.starts_with(p.as_ref()) {
-                                batches.entry(None).or_insert_with(O::new).push((id, v))
-                            } else {
-                                if &now < exp {
-                                    batches
-                                        .entry(Some(p.clone()))
-                                        .or_insert_with(O::new)
-                                        .push((id, v))
+                    loop {
+                        match r.next_back() {
+                            None => {
+                                batches.entry(None).or_insert_with(O::new).push((id, v));
+                                break
+                            }
+                            Some((p, (exp, _))) => {
+                                if !path.starts_with(p.as_ref()) {
+                                    continue;
                                 } else {
-                                    gc.push(p.clone());
-                                    batches
-                                        .entry(None)
-                                        .or_insert_with(O::new)
-                                        .push((id, v))
+                                    if &now < exp {
+                                        batches
+                                            .entry(Some(p.clone()))
+                                            .or_insert_with(O::new)
+                                            .push((id, v))
+                                    } else {
+                                        gc.push(p.clone());
+                                        batches
+                                            .entry(None)
+                                            .or_insert_with(O::new)
+                                            .push((id, v))
+                                    }
+                                    break
                                 }
                             }
                         }

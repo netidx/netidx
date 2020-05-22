@@ -142,37 +142,39 @@ mod resolver {
         assert_eq!(i, paths.len());
     }
 
+    async fn run_publish_resolve_complex() {
+        let ctx = Ctx::new().await;
+        let waddr: SocketAddr = "127.0.0.1:5543".parse().unwrap();
+        let paths = [
+            "/tmp/x",
+            "/tmp/y",
+            "/tmp/z",
+            "/app/huge0/x",
+            "/app/huge0/y",
+            "/app/huge0/z",
+            "/app/huge1/x",
+            "/app/huge1/y",
+            "/app/huge1/z",
+        ]
+        .iter()
+        .map(|r| Path::from(*r))
+        .collect::<Vec<_>>();
+        let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
+        w.publish(paths.iter().cloned()).await.unwrap();
+        let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
+        check_list(&r_root).await;
+        check_resolve(&ctx, &r_root, &paths, waddr).await;
+        let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
+        check_list(&r_huge0).await;
+        check_resolve(&ctx, &r_huge0, &paths, waddr).await;
+        let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
+        check_list(&r_huge1).await;
+        check_resolve(&ctx, &r_huge1, &paths, waddr).await;
+    }
+
     #[test]
     fn publish_resolve_complex() {
-        Runtime::new().unwrap().block_on(async {
-            let ctx = Ctx::new().await;
-            let waddr: SocketAddr = "127.0.0.1:5543".parse().unwrap();
-            let paths = [
-                "/tmp/x",
-                "/tmp/y",
-                "/tmp/z",
-                "/app/huge0/x",
-                "/app/huge0/y",
-                "/app/huge0/z",
-                "/app/huge1/x",
-                "/app/huge1/y",
-                "/app/huge1/z",
-            ]
-            .iter()
-            .map(|r| Path::from(*r))
-            .collect::<Vec<_>>();
-            let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
-            w.publish(paths.iter().cloned()).await.unwrap();
-            let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
-            check_list(&r_root).await;
-            check_resolve(&ctx, &r_root, &paths, waddr).await;
-            let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
-            check_list(&r_huge0).await;
-            check_resolve(&ctx, &r_huge0, &paths, waddr).await;
-            let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
-            check_list(&r_huge1).await;
-            check_resolve(&ctx, &r_huge1, &paths, waddr).await;
-        })
+        Runtime::new().unwrap().block_on(run_publish_resolve_complex())
     }
 }
 
