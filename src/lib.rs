@@ -1,38 +1,98 @@
-//! netidx is like DNS for program values.
+//! netidx is like DNS for program values. With netidx you can name
+//! individual values in your program, and other programs can find and
+//! subscribe to those values securely over the network.
 //!
-//! Like DNS netidx maintains a hierarchical namespace in a
-//! cluster of resolver servers., a publisher, and a
-//! subscriber. Published values always have a current value. Multiple
-//! subscribers may subscribe to a given value at different times, and
-//! each one will be immediately given the current value. When a value
-//! is updated, every subscriber receives the new value. For example,
+//! Like DNS netidx maintains a hierarchical namespace in a resolver
+//! server. Publishers tell the resolver about values they
+//! have. Subscribers ask the resolver for values they want. Once a
+//! subscriber knows where to find a value it is looking for, it
+//! connects directly to the publisher, and the resolver is no longer
+//! involved.
 //!
+//! # Publisher
+//! ```
+//! use netidx::{
+//!     publisher::{Publisher, Value, BindCfg},
+//!     config::Config,
+//!     resolver::Auth,
+//!     path::Path,
+//! };
+//! use tokio::time;
+//! use std::time::Duration;
 //!
-//! We can also use a subscription as an ordered lossless stream, just
-//! like a tcp socket. Using the above example as a basis,
+//! // load the site cluster config. You can also just use a file.
+//! let cfg = Config::load_from_dns()?;
 //!
-//! The subscriber will get every value the publisher sends with
-//! `update`, and it will get them in the order publisher called
-//! `update`. As with the previous example, every subscriber that is
-//! subscribed to the value will see the same stream, in the same
-//! order.
+//! // no authentication (kerberos v5 is the other option)
+//! // listen on any unique address matching 192.168.0.0/16
+//! let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
 //!
-//! The role of the `resolver_server` is rendezvous, it stores that
-//! `publisher` has a value called "/n", and tells subscribers who ask
-//! for that value where to find it (in the form of a
-//! `SocketAddr`). Once the subscriber has asked for "/n" and been
-//! told the `SocketAddr` of the publisher that has it, the resolver
-//! server is out of the picture, the subscriber makes a direct
-//! connection to that publisher, requests the value, and the
-//! publisher sends the value and any future updates directly to all
-//! it's subscribers. Since resolver server does nothing but store a
-//! database of `Path -> SocketAddr` mappings, it is quite
-//! lightweight.
+//! let temp = publisher.publish(
+//!     Path::from("/hw/washu-chan/cpu-temp"),
+//!     Value::F32(get_cpu_temp())
+//! )?;
+//! publisher.flush(None).await?;
 //!
-//! The default transport is messagepack, facilitated by serde, so any
-//! type that supports Serialize can be sent. If a subscriber doesn't
-//! know what type a publisher will be publishing, it can just elect
-//! to receive `rmpv::Value`, or even just the raw bytes.
+//! loop {
+//!     time::delay_for(Duration::from_millis(500)).await;
+//!     temp.update(Value::F32(get_cpu_temp()));
+//!     publisher.flush(None).await?;
+//! }
+//! ```
+//!
+//! # Subscriber
+//! ```
+//! use netidx::{
+//!     subscriber::Subscriber,
+//!     config::Config,
+//!     resolver::Auth,
+//!     path::Path,
+//! };
+//! use futures::channel::mpsc;
+//!
+//! let cfg = Config::load_from_dns()?;
+//! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
+//! let temp = subscriber.subscribe_one(Path::from("/hw/washu-chan/cpu-temp")).await?;
+//! println!("washu-chan cpu temp is: {:?}", temp.last().await?);
+//!
+//! let (tx, rx) = mpsc::channel(10);
+//! temp.updates(false, tx);
+//! while let Some(batch) = tx.next().await {
+//!     for (_, v) in batch {
+//!         println!("washu-chan cpu temp is: {:?}", v);
+//!     }
+//! }
+//! ```
+//!
+//! You may have guessed several things from the code above, but let
+//! me say them clearly. Published values always have a value, and new
+//! subscribers receive the most recent published value
+//! initially. Thereafter a subscription is a lossless ordered stream,
+//! just like a tcp connection, except that instead of bytes Values
+//! are the unit of transmission. Since the subscriber can write
+//! values back to the publisher, the connection is bidirectional,
+//! also like a Tcp stream.
+//! 
+//! Values include many useful primitives, including zero copy bytes
+//! buffers (using the awesome bytes crate), so you can easily use
+//! netidx to efficiently send any kind of message you like. However
+//! it's advised to stick to primitives and express structure with
+//! muliple published values in a hierarchy, since this makes your
+//! system more discoverable, and is also quite efficient.
+//!
+//! In many environments it would be completely nuts to build a system
+//! like this without security, whereas in others it's not necessary
+//! at all. To handle both of these cases netidx includes optional
+//! support for kerberos v5 (a.k.a. ms active directory). If enabled,
+//! all components will do mutual authentication between the resolver,
+//! subscriber, and publisher as well as encryption of all data on the
+//! wire. In addition to authentication, the resolver server in krb5
+//! mode maintains and enforces authorization permissions for the
+//! entire namespace, so whoever runs the resolvers can centrally
+//! enforce who can publish where, and who can subscribe to what.
+//!
+//! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
+//! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
 #![recursion_limit="1024"]
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
