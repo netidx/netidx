@@ -1022,6 +1022,8 @@ async fn client_loop(
     let mut msg_sent = false;
     let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
     let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
+    // make sure the deferred subs stream never ends
+    deferred_subs.inner_mut().push(Box::new(stream::pending()));
     hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
     loop {
         select_biased! {

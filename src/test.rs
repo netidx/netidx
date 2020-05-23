@@ -220,7 +220,7 @@ mod resolver {
 mod publisher {
     use super::*;
     use crate::{
-        publisher::{BindCfg, Publisher},
+        publisher::{BindCfg, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
         subscriber::{Subscriber, Value},
@@ -272,6 +272,8 @@ mod publisher {
                 .await
                 .unwrap();
                 let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
+                let mut dfp: Option<Val> = None;
+                let mut df = publisher.publish_default("/app/q".into()).unwrap();
                 publisher.flush(None).await.unwrap();
                 tx.send(()).unwrap();
                 let (tx, mut rx) = mpsc::channel(10);
@@ -279,6 +281,19 @@ mod publisher {
                 let mut c = 1;
                 loop {
                     time::delay_for(Duration::from_millis(100)).await;
+                    while let Ok(r) = df.try_next() {
+                        match r {
+                            None => panic!("publish default chan closed"),
+                            Some((p, reply)) => {
+                                assert!(p.starts_with("/app/q"));
+                                dfp = Some(publisher.publish(p, Value::True).unwrap());
+                                let _ = reply.send(());
+                            }
+                        }
+                    }
+                    if let Some(dfp) = &dfp {
+                        dfp.update(Value::True);
+                    }
                     vp.update(Value::U64(314159 + c));
                     publisher.flush(None).await.unwrap();
                     if let Some(mut batch) = rx.next().await {
@@ -296,6 +311,8 @@ mod publisher {
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
+            let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
+            assert_eq!(q.last().await, Some(Value::True));
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);
