@@ -1,6 +1,6 @@
-Netidx is like DNS for program values. With netidx you can name
-individual values in your program, and other programs can find and
-subscribe to those values securely over the network.
+Netidx is like DNS for values. With netidx you can name individual
+values in your program, and other programs can find and subscribe to
+those values securely over the network.
 
 Like DNS netidx maintains a hierarchical namespace in a resolver
 server. Publishers tell the resolver about values they
