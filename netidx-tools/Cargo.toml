@@ -3,6 +3,12 @@ name = "netidx-tools"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
+license = "MIT"
+description = "it's like DNS for values"
+homepage = "https://github.com/estokes/netidx"
+documentation = "https://docs.rs/netidx"
+keywords = []
+categories = []
 
 [[bin]]
 name = "netidx"

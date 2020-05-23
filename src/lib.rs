@@ -64,14 +64,13 @@
 //! }
 //! ```
 //!
-//! You may have guessed several things from the code above, but let
-//! me say them clearly. Published values always have a value, and new
-//! subscribers receive the most recent published value
-//! initially. Thereafter a subscription is a lossless ordered stream,
-//! just like a tcp connection, except that instead of bytes Values
-//! are the unit of transmission. Since the subscriber can write
-//! values back to the publisher, the connection is bidirectional,
-//! also like a Tcp stream.
+//! Published values always have a value, and new subscribers receive
+//! the most recent published value initially. Thereafter a
+//! subscription is a lossless ordered stream, just like a tcp
+//! connection, except that instead of bytes Values are the unit of
+//! transmission. Since the subscriber can write values back to the
+//! publisher, the connection is bidirectional, also like a Tcp
+//! stream.
 //! 
 //! Values include many useful primitives, including zero copy bytes
 //! buffers (using the awesome bytes crate), so you can easily use
