@@ -148,15 +148,14 @@ impl Val {
     }
 
     /// Queue an update to the published value, it will not be sent
-    /// out until you call `flush` on the publisher. New subscribers
-    /// will not see the new value until you have called
-    /// `flush`. Multiple updates can be queued before flush is
-    /// called, in which case after `flush` is called new subscribers
-    /// will see the last queued value, and existing subscribers will
-    /// receive all the queued values in order. If updates are queued
-    /// on multiple different published values before `flush` is
-    /// called, they will all be sent out as a batch in the order that
-    /// update is called.
+    /// out until you call `flush` on the publisher, however new
+    /// subscribers will receive the last value passed to update when
+    /// they subscribe regardless of flush. Multiple updates can be
+    /// queued before flush is called, in which case on `flush`
+    /// subscribers will receive all the queued values in order. If
+    /// updates are queued on multiple different published values
+    /// before `flush` is called, they will all be sent out as a batch
+    /// and are guarenteed to arrive in the order `update` was called.
     pub fn update(&self, v: Value) {
         let mut inner = self.0.locked.lock();
         for q in inner.subscribed.values() {
@@ -207,6 +206,7 @@ impl Val {
     }
 }
 
+/// A weak reference to a published value.
 #[derive(Clone)]
 pub struct ValWeak(Weak<ValInner>);
 
@@ -216,6 +216,8 @@ impl ValWeak {
     }
 }
 
+/// A handle to the channel that will receive notifications about
+/// subscriptions to paths in a subtree with a default publisher.
 pub struct DefaultHandle {
     chan: fmpsc::UnboundedReceiver<(Path, oneshot::Sender<()>)>,
     path: Path,
@@ -462,11 +464,11 @@ fn rand_port(current: u16) -> u16 {
     current + rng.gen_range(0u16, 10u16)
 }
 
-/// Publisher allows to publish values, and gives central control of
-/// flushing queued updates. Publisher is internally wrapped in an
-/// Arc, so cloning it is virtually free. When all references to to
-/// the publisher have been dropped the publisher will shutdown the
-/// listener, and remove all published paths from the resolver server.
+/// Publish values and centrally flush queued updates. Publisher is
+/// internally wrapped in an Arc, so cloning it is virtually
+/// free. When all references to to the publisher have been dropped
+/// the publisher will shutdown the listener, and remove all published
+/// paths from the resolver server.
 #[derive(Clone)]
 pub struct Publisher(Arc<Mutex<PublisherInner>>);
 
@@ -475,7 +477,8 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    /// Create a new publisher using the specified resolver and bind config.
+    /// Create a new publisher using the specified resolver, desired
+    /// auth, and bind config.
     pub async fn new(
         resolver: Config,
         desired_auth: Auth,
@@ -610,6 +613,26 @@ impl Publisher {
         }
     }
 
+    /// Install a default publisher rooted at `base`. Once installed,
+    /// any subscription request for a child of `base`, regardless if
+    /// it doesn't exist in the resolver, will be routed to this
+    /// publisher or one of it's peers in the case of multiple default
+    /// publishers.
+    ///
+    /// You must listen for requests on the returned channel handle,
+    /// and if they are valid, you should publish the requested value,
+    /// and signal the subscriber by sending () to the oneshot channel
+    /// that comes with the request. In the case the request is not
+    /// valid, just send to the oneshot channel and the subscriber
+    /// will be told the value doesn't exist.
+    ///
+    /// This functionality is useful if, for example, you have a huge
+    /// namespace and you know your subscribers will only want small
+    /// parts of it, but you can't predict ahead of time which
+    /// parts. It can also be used to implement e.g. a database query
+    /// by appending the escaped query to the base path, with the
+    /// added bonus that the result will be automatically cached and
+    /// distributed to anyone making the same query again.
     pub fn publish_default(&self, base: Path) -> Result<DefaultHandle> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(base.as_ref()) {
@@ -637,10 +660,11 @@ impl Publisher {
     ///
     /// If you don't want to wait for the future you can just throw it
     /// away, `flush` triggers sending the data whether you await the
-    /// future or not. However if you never wait for any of the
-    /// futures returned by flush there won't be any pushback, so a
-    /// slow client could cause the publisher to consume arbitrary
-    /// amounts of memory unless you set an aggressive timeout.
+    /// future or not, unlike most futures. However if you never wait
+    /// for any of the futures returned by flush there won't be any
+    /// pushback, so a slow client could cause the publisher to
+    /// consume arbitrary amounts of memory unless you set an
+    /// aggressive timeout.
     ///
     /// If timeout is specified then any client that can't accept the
     /// update within the timeout duration will be disconnected.
@@ -689,7 +713,8 @@ impl Publisher {
         self.0.lock().clients.len()
     }
 
-    /// Wait for at least one client to subscribe to at least one value.
+    /// Wait for at least one client to subscribe to at least one
+    /// value. Returns immediately if there is already a client.
     pub async fn wait_any_client(&self) {
         let wait = {
             let mut inner = self.0.lock();

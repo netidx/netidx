@@ -7,8 +7,8 @@ license = "MIT"
 description = "it's like DNS for values"
 homepage = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
-keywords = []
-categories = []
+keywords = ["network", "networking", "framework", "distributed", "kerberos", "krb5", "tool"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "netidx"
