@@ -57,8 +57,8 @@
 //!
 //! let (tx, rx) = mpsc::channel(10);
 //! temp.updates(false, tx);
-//! while let Some(batch) = rx.next().await {
-//!     for (_, v) in batch {
+//! while let Some(mut batch) = rx.next().await {
+//!     for (_, v) in batch.drain(..) {
 //!         println!("washu-chan cpu temp is: {:?}", v);
 //!     }
 //! }
