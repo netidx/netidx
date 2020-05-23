@@ -119,11 +119,8 @@ impl ValWeak {
     }
 }
 
-/// A UVal is an untyped subscription to a value. A value has a
-/// current value, and a stream of updates. The current value is
-/// accessed by `UVal::last`, which will be available as long as the
-/// subscription is alive. The stream of updates is accessed with the
-/// `UVal::updates` function.
+/// A non durable subscription to a value. If all user held references
+/// to `Val` are dropped then it will be unsubscribed.
 #[derive(Debug, Clone)]
 pub struct Val(Arc<ValInner>);
 
@@ -133,7 +130,8 @@ impl Val {
     }
 
     /// Get the last published value, or None if the subscription is
-    /// dead.
+    /// dead. Will only return `None` if the subscription is dead,
+    /// otherwise there WILL be a value.
     pub async fn last(&self) -> Option<Value> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
@@ -143,14 +141,13 @@ impl Val {
         }
     }
 
-    /// Get a stream of published values. Values will arrive in the
-    /// order they are published. No value will be omitted. If
-    /// `begin_with_last` is true, then the stream will start with the
-    /// last published value at the time `updates` is called, and will
-    /// then receive any updated values. Otherwise the stream will
-    /// only receive new values.
+    /// Register `tx` to receive updates to this `Val`. If
+    /// `begin_with_last` is true, then an immediate update will be
+    /// sent consisting of the last value received from the publisher.
     ///
-    /// If the subscription dies the stream will end.
+    /// You may register multiple different channels to receive
+    /// updates from a `Val`, and you may register one channel to
+    /// receive updates from multiple `Val`s.
     pub fn updates(&self, begin_with_last: bool, tx: Sender<Batch>) {
         let m = ToCon::Stream {
             tx,
@@ -164,19 +161,27 @@ impl Val {
     /// Write a value back to the publisher. This will start going out
     /// as soon as this method returns, and you can call `flush` on
     /// the subscriber to get pushback in case of a slow publisher.
+    ///
+    /// The publisher will receive multiple writes in the order you
+    /// call `write`.
     pub fn write(&self, v: Value) {
         let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v));
     }
 
+    /// Get the unique id of this subscription.
     pub fn id(&self) -> SubId {
         self.0.sub_id
     }
 }
 
+/// The durable subsiption state
 #[derive(Debug)]
 pub enum DvState {
+    /// The Dval is currently subscribed
     Subscribed,
+    /// The Dval is not currently subscribed
     Unsubscribed,
+    /// The Dval is permanently dead and will not ever resubscribe
     FatalError(String),
 }
 
@@ -207,34 +212,33 @@ impl DvalWeak {
     }
 }
 
-/// `DUVal` is a durable value subscription. it behaves just like
-/// `UVal`, except that if it dies a task within subscriber will
+/// `Dval` is a durable value subscription. it behaves just like
+/// `Val`, except that if it dies a task within subscriber will
 /// attempt to resubscribe. The resubscription process goes through
-/// the entire resolution and connection process again, so `DUVal` is
+/// the entire resolution and connection process again, so `Dval` is
 /// robust to many failures. For example,
 ///
 /// - multiple publishers are publishing on a path and one of them dies.
-///   `DUVal` will transparently move to another one.
+///   `Dval` will transparently move to another one.
 ///
-/// - a publisher is restarted (possibly on a different machine).
-///   Since `DUVal` uses linear backoff to avoid saturating the
-///   resolver, and the network, but assuming the publisher is restarted
-///   quickly, resubscription will happen almost immediatly.
+/// - a publisher is restarted (possibly on a different
+///   machine). `Dval` will wait using linear backoff for the publisher
+///   to come back, and then it will resubscribe.
 ///
 /// - The resolver server cluster is restarted. In this case existing
-///   subscriptions won't die, but new ones will fail if the new
-///   cluster is missing data. However even in this very bad case the
-///   publishers will notice during their heartbeat (default every 10
-///   minutes) that the resolver server is missing their data, and
-///   they will republish it. If the resolver is restarted quickly,
-///   then in the worst case all the data is back in 10 minutes, and
-///   all DUVals waiting to subscribe to missing data will retry and
-///   succeed 35 seconds after that.
+///   subscriptions won't die, but new ones will fail while the
+///   cluster is down. However once it is back up, and the publishers
+///   have republished all their data, which they will do
+///   automatically, `Dval` will resubscribe to anything it couldn't
+///   find while the resolver server cluster was down.
 ///
-/// A `DUVal` uses more memory than a `UVal` subscription, but other
-/// than that the performance is the same. It is therefore recommended
-/// that `DUVal` and `DVal` be considered the default value
-/// subscription type where semantics allow.
+/// A `Dval` uses a bit more memory than a `Val` subscription, but
+/// other than that the performance is the same. It is therefore
+/// recommended that you use `Dval` as the default kind of value
+/// subscription.
+///
+/// If all user held references to `Dval` are dropped it will be
+/// unsubscribed.
 #[derive(Debug, Clone)]
 pub struct Dval(Arc<Mutex<DvalInner>>);
 
@@ -253,10 +257,10 @@ impl Dval {
         sub.last().await
     }
 
-    /// Return a stream that produces a value when the state of the
-    /// subscription changes. if include_current is true, then the
-    /// current state will be immediatly emitted once even if there
-    /// was no state change.
+    /// Register `tx` to receive messages about subscription state
+    /// changes of this `Dval`. You can register multiple channels to
+    /// receive state updates, and you can register one channel to
+    /// receive updates about multiple `Dval`s.
     pub fn state_updates(
         &self,
         include_current: bool,
@@ -275,6 +279,7 @@ impl Dval {
         t.states.push(tx);
     }
 
+    /// return the current subscription state
     pub fn state(&self) -> DvState {
         match self.0.lock().sub {
             SubState::Unsubscribed => DvState::Unsubscribed,
@@ -283,10 +288,13 @@ impl Dval {
         }
     }
 
-    /// Gets a stream of updates just like `UVal::updates` except that
-    /// the stream will not end when the subscription dies, it will
-    /// just stop producing values, and will start again if
-    /// resubscription is successful.
+    /// Register `tx` to receive updates to this `Dval`. If
+    /// `begin_with_last` is true, then an immediate update will be
+    /// sent consisting of the last value received from the publisher.
+    ///
+    /// You may register multiple different channels to receive
+    /// updates from a `Dval`, and you may register one channel to
+    /// receive updates from multiple `Dval`s.
     pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Batch>) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
@@ -319,6 +327,7 @@ impl Dval {
         }
     }
 
+    /// return the unique id of this `Dval`
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
@@ -347,10 +356,12 @@ impl SubscriberWeak {
     }
 }
 
+/// create subscriptions
 #[derive(Clone)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
+    /// create a new subscriber with the specified config and desired auth
     pub fn new(resolver: Config, desired_auth: Auth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
@@ -505,19 +516,20 @@ impl Subscriber {
 
     /// Subscribe to the specified set of values.
     ///
-    /// Path resolution and subscription are done in parallel, so the
-    /// lowest latency per subscription will be achieved with larger
-    /// batches.
+    /// To minimize round trips and amortize locking path resolution
+    /// and subscription are done in batches. Best performance will be
+    /// achieved with larger batches.
     ///
     /// In case you are already subscribed to one or more of the paths
     /// in the batch, you will receive a reference to the existing
-    /// subscription, no additional messages will be sent.
+    /// subscription and no additional messages will be sent. However
+    /// subscriber does not retain strong references to subscribed
+    /// values, so if you drop all of them it will be unsubscribed.
     ///
     /// It is safe to call this function concurrently with the same or
     /// overlapping sets of paths in the batch, only one subscription
-    /// attempt will be made concurrently, and the result of that one
-    /// attempt will be given to each concurrent caller upon success
-    /// or failure.
+    /// attempt will be made, and the result of that one attempt will
+    /// be given to each concurrent caller upon success or failure.
     ///
     /// The timeout, if specified, will apply to each subscription
     /// individually. Any subscription that does not complete
@@ -525,9 +537,7 @@ impl Subscriber {
     /// error, but that error will not effect other subscriptions in
     /// the batch, which may complete successfully. If you need all or
     /// nothing behavior, specify None for timeout and wrap the
-    /// `subscribe_vals_ut` future in a `time::timeout`. In the case
-    /// timeout is specified, `subscribe_vals_ut` is guaranteed to
-    /// complete no later than `now + timeout`.
+    /// `subscribe` future in a `time::timeout`.
     pub async fn subscribe(
         &self,
         batch: impl IntoIterator<Item = Path>,
@@ -732,9 +742,10 @@ impl Subscriber {
             .collect()
     }
 
-    /// Subscribe to one value. This is sufficient for a small number
-    /// of paths, but if you need to subscribe to a lot of values it
-    /// is more efficent to use `subscribe_vals_ut`
+    /// Subscribe to just one value. This is sufficient for a small
+    /// number of paths, but if you need to subscribe to a lot of
+    /// values it is more efficent to use `subscribe`. The semantics
+    /// of this method are the same as `subscribe` called with 1 path.
     pub async fn subscribe_one(
         &self,
         path: Path,
@@ -746,14 +757,11 @@ impl Subscriber {
     /// Create a durable value subscription to `path`.
     ///
     /// Batching of durable subscriptions is automatic, if you create
-    /// a lot of durable subscriptions all at once they will batch,
-    /// minimizing the number of messages exchanged with both the
-    /// resolver server and the publishers.
+    /// a lot of durable subscriptions all at once they will batch.
     ///
-    /// As with regular subscriptions there is only ever one
-    /// subscription for a given path, calling
-    /// `subscribe_val_durable_ut` again for the same path will just
-    /// return another pointer to it.
+    /// The semantics of `durable_subscribe` are the same as
+    /// subscribe, except that certain errors are caught, and
+    /// resubscriptions are attempted. see `Dval`.
     pub fn durable_subscribe(&self, path: Path) -> Dval {
         let mut t = self.0.lock();
         if let Some(s) = t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
@@ -777,9 +785,9 @@ impl Subscriber {
 
     /// This will return when all pending operations are flushed out
     /// to the publishers. This is primarially used to provide
-    /// pushback in the case you want to do a lot of writes, any you
+    /// pushback in the case you want to do a lot of writes, and you
     /// need pushback in case a publisher is slow to process them,
-    /// however it applies to subscribe/unsubscribe as well.
+    /// however it applies to durable_subscribe and unsubscribe as well.
     pub async fn flush(&self) {
         let flushes = {
             let t = self.0.lock();

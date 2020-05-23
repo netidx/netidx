@@ -194,8 +194,7 @@ impl Val {
         }
     }
 
-    /// Get the unique `Id` of this `Val`. This id is unique on this
-    /// publisher only, no attempt is made to make it globally unique.
+    /// Get the unique `Id` of this `Val`
     pub fn id(&self) -> Id {
         self.0.id
     }
