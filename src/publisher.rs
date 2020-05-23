@@ -351,7 +351,7 @@ pub enum BindCfg {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::publisher::BindCfg;
+    /// use netidx::publisher::BindCfg;
     /// "ffff:1c00:2700:3c00::/64".parse::<BindCfg>().unwrap();
     /// "127.0.0.1/32".parse::<BindCfg>().unwrap();
     /// "192.168.2.0/24".parse::<BindCfg>().unwrap();
@@ -366,7 +366,7 @@ pub enum BindCfg {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::publisher::BindCfg;
+    /// use netidx::publisher::BindCfg;
     /// "[ffff:1c00:2700:3c00::]:1234".parse::<BindCfg>().unwrap();
     /// "192.168.0.1:1234".parse::<BindCfg>().unwrap();
     /// ```

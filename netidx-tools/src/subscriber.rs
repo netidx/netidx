@@ -7,7 +7,7 @@ use futures::{
     select_biased,
     stream::{self, FusedStream},
 };
-use json_pubsub::{
+use netidx::{
     config::Config,
     path::Path,
     resolver::Auth,

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::prelude::*;
-use json_pubsub::{
+use netidx::{
     chars::Chars,
     config::Config,
     path::Path,
@@ -186,7 +186,7 @@ pub(crate) fn run(
                                 p.update(val.into());
                             }
                             None => {
-                                let path = Path::from(path);
+                                let path = Path::from(String::from(path));
                                 let publ = try_cf!(
                                     "failed to publish",
                                     continue,

@@ -2,9 +2,9 @@
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate json_pubsub;
+extern crate netidx;
 
-use json_pubsub::{config, path::Path, publisher::BindCfg, resolver::Auth};
+use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use log::warn;
 use std::net::SocketAddr;
 use structopt::StructOpt;

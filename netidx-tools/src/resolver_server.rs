@@ -1,6 +1,6 @@
 use daemonize::Daemonize;
 use futures::future;
-use json_pubsub::{config, resolver_server::Server};
+use netidx::{config, resolver_server::Server};
 use tokio::runtime::Runtime;
 
 pub(crate) fn run(

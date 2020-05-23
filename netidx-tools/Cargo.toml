@@ -1,8 +1,12 @@
 [package]
-name = "json-pubsub-tools"
+name = "netidx-tools"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
+
+[[bin]]
+name = "netidx"
+path = "src/main.rs"
 
 [profile.release]
 codegen-units = 1
@@ -15,10 +19,7 @@ tokio = { version = "0.2", features = ["full"] }
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
-rmp = "0.8"
-rmpv = "0.4"
-rmp-serde = "0.14"
-json-pubsub = {path = ".."}
+netidx = {path = ".."}
 structopt = "0.3"
 daemonize = "0.4"
 bytes = "0.5"

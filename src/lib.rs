@@ -1,13 +1,11 @@
-//! Share values between programs using human readable names,
-//! publish/subscribe semantics, and a simple msgpack message format.
+//! netidx is like DNS for program values.
 //!
-//! json_pubsub consists of three essential parts, a hierarchical
-//! namespace of values maintained in the resolver server, a
-//! publisher, and a subscriber. Published values always have a
-//! current value. Multiple subscribers may subscribe to a given value
-//! at different times, and each one will be immediately given the
-//! current value. When a value is updated, every subscriber receives
-//! the new value. For example,
+//! Like DNS netidx maintains a hierarchical namespace in a
+//! cluster of resolver servers., a publisher, and a
+//! subscriber. Published values always have a current value. Multiple
+//! subscribers may subscribe to a given value at different times, and
+//! each one will be immediately given the current value. When a value
+//! is updated, every subscriber receives the new value. For example,
 //!
 //!
 //! We can also use a subscription as an ordered lossless stream, just

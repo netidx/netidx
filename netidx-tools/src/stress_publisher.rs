@@ -1,5 +1,5 @@
 use futures::{prelude::*, select};
-use json_pubsub::{
+use netidx::{
     config::Config,
     path::Path,
     publisher::{BindCfg, Publisher, Value},

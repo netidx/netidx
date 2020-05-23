@@ -7,6 +7,7 @@ use std::{
     iter::Iterator,
     ops::Deref,
     result::Result,
+    str::FromStr,
 };
 
 pub static ESC: char = '\\';
@@ -98,6 +99,14 @@ impl<'a> From<&'a String> for Path {
         } else {
             Path(Chars::from(canonize(s.as_str())))
         }
+    }
+}
+
+impl FromStr for Path {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Path(Chars::from(String::from(s))))
     }
 }
 
@@ -199,7 +208,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::root().append("bar").append("baz");
     /// assert_eq!(&*p, "/bar/baz");
     ///
@@ -225,7 +234,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo", "bar", "baz"]);
     ///
@@ -254,7 +263,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/some/path/ending/in/foo");
     /// let mut bn = Path::basenames(&p);
     /// assert_eq!(bn.next(), Some("/"));
@@ -277,7 +286,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::levels(&p), 3);
     /// ```
@@ -294,7 +303,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::dirname(&p), Some("/foo/bar"));
     ///
@@ -313,7 +322,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::basename(&p), Some("baz"));
     ///
@@ -372,7 +381,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::rfind_sep(&p), Some(8));
     ///
@@ -388,7 +397,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use json_pubsub::path::Path;
+    /// use netidx::path::Path;
     /// let p = Path::from("foo/bar/baz");
     /// assert_eq!(Path::find_sep(&p), Some(3));
     ///

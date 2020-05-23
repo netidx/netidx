@@ -1,5 +1,5 @@
 [package]
-name = "json-pubsub"
+name = "netidx"
 version = "0.1.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"

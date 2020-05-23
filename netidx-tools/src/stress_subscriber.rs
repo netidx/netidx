@@ -1,6 +1,6 @@
 use futures::channel::mpsc;
 use futures::prelude::*;
-use json_pubsub::{
+use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},

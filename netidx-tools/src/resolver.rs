@@ -1,5 +1,5 @@
 use super::ResolverCmd;
-use json_pubsub::{
+use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead, ResolverWrite},
