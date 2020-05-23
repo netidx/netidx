@@ -32,7 +32,7 @@ struct Opt {
 
 #[derive(StructOpt, Debug)]
 enum Sub {
-    #[structopt(name = "resolver-server", about = "Run a resolver server")]
+    #[structopt(name = "resolver-server", about = "run a resolver")]
     ResolverServer {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool,
@@ -54,7 +54,7 @@ enum Sub {
         )]
         permissions: Option<String>,
     },
-    #[structopt(name = "resolver", about = "Query a resolver server")]
+    #[structopt(name = "resolver", about = "query the resolver")]
     Resolver {
         #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
         krb5: bool,
@@ -63,7 +63,7 @@ enum Sub {
         #[structopt(subcommand)]
         cmd: ResolverCmd,
     },
-    #[structopt(name = "publisher", about = "publish path|data lines from stdin")]
+    #[structopt(name = "publisher", about = "publish data")]
     Publisher {
         #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
         krb5: bool,
@@ -85,7 +85,7 @@ enum Sub {
         )]
         timeout: Option<u64>,
     },
-    #[structopt(name = "subscriber", about = "subscribe and print values")]
+    #[structopt(name = "subscriber", about = "subscribe to values")]
     Subscriber {
         #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
         krb5: bool,
