@@ -67,9 +67,9 @@
 //! Published values always have a value, and new subscribers receive
 //! the most recent published value initially. Thereafter a
 //! subscription is a lossless ordered stream, just like a tcp
-//! connection, except that instead of bytes Values are the unit of
-//! transmission. Since the subscriber can write values back to the
-//! publisher, the connection is bidirectional, also like a Tcp
+//! connection, except that instead of bytes `publisher::Value` is the
+//! unit of transmission. Since the subscriber can write values back
+//! to the publisher, the connection is bidirectional, also like a Tcp
 //! stream.
 //! 
 //! Values include many useful primitives, including zero copy bytes
