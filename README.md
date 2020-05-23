@@ -1,4 +1,4 @@
-netidx is like DNS for program values. With netidx you can name
+Netidx is like DNS for program values. With netidx you can name
 individual values in your program, and other programs can find and
 subscribe to those values securely over the network.
 
