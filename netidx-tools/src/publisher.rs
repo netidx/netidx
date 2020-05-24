@@ -77,6 +77,7 @@ pub(crate) enum SValue {
     Bytes(Vec<u8>),
     True,
     False,
+    Null,
 }
 
 impl From<Value> for SValue {
@@ -96,6 +97,7 @@ impl From<Value> for SValue {
             Value::Bytes(b) => SValue::Bytes(Vec::from(&*b)),
             Value::True => SValue::True,
             Value::False => SValue::False,
+            Value::Null => SValue::Null,
         }
     }
 }
@@ -117,28 +119,32 @@ impl Into<Value> for SValue {
             SValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
             SValue::True => Value::True,
             SValue::False => Value::False,
+            SValue::Null => Value::Null,
         }
     }
 }
 
 fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
-    Ok(match typ {
-        Typ::U32 => SValue::U32(s.parse::<u32>()?),
-        Typ::V32 => SValue::V32(s.parse::<u32>()?),
-        Typ::I32 => SValue::I32(s.parse::<i32>()?),
-        Typ::Z32 => SValue::Z32(s.parse::<i32>()?),
-        Typ::U64 => SValue::U64(s.parse::<u64>()?),
-        Typ::V64 => SValue::V64(s.parse::<u64>()?),
-        Typ::I64 => SValue::I64(s.parse::<i64>()?),
-        Typ::Z64 => SValue::Z64(s.parse::<i64>()?),
-        Typ::F32 => SValue::F32(s.parse::<f32>()?),
-        Typ::F64 => SValue::F64(s.parse::<f64>()?),
-        Typ::Bool => match s.parse::<bool>()? {
-            true => SValue::True,
-            false => SValue::False,
-        },
-        Typ::String => SValue::String(String::from(s)),
-        Typ::Json => serde_json::from_str(s)?,
+    Ok(match s {
+        "null" => SValue::Null,
+        s => match typ {
+            Typ::U32 => SValue::U32(s.parse::<u32>()?),
+            Typ::V32 => SValue::V32(s.parse::<u32>()?),
+            Typ::I32 => SValue::I32(s.parse::<i32>()?),
+            Typ::Z32 => SValue::Z32(s.parse::<i32>()?),
+            Typ::U64 => SValue::U64(s.parse::<u64>()?),
+            Typ::V64 => SValue::V64(s.parse::<u64>()?),
+            Typ::I64 => SValue::I64(s.parse::<i64>()?),
+            Typ::Z64 => SValue::Z64(s.parse::<i64>()?),
+            Typ::F32 => SValue::F32(s.parse::<f32>()?),
+            Typ::F64 => SValue::F64(s.parse::<f64>()?),
+            Typ::Bool => match s.parse::<bool>()? {
+                true => SValue::True,
+                false => SValue::False,
+            },
+            Typ::String => SValue::String(String::from(s)),
+            Typ::Json => serde_json::from_str(s)?,
+        }
     })
 }
 

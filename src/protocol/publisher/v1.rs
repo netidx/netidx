@@ -202,6 +202,8 @@ pub enum Value {
     True,
     /// boolean false
     False,
+    /// Empty value
+    Null,
 }
 
 impl Pack for Value {
@@ -219,7 +221,7 @@ impl Pack for Value {
             Value::F64(_) => mem::size_of::<f64>(),
             Value::String(c) => <Chars as Pack>::len(c),
             Value::Bytes(b) => <Bytes as Pack>::len(b),
-            Value::True | Value::False => 0,
+            Value::True | Value::False | Value::Null => 0,
         }
     }
 
@@ -275,6 +277,7 @@ impl Pack for Value {
             }
             Value::True => Ok(buf.put_u8(12)),
             Value::False => Ok(buf.put_u8(13)),
+            Value::Null => Ok(buf.put_u8(14)),
         }
     }
 
@@ -294,6 +297,7 @@ impl Pack for Value {
             11 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
             12 => Ok(Value::True),
             13 => Ok(Value::False),
+            14 => Ok(Value::Null),
             _ => Err(PackError::UnknownTag),
         }
     }
