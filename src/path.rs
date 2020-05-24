@@ -144,7 +144,7 @@ fn canonize(s: &str) -> String {
 fn is_escaped(s: &str, i: usize) -> bool {
     let b = s.as_bytes();
     !s.is_char_boundary(i)
-        || (b[i] == (SEP as u8) && {
+        || ((b[i] == (SEP as u8) || b[i] == (ESC as u8)) && {
             let mut res = false;
             for j in (0..i).rev() {
                 if s.is_char_boundary(j) && b[j] == (ESC as u8) {
@@ -235,6 +235,31 @@ impl Path {
                 } else {
                     out.push(c);
                 }
+            }
+            Cow::Owned(out)
+        }
+    }
+
+    /// This will unescape the path seperator and the escape character
+    /// in a path part.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx::path::Path;
+    /// assert_eq!("foo/bar", &*Path::unescape("foo\\/bar"));
+    /// assert_eq!("\\hello world", &*Path::unescape("\\\\hello world"));
+    /// ```
+    pub fn unescape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
+        let s = s.as_ref();
+        if !(0..s.len()).into_iter().any(|i| is_escaped(s, i)) {
+            Cow::Borrowed(s)
+        } else {
+            let mut out = String::with_capacity(s.len());
+            for (i, c) in s.chars().enumerate() {
+                if is_escaped(s, i) {
+                    out.pop();
+                }
+                out.push(c);
             }
             Cow::Owned(out)
         }
