@@ -10,7 +10,8 @@
 //! involved.
 //!
 //! # Publisher
-//! ```
+//! ```no_run
+//! # fn get_cpu_temp() -> f32 { 42. }
 //! use netidx::{
 //!     publisher::{Publisher, Value, BindCfg},
 //!     config::Config,
@@ -19,9 +20,11 @@
 //! };
 //! use tokio::time;
 //! use std::time::Duration;
+//! # use anyhow::Result;
 //!
+//! async fn run() -> Result<()> {
 //! // load the site cluster config. You can also just use a file.
-//! let cfg = Config::load_from_dns()?;
+//! let cfg = Config::load_from_dns(None)?;
 //!
 //! // no authentication (kerberos v5 is the other option)
 //! // listen on any unique address matching 192.168.0.0/16
@@ -38,30 +41,37 @@
 //!     temp.update(Value::F32(get_cpu_temp()));
 //!     publisher.flush(None).await?;
 //! }
+//! # Ok(())
+//! # };
 //! ```
 //!
 //! # Subscriber
-//! ```
+//! ```no_run
 //! use netidx::{
 //!     subscriber::Subscriber,
 //!     config::Config,
 //!     resolver::Auth,
 //!     path::Path,
 //! };
-//! use futures::channel::mpsc;
+//! use futures::{prelude::*, channel::mpsc};
+//! # use anyhow::Result;
 //!
-//! let cfg = Config::load_from_dns()?;
+//! async fn run() -> Result<()> {
+//! let cfg = Config::load_from_dns(None)?;
 //! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
-//! let temp = subscriber.subscribe_one(Path::from("/hw/washu-chan/cpu-temp")).await?;
-//! println!("washu-chan cpu temp is: {:?}", temp.last().await?);
+//! let path = Path::from("/hw/washu-chan/cpu-temp");
+//! let temp = subscriber.subscribe_one(path, None).await?;
+//! println!("washu-chan cpu temp is: {:?}", temp.last().await);
 //!
-//! let (tx, rx) = mpsc::channel(10);
+//! let (tx, mut rx) = mpsc::channel(10);
 //! temp.updates(false, tx);
 //! while let Some(mut batch) = rx.next().await {
 //!     for (_, v) in batch.drain(..) {
 //!         println!("washu-chan cpu temp is: {:?}", v);
 //!     }
 //! }
+//! # Ok(())
+//! # };
 //! ```
 //!
 //! Published values always have a value, and new subscribers receive
@@ -71,7 +81,7 @@
 //! unit of transmission. Since the subscriber can write values back
 //! to the publisher, the connection is bidirectional, also like a Tcp
 //! stream.
-//! 
+//!
 //! Values include many useful primitives, including zero copy bytes
 //! buffers (using the awesome bytes crate), so you can easily use
 //! netidx to efficiently send any kind of message you like. However
@@ -92,26 +102,32 @@
 //!
 //! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
 //! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
-#![recursion_limit="1024"]
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate serde_derive;
-#[macro_use] extern crate pin_utils;
-#[macro_use] extern crate bitflags;
+#![recursion_limit = "1024"]
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate pin_utils;
+#[macro_use]
+extern crate bitflags;
 
 mod pack;
-#[macro_use] pub mod utils;
-mod os;
-pub mod chars;
-mod resolver_store;
+#[macro_use]
+pub mod utils;
 mod auth;
-mod secstore;
+pub mod channel;
+pub mod chars;
+pub mod config;
+mod os;
 pub mod path;
 pub mod protocol;
-pub mod config;
-pub mod channel;
-mod resolver_single;
+pub mod publisher;
 pub mod resolver;
 pub mod resolver_server;
-pub mod publisher;
+mod resolver_single;
+mod resolver_store;
+mod secstore;
 pub mod subscriber;
-#[cfg(test)] mod test;
+#[cfg(test)]
+mod test;

@@ -1,6 +1,11 @@
-use crate::{chars::Chars, pack::{Pack, PackError}, utils};
+use crate::{
+    chars::Chars,
+    pack::{Pack, PackError},
+    utils,
+};
 use std::{
     borrow::Borrow,
+    borrow::Cow,
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
@@ -199,8 +204,40 @@ impl Path {
     }
 
     /// returns true if the path starts with /, false otherwise
-    pub fn is_absolute<T: AsRef<str>>(p: T) -> bool {
+    pub fn is_absolute<T: AsRef<str> + ?Sized>(p: &T) -> bool {
         p.as_ref().starts_with(SEP)
+    }
+
+    /// This will escape the path seperator and the escape character
+    /// in a path part. If you want to be sure that e.g. `append` will
+    /// only append 1 level, then you should call this function on
+    /// your part before appending it.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx::path::Path;
+    /// assert_eq!("foo\\/bar", &*Path::escape("foo/bar"));
+    /// assert_eq!("\\\\hello world", &*Path::escape("\\hello world"));
+    /// ```
+    pub fn escape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
+        let s = s.as_ref();
+        if s.find(|c: char| c == SEP || c == ESC).is_none() {
+            Cow::Borrowed(s.as_ref())
+        } else {
+            let mut out = String::with_capacity(s.len());
+            for c in s.chars() {
+                if c == SEP {
+                    out.push(ESC);
+                    out.push(c);
+                } else if c == ESC {
+                    out.push(ESC);
+                    out.push(c);
+                } else {
+                    out.push(c);
+                }
+            }
+            Cow::Owned(out)
+        }
     }
 
     /// return a new path with the specified string appended as a new
@@ -215,7 +252,7 @@ impl Path {
     /// let p = Path::root().append("/bar").append("//baz//////foo/");
     /// assert_eq!(&*p, "/bar/baz/foo");
     /// ```
-    pub fn append<T: AsRef<str>>(&self, other: T) -> Self {
+    pub fn append<T: AsRef<str> + ?Sized>(&self, other: &T) -> Self {
         let other = other.as_ref();
         if other.len() == 0 {
             self.clone()
@@ -247,7 +284,8 @@ impl Path {
     /// let p = Path::from(r"/foo\\\/bar/baz");
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec![r"foo\\\/bar", "baz"]);
     /// ```
-    pub fn parts(s: &str) -> impl Iterator<Item = &str> {
+    pub fn parts<T: AsRef<str> + ?Sized>(s: &T) -> impl Iterator<Item = &str> {
+        let s = s.as_ref();
         let skip = if s == "/" {
             2
         } else if s.starts_with("/") {
@@ -274,7 +312,8 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
     /// ```
-    pub fn basenames(s: &str) -> impl Iterator<Item = &str> {
+    pub fn basenames<T: AsRef<str> + ?Sized>(s: &T) -> impl Iterator<Item = &str> {
+        let s = s.as_ref();
         if s == "/" {
             BaseNames::Root(true)
         } else {
@@ -290,7 +329,7 @@ impl Path {
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::levels(&p), 3);
     /// ```
-    pub fn levels(s: &str) -> usize {
+    pub fn levels<T: AsRef<str> + ?Sized>(s: &T) -> usize {
         let mut p = 0;
         for _ in Path::parts(s) {
             p += 1
@@ -313,7 +352,8 @@ impl Path {
     /// let p = Path::from("/foo");
     /// assert_eq!(Path::dirname(&p), None);
     /// ```
-    pub fn dirname(s: &str) -> Option<&str> {
+    pub fn dirname<T: AsRef<str> + ?Sized>(s: &T) -> Option<&str> {
+        let s = s.as_ref();
         Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i]) })
     }
 
@@ -338,7 +378,8 @@ impl Path {
     /// let p = Path::from("/");
     /// assert_eq!(Path::basename(&p), None);
     /// ```
-    pub fn basename(s: &str) -> Option<&str> {
+    pub fn basename<T: AsRef<str> + ?Sized>(s: &T) -> Option<&str> {
+        let s = s.as_ref();
         match Path::rfind_sep(s) {
             None => {
                 if s.len() > 0 {
@@ -388,7 +429,8 @@ impl Path {
     /// let p = Path::from("");
     /// assert_eq!(Path::rfind_sep(&p), None);
     /// ```
-    pub fn rfind_sep(s: &str) -> Option<usize> {
+    pub fn rfind_sep<T: AsRef<str> + ?Sized>(s: &T) -> Option<usize> {
+        let s = s.as_ref();
         Path::find_sep_int(s, |s| s.rfind(SEP))
     }
 
@@ -404,7 +446,8 @@ impl Path {
     /// let p = Path::from("");
     /// assert_eq!(Path::find_sep(&p), None);
     /// ```
-    pub fn find_sep(s: &str) -> Option<usize> {
+    pub fn find_sep<T: AsRef<str> + ?Sized>(s: &T) -> Option<usize> {
+        let s = s.as_ref();
         Path::find_sep_int(s, |s| s.find(SEP))
     }
 }
