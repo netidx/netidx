@@ -9,60 +9,61 @@ subscriber knows where to find a value it is looking for, it
 connects directly to the publisher, and the resolver is no longer
 involved.
 
-# Publisher
-``` rust
-use netidx::{
-    publisher::{Publisher, Value, BindCfg},
-    config::Config,
-    resolver::Auth,
-    path::Path,
-};
-use tokio::time;
-use std::time::Duration;
+ # Publisher
+ ```rust
+ use netidx::{
+     publisher::{Publisher, Value, BindCfg},
+     config::Config,
+     resolver::Auth,
+     path::Path,
+ };
+ use tokio::time;
+ use std::time::Duration;
 
-// load the site cluster config. You can also just use a file.
-let cfg = Config::load_from_dns()?;
+ // load the site cluster config. You can also just use a file.
+ let cfg = Config::load_from_dns(None)?;
 
-// no authentication (kerberos v5 is the other option)
-// listen on any unique address matching 192.168.0.0/16
-let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
+ // no authentication (kerberos v5 is the other option)
+ // listen on any unique address matching 192.168.0.0/16
+ let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
 
-let temp = publisher.publish(
-    Path::from("/hw/washu-chan/cpu-temp"),
-    Value::F32(get_cpu_temp())
-)?;
-publisher.flush(None).await?;
+ let temp = publisher.publish(
+     Path::from("/hw/washu-chan/cpu-temp"),
+     Value::F32(get_cpu_temp())
+ )?;
+ publisher.flush(None).await?;
 
-loop {
-    time::delay_for(Duration::from_millis(500)).await;
-    temp.update(Value::F32(get_cpu_temp()));
-    publisher.flush(None).await?;
-}
-```
+ loop {
+     time::delay_for(Duration::from_millis(500)).await;
+     temp.update(Value::F32(get_cpu_temp()));
+     publisher.flush(None).await?;
+ }
+ ```
 
-# Subscriber
-``` rust
-use netidx::{
-    subscriber::Subscriber,
-    config::Config,
-    resolver::Auth,
-    path::Path,
-};
-use futures::channel::mpsc;
+ # Subscriber
+ ```rust
+ use netidx::{
+     subscriber::Subscriber,
+     config::Config,
+     resolver::Auth,
+     path::Path,
+ };
+ use futures::{prelude::*, channel::mpsc};
 
-let cfg = Config::load_from_dns()?;
-let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
-let temp = subscriber.subscribe_one(Path::from("/hw/washu-chan/cpu-temp")).await?;
-println!("washu-chan cpu temp is: {:?}", temp.last().await?);
+ let cfg = Config::load_from_dns(None)?;
+ let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
+ let path = Path::from("/hw/washu-chan/cpu-temp");
+ let temp = subscriber.subscribe_one(path, None).await?;
+ println!("washu-chan cpu temp is: {:?}", temp.last().await);
 
-let (tx, rx) = mpsc::channel(10);
-temp.updates(false, tx);
-while let Some(mut batch) = rx.next().await {
-    for (_, v) in batch.drain(..) {
-        println!("washu-chan cpu temp is: {:?}", v);
-    }
-}
-```
+ let (tx, mut rx) = mpsc::channel(10);
+ temp.updates(false, tx);
+ while let Some(mut batch) = rx.next().await {
+     for (_, v) in batch.drain(..) {
+         println!("washu-chan cpu temp is: {:?}", v);
+     }
+ }
+ ```
 
 Published values always have a value, and new subscribers receive
 the most recent published value initially. Thereafter a

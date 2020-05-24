@@ -20,9 +20,9 @@
 //! };
 //! use tokio::time;
 //! use std::time::Duration;
-//! # use anyhow::Result;
 //!
-//! async fn run() -> Result<()> {
+//! # use anyhow::Result;
+//! # async fn run() -> Result<()> {
 //! // load the site cluster config. You can also just use a file.
 //! let cfg = Config::load_from_dns(None)?;
 //!
@@ -56,7 +56,7 @@
 //! use futures::{prelude::*, channel::mpsc};
 //! # use anyhow::Result;
 //!
-//! async fn run() -> Result<()> {
+//! # async fn run() -> Result<()> {
 //! let cfg = Config::load_from_dns(None)?;
 //! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
 //! let path = Path::from("/hw/washu-chan/cpu-temp");
