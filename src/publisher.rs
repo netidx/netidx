@@ -17,6 +17,7 @@ use fxhash::FxBuildHasher;
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
+use get_if_addrs::get_if_addrs;
 use std::{
     boxed::Box,
     cmp::{Ord, Ordering, PartialOrd},
@@ -412,15 +413,15 @@ impl BindCfg {
     fn select(&self) -> Result<IpAddr> {
         match self {
             BindCfg::Exact(addr) => {
-                if os::get_addrs()?.any(|ip| ip == addr.ip()) {
+                if get_if_addrs()?.iter().any(|i| i.ip() == addr.ip()) {
                     Ok(addr.ip())
                 } else {
                     bail!("no interface matches the bind address {:?}", addr);
                 }
             }
             BindCfg::Match { addr, netmask } => {
-                let selected = os::get_addrs()?
-                    .filter_map(|ip| match (ip, addr, netmask) {
+                let selected = get_if_addrs()?.iter()
+                    .filter_map(|i| match (i.ip(), addr, netmask) {
                         (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
                             let masked = Ipv4Addr::from(
                                 u32::from_be_bytes(ip.octets())

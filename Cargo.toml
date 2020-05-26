@@ -12,7 +12,6 @@ categories = ["network-programming"]
 
 [target.'cfg(unix)'.dependencies]
 libgssapi = "0.4"
-nix = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3"
@@ -36,6 +35,7 @@ parking_lot = "0.10"
 bitflags = "1"
 arc-swap = "0.4"
 trust-dns-resolver = "0.19"
+get_if_addrs = "0.5"
 
 [dev-dependencies]
 proptest = "0.9"
