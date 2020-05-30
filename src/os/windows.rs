@@ -11,13 +11,47 @@ use winapi::{
     ctypes::*,
     shared::{
         sspi::{self, PCredHandle, PCtxtHandle, SecBuffer, SecBufferDesc, SecHandle, SecPkgInfoW},
-        winerror::SUCCEEDED,
+        winerror::{
+            SEC_E_OK, SEC_I_COMPLETE_AND_CONTINUE, SEC_I_COMPLETE_NEEDED, SEC_I_CONTINUE_NEEDED,
+            SUCCEEDED,
+        },
     },
-    um::{winbase::lstrlenW, winnt::LARGE_INTEGER},
+    um::{
+        winbase::{
+            lstrlenW, FormatMessageW, FORMAT_MESSAGE_ALLOCATE_BUFFER,
+            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS,
+        },
+        winnt::{LANG_NEUTRAL, LARGE_INTEGER, MAKELANGID, SUBLANG_NEUTRAL},
+    },
 };
 
+unsafe fn string_from_wstr(s: *const u16) -> String {
+    let slen = lstrlenW(s);
+    let slice = &*ptr::slice_from_raw_parts(s, slen as usize);
+    OsString::from_wide(slice).to_string_lossy().to_string()
+}
+
 fn str_to_wstr(s: &str) -> Vec<u16> {
-    OsString::from(s).encode_wide().collect::<Vec<_>>()
+    let mut v = OsString::from(s).encode_wide().collect::<Vec<_>>();
+    v.push(0); // ensure null termination
+    v
+}
+
+fn format_error(error: i32) -> String {
+    const BUF: usize = 512;
+    let mut msg = [0u16; BUF];
+    unsafe {
+        FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            ptr::null_mut(),
+            error as u32,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL) as u32,
+            msg.as_mut_ptr(),
+            BUF - 1,
+            ptr::null_mut(),
+        );
+    }
+    unsafe { string_from_wstr(msg.as_mut_ptr()) }
 }
 
 struct Cred(SecHandle);
@@ -37,7 +71,7 @@ impl Cred {
         let principal_ptr = principal
             .map(|mut p| p.as_mut_ptr())
             .unwrap_or(ptr::null_mut());
-        let mut package = str_to_wstr("Kerberos\0");
+        let mut package = str_to_wstr("Kerberos");
         let dir = if server {
             sspi::SECPKG_CRED_INBOUND
         } else {
@@ -58,7 +92,7 @@ impl Cred {
             )
         };
         if !SUCCEEDED(res) {
-            bail!("failed to acquire credentials {}", res);
+            bail!("failed to acquire credentials {}", format_error(res));
         } else {
             Ok(Cred(cred))
         }
@@ -67,7 +101,7 @@ impl Cred {
 
 fn alloc_krb5_buf() -> Result<Vec<u8>> {
     let mut ifo = ptr::null_mut::<SecPkgInfoW>();
-    let mut pkg = str_to_wstr("Kerberos\0");
+    let mut pkg = str_to_wstr("Kerberos");
     let res = unsafe { sspi::QuerySecurityPackageInfoW(pkg.as_mut_ptr(), &mut ifo as *mut _) };
     if !SUCCEEDED(res) {
         if ifo != ptr::null_mut() {
@@ -75,7 +109,10 @@ fn alloc_krb5_buf() -> Result<Vec<u8>> {
                 sspi::FreeContextBuffer(ifo as *mut _);
             }
         }
-        bail!("failed to query pkg info for Kerberos {}", res);
+        bail!(
+            "failed to query pkg info for Kerberos {}",
+            format_error(res)
+        );
     }
     let max_len = unsafe { (*ifo).cbMaxToken };
     unsafe {
@@ -86,6 +123,52 @@ fn alloc_krb5_buf() -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn wrap_iov(
+    ctx: &mut SecHandle,
+    sizes: &SecPkgContext_Sizes,
+    stream_sizes: &SecPkgContext_StreamSizes,
+    header: &mut BytesMut,
+    data: &mut BytesMut,
+    padding: &mut BytesMut,
+) -> Result<()> {
+    if data.len() > stream_sizes.cbMaximumMessage as usize {
+        bail!(
+            "message too large, {} exceeds max size {}",
+            data.len(),
+            stream_sizes.cbMaximumMessage
+        )
+    }
+    header.resize(sizes.cbSecurityTrailer as usize, 0x0);
+    padding.resize(sizes.cbBlockSize as usize, 0x0);
+    let mut buffers = [
+        SecBuffer {
+            BufferType: sspi::SECBUFFER_TOKEN,
+            cbBuffer: sizes.cbSecurityTrailer,
+            pvBuffer: &mut **header as *mut _ as *mut c_void,
+        },
+        SecBuffer {
+            BufferType: sspi::SECBUFFER_DATA,
+            cbBuffer: data.len() as u32,
+            pvBuffer: &mut **data as *mut _ as *mut c_void,
+        },
+        SecBuffer {
+            BufferType: sspi::SECBUFFER_PADDING,
+            cbBuffer: sizes.cbBlockSize,
+            pvBuffer: &mut **padding as *mut _ as *mut c_void,
+        },
+    ];
+    let mut buf_desc = SecBufferDesc {
+        ulVersion: sspi::SECBUFFER_VERSION,
+        cBuffers: 3,
+        pBuffers: buffers.as_mut_ptr(),
+    };
+    let res = unsafe { sspi::EncryptMessage(ctx as *mut _, 0, &mut buf_desc as *mut _, 0) };
+    if !SUCCEEDED(res) {
+        bail!("EncryptMessage failed {}", format_error(res))
+    }
+    Ok(())
+}
+
 struct ClientCtx {
     ctx: SecHandle,
     cred: Cred,
@@ -93,6 +176,7 @@ struct ClientCtx {
     attrs: u32,
     lifetime: LARGE_INTEGER,
     buf: Vec<u8>,
+    done: bool,
 }
 
 impl Drop for ClientCtx {
@@ -112,10 +196,17 @@ impl ClientCtx {
             attrs: 0,
             lifetime: LARGE_INTEGER::default(),
             buf: alloc_krb5_buf()?,
+            done: false,
         })
     }
 
     fn step(&mut self, tok: Option<&[u8]>) -> Result<Option<&[u8]>> {
+        if self.done {
+            return Ok(None);
+        }
+        for i in 0..self.buf.len() {
+            self.buf[i] = 0;
+        }
         let mut out_buf = SecBuffer {
             cbBuffer: self.buf.len() as u32,
             BufferType: sspi::SECBUFFER_TOKEN,
@@ -165,8 +256,18 @@ impl ClientCtx {
             )
         };
         if !SUCCEEDED(res) {
-            bail!("ClientCtx::step failed {}", res)
-        } else if out_buf.cbBuffer > 0 {
+            bail!("ClientCtx::step failed {}", format_error(res))
+        }
+        if res == SEC_E_OK {
+            self.done = true;
+        }
+        if res == SEC_I_COMPLETE_AND_CONTINUE || res == SEC_I_COMPLETE_NEEDED {
+            let res = unsafe { sspi::CompleteAuthToken(ctx_ptr, &mut out_buf_desc as *mut _) };
+            if !SUCCEEDED(res) {
+                bail!("complete token failed {}", format_error(res))
+            }
+        }
+        if out_buf.cbBuffer > 0 {
             Ok(Some(&self.buf[0..(out_buf.cbBuffer as usize)]))
         } else {
             Ok(None)
@@ -180,6 +281,7 @@ struct ServerCtx {
     buf: Vec<u8>,
     attrs: u32,
     lifetime: LARGE_INTEGER,
+    done: bool,
 }
 
 impl Drop for ServerCtx {
@@ -198,10 +300,17 @@ impl ServerCtx {
             buf: alloc_krb5_buf()?,
             attrs: 0,
             lifetime: LARGE_INTEGER::default(),
+            done: false,
         })
     }
 
     fn step(&mut self, tok: &[u8]) -> Result<Option<&[u8]>> {
+        if self.done {
+            return Ok(None);
+        }
+        for i in 0..self.buf.len() {
+            self.buf[i] = 0;
+        }
         let mut out_buf = SecBuffer {
             cbBuffer: self.buf.len() as u32,
             BufferType: sspi::SECBUFFER_TOKEN,
@@ -233,7 +342,7 @@ impl ServerCtx {
                 &mut self.cred.0 as *mut _,
                 ctx_ptr,
                 &mut in_buf_desc as *mut _,
-                0,
+                sspi::ISC_REQ_CONFIDENTIALITY | sspi::ISC_REQ_MUTUAL_AUTH,
                 sspi::SECURITY_NATIVE_DREP,
                 &mut self.ctx as *mut _,
                 &mut out_buf_desc as *mut _,
@@ -242,30 +351,21 @@ impl ServerCtx {
             )
         };
         if !SUCCEEDED(res) {
-            bail!("ServerCtx::step failed {}", res);
+            bail!("ServerCtx::step failed {}", format_error(res));
+        }
+        if res == SEC_E_OK {
+            self.done = true;
+        }
+        if res == SEC_I_COMPLETE_AND_CONTINUE || res == SEC_I_COMPLETE_NEEDED {
+            let res = unsafe { sspi::CompleteAuthToken(ctx_ptr, &mut out_buf_desc as *mut _) };
+            if !SUCCEEDED(res) {
+                bail!("complete token failed {}", format_error(res))
+            }
         }
         if out_buf.cbBuffer > 0 {
             Ok(Some(&self.buf[0..(out_buf.cbBuffer as usize)]))
         } else {
             Ok(None)
-        }
-    }
-}
-
-fn print_pkgs() {
-    let mut len: u32 = 0;
-    let mut pkgs = ptr::null_mut::<SecPkgInfoW>();
-    let res = unsafe { sspi::EnumerateSecurityPackagesW(&mut len as *mut _, &mut pkgs as *mut _) };
-    if !SUCCEEDED(res) {
-        panic!("failed to print security packages {}", res);
-    } else {
-        let pkgs = unsafe { &*ptr::slice_from_raw_parts(pkgs, len as usize) };
-        for pkg in pkgs {
-            unsafe {
-                let slen = lstrlenW(pkg.Name);
-                let slice = &*ptr::slice_from_raw_parts(pkg.Name, slen as usize);
-                println!("{}", OsString::from_wide(slice).to_string_lossy());
-            }
         }
     }
 }

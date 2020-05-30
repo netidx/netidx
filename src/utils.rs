@@ -17,12 +17,6 @@ use std::{
     str,
 };
 
-macro_rules! bail {
-    ($($msg:expr), +) => {
-        return Err(anyhow::anyhow!($($msg), +))
-    }
-}
-
 #[macro_export]
 macro_rules! try_cf {
     ($msg:expr, continue, $lbl:tt, $e:expr) => {
