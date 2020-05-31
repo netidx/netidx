@@ -2,7 +2,6 @@ use super::{Krb5Ctx, Krb5ServerCtx};
 use anyhow::{bail, Result};
 use bytes::{Buf, BytesMut};
 use parking_lot::Mutex;
-use tokio::task;
 use std::{
     default::Default,
     ffi::OsString,
@@ -13,29 +12,30 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::task;
 use winapi::{
     ctypes::*,
     shared::{
+        minwindef::FILETIME,
         sspi::{
-            self, SecBuffer, SecBufferDesc, SecHandle, SecPkgContext_Sizes, SecPkgInfoW,
-            SECPKG_ATTR_SIZES,
+            self, SecBuffer, SecBufferDesc, SecHandle, SecPkgContext_NativeNamesW,
+            SecPkgContext_Sizes, SecPkgInfoW, SECPKG_ATTR_SIZES,
         },
         winerror::{
             SEC_E_OK, SEC_I_COMPLETE_AND_CONTINUE, SEC_I_COMPLETE_NEEDED, SUCCEEDED,
         },
-        minwindef::FILETIME,
     },
     um::{
+        errhandlingapi::GetLastError,
+        minwinbase::SYSTEMTIME,
         ntsecapi::KERB_WRAP_NO_ENCRYPT,
+        sysinfoapi::GetSystemTime,
+        timezoneapi::{SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime},
         winbase::{
             lstrlenW, FormatMessageW, FORMAT_MESSAGE_FROM_SYSTEM,
             FORMAT_MESSAGE_IGNORE_INSERTS,
         },
         winnt::{LANG_NEUTRAL, LARGE_INTEGER, MAKELANGID, SUBLANG_NEUTRAL},
-        sysinfoapi::GetSystemTime,
-        timezoneapi::{SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime},
-        minwinbase::SYSTEMTIME,
-        errhandlingapi::GetLastError,
     },
 };
 
@@ -249,12 +249,19 @@ fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {
     let mut lt = SYSTEMTIME::default();
     let mut ft = FILETIME::default();
     unsafe {
-        GetSystemTime(&mut st as *mut _); 
-        if !SystemTimeToTzSpecificLocalTime(ptr::null_mut(), &st as *const _, &mut lt as *mut _) {
+        GetSystemTime(&mut st as *mut _);
+        if !SystemTimeToTzSpecificLocalTime(
+            ptr::null_mut(),
+            &st as *const _,
+            &mut lt as *mut _,
+        ) {
             bail!("failed to convert to local time {}", format_error(GetLastError()))
         }
         if !SystemTimeToFileTime(&lt as *const _, &mut ft as *mut _) {
-            bail!("failed to convert current time to a filetime: {}", format_error(GetLastError()))
+            bail!(
+                "failed to convert current time to a filetime: {}",
+                format_error(GetLastError())
+            )
         }
         let now: u64 = ft.dwHighDateTime << 32 | ft.dwLowDateTime;
         let expires = *lifetime.QuadPart() as u64;
@@ -562,5 +569,23 @@ impl Krb5Ctx for ServerCtx {
 
     fn ttl(&self) -> Result<Duration> {
         convert_lifetime(self.0.lock().lifetime)
+    }
+}
+
+impl Krb5ServerCtx for ServerCtx {
+    fn client(&self) -> Result<String> {
+        let mut names = SecPkgContext_NativeNamesW::default();
+        let mut inner = self.0.lock();
+        unsafe {
+            let res = sspi::QueryContextAttributesW(
+                inner.ctx,
+                sspi::SECPKG_ATTR_NATIVE_NAMES,
+                &mut names as *mut _ as *mut c_void,
+            );
+            if !SUCCEEDED(res) {
+                bail!("failed to get client name {}", format_error(res))
+            }
+            Ok(string_from_wstr(names.sClientName))
+        }
     }
 }
