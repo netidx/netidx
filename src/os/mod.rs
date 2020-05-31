@@ -9,7 +9,6 @@ pub(crate) trait Krb5Ctx {
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<Self::Buf>;
     fn wrap_iov(
         &self,
-        encrypt: bool,
         header: &mut BytesMut,
         data: &mut BytesMut,
         padding: &mut BytesMut,
