@@ -2,6 +2,7 @@ use super::{Krb5Ctx, Krb5ServerCtx};
 use anyhow::{bail, Result};
 use bytes::{Buf, BytesMut};
 use parking_lot::Mutex;
+use tokio::task;
 use std::{
     default::Default,
     ffi::OsString,
@@ -22,6 +23,7 @@ use winapi::{
         winerror::{
             SEC_E_OK, SEC_I_COMPLETE_AND_CONTINUE, SEC_I_COMPLETE_NEEDED, SUCCEEDED,
         },
+        minwindef::FILETIME,
     },
     um::{
         ntsecapi::KERB_WRAP_NO_ENCRYPT,
@@ -30,6 +32,10 @@ use winapi::{
             FORMAT_MESSAGE_IGNORE_INSERTS,
         },
         winnt::{LANG_NEUTRAL, LARGE_INTEGER, MAKELANGID, SUBLANG_NEUTRAL},
+        sysinfoapi::GetSystemTime,
+        timezoneapi::{SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime},
+        minwinbase::SYSTEMTIME,
+        errhandlingapi::GetLastError,
     },
 };
 
@@ -238,7 +244,27 @@ fn unwrap_iov(ctx: &mut SecHandle, len: usize, msg: &mut BytesMut) -> Result<Byt
     Ok(msg.split_to(bufs[1].cbBuffer as usize))
 }
 
-fn convert_lifetime(lifetime: LARGE_INTEGER) -> Duration {todo!()}
+fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {
+    let mut st = SYSTEMTIME::default();
+    let mut lt = SYSTEMTIME::default();
+    let mut ft = FILETIME::default();
+    unsafe {
+        GetSystemTime(&mut st as *mut _); 
+        if !SystemTimeToTzSpecificLocalTime(ptr::null_mut(), &st as *const _, &mut lt as *mut _) {
+            bail!("failed to convert to local time {}", format_error(GetLastError()))
+        }
+        if !SystemTimeToFileTime(&lt as *const _, &mut ft as *mut _) {
+            bail!("failed to convert current time to a filetime: {}", format_error(GetLastError()))
+        }
+        let now: u64 = ft.dwHighDateTime << 32 | ft.dwLowDateTime;
+        let expires = *lifetime.QuadPart() as u64;
+        if expires <= now {
+            Ok(Duration::from_secs(0))
+        } else {
+            Ok(Duration::from_secs((expires - now) / 10))
+        }
+    }
+}
 
 struct ClientCtxInner {
     ctx: SecHandle,
@@ -275,12 +301,8 @@ impl ClientCtx {
             sizes: SecPkgContext_Sizes::default(),
         }))))
     }
-}
 
-impl Krb5Ctx for ClientCtx {
-    type Buf = BytesMut;
-
-    fn step(&self, tok: Option<&[u8]>) -> Result<Option<BytesMut>> {
+    fn do_step(&self, tok: Option<&[u8]>) -> Result<Option<BytesMut>> {
         let mut guard = self.0.lock();
         let inner = &mut *guard;
         if inner.done {
@@ -353,6 +375,14 @@ impl Krb5Ctx for ClientCtx {
             bail!("ClientCtx::step no token was generated but we are not done")
         }
     }
+}
+
+impl Krb5Ctx for ClientCtx {
+    type Buf = BytesMut;
+
+    fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>> {
+        task::block_in_place(|| self.do_step(token))
+    }
 
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<BytesMut> {
         let mut guard = self.0.lock();
@@ -383,8 +413,7 @@ impl Krb5Ctx for ClientCtx {
     }
 
     fn ttl(&self) -> Result<Duration> {
-        let ttl = self.0.lock().lifetime;
-
+        convert_lifetime(self.0.lock().lifetime)
     }
 }
 
@@ -422,7 +451,8 @@ impl ServerCtx {
         }))))
     }
 
-    fn step(&self, tok: &[u8]) -> Result<Option<Vec<u8>>> {
+    fn do_step(&self, tok: Option<&[u8]>) -> Result<Option<BytesMut>> {
+        let tok = tok.ok_or_else(|| bail!("no token supplied"))?;
         let mut guard = self.0.lock();
         let inner = &mut *guard;
         if inner.done {
@@ -486,12 +516,20 @@ impl ServerCtx {
             }
         }
         if out_buf.cbBuffer > 0 {
-            Ok(Some(Vec::from(&inner.buf[0..(out_buf.cbBuffer as usize)])))
+            Ok(Some(BytesMut::from(&inner.buf[0..(out_buf.cbBuffer as usize)])))
         } else if inner.done {
             Ok(None)
         } else {
             bail!("ServerCtx::step no token was generated but we are not done")
         }
+    }
+}
+
+impl Krb5Ctx for ServerCtx {
+    type Buf = BytesMut;
+
+    fn step(&self, token: Option<&[u8]>) -> Result<Option<Self::Buf>> {
+        task::block_in_place(|| self.do_step(token))
     }
 
     fn wrap(&self, encrypt: bool, msg: &[u8]) -> Result<BytesMut> {
@@ -520,5 +558,9 @@ impl ServerCtx {
     fn unwrap(&self, msg: &[u8]) -> Result<BytesMut> {
         let mut buf = BytesMut::from(msg);
         self.unwrap_iov(buf.len(), &mut buf)
+    }
+
+    fn ttl(&self) -> Result<Duration> {
+        convert_lifetime(self.0.lock().lifetime)
     }
 }
