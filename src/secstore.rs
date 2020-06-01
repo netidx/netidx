@@ -106,7 +106,7 @@ impl SecStore {
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes)> {
-        let ctx = os::create_server_ctx(Some(self.spn.as_bytes()))?;
+        let ctx = os::create_server_ctx(Some(self.spn.as_str()))?;
         let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
             || anyhow!("step didn't generate a mutual authentication token"),
         )?;

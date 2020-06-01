@@ -621,3 +621,15 @@ pub(crate) fn create_server_ctx(principal: Option<&str>) -> Result<ServerCtx> {
         ServerCtx::new(cred)
     })
 }
+
+pub(crate) struct Mapper;
+
+impl Mapper {
+    pub(crate) fn new() -> Result<Mapper> {
+        Ok(Mapper)
+    }
+
+    pub(crate) fn groups(&mut self, _user: &str) -> Result<Vec<String>> {
+        todo!("group listing is not implemented on windows")
+    }
+}
