@@ -11,6 +11,7 @@ use std::{
     ptr,
     sync::Arc,
     time::Duration,
+    fmt,
 };
 use tokio::task;
 use winapi::{
@@ -45,9 +46,9 @@ unsafe fn string_from_wstr(s: *const u16) -> String {
     OsString::from_wide(slice).to_string_lossy().to_string()
 }
 
-fn str_to_wstr(s: &str) -> Vec<u16> {
+fn to_wstr<T: Into<OsString>>(s: &T) -> Vec<u16> {
     let mut v = OsString::from(s).encode_wide().collect::<Vec<_>>();
-    v.push(0); // ensure null termination
+    v.push(0);
     v
 }
 
@@ -79,12 +80,12 @@ impl Drop for Cred {
 }
 
 impl Cred {
-    fn acquire(principal: Option<&str>, server: bool) -> Result<Cred> {
+    fn acquire<T: Into<OsString>>(principal: Option<&T>, server: bool) -> Result<Cred> {
         let mut cred = SecHandle::default();
-        let principal = principal.map(str_to_wstr);
+        let principal = principal.map(to_wstr);
         let principal_ptr =
             principal.map(|mut p| p.as_mut_ptr()).unwrap_or(ptr::null_mut());
-        let mut package = str_to_wstr("Kerberos");
+        let mut package = to_wstr("Kerberos");
         let dir =
             if server { sspi::SECPKG_CRED_INBOUND } else { sspi::SECPKG_CRED_OUTBOUND };
         let mut lifetime = LARGE_INTEGER::default();
@@ -111,7 +112,7 @@ impl Cred {
 
 fn alloc_krb5_buf() -> Result<Vec<u8>> {
     let mut ifo = ptr::null_mut::<SecPkgInfoW>();
-    let mut pkg = str_to_wstr("Kerberos");
+    let mut pkg = to_wstr("Kerberos");
     let res =
         unsafe { sspi::QuerySecurityPackageInfoW(pkg.as_mut_ptr(), &mut ifo as *mut _) };
     if !SUCCEEDED(res) {
@@ -293,14 +294,20 @@ impl Drop for ClientCtxInner {
 }
 
 #[derive(Clone)]
-struct ClientCtx(Arc<Mutex<ClientCtxInner>>);
+pub(crate) struct ClientCtx(Arc<Mutex<ClientCtxInner>>);
+
+impl fmt::Debug for ClientCtx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "netidx::os::windows::ClientCtx")
+    }
+}
 
 impl ClientCtx {
-    fn new(cred: Cred, target: &str) -> Result<ClientCtx> {
+    fn new<T: Into<OsString>>(cred: Cred, target: &T) -> Result<ClientCtx> {
         Ok(ClientCtx(Arc::new(Mutex::new(ClientCtxInner {
             ctx: SecHandle::default(),
             cred,
-            target: str_to_wstr(target),
+            target: to_wstr(target),
             attrs: 0,
             lifetime: LARGE_INTEGER::default(),
             buf: alloc_krb5_buf()?,
@@ -443,7 +450,13 @@ impl Drop for ServerCtxInner {
 }
 
 #[derive(Clone)]
-struct ServerCtx(Arc<Mutex<ServerCtxInner>>);
+pub(crate) struct ServerCtx(Arc<Mutex<ServerCtxInner>>);
+
+impl fmt::Debug for ServerCtx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "netidx::os::windows::ServerCtx")
+    }
+}
 
 impl ServerCtx {
     fn new(cred: Cred) -> Result<ServerCtx> {
@@ -588,4 +601,21 @@ impl Krb5ServerCtx for ServerCtx {
             Ok(string_from_wstr(names.sClientName))
         }
     }
+}
+
+pub(crate) fn create_client_ctx(
+    principal: Option<&[u8]>,
+    target_principal: &[u8]
+) -> Result<ClientCtx> {
+    task::block_in_place(|| {
+        let cred = Cred::acquire(principal, false)?;
+        ClientCtx::new(cred, target_principal)
+    })
+}
+
+pub(crate) fn create_server_ctx(principal: Option<&[u8]>) -> Result<ServerCtx> {
+    task::block_in_place(|| {
+        let cred = Cred::acquire(principal, true)?;
+        ServerCtx::new(cred)
+    })
 }

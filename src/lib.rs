@@ -111,6 +111,8 @@ extern crate serde_derive;
 extern crate pin_utils;
 #[macro_use]
 extern crate bitflags;
+#[macro_use]
+extern crate anyhow;
 
 mod pack;
 #[macro_use]
