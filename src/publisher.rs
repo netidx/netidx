@@ -994,7 +994,7 @@ async fn hello_client(
         Token(tok) => match auth {
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
-                let p = spn.as_ref().or(upn.as_ref()).map(|p| p.as_bytes());
+                let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
                 let ctx = os::create_server_ctx(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?

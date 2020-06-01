@@ -44,7 +44,7 @@ pub enum Auth {
     Krb5 { upn: Option<String>, spn: Option<String> },
 }
 
-fn create_ctx(upn: Option<&[u8]>, target_spn: &[u8]) -> Result<(ClientCtx, Bytes)> {
+fn create_ctx(upn: Option<&str>, target_spn: &str) -> Result<(ClientCtx, Bytes)> {
     let ctx = os::create_client_ctx(upn, target_spn)?;
     match ctx.step(None)? {
         None => bail!("client ctx first step produced no token"),
@@ -94,11 +94,10 @@ async fn connect_read(
             (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => match sc {
                 Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
                 None => {
-                    let upn = upn.as_ref().map(|s| s.as_bytes());
+                    let upn = upn.as_ref().map(|s| s.as_str());
                     let target_spn = spns
                         .get(&addr)
-                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?
-                        .as_bytes();
+                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
                     let (ctx, tok) =
                         try_cf!("create ctx", continue, create_ctx(upn, target_spn));
                     (ClientAuthRead::Initiate(tok), Some(ctx))
@@ -266,13 +265,12 @@ async fn connect_write(
             match ctxts.read().get(&resolver_addr) {
                 Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
                 None => {
-                    let upnr = upn.as_ref().map(|s| s.as_bytes());
+                    let upnr = upn.as_ref().map(|s| s.as_str());
                     let target_spn = spns
                         .get(&resolver_addr)
                         .ok_or_else(|| {
                             anyhow!("no target spn for resolver {:?}", resolver_addr)
-                        })?
-                        .as_bytes();
+                        })?;
                     let (ctx, token) = create_ctx(upnr, target_spn)?;
                     let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
                     (ClientAuthWrite::Initiate { spn, token }, Some(ctx))

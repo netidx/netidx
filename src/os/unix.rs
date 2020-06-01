@@ -154,17 +154,17 @@ impl Krb5ServerCtx for ServerCtx {
 }
 
 pub(crate) fn create_client_ctx(
-    principal: Option<&[u8]>,
-    target_principal: &[u8],
+    principal: Option<&str>,
+    target_principal: &str,
 ) -> Result<ClientCtx> {
     task::block_in_place(|| {
         let name = principal
             .map(|n| {
-                Name::new(n, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                Name::new(n.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
                     .canonicalize(Some(&GSS_MECH_KRB5))
             })
             .transpose()?;
-        let target = Name::new(target_principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+        let target = Name::new(target_principal.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
             .canonicalize(Some(&GSS_MECH_KRB5))?;
         let cred = {
             let mut s = OidSet::new()?;
@@ -180,11 +180,11 @@ pub(crate) fn create_client_ctx(
     })
 }
 
-pub(crate) fn create_server_ctx(principal: Option<&[u8]>) -> Result<ServerCtx> {
+pub(crate) fn create_server_ctx(principal: Option<&str>) -> Result<ServerCtx> {
     task::block_in_place(|| {
         let name = principal
             .map(|principal| -> Result<Name> {
-                Ok(Name::new(principal, Some(&GSS_NT_KRB5_PRINCIPAL))?
+                Ok(Name::new(principal.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
                     .canonicalize(Some(&GSS_MECH_KRB5))?)
             })
             .transpose()?;

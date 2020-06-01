@@ -46,7 +46,7 @@ unsafe fn string_from_wstr(s: *const u16) -> String {
     OsString::from_wide(slice).to_string_lossy().to_string()
 }
 
-fn to_wstr<T: Into<OsString>>(s: &T) -> Vec<u16> {
+fn str_to_wstr(s: &str) -> Vec<u16> {
     let mut v = OsString::from(s).encode_wide().collect::<Vec<_>>();
     v.push(0);
     v
@@ -80,12 +80,12 @@ impl Drop for Cred {
 }
 
 impl Cred {
-    fn acquire<T: Into<OsString>>(principal: Option<&T>, server: bool) -> Result<Cred> {
+    fn acquire(principal: Option<&str>, server: bool) -> Result<Cred> {
         let mut cred = SecHandle::default();
-        let principal = principal.map(to_wstr);
+        let principal = principal.map(str_to_wstr);
         let principal_ptr =
             principal.map(|mut p| p.as_mut_ptr()).unwrap_or(ptr::null_mut());
-        let mut package = to_wstr("Kerberos");
+        let mut package = str_to_wstr("Kerberos");
         let dir =
             if server { sspi::SECPKG_CRED_INBOUND } else { sspi::SECPKG_CRED_OUTBOUND };
         let mut lifetime = LARGE_INTEGER::default();
@@ -112,7 +112,7 @@ impl Cred {
 
 fn alloc_krb5_buf() -> Result<Vec<u8>> {
     let mut ifo = ptr::null_mut::<SecPkgInfoW>();
-    let mut pkg = to_wstr("Kerberos");
+    let mut pkg = str_to_wstr("Kerberos");
     let res =
         unsafe { sspi::QuerySecurityPackageInfoW(pkg.as_mut_ptr(), &mut ifo as *mut _) };
     if !SUCCEEDED(res) {
@@ -205,7 +205,7 @@ fn wrap(
     let mut data = buf.split_to(msg.len());
     buf.resize(sizes.cbBlockSize as usize, 0);
     let mut padding = buf.split_to(sizes.cbBlockSize as usize);
-    wrap_iov(ctx, sizes, &mut header, &mut data, &mut padding)?;
+    wrap_iov(ctx, sizes, encrypt, &mut header, &mut data, &mut padding)?;
     data.unsplit(padding);
     header.unsplit(data);
     Ok(header)
@@ -251,20 +251,20 @@ fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {
     let mut ft = FILETIME::default();
     unsafe {
         GetSystemTime(&mut st as *mut _);
-        if !SystemTimeToTzSpecificLocalTime(
+        if 0 == SystemTimeToTzSpecificLocalTime(
             ptr::null_mut(),
             &st as *const _,
             &mut lt as *mut _,
         ) {
-            bail!("failed to convert to local time {}", format_error(GetLastError()))
+            bail!("failed to convert to local time {}", format_error(GetLastError() as i32))
         }
-        if !SystemTimeToFileTime(&lt as *const _, &mut ft as *mut _) {
+        if 0 == SystemTimeToFileTime(&lt as *const _, &mut ft as *mut _) {
             bail!(
                 "failed to convert current time to a filetime: {}",
-                format_error(GetLastError())
+                format_error(GetLastError() as i32)
             )
         }
-        let now: u64 = ft.dwHighDateTime << 32 | ft.dwLowDateTime;
+        let now: u64 = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
         let expires = *lifetime.QuadPart() as u64;
         if expires <= now {
             Ok(Duration::from_secs(0))
@@ -303,11 +303,11 @@ impl fmt::Debug for ClientCtx {
 }
 
 impl ClientCtx {
-    fn new<T: Into<OsString>>(cred: Cred, target: &T) -> Result<ClientCtx> {
+    fn new(cred: Cred, target: &str) -> Result<ClientCtx> {
         Ok(ClientCtx(Arc::new(Mutex::new(ClientCtxInner {
             ctx: SecHandle::default(),
             cred,
-            target: to_wstr(target),
+            target: str_to_wstr(target),
             attrs: 0,
             lifetime: LARGE_INTEGER::default(),
             buf: alloc_krb5_buf()?,
@@ -406,6 +406,7 @@ impl Krb5Ctx for ClientCtx {
 
     fn wrap_iov(
         &self,
+        encrypt: bool,
         header: &mut BytesMut,
         data: &mut BytesMut,
         padding: &mut BytesMut,
@@ -413,7 +414,7 @@ impl Krb5Ctx for ClientCtx {
     ) -> Result<()> {
         let mut guard = self.0.lock();
         let inner = &mut *guard;
-        wrap_iov(&mut inner.ctx, true, &mut inner.sizes, header, data, padding)
+        wrap_iov(&mut inner.ctx, &mut inner.sizes, encrypt, header, data, padding)
     }
 
     fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
@@ -472,7 +473,7 @@ impl ServerCtx {
     }
 
     fn do_step(&self, tok: Option<&[u8]>) -> Result<Option<BytesMut>> {
-        let tok = tok.ok_or_else(|| bail!("no token supplied"))?;
+        let tok = tok.ok_or_else(|| anyhow!("no token supplied"))?;
         let mut guard = self.0.lock();
         let inner = &mut *guard;
         if inner.done {
@@ -560,6 +561,7 @@ impl Krb5Ctx for ServerCtx {
 
     fn wrap_iov(
         &self,
+        encrypt: bool,
         header: &mut BytesMut,
         data: &mut BytesMut,
         padding: &mut BytesMut,
@@ -567,7 +569,7 @@ impl Krb5Ctx for ServerCtx {
     ) -> Result<()> {
         let mut guard = self.0.lock();
         let inner = &mut *guard;
-        wrap_iov(&mut inner.ctx, &mut inner.sizes, header, data, padding)
+        wrap_iov(&mut inner.ctx, &mut inner.sizes, encrypt, header, data, padding)
     }
 
     fn unwrap_iov(&self, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
@@ -591,7 +593,7 @@ impl Krb5ServerCtx for ServerCtx {
         let mut inner = self.0.lock();
         unsafe {
             let res = sspi::QueryContextAttributesW(
-                inner.ctx,
+                &mut inner.ctx as *mut _,
                 sspi::SECPKG_ATTR_NATIVE_NAMES,
                 &mut names as *mut _ as *mut c_void,
             );
@@ -604,8 +606,8 @@ impl Krb5ServerCtx for ServerCtx {
 }
 
 pub(crate) fn create_client_ctx(
-    principal: Option<&[u8]>,
-    target_principal: &[u8]
+    principal: Option<&str>,
+    target_principal: &str
 ) -> Result<ClientCtx> {
     task::block_in_place(|| {
         let cred = Cred::acquire(principal, false)?;
@@ -613,7 +615,7 @@ pub(crate) fn create_client_ctx(
     })
 }
 
-pub(crate) fn create_server_ctx(principal: Option<&[u8]>) -> Result<ServerCtx> {
+pub(crate) fn create_server_ctx(principal: Option<&str>) -> Result<ServerCtx> {
     task::block_in_place(|| {
         let cred = Cred::acquire(principal, true)?;
         ServerCtx::new(cred)

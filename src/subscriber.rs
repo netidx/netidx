@@ -871,8 +871,8 @@ async fn hello_publisher(
             }
         }
         Auth::Krb5 { upn, .. } => {
-            let p = upn.as_ref().map(|p| p.as_bytes());
-            let ctx = os::create_client_ctx(p, target_spn.as_bytes())?;
+            let p = upn.as_ref().map(|p| p.as_str());
+            let ctx = os::create_client_ctx(p, target_spn)?;
             let tok = ctx
                 .step(None)?
                 .map(|b| utils::bytes(&*b))
