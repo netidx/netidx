@@ -4,17 +4,34 @@ extern crate serde_derive;
 #[macro_use]
 extern crate netidx;
 
-use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use log::warn;
+use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
 mod publisher;
 mod resolver;
-mod resolver_server;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
+
+#[cfg(unix)]
+mod resolver_server;
+
+#[cfg(not(unix))]
+mod resolver_server {
+    use netidx::config;
+
+    pub(crate) fn run(
+        _config: config::Config,
+        _permissions: config::PMap,
+        _daemonize: bool,
+        _delay_reads: bool,
+        _id: usize,
+    ) {
+        todo!("the resolver server is not yet ported to this platform")
+    }
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "json-pubsub")]
@@ -180,6 +197,9 @@ fn main() {
     };
     match opt.cmd {
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
+            if !cfg!(unix) {
+                todo!("the resolver server is not yet ported to this platform")
+            }
             let anon = match cfg.auth {
                 config::Auth::Anonymous => true,
                 config::Auth::Krb5(_) => false,

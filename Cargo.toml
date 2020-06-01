@@ -14,7 +14,7 @@ categories = ["network-programming"]
 libgssapi = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi"]}
+winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi", "ntsecapi"]}
 
 [dependencies]
 log = "0.4"
