@@ -9,6 +9,8 @@ use std::{
     str,
 };
 
+/// This is a thin wrapper around a Bytes that guarantees that it's contents are
+/// well formed unicode.
 #[derive(Clone)]
 pub struct Chars(Bytes);
 

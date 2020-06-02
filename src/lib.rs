@@ -118,12 +118,12 @@ mod pack;
 #[macro_use]
 pub mod utils;
 mod auth;
-pub mod channel;
+mod channel;
 pub mod chars;
 pub mod config;
 mod os;
 pub mod path;
-pub mod protocol;
+mod protocol;
 pub mod publisher;
 pub mod resolver;
 pub mod resolver_server;

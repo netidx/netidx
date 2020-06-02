@@ -246,6 +246,7 @@ impl Config {
         })
     }
 
+    /// Load the cluster config from the specified file.
     pub fn load_from_file<P: AsRef<FsPath>>(file: P) -> Result<Config> {
         Config::parse(&read_to_string(file)?)
     }
