@@ -11,7 +11,7 @@ use libgssapi::{
     oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
     util::{Buf, GssIov, GssIovFake, GssIovType},
 };
-use std::{process::Command, time::Duration, net::IpAddr};
+use std::{process::Command, time::Duration};
 use tokio::task;
 
 fn wrap_iov(
@@ -160,11 +160,11 @@ pub(crate) fn create_client_ctx(
     task::block_in_place(|| {
         let name = principal
             .map(|n| {
-                Name::new(n.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
+                Name::new(n.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
                     .canonicalize(Some(&GSS_MECH_KRB5))
             })
             .transpose()?;
-        let target = Name::new(target_principal.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
+        let target = Name::new(target_principal.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
             .canonicalize(Some(&GSS_MECH_KRB5))?;
         let cred = {
             let mut s = OidSet::new()?;
@@ -184,7 +184,7 @@ pub(crate) fn create_server_ctx(principal: Option<&str>) -> Result<ServerCtx> {
     task::block_in_place(|| {
         let name = principal
             .map(|principal| -> Result<Name> {
-                Ok(Name::new(principal.to_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
+                Ok(Name::new(principal.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
                     .canonicalize(Some(&GSS_MECH_KRB5))?)
             })
             .transpose()?;
