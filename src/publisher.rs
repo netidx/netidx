@@ -1076,6 +1076,20 @@ async fn client_loop(
                     }
                 }
             },
+            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
+                Err(e) => return Err(Error::from(e)),
+                Ok(()) => {
+                    let now = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)?
+                        .as_secs();
+                    handle_batch(
+                        &t, &updates, &addr, batch.drain(..), &mut con,
+                        &mut write_batches, &ctxts, &desired_auth, now,
+                        &mut deferred_subs,
+                    ).await?;
+                    con.flush().await?
+                }
+            },
             to_cl = flushes.next() => match to_cl {
                 None => break Ok(()),
                 Some(timeout) => {
@@ -1096,20 +1110,6 @@ async fn client_loop(
                         None => f.await?,
                         Some(d) => time::timeout(d, f).await??
                     }
-                }
-            },
-            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs();
-                    handle_batch(
-                        &t, &updates, &addr, batch.drain(..), &mut con,
-                        &mut write_batches, &ctxts, &desired_auth, now,
-                        &mut deferred_subs,
-                    ).await?;
-                    con.flush().await?
                 }
             },
             _ = hb.next() => {
