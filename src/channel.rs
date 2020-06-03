@@ -193,7 +193,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
     mut soc: ReadHalf<TcpStream>,
     mut set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<BytesMut> {
-    let (mut tx, rx) = mpsc::channel(10);
+    let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
         let mut ctx: Option<C> = None;

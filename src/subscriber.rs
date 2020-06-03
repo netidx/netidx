@@ -1005,7 +1005,7 @@ fn decode_task(
     mut con: ReadChannel<ClientCtx>,
     mut buf_return: UnboundedReceiver<Vec<From>>,
 ) -> Receiver<Result<(Vec<From>, bool)>> {
-    let (mut send, recv) = mpsc::channel(10);
+    let (mut send, recv) = mpsc::channel(3);
     task::spawn(async move {
         let mut bufs: Vec<Vec<From>> = Vec::new();
         let mut buf: Vec<From> = Vec::new();
@@ -1013,7 +1013,7 @@ fn decode_task(
             select_biased! {
                 b = buf_return.next() => match b {
                     None => break Ok(()),
-                    Some(b) => { bufs.push(b); }
+                    Some(b) => if bufs.len() < 1000 { bufs.push(b); }
                 },
                 r = con.receive_batch(&mut buf).fuse() => match r {
                     Err(e) => {
