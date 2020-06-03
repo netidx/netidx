@@ -36,6 +36,7 @@ bitflags = "1"
 arc-swap = "0.4"
 trust-dns-resolver = "0.19"
 get_if_addrs = "0.5"
+base64 = "0.12"
 
 [dev-dependencies]
 proptest = "0.9"

@@ -93,13 +93,13 @@ pub(crate) mod file {
 fn lookup_txt(name: &str) -> Result<String> {
     use trust_dns_resolver::Resolver;
     let resolver = Resolver::from_system_conf()?;
-    let mut s = String::new();
+    let mut buf = Vec::new();
     if let Some(txt) = resolver.txt_lookup(name)?.iter().next() {
         for data in txt.txt_data() {
-            s.push_str(&*String::from_utf8_lossy(&*data))
+            buf.extend_from_slice(data);
         }
     }
-    Ok(s)
+    Ok(String::from_utf8(base64::decode(buf)?)?)
 }
 
 type Permissions = String;
