@@ -1088,33 +1088,6 @@ async fn connection(
                 }
                 try_cf!(try_flush(&mut write_con).await)
             },
-            r = batches.next() => match r {
-                Some(Ok((mut batch, true))) => {
-                    msg_recvd = true;
-                    process_updates_batch(
-                        &mut by_chan,
-                        &mut batch,
-                        &mut subscriptions
-                    ).await;
-                    try_cf!(return_batch.unbounded_send(batch));
-                    try_cf!(try_flush(&mut write_con).await)
-                },
-                Some(Ok((mut batch, false))) =>
-                    if let Some(subscriber) = subscriber.upgrade() {
-                        msg_recvd = true;
-                        try_cf!(process_batch(
-                            &mut batch,
-                            &mut subscriptions,
-                            &mut pending,
-                            &mut write_con,
-                            &subscriber,
-                            addr).await);
-                        try_cf!(return_batch.unbounded_send(batch));
-                        try_cf!(try_flush(&mut write_con).await)
-                    }
-                Some(Err(e)) => break Err(Error::from(e)),
-                None => break Err(anyhow!("EOF")),
-            },
             msg = from_sub.next() => match msg {
                 None => break Err(anyhow!("dropped")),
                 Some(BatchItem::EndBatch) => {
@@ -1169,6 +1142,33 @@ async fn connection(
                 Some(BatchItem::InBatch(ToCon::Flush(tx))) => {
                     let _ = tx.send(());
                 }
+            },
+            r = batches.next() => match r {
+                Some(Ok((mut batch, true))) => {
+                    msg_recvd = true;
+                    process_updates_batch(
+                        &mut by_chan,
+                        &mut batch,
+                        &mut subscriptions
+                    ).await;
+                    try_cf!(return_batch.unbounded_send(batch));
+                    try_cf!(try_flush(&mut write_con).await)
+                },
+                Some(Ok((mut batch, false))) =>
+                    if let Some(subscriber) = subscriber.upgrade() {
+                        msg_recvd = true;
+                        try_cf!(process_batch(
+                            &mut batch,
+                            &mut subscriptions,
+                            &mut pending,
+                            &mut write_con,
+                            &subscriber,
+                            addr).await);
+                        try_cf!(return_batch.unbounded_send(batch));
+                        try_cf!(try_flush(&mut write_con).await)
+                    }
+                Some(Err(e)) => break Err(Error::from(e)),
+                None => break Err(anyhow!("EOF")),
             },
         }
     };

@@ -1052,6 +1052,13 @@ async fn client_loop(
     hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
+            _ = hb.next() => {
+                if !msg_sent {
+                    con.queue_send(&publisher::v1::From::Heartbeat)?;
+                    con.flush().await?;
+                }
+                msg_sent = false;
+            },
             s = deferred_subs.next() => match s {
                 None => (),
                 Some(BatchItem::InBatch(v)) => { deferred_subs_batch.push(v); }
@@ -1111,13 +1118,6 @@ async fn client_loop(
                         Some(d) => time::timeout(d, f).await??
                     }
                 }
-            },
-            _ = hb.next() => {
-                if !msg_sent {
-                    con.queue_send(&publisher::v1::From::Heartbeat)?;
-                    con.flush().await?;
-                }
-                msg_sent = false;
             },
         }
     }
