@@ -42,8 +42,6 @@ use tokio::{
 };
 
 static MAX_CLIENTS: usize = 768;
-static SND_BUF: usize = 4 * 1024 * 1024;
-static RECV_BUF: usize = 4 * 1024 * 1024;
 
 make_pool!(pub, BATCHES, Batch, (Id, Value), 1000);
 
@@ -1149,8 +1147,6 @@ async fn accept_loop(
                     if pb.clients.len() < MAX_CLIENTS {
                         let (tx, rx) = channel(1);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
-                        try_cf!("sndbuf", continue, s.set_send_buffer_size(SND_BUF));
-                        try_cf!("rcvbuf", continue, s.set_recv_buffer_size(RECV_BUF));
                         let updates = Arc::new(SegQueue::new());
                         pb.clients.insert(addr, Client {
                             flush_trigger: tx,

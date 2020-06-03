@@ -19,7 +19,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
             .into_iter()
             .map(|path| subscriber.durable_subscribe(path))
             .collect::<Vec<Dval>>();
-        let (tx, mut vals) = mpsc::channel(100000);
+        let (tx, mut vals) = mpsc::channel(3);
         for s in subs.iter() {
             s.updates(true, tx.clone())
         }

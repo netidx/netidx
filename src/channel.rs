@@ -1,15 +1,10 @@
 use crate::{os::Krb5Ctx, pack::Pack};
 use anyhow::{anyhow, Error, Result};
-use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use byteorder::{BigEndian, ByteOrder};
+use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
 use futures::{prelude::*, select_biased};
 use log::info;
-use std::{
-    cmp::min,
-    fmt::Debug,
-    mem, result,
-    time::Duration,
-};
+use std::{cmp::min, fmt::Debug, mem, result, time::Duration};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -296,7 +291,9 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
                 batch.push(T::decode(&mut self.buf)?);
             }
             match self.incoming.try_recv() {
-                Ok(b) => { self.buf = b; },
+                Ok(b) => {
+                    self.buf = b;
+                }
                 Err(_) => break,
             }
         }

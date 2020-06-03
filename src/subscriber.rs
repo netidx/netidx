@@ -5,10 +5,7 @@ use crate::{
     config::Config,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
-    protocol::{
-        self,
-        publisher::v1::{From, Id, To},
-    },
+    protocol::publisher::v1::{From, Id, To},
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
@@ -42,8 +39,6 @@ use tokio::{
 };
 
 const BATCH: usize = 100_000;
-static SND_BUF: usize = 4 * 1024 * 1024;
-static RECV_BUF: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -899,13 +894,14 @@ const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
 make_pool!(pub, BATCHES, Batch, (SubId, Value), 1000);
+make_pool!(DECODE_BATCHES, DecodeBatch, From, 1000);
 
 // This is the fast path for the common case where the batch contains
 // only updates. As of 2020-04-30, sending to an mpsc channel is
 // pretty slow, about 250ns, so we go to great lengths to avoid it.
 async fn process_updates_batch(
     by_chan: &mut HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher>,
-    batch: &mut Vec<protocol::publisher::v1::From>,
+    mut batch: DecodeBatch,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
     for m in batch.drain(..) {
@@ -928,7 +924,7 @@ async fn process_updates_batch(
 }
 
 async fn process_batch(
-    batch: &mut Vec<protocol::publisher::v1::From>,
+    mut batch: DecodeBatch,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
     con: &mut WriteChannel<ClientCtx>,
@@ -1005,26 +1001,22 @@ async fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
 
 fn decode_task(
     mut con: ReadChannel<ClientCtx>,
-    mut buf_return: UnboundedReceiver<Vec<From>>,
-) -> Receiver<Result<(Vec<From>, bool)>> {
+    stop: oneshot::Receiver<()>,
+) -> Receiver<Result<(DecodeBatch, bool)>> {
     let (mut send, recv) = mpsc::channel(3);
+    let mut stop = stop.fuse();
     task::spawn(async move {
-        let mut bufs: Vec<Vec<From>> = Vec::new();
-        let mut buf: Vec<From> = Vec::new();
-        let r = loop {
+        let mut buf = DecodeBatch::new();
+        let r: Result<(), anyhow::Error> = loop {
             select_biased! {
-                b = buf_return.next() => match b {
-                    None => break Ok(()),
-                    Some(b) => if bufs.len() < 1000 { bufs.push(b); }
-                },
+                _ = stop => { break Ok(()); },
                 r = con.receive_batch(&mut buf).fuse() => match r {
                     Err(e) => {
                         buf.clear();
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
-                        let next = bufs.pop().unwrap_or_else(Vec::new);
-                        let batch = mem::replace(&mut buf, next);
+                        let batch = mem::replace(&mut buf, DecodeBatch::new());
                         let only_updates = batch.iter().all(|v| match v {
                             From::Update(_, _) => true,
                             _ => false
@@ -1054,13 +1046,11 @@ async fn connection(
     let mut from_sub = Batched::new(from_sub, BATCH);
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
     soc.set_nodelay(true)?;
-    soc.set_send_buffer_size(SND_BUF)?;
-    soc.set_recv_buffer_size(RECV_BUF)?;
     let mut con = Channel::new(soc);
     hello_publisher(&mut con, &auth, &target_spn).await?;
     let (read_con, mut write_con) = con.split();
-    let (return_batch, read_returned) = mpsc::unbounded();
-    let mut batches = decode_task(read_con, read_returned);
+    let (tx_stop, rx_stop) = oneshot::channel();
+    let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let mut by_receiver: HashMap<ChanWrap<Batch>, ChanId> = HashMap::new();
     let mut by_chan: HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher> =
@@ -1154,23 +1144,21 @@ async fn connection(
                     msg_recvd = true;
                     process_updates_batch(
                         &mut by_chan,
-                        &mut batch,
+                        batch,
                         &mut subscriptions
                     ).await;
-                    try_cf!(return_batch.unbounded_send(batch));
                     try_cf!(try_flush(&mut write_con).await)
                 },
                 Some(Ok((mut batch, false))) =>
                     if let Some(subscriber) = subscriber.upgrade() {
                         msg_recvd = true;
                         try_cf!(process_batch(
-                            &mut batch,
+                            batch,
                             &mut subscriptions,
                             &mut pending,
                             &mut write_con,
                             &subscriber,
                             addr).await);
-                        try_cf!(return_batch.unbounded_send(batch));
                         try_cf!(try_flush(&mut write_con).await)
                     }
                 Some(Err(e)) => break Err(Error::from(e)),
@@ -1188,6 +1176,7 @@ async fn connection(
             let _ = req.finished.send(Err(anyhow!("connection died")));
         }
     }
+    let _ = tx_stop.send(());
     info!("connection to {:?} shutting down {:?}", addr, res);
     res
 }

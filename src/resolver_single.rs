@@ -10,7 +10,7 @@ use crate::{
     },
     utils::{self, Pooled},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, Error};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
@@ -83,6 +83,7 @@ async fn connect_read(
         }
         n += 1;
         let con = cwt!("connect", TcpStream::connect(&addr));
+        try_cf!("no delay", con.set_nodelay(true));
         let mut con = Channel::new(con);
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
@@ -253,6 +254,7 @@ async fn connect_write(
 ) -> Result<(u64, Channel<ClientCtx>)> {
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
+    con.set_nodelay(true)?;
     let mut con = Channel::new(con);
     wt!(con.send_one(&1u64))??;
     let _version: u64 = wt!(con.receive())??;
