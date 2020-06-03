@@ -52,7 +52,7 @@ async fn flush_buf<B: Buf>(
 fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
     mut soc: WriteHalf<TcpStream>,
 ) -> Sender<ToFlush<C>> {
-    let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(10);
+    let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
     task::spawn(async move {
         let mut ctx: Option<C> = None;
         let mut header = BytesMut::new();
