@@ -42,6 +42,8 @@ use tokio::{
 };
 
 const BATCH: usize = 100_000;
+static SND_BUF: usize = 4 * 1024 * 1024;
+static RECV_BUF: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -1050,7 +1052,11 @@ async fn connection(
     let mut idle: usize = 0;
     let mut msg_recvd = false;
     let mut from_sub = Batched::new(from_sub, BATCH);
-    let mut con = Channel::new(time::timeout(PERIOD, TcpStream::connect(addr)).await??);
+    let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
+    soc.set_nodelay(true)?;
+    soc.set_send_buffer_size(SND_BUF)?;
+    soc.set_recv_buffer_size(RECV_BUF)?;
+    let mut con = Channel::new(soc);
     hello_publisher(&mut con, &auth, &target_spn).await?;
     let (read_con, mut write_con) = con.split();
     let (return_batch, read_returned) = mpsc::unbounded();
