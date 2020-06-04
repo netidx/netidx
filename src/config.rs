@@ -9,11 +9,11 @@ use std::{
     },
     convert::AsRef,
     default::Default,
+    env,
     fs::read_to_string,
     net::SocketAddr,
-    path::{Path as FsPath, PathBuf as FsPathBuf},
+    path::Path as FsPath,
     time::Duration,
-    env,
 };
 
 pub(crate) mod file {
@@ -254,7 +254,7 @@ impl Config {
             if home.is_file() {
                 return Config::load(home);
             }
-        } 
+        }
         bail!("no default config file was found")
     }
 }
