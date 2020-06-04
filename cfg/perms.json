@@ -1,0 +1,13 @@
+{
+    "/": {
+      	"root@YOUR-KRB5-REALM": "swlpd",
+        "domain users": "!swlpd",
+    },
+    "/example/path": {
+        "domain users": "sl",
+        "publisher@YOUR-KRB5-REALM": "p",
+    },
+    "/anon": {
+        "": "swlpd"
+    }
+}

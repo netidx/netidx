@@ -11,8 +11,9 @@ use std::{
     default::Default,
     fs::read_to_string,
     net::SocketAddr,
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf as FsPathBuf},
     time::Duration,
+    env,
 };
 
 pub(crate) mod file {
@@ -90,18 +91,6 @@ pub(crate) mod file {
     }
 }
 
-fn lookup_txt(name: &str) -> Result<String> {
-    use trust_dns_resolver::Resolver;
-    let resolver = Resolver::from_system_conf()?;
-    let mut buf = Vec::new();
-    if let Some(txt) = resolver.txt_lookup(name)?.iter().next() {
-        for data in txt.txt_data() {
-            buf.extend_from_slice(data);
-        }
-    }
-    Ok(String::from_utf8(base64::decode(buf)?)?)
-}
-
 type Permissions = String;
 type Entity = String;
 
@@ -125,17 +114,8 @@ impl PMap {
         Ok(pmap)
     }
 
-    pub fn load_from_file(file: &str) -> Result<PMap> {
+    pub fn load(file: &str) -> Result<PMap> {
         PMap::parse(&read_to_string(file)?)
-    }
-
-    /// If you wish you can store your netindex permission map in a
-    /// DNS TXT record. The default name is "netindex-permissions"
-    /// where <your-fqdn> is replaced with the fully qualified domain
-    /// name of the machine this function is run on. Or you can
-    /// specify a custom name.
-    pub fn load_from_dns(name: Option<&str>) -> Result<PMap> {
-        PMap::parse(&lookup_txt(name.unwrap_or("netindex-permissions"))?)
     }
 }
 
@@ -247,19 +227,35 @@ impl Config {
     }
 
     /// Load the cluster config from the specified file.
-    pub fn load_from_file<P: AsRef<FsPath>>(file: P) -> Result<Config> {
+    pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
         Config::parse(&read_to_string(file)?)
     }
 
-    /// If you wish to have a network wide netindex cluster
-    /// configuration without the need to sync config files between
-    /// machines then you may store the configuration in a DNS TXT
-    /// record. If you specify a name, then this function will try to
-    /// find the config at that name, you may need this for a complex
-    /// configuration, for example if you have multiple clusters in a
-    /// hierarchy but only one DNS domain. If no name is specified
-    /// then the default name is, "netindex".
-    pub fn load_from_dns(name: Option<&str>) -> Result<Config> {
-        Config::parse(&lookup_txt(name.unwrap_or("netindex"))?)
+    /// This try in order,
+    /// * $NETIDX_CFG
+    /// * ~/.config/netidx.json
+    /// * ~/.netidx.json
+    /// * /etc/netidx.json
+    pub fn load_default() -> Result<Config> {
+        let home = env::var_os("HOME").map(FsPathBuf::from);
+        if let Some(cfg) = env::var_os("NETIDX_CFG") {
+            Config::load(cfg)
+        } else if let Some(home) = &home {
+            let mut cfg = home.clone();
+            cfg.push(".config/netidx.json");
+            if cfg.is_file() {
+                Config::load(cfg)
+            } else {
+                let mut cfg = home.clone();
+                cfg.push(".netidx.json");
+                if cfg.is_file() {
+                    Config::load(cfg)
+                } else {
+                    Config::load("/etc/netidx.json")
+                }
+            }
+        } else {
+            Config::load("/etc/netidx.json")
+        }
     }
 }

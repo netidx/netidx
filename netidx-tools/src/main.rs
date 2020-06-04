@@ -39,10 +39,9 @@ struct Opt {
     #[structopt(
         short = "c",
         long = "config",
-        help = "config, either file:PATH, or dns:NAME, or just dns for the default",
-        default_value = "dns"
+        help = "override the default config file location (~/.config/netidx.json)"
     )]
-    config: String,
+    config: Option<String>,
     #[structopt(subcommand)]
     cmd: Sub,
 }
@@ -67,7 +66,7 @@ enum Sub {
         #[structopt(
             short = "p",
             long = "permissions",
-            help = "location of the permissions, file:PATH or dns:NAME, or just dns"
+            help = "location of the permissions file"
         )]
         permissions: Option<String>,
     },
@@ -182,18 +181,9 @@ fn auth(krb5: bool, upn: Option<String>, spn: Option<String>) -> Auth {
 fn main() {
     env_logger::init();
     let opt = Opt::from_args();
-    let cfg = {
-        if &opt.config == "dns" {
-            config::Config::load_from_dns(None).expect("config")
-        } else if opt.config.starts_with("dns:") {
-            config::Config::load_from_dns(Some(opt.config.trim_start_matches("dns:")))
-                .expect("config")
-        } else if opt.config.starts_with("file:") {
-            config::Config::load_from_file(opt.config.trim_start_matches("file:"))
-                .expect("config")
-        } else {
-            panic!("{} unrecognized config location", opt.config);
-        }
+    let cfg = match opt.config {
+        None => config::Config::load_default().unwrap(),
+        Some(path) => config::Config::load(path).unwrap(),
     };
     match opt.cmd {
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
@@ -211,19 +201,7 @@ fn main() {
                     warn!("ignoring --permissions, server not using Kerberos");
                     config::PMap::default()
                 }
-                Some(p) => {
-                    if p == "dns" {
-                        config::PMap::load_from_dns(None).expect("permissions")
-                    } else if p.starts_with("dns:") {
-                        config::PMap::load_from_dns(Some(p.trim_start_matches("dns:")))
-                            .expect("permissions")
-                    } else if p.starts_with("file:") {
-                        config::PMap::load_from_file(p.trim_start_matches("file:"))
-                            .expect("permissions")
-                    } else {
-                        panic!("{} unrecognized permissions location", p)
-                    }
-                }
+                Some(p) => config::PMap::load(&p).unwrap(),
             };
             resolver_server::run(cfg, permissions, !foreground, delay_reads, id)
         }
