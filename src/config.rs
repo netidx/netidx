@@ -231,31 +231,30 @@ impl Config {
         Config::parse(&read_to_string(file)?)
     }
 
-    /// This try in order,
+    /// This will try in order,
+    ///
     /// * $NETIDX_CFG
-    /// * ~/.config/netidx.json
-    /// * ~/.netidx.json
-    /// * /etc/netidx.json
+    /// * ${dirs::config_dir}/netidx.json
+    /// * ${dirs::home_dir}/.netidx.json
+    ///
+    /// It will load the first file that exists, if that file fails to
+    /// load then Err will be returned.
     pub fn load_default() -> Result<Config> {
-        let home = env::var_os("HOME").map(FsPathBuf::from);
         if let Some(cfg) = env::var_os("NETIDX_CFG") {
-            Config::load(cfg)
-        } else if let Some(home) = &home {
-            let mut cfg = home.clone();
-            cfg.push(".config/netidx.json");
-            if cfg.is_file() {
-                Config::load(cfg)
-            } else {
-                let mut cfg = home.clone();
-                cfg.push(".netidx.json");
-                if cfg.is_file() {
-                    Config::load(cfg)
-                } else {
-                    Config::load("/etc/netidx.json")
-                }
-            }
-        } else {
-            Config::load("/etc/netidx.json")
+            return Config::load(cfg);
         }
+        if let Some(mut cfg) = dirs::config_dir() {
+            cfg.push("netidx.json");
+            if cfg.is_file() {
+                return Config::load(cfg);
+            }
+        }
+        if let Some(mut home) = dirs::home_dir() {
+            home.push(".netidx.json");
+            if home.is_file() {
+                return Config::load(home);
+            }
+        } 
+        bail!("no default config file was found")
     }
 }
