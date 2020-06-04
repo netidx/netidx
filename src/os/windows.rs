@@ -241,8 +241,12 @@ fn unwrap_iov(ctx: &mut SecHandle, len: usize, msg: &mut BytesMut) -> Result<Byt
     if !SUCCEEDED(res) {
         bail!("decrypt message failed {}", format_error(res))
     }
-    msg.advance(bufs[1].pvBuffer as usize - bufs[0].pvBuffer as usize);
-    Ok(msg.split_to(bufs[1].cbBuffer as usize))
+    let hdr_len = bufs[1].pvBuffer as usize - bufs[0].pvBuffer as usize;
+    let data_len = bufs[1].cbBuffer as usize;
+    msg.advance(hdr_len);
+    let data = msg.split_to(data_len);
+    msg.advance(len - hdr_len - data_len); // padding
+    Ok(data)
 }
 
 fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {

@@ -7,7 +7,10 @@ use netidx::{
     subscriber::{DvState, Dval, Subscriber},
 };
 use std::time::Duration;
-use tokio::{runtime::Runtime, time::{self, Instant}};
+use tokio::{
+    runtime::Runtime,
+    time::{self, Instant},
+};
 
 pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
@@ -54,7 +57,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
                             }
                         }
                         println!(
-                            "subscribed: {} unsubscribed: {}({}) rx: {:.0} rx(avg): {:.0} batch(avg): {:.0}",
+                            "sub: {} !sub: {}({}) rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
                             subscribed,
                             unsubscribed,
                             fatal,
