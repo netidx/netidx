@@ -170,8 +170,8 @@ fn wrap_iov(
     data: &mut BytesMut,
     padding: &mut BytesMut,
 ) -> Result<()> {
-    header.resize(sizes.cbSecurityTrailer as usize, 0x0);
-    padding.resize(sizes.cbBlockSize as usize, 0x0);
+    header.resize(sizes.cbSecurityTrailer as usize, 0);
+    padding.resize(sizes.cbBlockSize as usize, 0);
     let mut buffers = [
         SecBuffer {
             BufferType: sspi::SECBUFFER_TOKEN,
@@ -212,19 +212,17 @@ fn wrap(
     encrypt: bool,
     msg: &[u8],
 ) -> Result<BytesMut> {
-    let mut buf = BytesMut::with_capacity(
-        (sizes.cbSecurityTrailer + sizes.cbBlockSize) as usize + msg.len(),
-    );
-    buf.extend((0..sizes.cbSecurityTrailer).map(|_| 0));
-    let mut header = buf.split_to(sizes.cbSecurityTrailer as usize);
-    buf.extend_from_slice(msg);
-    let mut data = buf.split_to(msg.len());
-    buf.extend((0..sizes.cbBlockSize).into_iter().map(|_| 0));
-    let mut padding = buf.split_to(sizes.cbBlockSize as usize);
+    let mut header = BytesMut::new();
+    header.resize(sizes.cbSecurityTrailer as usize, 0);
+    let mut data = BytesMut::from(msg);
+    let mut padding = BytesMut::new();
+    padding.resize(sizes.cbBlockSize as usize, 0);
     wrap_iov(ctx, sizes, encrypt, &mut header, &mut data, &mut padding)?;
-    header.unsplit(data);
-    header.unsplit(padding);
-    Ok(header)
+    let mut msg = BytesMut::with_capacity(header.len() + data.len() + padding.len());
+    msg.extend_from_slice(&*header);
+    msg.extend_from_slice(&*data);
+    msg.extend_from_slice(&*padding);
+    Ok(msg)
 }
 
 fn unwrap_iov(ctx: &mut SecHandle, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
