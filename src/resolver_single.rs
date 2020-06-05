@@ -310,7 +310,7 @@ async fn connect_write(
                 ctxts.insert(r.resolver_id, ctx.clone());
                 ctxts.insert(resolver_addr, ctx);
             }
-            wt!(con.send_one(&ReadyForOwnershipCheck));
+            wt!(con.send_one(&ReadyForOwnershipCheck))??;
             info!("write_con all traffic now encrypted");
         }
     }
