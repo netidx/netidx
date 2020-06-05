@@ -10,7 +10,7 @@ use crate::{
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
             FromWrite, Resolved, ServerAuthWrite, ServerHelloRead, ServerHelloWrite,
-            ToRead, ToWrite,
+            ToRead, ToWrite, ReadyForOwnershipCheck,
         },
     },
     resolver_store::{Store, StoreInner},
@@ -250,6 +250,8 @@ async fn hello_client_write(
                 send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
+                let _: ReadyForOwnershipCheck =
+                    time::timeout(cfg.hello_timeout, con.receive()).await??;
                 info!(
                     "hello_write connecting to {:?} for listener ownership check",
                     hello.write_addr

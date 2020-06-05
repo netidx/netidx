@@ -308,6 +308,24 @@ impl Pack for ServerHelloWrite {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyForOwnershipCheck;
+
+impl Pack for ReadyForOwnershipCheck {
+    fn len(&self) -> usize { 1 }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        Ok(buf.put_u8(0))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(ReadyForOwnershipCheck),
+            _ => Err(PackError::UnknownTag)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToRead {
     /// Resolve path to addresses/ports
     Resolve(Path),

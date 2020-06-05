@@ -1008,7 +1008,6 @@ async fn hello_client(
         },
         ResolverAuthenticate(id, tok) => {
             info!("hello_client processing listener ownership check from resolver");
-            time::delay_for(Duration::from_secs(2)).await;
             let ctx = ctxts
                 .read()
                 .get(&id)

@@ -6,7 +6,7 @@ use crate::{
     path::Path,
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite, ReadyForOwnershipCheck,
     },
     utils::{self, Pooled},
 };
@@ -310,6 +310,7 @@ async fn connect_write(
                 ctxts.insert(r.resolver_id, ctx.clone());
                 ctxts.insert(resolver_addr, ctx);
             }
+            wt!(con.send_one(&ReadyForOwnershipCheck));
             info!("write_con all traffic now encrypted");
         }
     }
