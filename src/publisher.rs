@@ -14,10 +14,10 @@ use anyhow::{anyhow, Error, Result};
 use crossbeam::queue::SegQueue;
 use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectAll};
 use fxhash::FxBuildHasher;
+use get_if_addrs::get_if_addrs;
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
-use get_if_addrs::get_if_addrs;
 use std::{
     boxed::Box,
     cmp::{Ord, Ordering, PartialOrd},
@@ -420,7 +420,8 @@ impl BindCfg {
                 }
             }
             BindCfg::Match { addr, netmask } => {
-                let selected = get_if_addrs()?.iter()
+                let selected = get_if_addrs()?
+                    .iter()
                     .filter_map(|i| match (i.ip(), addr, netmask) {
                         (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
                             let masked = Ipv4Addr::from(
@@ -1007,24 +1008,17 @@ async fn hello_client(
         },
         ResolverAuthenticate(id, tok) => {
             info!("hello_client processing listener ownership check from resolver");
-            for _ in 0..10 {
-                let ctx = ctxts.read().get(&id).cloned();
-                match ctx {
-                    None => {
-                        time::delay_for(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    Some(ctx) => {
-                        let n = ctx.unwrap(&*tok)?;
-                        let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-                        debug!("the ownership check salt is {}, sending reply {}", n, n + 2);
-                        let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
-                        con.send_one(&ResolverAuthenticate(id, tok)).await?;
-                        return Ok(());
-                    }
-                }
-            }
-            bail!("no security context")
+            time::delay_for(Duration::from_secs(2)).await;
+            let ctx = ctxts
+                .read()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no security context"))?;
+            let n = ctx.unwrap(&*tok)?;
+            let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+            let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+            con.send_one(&ResolverAuthenticate(id, tok)).await?;
+            return Ok(());
         }
     }
     Ok(())

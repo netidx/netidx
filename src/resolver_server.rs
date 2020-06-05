@@ -267,7 +267,6 @@ async fn hello_client_write(
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
                 let salt = salt();
-                debug!("the salt is {}, expecting {}", salt, salt + 2);
                 let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
                 let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
