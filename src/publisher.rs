@@ -886,14 +886,23 @@ async fn handle_batch(
                         deferred_subs,
                     )?,
                     Auth::Krb5 { .. } => match ctxts.get(&resolver) {
-                        None => con.queue_send(&From::Denied(path))?,
+                        None => {
+                            debug!("denied, no context for {}", resolver);
+                            con.queue_send(&From::Denied(path))?
+                        },
                         Some(ctx) => match ctx.unwrap(&token) {
-                            Err(_) => con.queue_send(&From::Denied(path))?,
+                            Err(e) => {
+                                debug!("denied, unwrap error {}", e);
+                                con.queue_send(&From::Denied(path))?
+                            },
                             Ok(b) => {
                                 let mut b = utils::bytesmut(&*b);
                                 let tok = PermissionToken::decode(&mut b);
                                 match tok {
-                                    Err(_) => con.queue_send(&From::Denied(path))?,
+                                    Err(e) => {
+                                        debug!("denied, decode token err {}", e);
+                                        con.queue_send(&From::Denied(path))?
+                                    },
                                     Ok(PermissionToken {
                                         path: a_path,
                                         permissions,
@@ -912,6 +921,7 @@ async fn handle_batch(
                                                 .unwrap()
                                                 .contains(Permissions::SUBSCRIBE)
                                         {
+                                            debug!("denied, permission not granted");
                                             con.queue_send(&From::Denied(path))?
                                         } else {
                                             subscribe(
