@@ -304,12 +304,12 @@ async fn connect_write(
             info!("write_con processing resolver mutual authentication");
             ctx.step(Some(&tok))?;
             info!("write_con mutual authentication succeeded");
+            con.set_ctx(ctx.clone()).await;
             {
                 let mut ctxts = ctxts.write();
                 ctxts.insert(r.resolver_id, ctx.clone());
-                ctxts.insert(resolver_addr, ctx.clone());
+                ctxts.insert(resolver_addr, ctx);
             }
-            con.set_ctx(ctx).await;
             info!("write_con all traffic now encrypted");
         }
     }
