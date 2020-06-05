@@ -1009,20 +1009,16 @@ async fn hello_client(
         ResolverAuthenticate(id, tok) => {
             info!("hello_client processing listener ownership check from resolver");
             time::delay_for(Duration::from_secs(2)).await;
-            for i in 0..10 {
-                match ctxts.read().get(&id).cloned() {
-                    None => {
-                        time::delay_for(Duration::from_secs(1)).await;
-                    }
-                    Some(ctx) => {
-                        let n = ctx.unwrap(&*tok)?;
-                        let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-                        let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
-                        con.send_one(&ResolverAuthenticate(id, tok)).await?;
-                        return Ok(());
-                    }
-                }
-            }
+            let ctx = ctxts
+                .read()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no security context"))?;
+            let n = ctx.unwrap(&*tok)?;
+            let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+            let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
+            con.send_one(&ResolverAuthenticate(id, tok)).await?;
+            return Ok(());
         }
     }
     Ok(())
