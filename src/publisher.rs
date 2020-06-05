@@ -1017,6 +1017,7 @@ async fn hello_client(
                     Some(ctx) => {
                         let n = ctx.unwrap(&*tok)?;
                         let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
+                        debug!("the ownership check salt is {}, sending reply {}", n, n + 2);
                         let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
                         con.send_one(&ResolverAuthenticate(id, tok)).await?;
                         return Ok(());

@@ -2,16 +2,16 @@ use super::{Krb5Ctx, Krb5ServerCtx};
 use anyhow::{bail, Result};
 use bytes::{Buf, BytesMut};
 use parking_lot::Mutex;
+use log::debug;
 use std::{
     default::Default,
     ffi::OsString,
-    mem,
+    fmt, mem,
     ops::Drop,
     os::windows::ffi::{OsStrExt, OsStringExt},
     ptr,
     sync::Arc,
     time::Duration,
-    fmt,
 };
 use tokio::task;
 use winapi::{
@@ -20,7 +20,8 @@ use winapi::{
         minwindef::FILETIME,
         sspi::{
             self, SecBuffer, SecBufferDesc, SecHandle, SecPkgContext_NativeNamesW,
-            SecPkgContext_Sizes, SecPkgInfoW, SECPKG_ATTR_SIZES,
+            SecPkgContext_Sizes, SecPkgCredentials_NamesW, SecPkgInfoW,
+            SECPKG_ATTR_SIZES,
         },
         winerror::{
             SEC_E_OK, SEC_I_COMPLETE_AND_CONTINUE, SEC_I_COMPLETE_NEEDED, SUCCEEDED,
@@ -106,6 +107,21 @@ impl Cred {
             bail!("failed to acquire credentials {}", format_error(res));
         } else {
             Ok(Cred(cred))
+        }
+    }
+
+    pub(crate) fn name(&mut self) -> Result<String> {
+        let mut names = SecPkgCredentials_NamesW::default();
+        unsafe {
+            let res = sspi::QueryCredentialsAttributesW(
+                &mut self.0 as *mut _,
+                sspi::SECPKG_CRED_ATTR_NAMES,
+                &mut names as *mut _ as *mut c_void,
+            );
+            if !SUCCEEDED(res) {
+                bail!("failed to query cred names {}", format_error(res))
+            }
+            Ok(string_from_wstr(names.sUserName))
         }
     }
 }
@@ -199,15 +215,15 @@ fn wrap(
     let mut buf = BytesMut::with_capacity(
         (sizes.cbSecurityTrailer + sizes.cbBlockSize) as usize + msg.len(),
     );
-    buf.resize(sizes.cbSecurityTrailer as usize, 0);
+    buf.extend((0..sizes.cbSecurityTrailer).map(|_| 0));
     let mut header = buf.split_to(sizes.cbSecurityTrailer as usize);
     buf.extend_from_slice(msg);
     let mut data = buf.split_to(msg.len());
-    buf.resize(sizes.cbBlockSize as usize, 0);
+    buf.extend((0..sizes.cbBlockSize).into_iter().map(|_| 0));
     let mut padding = buf.split_to(sizes.cbBlockSize as usize);
     wrap_iov(ctx, sizes, encrypt, &mut header, &mut data, &mut padding)?;
-    data.unsplit(padding);
     header.unsplit(data);
+    header.unsplit(padding);
     Ok(header)
 }
 
@@ -260,7 +276,10 @@ fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {
             &st as *const _,
             &mut lt as *mut _,
         ) {
-            bail!("failed to convert to local time {}", format_error(GetLastError() as i32))
+            bail!(
+                "failed to convert to local time {}",
+                format_error(GetLastError() as i32)
+            )
         }
         if 0 == SystemTimeToFileTime(&lt as *const _, &mut ft as *mut _) {
             bail!(
@@ -362,7 +381,7 @@ impl ClientCtx {
                 inner.target.as_mut_ptr(),
                 sspi::ISC_REQ_CONFIDENTIALITY | sspi::ISC_REQ_MUTUAL_AUTH,
                 0,
-                sspi::SECURITY_NETWORK_DREP,
+                sspi::SECURITY_NATIVE_DREP,
                 in_buf_ptr,
                 0,
                 &mut inner.ctx as *mut _,
@@ -519,7 +538,7 @@ impl ServerCtx {
                 ctx_ptr,
                 &mut in_buf_desc as *mut _,
                 sspi::ISC_REQ_CONFIDENTIALITY | sspi::ISC_REQ_MUTUAL_AUTH,
-                sspi::SECURITY_NETWORK_DREP,
+                sspi::SECURITY_NATIVE_DREP,
                 &mut inner.ctx as *mut _,
                 &mut out_buf_desc as *mut _,
                 &mut inner.attrs as *mut _,
@@ -611,7 +630,7 @@ impl Krb5ServerCtx for ServerCtx {
 
 pub(crate) fn create_client_ctx(
     principal: Option<&str>,
-    target_principal: &str
+    target_principal: &str,
 ) -> Result<ClientCtx> {
     task::block_in_place(|| {
         let cred = Cred::acquire(principal, false)?;
@@ -621,7 +640,9 @@ pub(crate) fn create_client_ctx(
 
 pub(crate) fn create_server_ctx(principal: Option<&str>) -> Result<ServerCtx> {
     task::block_in_place(|| {
-        let cred = Cred::acquire(principal, true)?;
+        debug!("loading server credentials for: {}", principal.unwrap_or("<default>"));
+        let mut cred = Cred::acquire(principal, true)?;
+        debug!("loaded server credentials for: {}", cred.name()?);
         ServerCtx::new(cred)
     })
 }

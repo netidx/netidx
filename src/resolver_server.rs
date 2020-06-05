@@ -267,6 +267,7 @@ async fn hello_client_write(
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
                 let salt = salt();
+                debug!("the salt is {}, expecting {}", salt, salt + 2);
                 let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
                 let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
@@ -277,6 +278,7 @@ async fn hello_client_write(
                     publisher::v1::Hello::ResolverAuthenticate(_, tok) => {
                         let d = Vec::from(&*ctx.unwrap(&tok)?);
                         let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
+                        debug!("received salt {}", dsalt);
                         if dsalt != salt + 2 {
                             bail!("listener ownership check failed");
                         }
