@@ -349,6 +349,8 @@ fn handle_batch_read(
                                 krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
                                 resolver: id,
                                 addrs: s.resolve(&path),
+                                timestamp: now,
+                                permissions: Permissions::all().bits(),
                             };
                             con.queue_send(&FromRead::Resolved(a))?;
                         }
@@ -366,7 +368,13 @@ fn handle_batch_read(
                                     perm,
                                     &path,
                                 )?;
-                                let a = Resolved { krb5_spns, resolver: id, addrs };
+                                let a = Resolved {
+                                    krb5_spns,
+                                    resolver: id,
+                                    addrs,
+                                    timestamp: now,
+                                    permissions: perm.bits(),
+                                };
                                 con.queue_send(&FromRead::Resolved(a))?
                             }
                         }
