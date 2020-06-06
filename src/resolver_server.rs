@@ -19,7 +19,7 @@ use crate::{
     utils,
 };
 use anyhow::Result;
-use bytes::{Bytes, Buf};
+use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
@@ -249,7 +249,7 @@ async fn hello_client_write(
                 send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
-                send(&cfg, &mut con, Secret(secret.clone())).await?;
+                send(&cfg, &mut con, Secret(secret)).await?;
                 let _: ReadyForOwnershipCheck =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
                 info!(
@@ -268,7 +268,7 @@ async fn hello_client_write(
                 // we have more than one.
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
-                let tok = utils::make_sha3_token(&*secret, None);
+                let tok = utils::make_sha3_token(None, &[&secret.to_be_bytes()]);
                 let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
@@ -279,10 +279,12 @@ async fn hello_client_write(
                         if tok.len() < 8 {
                             bail!("listener ownership check buffer short");
                         }
-                        let salt = tok.get_u64();
-                        let mut expected = utils::make_sha3_token(&*secret, Some(salt));
+                        let mut expected = utils::make_sha3_token(
+                            Some(tok.get_u64()),
+                            &[&(!secret).to_be_bytes()],
+                        );
                         expected.advance(mem::size_of::<u64>());
-                        if &*secret != &*expected {
+                        if &*tok != &*expected {
                             bail!("listener ownership check failed");
                         }
                         let client = ctx.client()?;

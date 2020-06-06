@@ -148,6 +148,20 @@ pub(crate) fn decode_varint(buf: &mut BytesMut) -> Result<u64, PackError> {
     Err(PackError::InvalidFormat)
 }
 
+impl Pack for u128 {
+    fn len(&self) -> usize {
+        mem::size_of::<u128>()
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(buf.put_u128(*self))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+        Ok(buf.get_u128())
+    }
+}
+
 impl Pack for u64 {
     fn len(&self) -> usize {
         mem::size_of::<u64>()

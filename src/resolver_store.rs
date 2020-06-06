@@ -160,9 +160,7 @@ impl<T> StoreInner<T> {
             .next_back();
         match r {
             None => None,
-            Some((p, r)) if path.starts_with(p.as_ref()) => {
-                Some(r.clone())
-            }
+            Some((p, r)) if path.starts_with(p.as_ref()) => Some(r.clone()),
             Some(_) => None,
         }
     }
@@ -253,42 +251,35 @@ impl<T> StoreInner<T> {
         perm: Permissions,
         path: &Path,
     ) -> Result<Vec<(SocketAddr, Bytes)>> {
-        fn sign_path(
-            sec: &SecStoreInner,
-            krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
-            addr: SocketAddr,
-            path: &Path,
-            perm: Permissions,
-            now: u64,
-        ) -> Result<(SocketAddr, Bytes)> {
-            match sec.get_write(&addr) {
-                None => Ok((addr, Bytes::new())),
-                Some((spn, ctx)) => {
-                    if !krb5_spns.contains_key(&addr) {
-                        krb5_spns.insert(addr, spn.clone());
-                    }
-                    let msg = utils::pack(&PermissionToken {
-                        path: path.clone(),
-                        permissions: perm.bits(),
-                        timestamp: now,
-                    })?;
-                    let tok = utils::bytes(&*ctx.wrap(true, &*msg)?);
-                    Ok((addr, tok))
+        let sign_addr = |addr: SocketAddr| match sec.get_write(&addr) {
+            None => Bytes::new(),
+            Some((spn, secret, _)) => {
+                if !krb5_spns.contains_key(&addr) {
+                    krb5_spns.insert(addr, spn.clone());
                 }
+                utils::make_sha3_token(
+                    None,
+                    &[
+                        &secret.to_be_bytes(),
+                        &now.to_be_bytes(),
+                        &perm.bits().to_be_bytes(),
+                        path.as_bytes(),
+                    ],
+                )
             }
-        }
+        };
         self.by_path
             .get(&*path)
             .map(|addrs| {
                 Ok(addrs
                     .iter()
-                    .map(|addr| sign_path(sec, krb5_spns, *addr, path, perm, now))
+                    .map(sign_addr)
                     .collect::<Result<Vec<(SocketAddr, Bytes)>>>()?)
             })
             .unwrap_or_else(|| {
                 self.resolve_default(path)
                     .into_iter()
-                    .map(|(a, _)| sign_path(sec, krb5_spns, a, path, perm, now))
+                    .map(|(a, _)| sign_addr(a))
                     .collect::<Result<Vec<(SocketAddr, Bytes)>>>()
             })
     }

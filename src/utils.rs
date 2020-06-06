@@ -108,16 +108,6 @@ macro_rules! try_cf {
     };
 }
 
-pub(crate) fn make_sha3_token(secret: &[u8], salt: Option<u64>) -> Bytes {
-    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen_range::<u64>());
-    let mut hash = Sha3_512::new();
-    hash.input(&salt.to_be_bytes());
-    hash.input(secret);
-    Bytes::from_iter(
-        salt.to_be_bytes().iter().copied().chain(hash.result().iter().copied()),
-    )
-}
-
 pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
     match ip {
         IpAddr::V4(ip) if ip.is_link_local() => {
@@ -180,6 +170,21 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
 
 thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
+pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
+    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen_range::<u64>());
+    let mut hash = Sha3_512::new();
+    hash.input(&salt.to_be_bytes());
+    for v in secret {
+        hash.input(v);
+    }
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        b.put_u64(salt);
+        b.extend_from_slice(hash.result().into_iter());
+        b.split().freeze()
+    })
 }
 
 pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {

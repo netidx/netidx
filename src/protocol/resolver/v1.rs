@@ -308,7 +308,7 @@ impl Pack for ServerHelloWrite {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Secret(pub Bytes);
+pub struct Secret(pub u128);
 
 impl Pack for Secret {
     fn len(&self) -> usize {
@@ -392,6 +392,8 @@ pub struct Resolved {
     pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
     pub resolver: SocketAddr,
     pub addrs: Vec<(SocketAddr, Bytes)>,
+    pub timestamp: u64,
+    pub permissions: u32,
 }
 
 impl Pack for Resolved {
@@ -399,6 +401,8 @@ impl Pack for Resolved {
         <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
             + <SocketAddr as Pack>::len(&self.resolver)
             + <Vec<(SocketAddr, Bytes)> as Pack>::len(&self.addrs)
+            + <u64 as Pack>::len(&self.timestamp)
+            + <u32 as Pack>::len(&self.permissions)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
@@ -407,14 +411,18 @@ impl Pack for Resolved {
             buf,
         )?;
         <SocketAddr as Pack>::encode(&self.resolver, buf)?;
-        <Vec<(SocketAddr, Bytes)> as Pack>::encode(&self.addrs, buf)
+        <Vec<(SocketAddr, Bytes)> as Pack>::encode(&self.addrs, buf)?;
+        <u64 as Pack>::encode(&self.timestamp, buf)?;
+        <u32 as Pack>::encode(&self.permissions, buf)?;
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
         let resolver = <SocketAddr as Pack>::decode(buf)?;
         let addrs = <Vec<(SocketAddr, Bytes)> as Pack>::decode(buf)?;
-        Ok(Resolved { krb5_spns, resolver, addrs })
+        let timestamp = <u64 as Pack>::decode(buf)?;
+        let permissions = <u32 as Pack>::decode(buf)?;
+        Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions })
     }
 }
 
@@ -501,39 +509,6 @@ impl Pack for FromRead {
             4 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
-    }
-}
-
-/// This is the format of the Vec<u8> passed back with each Resolved
-/// msg, however it is encrypted with the publisher's resolver
-/// security context. This allows the subscriber to prove to the
-/// publisher that the resolver authorized it to do whatever action it
-/// is requesting to the specified path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PermissionToken {
-    pub path: Path,
-    pub permissions: u32,
-    pub timestamp: u64,
-}
-
-impl Pack for PermissionToken {
-    fn len(&self) -> usize {
-        <Path as Pack>::len(&self.path)
-            + <u32 as Pack>::len(&self.permissions)
-            + <u64 as Pack>::len(&self.timestamp)
-    }
-
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        <Path as Pack>::encode(&self.path, buf)?;
-        <u32 as Pack>::encode(&self.permissions, buf)?;
-        <u64 as Pack>::encode(&self.timestamp, buf)
-    }
-
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
-        let path = <Path as Pack>::decode(buf)?;
-        let permissions = <u32 as Pack>::decode(buf)?;
-        let timestamp = <u64 as Pack>::decode(buf)?;
-        Ok(PermissionToken { path, permissions, timestamp })
     }
 }
 

@@ -17,7 +17,7 @@ static GC: usize = u16::MAX as usize;
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (Chars, Bytes, ServerCtx), FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, (Chars, u128, ServerCtx), FxBuildHasher>,
     userdb: UserDb,
 }
 
@@ -29,7 +29,7 @@ impl SecStoreInner {
         })
     }
 
-    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, Bytes, ServerCtx)> {
+    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, u128, ServerCtx)> {
         self.write_ctxts.get(id).and_then(|r| match r.1.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
@@ -105,9 +105,9 @@ impl SecStore {
         inner.get_write(id).map(|(_, _, c)| c.clone())
     }
 
-    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes, Bytes)> {
+    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, u128, Bytes)> {
         let ctx = os::create_server_ctx(Some(self.spn.as_str()))?;
-        let secret = utils::bytes(&rand::thread_rng().gen::<u128>().to_be_bytes());
+        let secret = utils::bytes(&rand::thread_rng().gen::<u128>());
         let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
             || anyhow!("step didn't generate a mutual authentication token"),
         )?;
@@ -128,7 +128,7 @@ impl SecStore {
         &self,
         addr: SocketAddr,
         spn: Chars,
-        secret: Bytes,
+        secret: u128,
         ctx: ServerCtx,
     ) {
         let mut inner = self.store.write();
