@@ -247,7 +247,7 @@ impl Pack for ServerAuthWrite {
         1 + match self {
             ServerAuthWrite::Anonymous => 0,
             ServerAuthWrite::Reused => 0,
-            ServerAuthWrite::Accepted(b) => <Bytes as Pack>::len(b),
+            ServerAuthWrite::Accepted(s, b) => <Bytes as Pack>::len(b),
         }
     }
 
@@ -255,7 +255,7 @@ impl Pack for ServerAuthWrite {
         match self {
             ServerAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
-            ServerAuthWrite::Accepted(b) => {
+            ServerAuthWrite::Accepted(s, b) => {
                 buf.put_u8(2);
                 <Bytes as Pack>::encode(b, buf)
             }
@@ -295,7 +295,7 @@ impl Pack for ServerHelloWrite {
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <bool as Pack>::encode(&self.ttl_expired, buf)?;
         ServerAuthWrite::encode(&self.auth, buf)?;
-        <SocketAddr as Pack>::encode(&self.resolver_id, buf)
+        <SocketAddr as Pack>::encode(&self.resolver_id, buf)?;
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
@@ -308,10 +308,29 @@ impl Pack for ServerHelloWrite {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Secret(pub Bytes);
+
+impl Pack for Secret {
+    fn len(&self) -> usize {
+        <Bytes as Pack>::len(&self.0)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        <Bytes as Pack>::encode(&self.0, buf)
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        Ok(Secret(<Bytes as Pack>::decode(buf)?))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadyForOwnershipCheck;
 
 impl Pack for ReadyForOwnershipCheck {
-    fn len(&self) -> usize { 1 }
+    fn len(&self) -> usize {
+        1
+    }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         Ok(buf.put_u8(0))
@@ -320,7 +339,7 @@ impl Pack for ReadyForOwnershipCheck {
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ReadyForOwnershipCheck),
-            _ => Err(PackError::UnknownTag)
+            _ => Err(PackError::UnknownTag),
         }
     }
 }

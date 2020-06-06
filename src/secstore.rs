@@ -4,6 +4,7 @@ use crate::{
     config,
     os::{self, Krb5Ctx, Mapper, ServerCtx},
     protocol::resolver::v1::CtxId,
+    utils,
 };
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
@@ -16,7 +17,7 @@ static GC: usize = u16::MAX as usize;
 
 pub(crate) struct SecStoreInner {
     read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (Chars, ServerCtx), FxBuildHasher>,
+    write_ctxts: HashMap<SocketAddr, (Chars, Bytes, ServerCtx), FxBuildHasher>,
     userdb: UserDb,
 }
 
@@ -28,7 +29,7 @@ impl SecStoreInner {
         })
     }
 
-    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, ServerCtx)> {
+    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, Bytes, ServerCtx)> {
         self.write_ctxts.get(id).and_then(|r| match r.1.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
@@ -73,8 +74,7 @@ impl SecStore {
         cfg: &Arc<config::Config>,
     ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
-        let pmap =
-            PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
+        let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
         Ok(SecStore {
             spn: Arc::new(spn),
             pmap: ArcSwap::from(Arc::new(pmap)),
@@ -102,15 +102,16 @@ impl SecStore {
 
     pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
         let inner = self.store.read();
-        inner.get_write(id).map(|(_, c)| c.clone())
+        inner.get_write(id).map(|(_, _, c)| c.clone())
     }
 
-    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes)> {
+    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, Bytes, Bytes)> {
         let ctx = os::create_server_ctx(Some(self.spn.as_str()))?;
+        let secret = utils::bytes(&rand::thread_rng().gen::<u128>().to_be_bytes());
         let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
             || anyhow!("step didn't generate a mutual authentication token"),
         )?;
-        Ok((ctx, tok))
+        Ok((ctx, secret, tok))
     }
 
     pub(crate) fn store_read(&self, ctx: ServerCtx) -> CtxId {
@@ -123,9 +124,15 @@ impl SecStore {
         id
     }
 
-    pub(crate) fn store_write(&self, addr: SocketAddr, spn: Chars, ctx: ServerCtx) {
+    pub(crate) fn store_write(
+        &self,
+        addr: SocketAddr,
+        spn: Chars,
+        secret: Bytes,
+        ctx: ServerCtx,
+    ) {
         let mut inner = self.store.write();
-        inner.write_ctxts.insert(addr, (spn, ctx));
+        inner.write_ctxts.insert(addr, (spn, secret, ctx));
         if inner.write_ctxts.len() > GC {
             inner.gc();
         }

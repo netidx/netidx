@@ -206,6 +206,9 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
                 if buf.remaining() - mem::size_of::<u32>() < len {
                     break; // read more
                 } else if !encrypted {
+                    if ctx.is_some() {
+                        break 'main Err(anyhow!("encryption is required"))
+                    }
                     buf.advance(mem::size_of::<u32>());
                     try_cf!(break, 'main, tx.send(buf.split_to(len)).await);
                 } else {

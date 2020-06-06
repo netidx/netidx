@@ -37,6 +37,8 @@ arc-swap = "0.4"
 get_if_addrs = "0.5"
 base64 = "0.12"
 dirs = "2"
+sha3 = "0.8"
+digest = "0.8"
 
 [dev-dependencies]
 proptest = "0.9"

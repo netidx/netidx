@@ -4,13 +4,14 @@ use crate::{
     chars::Chars,
     config,
     os::{Krb5Ctx, Krb5ServerCtx, ServerCtx},
+    pack::Pack,
     path::Path,
     protocol::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, Resolved, ServerAuthWrite, ServerHelloRead, ServerHelloWrite,
-            ToRead, ToWrite, ReadyForOwnershipCheck,
+            FromWrite, ReadyForOwnershipCheck, Resolved, Secret, ServerAuthWrite,
+            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
         },
     },
     resolver_store::{Store, StoreInner},
@@ -18,6 +19,7 @@ use crate::{
     utils,
 };
 use anyhow::Result;
+use bytes::{Bytes, Buf};
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
@@ -26,6 +28,7 @@ use rand::Rng;
 use std::{
     collections::HashMap,
     convert::TryFrom,
+    iter::FromIterator,
     mem,
     net::SocketAddr,
     sync::{
@@ -188,13 +191,9 @@ async fn hello_client_write(
     async fn send(
         cfg: &Arc<config::Config>,
         con: &mut Channel<ServerCtx>,
-        hello: ServerHelloWrite,
+        msg: impl Pack,
     ) -> Result<()> {
-        Ok(time::timeout(cfg.hello_timeout, con.send_one(&hello)).await??)
-    }
-    fn salt() -> u64 {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(0, u64::max_value() - 2)
+        Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
     let ttl_expired = !store.read().clinfo().contains_key(&hello.write_addr);
@@ -238,7 +237,7 @@ async fn hello_client_write(
                     "hello_write initiating new krb5 context for {:?}",
                     hello.write_addr
                 );
-                let (ctx, tok) = secstore.create(&token)?;
+                let (ctx, secret, tok) = secstore.create(&token)?;
                 let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
@@ -250,6 +249,7 @@ async fn hello_client_write(
                 send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
+                send(&cfg, &mut con, Secret(secret.clone())).await?;
                 let _: ReadyForOwnershipCheck =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
                 info!(
@@ -268,26 +268,28 @@ async fn hello_client_write(
                 // we have more than one.
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
-                let salt = salt();
-                let tok = utils::bytes(&*ctx.wrap(true, &salt.to_be_bytes())?);
+                let tok = utils::make_sha3_token(&*secret, None);
                 let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
                     publisher::v1::Hello::Anonymous | publisher::v1::Hello::Token(_) => {
                         bail!("listener ownership check unexpected response")
                     }
-                    publisher::v1::Hello::ResolverAuthenticate(_, tok) => {
-                        let d = Vec::from(&*ctx.unwrap(&tok)?);
-                        let dsalt = u64::from_be_bytes(TryFrom::try_from(&*d)?);
-                        debug!("received salt {}", dsalt);
-                        if dsalt != salt + 2 {
+                    publisher::v1::Hello::ResolverAuthenticate(_, mut tok) => {
+                        if tok.len() < 8 {
+                            bail!("listener ownership check buffer short");
+                        }
+                        let salt = tok.get_u64();
+                        let mut expected = utils::make_sha3_token(&*secret, Some(salt));
+                        expected.advance(mem::size_of::<u64>());
+                        if &*secret != &*expected {
                             bail!("listener ownership check failed");
                         }
                         let client = ctx.client()?;
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = spn.unwrap_or(Chars::from(client));
                         info!("hello_write listener ownership check succeeded");
-                        secstore.store_write(hello.write_addr, spn, ctx.clone());
+                        secstore.store_write(hello.write_addr, spn, secret, ctx.clone());
                         uifo
                     }
                 }

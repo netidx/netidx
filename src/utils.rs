@@ -1,6 +1,8 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
 use bytes::{Bytes, BytesMut};
+use digest::Digest;
+use sha3::Sha3_512;
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -104,6 +106,16 @@ macro_rules! try_cf {
             }
         }
     };
+}
+
+pub(crate) fn make_sha3_token(secret: &[u8], salt: Option<u64>) -> Bytes {
+    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen_range::<u64>());
+    let mut hash = Sha3_512::new();
+    hash.input(&salt.to_be_bytes());
+    hash.input(secret);
+    Bytes::from_iter(
+        salt.to_be_bytes().iter().copied().chain(hash.result().iter().copied()),
+    )
 }
 
 pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
