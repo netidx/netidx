@@ -76,6 +76,8 @@ impl SubId {
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
+    timestamp: u64,
+    permissions: u32,
     token: Bytes,
     resolver: SocketAddr,
     finished: oneshot::Sender<Result<Val>>,
@@ -645,6 +647,8 @@ impl Subscriber {
                             let r = con.unbounded_send(ToCon::Subscribe(
                                 SubscribeValRequest {
                                     path: p.clone(),
+                                    timestamp: resolved.timestamp,
+                                    permissions: resolved.permissions,
                                     token: addr.1,
                                     resolver: resolved.resolver,
                                     finished: tx,
@@ -1093,10 +1097,14 @@ async fn connection(
                     let path = req.path.clone();
                     let resolver = req.resolver;
                     let token = req.token.clone();
+                    let permissions = req.permissions;
+                    let timestamp = req.timestamp;
                     pending.insert(path.clone(), req);
                     try_cf!(write_con.queue_send(&To::Subscribe {
                         path,
                         resolver,
+                        timestamp,
+                        permissions,
                         token,
                     }))
                 }

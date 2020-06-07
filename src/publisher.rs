@@ -3,7 +3,7 @@ use crate::{
     auth::Permissions,
     channel::Channel,
     config::Config,
-    os::{self, ClientCtx, Krb5Ctx, ServerCtx},
+    os::{self, Krb5Ctx, ServerCtx},
     pack::Pack,
     path::Path,
     protocol::publisher::{self, v1::Id},
@@ -11,6 +11,7 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
 };
 use anyhow::{anyhow, Error, Result};
+use bytes::Buf;
 use crossbeam::queue::SegQueue;
 use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectAll};
 use fxhash::FxBuildHasher;
@@ -22,7 +23,7 @@ use std::{
     boxed::Box,
     cmp::{Ord, Ordering, PartialOrd},
     collections::{hash_map::Entry, BTreeMap, BTreeSet, Bound, HashMap, HashSet},
-    convert::{From, TryFrom},
+    convert::From,
     default::Default,
     iter::{self, FromIterator},
     mem,
@@ -859,87 +860,76 @@ async fn handle_batch(
     msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher>,
-    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
     deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
-    use crate::protocol::{
-        publisher::v1::{From, To::*},
-        resolver::v1::PermissionToken,
-    };
+    use crate::protocol::publisher::v1::{From, To::*};
     {
         let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
         let mut pb = t_st.0.lock();
-        let ctxts = ctxts.read();
+        let secrets = secrets.read();
         let mut gc = false;
         for msg in msgs {
             match msg {
-                Subscribe { path, resolver, token } => match auth {
-                    Auth::Anonymous => subscribe(
-                        &mut *pb,
-                        updates,
-                        con,
-                        *addr,
-                        path,
-                        Permissions::all(),
-                        deferred_subs,
-                    )?,
-                    Auth::Krb5 { .. } => match ctxts.get(&resolver) {
-                        None => {
-                            debug!("denied, no context for {}", resolver);
-                            con.queue_send(&From::Denied(path))?
-                        },
-                        Some(ctx) => match ctx.unwrap(&token) {
-                            Err(e) => {
-                                debug!("denied, unwrap error {}", e);
+                Subscribe { path, resolver, timestamp, permissions, mut token } => {
+                    match auth {
+                        Auth::Anonymous => subscribe(
+                            &mut *pb,
+                            updates,
+                            con,
+                            *addr,
+                            path,
+                            Permissions::all(),
+                            deferred_subs,
+                        )?,
+                        Auth::Krb5 { .. } => match secrets.get(&resolver) {
+                            None => {
+                                debug!("denied, no stored secret for {}", resolver);
                                 con.queue_send(&From::Denied(path))?
-                            },
-                            Ok(b) => {
-                                let mut b = utils::bytesmut(&*b);
-                                let tok = PermissionToken::decode(&mut b);
-                                match tok {
-                                    Err(e) => {
-                                        debug!("denied, decode token err {}", e);
-                                        con.queue_send(&From::Denied(path))?
-                                    },
-                                    Ok(PermissionToken {
-                                        path: a_path,
+                            }
+                            Some(secret) => {
+                                if token.len() < mem::size_of::<u64>() {
+                                    bail!("error, token too short");
+                                }
+                                let salt = token.get_u64();
+                                let expected = utils::make_sha3_token(
+                                    Some(salt),
+                                    &[
+                                        &secret.to_be_bytes(),
+                                        &timestamp.to_be_bytes(),
+                                        &permissions.to_be_bytes(),
+                                        path.as_bytes(),
+                                    ],
+                                );
+                                let permissions = Permissions::from_bits(permissions)
+                                    .ok_or_else(|| anyhow!("invalid permission bits"))?;
+                                let age = std::cmp::max(
+                                    u64::saturating_sub(now, timestamp),
+                                    u64::saturating_sub(timestamp, now),
+                                );
+                                if age > 300
+                                    || !permissions.contains(Permissions::SUBSCRIBE)
+                                    || &*token != &expected[mem::size_of::<u64>()..]
+                                {
+                                    debug!("subscribe permission denied");
+                                    con.queue_send(&From::Denied(path))?
+                                } else {
+                                    subscribe(
+                                        &mut *pb,
+                                        updates,
+                                        con,
+                                        *addr,
+                                        path,
                                         permissions,
-                                        timestamp,
-                                    }) => {
-                                        let permissions =
-                                            Permissions::from_bits(permissions);
-                                        let age = std::cmp::max(
-                                            u64::saturating_sub(now, timestamp),
-                                            u64::saturating_sub(timestamp, now),
-                                        );
-                                        if age > 300
-                                            || &*a_path != &*path
-                                            || permissions.is_none()
-                                            || !permissions
-                                                .unwrap()
-                                                .contains(Permissions::SUBSCRIBE)
-                                        {
-                                            debug!("denied, permission not granted");
-                                            con.queue_send(&From::Denied(path))?
-                                        } else {
-                                            subscribe(
-                                                &mut *pb,
-                                                updates,
-                                                con,
-                                                *addr,
-                                                path,
-                                                permissions.unwrap(),
-                                                deferred_subs,
-                                            )?
-                                        }
-                                    }
+                                        deferred_subs,
+                                    )?
                                 }
                             }
                         },
-                    },
-                },
+                    }
+                }
                 Unsubscribe(id) => {
                     gc = true;
                     unsubscribe(&mut *pb, addr, id);
@@ -987,7 +977,7 @@ fn client_arrived(publisher: &PublisherWeak) {
 
 async fn hello_client(
     publisher: &PublisherWeak,
-    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
@@ -1016,18 +1006,15 @@ async fn hello_client(
                 client_arrived(publisher);
             }
         },
-        ResolverAuthenticate(id, tok) => {
+        ResolverAuthenticate(id, _) => {
+            // slow down brute force attacks on the hashed secret
+            time::delay_for(Duration::from_millis(100)).await;
             info!("hello_client processing listener ownership check from resolver");
-            let ctx = ctxts
-                .read()
-                .get(&id)
-                .cloned()
-                .ok_or_else(|| anyhow!("no security context"))?;
-            let n = ctx.unwrap(&*tok)?;
-            let n = u64::from_be_bytes(TryFrom::try_from(&*n)?);
-            let tok = utils::bytes(&*ctx.wrap(true, &(n + 2).to_be_bytes())?);
-            con.send_one(&ResolverAuthenticate(id, tok)).await?;
-            return Ok(());
+            let secret =
+                secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
+            let reply = utils::make_sha3_token(None, &[&(!secret).to_be_bytes()]);
+            con.send_one(&ResolverAuthenticate(id, reply)).await?;
+            bail!("resolver authentication complete");
         }
     }
     Ok(())
@@ -1036,7 +1023,7 @@ async fn hello_client(
 async fn client_loop(
     t: PublisherWeak,
     updates: Arc<SegQueue<ToClientMsg>>,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     addr: SocketAddr,
     flushes: Receiver<Option<Duration>>,
     s: TcpStream,
@@ -1053,7 +1040,7 @@ async fn client_loop(
     let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
     // make sure the deferred subs stream never ends
     deferred_subs.inner_mut().push(Box::new(stream::pending()));
-    hello_client(&t, &ctxts, &mut con, &desired_auth).await?;
+    hello_client(&t, &secrets, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
             _ = hb.next() => {
@@ -1095,7 +1082,7 @@ async fn client_loop(
                         .as_secs();
                     handle_batch(
                         &t, &updates, &addr, batch.drain(..), &mut con,
-                        &mut write_batches, &ctxts, &desired_auth, now,
+                        &mut write_batches, &secrets, &desired_auth, now,
                         &mut deferred_subs,
                     ).await?;
                     con.flush().await?
@@ -1147,7 +1134,7 @@ async fn accept_loop(
                         Some(t) => t
                     };
                     let mut pb = t.0.lock();
-                    let ctxts = pb.resolver.ctxts();
+                    let secrets = pb.resolver.secrets();
                     if pb.clients.len() < MAX_CLIENTS {
                         let (tx, rx) = channel(1);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
@@ -1160,7 +1147,7 @@ async fn accept_loop(
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
                             let r = client_loop(
-                                t_weak.clone(), updates, ctxts, addr, rx, s, desired_auth
+                                t_weak.clone(), updates, secrets, addr, rx, s, desired_auth
                             ).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {

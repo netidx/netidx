@@ -111,7 +111,13 @@ pub enum To {
     /// token is a proof from the resolver server that this
     /// subscription is permitted. In the case of an anonymous
     /// connection this proof will be empty.
-    Subscribe { path: Path, resolver: SocketAddr, token: Bytes },
+    Subscribe {
+        path: Path,
+        resolver: SocketAddr,
+        timestamp: u64,
+        permissions: u32,
+        token: Bytes,
+    },
     /// Unsubscribe from the specified value, this will always result
     /// in an Unsubscibed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
@@ -123,9 +129,11 @@ pub enum To {
 impl Pack for To {
     fn len(&self) -> usize {
         1 + match self {
-            To::Subscribe { path, resolver, token } => {
+            To::Subscribe { path, resolver, timestamp, permissions, token } => {
                 <Path as Pack>::len(path)
                     + <SocketAddr as Pack>::len(resolver)
+                    + <u64 as Pack>::len(timestamp)
+                    + <u32 as Pack>::len(permissions)
                     + <Bytes as Pack>::len(token)
             }
             To::Unsubscribe(id) => Id::len(id),
@@ -135,10 +143,12 @@ impl Pack for To {
 
     fn encode(&self, buf: &mut BytesMut) -> anyhow::Result<(), PackError> {
         match self {
-            To::Subscribe { path, resolver, token } => {
+            To::Subscribe { path, resolver, timestamp, permissions, token } => {
                 buf.put_u8(0);
                 <Path as Pack>::encode(path, buf)?;
                 <SocketAddr as Pack>::encode(resolver, buf)?;
+                <u64 as Pack>::encode(timestamp, buf)?;
+                <u32 as Pack>::encode(permissions, buf)?;
                 <Bytes as Pack>::encode(token, buf)
             }
             To::Unsubscribe(id) => {
@@ -158,8 +168,10 @@ impl Pack for To {
             0 => {
                 let path = <Path as Pack>::decode(buf)?;
                 let resolver = <SocketAddr as Pack>::decode(buf)?;
+                let timestamp = <u64 as Pack>::decode(buf)?;
+                let permissions = <u32 as Pack>::decode(buf)?;
                 let token = <Bytes as Pack>::decode(buf)?;
-                Ok(To::Subscribe { path, resolver, token })
+                Ok(To::Subscribe { path, resolver, timestamp, permissions, token })
             }
             1 => Ok(To::Unsubscribe(Id::decode(buf)?)),
             2 => {

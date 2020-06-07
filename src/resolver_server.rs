@@ -268,23 +268,22 @@ async fn hello_client_write(
                 // we have more than one.
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
-                let tok = utils::make_sha3_token(None, &[&secret.to_be_bytes()]);
-                let m = publisher::v1::Hello::ResolverAuthenticate(resolver_id, tok);
+                use publisher::v1::Hello as PHello;
+                let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-                    publisher::v1::Hello::Anonymous | publisher::v1::Hello::Token(_) => {
+                    PHello::Anonymous | PHello::Token(_) => {
                         bail!("listener ownership check unexpected response")
                     }
-                    publisher::v1::Hello::ResolverAuthenticate(_, mut tok) => {
+                    PHello::ResolverAuthenticate(_, mut tok) => {
                         if tok.len() < 8 {
                             bail!("listener ownership check buffer short");
                         }
-                        let mut expected = utils::make_sha3_token(
+                        let expected = utils::make_sha3_token(
                             Some(tok.get_u64()),
                             &[&(!secret).to_be_bytes()],
                         );
-                        expected.advance(mem::size_of::<u64>());
-                        if &*tok != &*expected {
+                        if &*tok != &expected[mem::size_of::<u64>()..] {
                             bail!("listener ownership check failed");
                         }
                         let client = ctx.client()?;

@@ -124,12 +124,12 @@ pub mod config;
 mod os;
 pub mod path;
 mod protocol;
-//pub mod publisher;
+pub mod publisher;
 pub mod resolver;
 pub mod resolver_server;
 mod resolver_single;
 mod resolver_store;
 mod secstore;
-//pub mod subscriber;
+pub mod subscriber;
 #[cfg(test)]
 mod test;
