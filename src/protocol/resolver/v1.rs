@@ -247,7 +247,7 @@ impl Pack for ServerAuthWrite {
         1 + match self {
             ServerAuthWrite::Anonymous => 0,
             ServerAuthWrite::Reused => 0,
-            ServerAuthWrite::Accepted(s, b) => <Bytes as Pack>::len(b),
+            ServerAuthWrite::Accepted(b) => <Bytes as Pack>::len(b),
         }
     }
 
@@ -255,7 +255,7 @@ impl Pack for ServerAuthWrite {
         match self {
             ServerAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
-            ServerAuthWrite::Accepted(s, b) => {
+            ServerAuthWrite::Accepted(b) => {
                 buf.put_u8(2);
                 <Bytes as Pack>::encode(b, buf)
             }
@@ -295,7 +295,7 @@ impl Pack for ServerHelloWrite {
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <bool as Pack>::encode(&self.ttl_expired, buf)?;
         ServerAuthWrite::encode(&self.auth, buf)?;
-        <SocketAddr as Pack>::encode(&self.resolver_id, buf)?;
+        <SocketAddr as Pack>::encode(&self.resolver_id, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
@@ -312,15 +312,15 @@ pub struct Secret(pub u128);
 
 impl Pack for Secret {
     fn len(&self) -> usize {
-        <Bytes as Pack>::len(&self.0)
+        <u128 as Pack>::len(&self.0)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        <Bytes as Pack>::encode(&self.0, buf)
+        <u128 as Pack>::encode(&self.0, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        Ok(Secret(<Bytes as Pack>::decode(buf)?))
+        Ok(Secret(<u128 as Pack>::decode(buf)?))
     }
 }
 
@@ -413,7 +413,7 @@ impl Pack for Resolved {
         <SocketAddr as Pack>::encode(&self.resolver, buf)?;
         <Vec<(SocketAddr, Bytes)> as Pack>::encode(&self.addrs, buf)?;
         <u64 as Pack>::encode(&self.timestamp, buf)?;
-        <u32 as Pack>::encode(&self.permissions, buf)?;
+        <u32 as Pack>::encode(&self.permissions, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {

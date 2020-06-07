@@ -1,11 +1,6 @@
 use crate::{
-    auth::Permissions,
-    chars::Chars,
-    os::Krb5Ctx,
-    path::Path,
-    protocol::resolver::v1::{PermissionToken, Referral},
-    secstore::SecStoreInner,
-    utils,
+    auth::Permissions, chars::Chars, path::Path, protocol::resolver::v1::Referral,
+    secstore::SecStoreInner, utils,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -250,37 +245,35 @@ impl<T> StoreInner<T> {
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> Result<Vec<(SocketAddr, Bytes)>> {
-        let sign_addr = |addr: SocketAddr| match sec.get_write(&addr) {
-            None => Bytes::new(),
+    ) -> Vec<(SocketAddr, Bytes)> {
+        let mut sign_addr = |addr: &SocketAddr| match sec.get_write(addr) {
+            None => (*addr, Bytes::new()),
             Some((spn, secret, _)) => {
-                if !krb5_spns.contains_key(&addr) {
-                    krb5_spns.insert(addr, spn.clone());
+                if !krb5_spns.contains_key(addr) {
+                    krb5_spns.insert(*addr, spn.clone());
                 }
-                utils::make_sha3_token(
-                    None,
-                    &[
-                        &secret.to_be_bytes(),
-                        &now.to_be_bytes(),
-                        &perm.bits().to_be_bytes(),
-                        path.as_bytes(),
-                    ],
+                (
+                    *addr,
+                    utils::make_sha3_token(
+                        None,
+                        &[
+                            &secret.to_be_bytes(),
+                            &now.to_be_bytes(),
+                            &perm.bits().to_be_bytes(),
+                            path.as_bytes(),
+                        ],
+                    ),
                 )
             }
         };
         self.by_path
             .get(&*path)
-            .map(|addrs| {
-                Ok(addrs
-                    .iter()
-                    .map(sign_addr)
-                    .collect::<Result<Vec<(SocketAddr, Bytes)>>>()?)
-            })
+            .map(|addrs| addrs.iter().map(&mut sign_addr).collect())
             .unwrap_or_else(|| {
                 self.resolve_default(path)
                     .into_iter()
-                    .map(|(a, _)| sign_addr(a))
-                    .collect::<Result<Vec<(SocketAddr, Bytes)>>>()
+                    .map(|(a, _)| sign_addr(&a))
+                    .collect()
             })
     }
 

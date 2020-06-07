@@ -6,11 +6,12 @@ use crate::{
     path::Path,
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite, ReadyForOwnershipCheck,
+        FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
+        ServerHelloWrite, ToRead, ToWrite,
     },
     utils::{self, Pooled},
 };
-use anyhow::{anyhow, Result, Error};
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
@@ -87,18 +88,20 @@ async fn connect_read(
         let mut con = Channel::new(con);
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
+        let sec = Duration::from_secs(1);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
                 bail!("authentication unavailable")
             }
             (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => match sc {
-                Some((id, ctx)) => (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
-                None => {
+                Some((id, ctx)) if ctx.ttl().unwrap_or(sec) > sec =>
+                    (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
+                _ => {
                     let upn = upn.as_ref().map(|s| s.as_str());
-                    let target_spn = spns
-                        .get(&addr)
-                        .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
+                    let target_spn = spns.get(&addr).ok_or_else(|| {
+                        anyhow!("no target spn for resolver {:?}", addr)
+                    })?;
                     let (ctx, tok) =
                         try_cf!("create ctx", continue, create_ctx(upn, target_spn));
                     (ClientAuthRead::Initiate(tok), Some(ctx))
@@ -122,7 +125,7 @@ async fn connect_read(
             }
             (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
             (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
-                let ctx = ctx.unwrap();
+                let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
                 try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
                 *sc = Some((id, ctx));
             }
@@ -248,7 +251,8 @@ async fn connect_write(
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
-    ctxts: &Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    security_context: &mut Option<ClientCtx>,
     desired_auth: &Auth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
@@ -258,27 +262,26 @@ async fn connect_write(
     let mut con = Channel::new(con);
     wt!(con.send_one(&1u64))??;
     let _version: u64 = wt!(con.receive())??;
+    let sec = Duration::from_secs(1);
     let (auth, ctx) = match (desired_auth, &resolver.auth) {
         (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
         (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
             bail!("authentication unavailable")
         }
-        (Auth::Krb5 { upn, spn }, config::Auth::Krb5(spns)) => {
-            match ctxts.read().get(&resolver_addr) {
-                Some(ctx) => (ClientAuthWrite::Reuse, Some(ctx.clone())),
-                None => {
-                    let upnr = upn.as_ref().map(|s| s.as_str());
-                    let target_spn = spns
-                        .get(&resolver_addr)
-                        .ok_or_else(|| {
-                            anyhow!("no target spn for resolver {:?}", resolver_addr)
-                        })?;
-                    let (ctx, token) = create_ctx(upnr, target_spn)?;
-                    let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                    (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
-                }
+        (Auth::Krb5 { upn, spn }, config::Auth::Krb5(spns)) => match security_context {
+            Some(ctx) if ctx.ttl().unwrap_or(sec) > sec => {
+                (ClientAuthWrite::Reuse, Some(ctx.clone()))
             }
-        }
+            _ => {
+                let upnr = upn.as_ref().map(|s| s.as_str());
+                let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
+                    anyhow!("no target spn for resolver {:?}", resolver_addr)
+                })?;
+                let (ctx, token) = create_ctx(upnr, target_spn)?;
+                let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+            }
+        },
     };
     let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
     debug!("write_con connection established hello {:?}", h);
@@ -286,7 +289,9 @@ async fn connect_write(
     let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
     match (desired_auth, r.auth) {
-        (Auth::Anonymous, ServerAuthWrite::Anonymous) => (),
+        (Auth::Anonymous, ServerAuthWrite::Anonymous) => {
+            *security_context = None;
+        }
         (Auth::Anonymous, _) => {
             bail!("server requires authentication");
         }
@@ -294,24 +299,25 @@ async fn connect_write(
             bail!("could not authenticate resolver server");
         }
         (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => {
-            if let Some(ref ctx) = ctx {
-                con.set_ctx(ctx.clone()).await;
-                info!("write_con all traffic now encrypted");
-            }
+            let ctx = ctx.ok_or_else(|| anyhow!("bug, reused but no ctx"))?;
+            con.set_ctx(ctx.clone()).await;
+            info!("write_con all traffic now encrypted");
         }
         (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
-            let ctx = ctx.unwrap();
+            let ctx = ctx.ok_or_else(|| anyhow!("bug, accepted but no ctx"))?;
             info!("write_con processing resolver mutual authentication");
             ctx.step(Some(&tok))?;
             info!("write_con mutual authentication succeeded");
             con.set_ctx(ctx.clone()).await;
+            info!("write_con all traffic now encrypted");
+            *security_context = Some(ctx.clone());
+            let secret: Secret = wt!(con.receive())??;
             {
-                let mut ctxts = ctxts.write();
-                ctxts.insert(r.resolver_id, ctx.clone());
-                ctxts.insert(resolver_addr, ctx);
+                let mut secrets = secrets.write();
+                secrets.insert(resolver_addr, secret.0);
+                secrets.insert(r.resolver_id, secret.0);
             }
             wt!(con.send_one(&ReadyForOwnershipCheck))??;
-            info!("write_con all traffic now encrypted");
         }
     }
     if !r.ttl_expired && !*degraded {
@@ -378,10 +384,11 @@ async fn connection_write(
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
     let mut degraded = false;
     let mut con: Option<Channel<ClientCtx>> = None;
+    let mut ctx: Option<ClientCtx> = None;
     let hb = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(TTL / 10);
     let now = Instant::now();
@@ -421,7 +428,7 @@ async fn connection_write(
                         None => {
                             let r = connect_write(
                                 &resolver, resolver_addr, write_addr, &published,
-                                &ctxts, &desired_auth, &mut degraded
+                                &secrets, &mut ctx, &desired_auth, &mut degraded
                             ).await;
                             match r {
                                 Ok((ttl, c)) => {
@@ -460,7 +467,7 @@ async fn connection_write(
                             None => {
                                 let r = connect_write(
                                     &resolver, resolver_addr, write_addr, &published,
-                                    &ctxts, &desired_auth, &mut degraded
+                                    &secrets, &mut ctx, &desired_auth, &mut degraded
                                 ).await;
                                 match r {
                                     Ok((ttl, c)) => {
@@ -524,7 +531,7 @@ async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
     resolver: Config,
     desired_auth: Auth,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
     let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
@@ -536,7 +543,7 @@ async fn write_mgr(
             let resolver = resolver.clone();
             let published = published.clone();
             let desired_auth = desired_auth.clone();
-            let ctxts = ctxts.clone();
+            let secrets = secrets.clone();
             senders.push(sender);
             task::spawn(async move {
                 connection_write(
@@ -545,8 +552,8 @@ async fn write_mgr(
                     addr,
                     write_addr,
                     published,
-                    desired_auth.clone(),
-                    ctxts.clone(),
+                    desired_auth,
+                    secrets,
                 )
                 .await;
                 info!("write task for {:?} exited", addr);
@@ -591,11 +598,11 @@ impl ResolverWrite {
         resolver: Config,
         desired_auth: Auth,
         write_addr: SocketAddr,
-        ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> ResolverWrite {
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         task::spawn(async move {
-            let r = write_mgr(to_rx, resolver, desired_auth, ctxts, write_addr).await;
+            let r = write_mgr(to_rx, resolver, desired_auth, secrets, write_addr).await;
             info!("write manager exited {:?}", r);
         });
         ResolverWrite(to_tx)

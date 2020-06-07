@@ -4,8 +4,8 @@ use crate::{
     config,
     os::{self, Krb5Ctx, Mapper, ServerCtx},
     protocol::resolver::v1::CtxId,
-    utils,
 };
+use rand::Rng;
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
 use bytes::Bytes;
@@ -30,7 +30,7 @@ impl SecStoreInner {
     }
 
     pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, u128, ServerCtx)> {
-        self.write_ctxts.get(id).and_then(|r| match r.1.ttl() {
+        self.write_ctxts.get(id).and_then(|r| match r.2.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
         })
@@ -42,7 +42,7 @@ impl SecStoreInner {
         for (id, ctx) in self.read_ctxts.iter() {
             read.push((*id, ctx.ttl().map(|d| d.as_secs()).unwrap_or(0)));
         }
-        for (id, (_, ctx)) in self.write_ctxts.iter() {
+        for (id, (_, _, ctx)) in self.write_ctxts.iter() {
             write.push((*id, ctx.ttl().map(|d| d.as_secs()).unwrap_or(0)));
         }
         read.sort_by_key(|(_, ttl)| *ttl);
@@ -107,7 +107,7 @@ impl SecStore {
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, u128, Bytes)> {
         let ctx = os::create_server_ctx(Some(self.spn.as_str()))?;
-        let secret = utils::bytes(&rand::thread_rng().gen::<u128>());
+        let secret = rand::thread_rng().gen::<u128>();
         let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
             || anyhow!("step didn't generate a mutual authentication token"),
         )?;

@@ -93,7 +93,7 @@ impl Router {
                         match r.next_back() {
                             None => {
                                 batches.entry(None).or_insert_with(O::new).push((id, v));
-                                break
+                                break;
                             }
                             Some((p, (exp, _))) => {
                                 if !path.starts_with(p.as_ref()) {
@@ -111,7 +111,7 @@ impl Router {
                                             .or_insert_with(O::new)
                                             .push((id, v))
                                     }
-                                    break
+                                    break;
                                 }
                             }
                         }
@@ -172,7 +172,7 @@ where
         resolver: Config,
         desired_auth: Auth,
         writer_addr: SocketAddr,
-        ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> Self;
     fn send(&mut self, batch: B) -> oneshot::Receiver<O>;
 }
@@ -182,7 +182,7 @@ impl Connection<ToRead, FromRead, IToReadBatch, IFromReadBatch> for SingleRead {
         resolver: Config,
         desired_auth: Auth,
         _writer_addr: SocketAddr,
-        _ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+        _secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> Self {
         SingleRead::new(resolver, desired_auth)
     }
@@ -197,9 +197,9 @@ impl Connection<ToWrite, FromWrite, IToWriteBatch, IFromWriteBatch> for SingleWr
         resolver: Config,
         desired_auth: Auth,
         writer_addr: SocketAddr,
-        ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> Self {
-        SingleWrite::new(resolver, desired_auth, writer_addr, ctxts)
+        SingleWrite::new(resolver, desired_auth, writer_addr, secrets)
     }
 
     fn send(&mut self, batch: IToWriteBatch) -> oneshot::Receiver<IFromWriteBatch> {
@@ -219,7 +219,7 @@ struct ResolverWrapInner<C, T, F, B, O, Bi, Oi> {
     default: C,
     by_path: HashMap<Path, C>,
     writer_addr: SocketAddr,
-    ctxts: Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     phantom: PhantomData<(T, F, B, O, Bi, Oi)>,
 }
 
@@ -243,22 +243,23 @@ where
         desired_auth: Auth,
         writer_addr: SocketAddr,
     ) -> ResolverWrap<C, T, F, B, O, Bi, Oi> {
-        let ctxts = Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
+        let secrets =
+            Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let router = Router::new();
-        let default = C::new(default, desired_auth.clone(), writer_addr, ctxts.clone());
+        let default = C::new(default, desired_auth.clone(), writer_addr, secrets.clone());
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
             desired_auth,
             default,
             by_path: HashMap::new(),
             writer_addr,
-            ctxts,
+            secrets,
             phantom: PhantomData,
         })))
     }
 
-    fn ctxts(&self) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
-        self.0.lock().ctxts.clone()
+    fn secrets(&self) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
+        self.0.lock().secrets.clone()
     }
 
     async fn send(&self, batch: &B) -> Result<O> {
@@ -282,7 +283,7 @@ where
                                     Config::from(r),
                                     inner.desired_auth.clone(),
                                     inner.writer_addr,
-                                    inner.ctxts.clone(),
+                                    inner.secrets.clone(),
                                 );
                                 inner.by_path.insert(rp, con.clone());
                                 waiters.push(con.send(batch))
@@ -461,9 +462,9 @@ impl ResolverWrite {
         }
     }
 
-    pub(crate) fn ctxts(
+    pub(crate) fn secrets(
         &self,
-    ) -> Arc<RwLock<HashMap<SocketAddr, ClientCtx, FxBuildHasher>>> {
-        self.0.ctxts()
+    ) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
+        self.0.secrets()
     }
 }

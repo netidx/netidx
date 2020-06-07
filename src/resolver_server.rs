@@ -367,7 +367,7 @@ fn handle_batch_read(
                                     now,
                                     perm,
                                     &path,
-                                )?;
+                                );
                                 let a = Resolved {
                                     krb5_spns,
                                     resolver: id,
@@ -476,7 +476,7 @@ async fn hello_client_read(
         ClientAuthRead::Initiate(tok) => match secstore {
             None => bail!("authentication requested but not supported"),
             Some(ref secstore) => {
-                let (ctx, tok) = secstore.create(&tok)?;
+                let (ctx, _, tok) = secstore.create(&tok)?;
                 let id = secstore.store_read(ctx.clone());
                 send(&cfg, &mut con, ServerHelloRead::Accepted(tok, id)).await?;
                 con.set_ctx(ctx.clone()).await;

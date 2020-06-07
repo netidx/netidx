@@ -1,8 +1,9 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::{Bytes, BytesMut, BufMut};
 use digest::Digest;
 use sha3::Sha3_512;
+use rand::Rng;
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -173,7 +174,7 @@ thread_local! {
 }
 
 pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
-    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen_range::<u64>());
+    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen::<u64>());
     let mut hash = Sha3_512::new();
     hash.input(&salt.to_be_bytes());
     for v in secret {
@@ -182,7 +183,7 @@ pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         b.put_u64(salt);
-        b.extend_from_slice(hash.result().into_iter());
+        b.extend(hash.result().into_iter());
         b.split().freeze()
     })
 }
