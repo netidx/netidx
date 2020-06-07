@@ -3,7 +3,7 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config,
-    os::{Krb5Ctx, Krb5ServerCtx, ServerCtx},
+    os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
     path::Path,
     protocol::{
@@ -24,11 +24,8 @@ use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info};
 use parking_lot::RwLockWriteGuard;
-use rand::Rng;
 use std::{
     collections::HashMap,
-    convert::TryFrom,
-    iter::FromIterator,
     mem,
     net::SocketAddr,
     sync::{

@@ -4,7 +4,6 @@ use crate::{
     channel::Channel,
     config::Config,
     os::{self, Krb5Ctx, ServerCtx},
-    pack::Pack,
     path::Path,
     protocol::publisher::{self, v1::Id},
     resolver::{Auth, ResolverWrite},

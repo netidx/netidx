@@ -2,7 +2,6 @@ use crate::{
     auth::Permissions, chars::Chars, path::Path, protocol::resolver::v1::Referral,
     secstore::SecStoreInner, utils,
 };
-use anyhow::Result;
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;

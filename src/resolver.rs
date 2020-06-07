@@ -1,7 +1,6 @@
 pub use crate::resolver_single::Auth;
 use crate::{
     config::Config,
-    os::ClientCtx,
     path::Path,
     protocol::resolver::v1::{FromRead, FromWrite, Referral, Resolved, ToRead, ToWrite},
     resolver_single::{
