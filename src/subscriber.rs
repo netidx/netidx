@@ -633,13 +633,19 @@ impl Subscriber {
                                     None => Chars::new(),
                                     Some(p) => p.clone(),
                                 };
-                                task::spawn(connection(
-                                    self.downgrade(),
-                                    addr.0,
-                                    target_spn,
-                                    rx,
-                                    desired_auth.clone(),
-                                ));
+                                let subscriber = self.downgrade();
+                                let desired_auth = desired_auth.clone();
+                                let addr = addr.0;
+                                task::spawn(async move {
+                                    let res = connection(
+                                        subscriber,
+                                        addr,
+                                        target_spn,
+                                        rx,
+                                        desired_auth,
+                                    ).await;
+                                    info!("connection to {} shutdown {:?}", addr, res);
+                                });
                                 tx
                             });
                             let (tx, rx) = oneshot::channel();
@@ -1185,6 +1191,5 @@ async fn connection(
         }
     }
     let _ = tx_stop.send(());
-    info!("connection to {:?} shutting down {:?}", addr, res);
     res
 }

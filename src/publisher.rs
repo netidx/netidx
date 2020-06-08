@@ -981,9 +981,11 @@ async fn hello_client(
     auth: &Auth,
 ) -> Result<()> {
     use crate::protocol::publisher::v1::Hello::{self, *};
+    debug!("hello_client");
     // negotiate protocol version
     con.send_one(&1u64).await?;
     let _ver: u64 = con.receive().await?;
+    debug!("protocol version {}", _ver);
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
     match hello {
