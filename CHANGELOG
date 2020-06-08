@@ -1,6 +1,6 @@
 * 0.2.0:
   - config in dns is removed due to limitations
-  - reduce buffer slack in subscriber
+  - reduce buffer slack 
   - fix a few cases where we didn't set tcp nodelay
   - many windows releated bugs fixed
   - test extensively on windows

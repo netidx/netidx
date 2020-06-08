@@ -1137,7 +1137,7 @@ async fn accept_loop(
                     let mut pb = t.0.lock();
                     let secrets = pb.resolver.secrets();
                     if pb.clients.len() < MAX_CLIENTS {
-                        let (tx, rx) = channel(1);
+                        let (tx, rx) = channel(3);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
                         let updates = Arc::new(SegQueue::new());
                         pb.clients.insert(addr, Client {
