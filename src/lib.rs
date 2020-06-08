@@ -24,7 +24,7 @@
 //! # use anyhow::Result;
 //! # async fn run() -> Result<()> {
 //! // load the site cluster config. You can also just use a file.
-//! let cfg = Config::load_from_dns(None)?;
+//! let cfg = Config::load_default()?;
 //!
 //! // no authentication (kerberos v5 is the other option)
 //! // listen on any unique address matching 192.168.0.0/16
@@ -57,7 +57,7 @@
 //! # use anyhow::Result;
 //!
 //! # async fn run() -> Result<()> {
-//! let cfg = Config::load_from_dns(None)?;
+//! let cfg = Config::load_default()?;
 //! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
 //! let path = Path::from("/hw/washu-chan/cpu-temp");
 //! let temp = subscriber.subscribe_one(path, None).await?;
