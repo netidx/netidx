@@ -89,16 +89,16 @@
 //! muliple published values in a hierarchy, since this makes your
 //! system more discoverable, and is also quite efficient.
 //!
-//! In many environments it would be completely nuts to build a system
-//! like this without security, whereas in others it's not necessary
-//! at all. To handle both of these cases netidx includes optional
-//! support for kerberos v5 (a.k.a. ms active directory). If enabled,
-//! all components will do mutual authentication between the resolver,
-//! subscriber, and publisher as well as encryption of all data on the
-//! wire. In addition to authentication, the resolver server in krb5
-//! mode maintains and enforces authorization permissions for the
-//! entire namespace, so whoever runs the resolvers can centrally
-//! enforce who can publish where, and who can subscribe to what.
+//! In many environments security is a requirement, whereas in others
+//! it's not necessary. To handle both of these cases netidx includes
+//! optional support for kerberos v5 (including Active Directory). If
+//! enabled, all components will do mutual authentication between the
+//! resolver, subscriber, and publisher as well as encryption of all
+//! data on the wire. In addition to authentication, the resolver
+//! server in krb5 mode maintains and enforces authorization
+//! permissions for the entire namespace, so the resolvers can
+//! centrally enforce who can publish where, and who can subscribe to
+//! what.
 //!
 //! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
 //! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
