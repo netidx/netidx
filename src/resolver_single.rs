@@ -95,8 +95,9 @@ async fn connect_read(
                 bail!("authentication unavailable")
             }
             (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => match sc {
-                Some((id, ctx)) if ctx.ttl().unwrap_or(sec) > sec =>
-                    (ClientAuthRead::Reuse(*id), Some(ctx.clone())),
+                Some((id, ctx)) if ctx.ttl().unwrap_or(sec) > sec => {
+                    (ClientAuthRead::Reuse(*id), Some(ctx.clone()))
+                }
                 _ => {
                     let upn = upn.as_ref().map(|s| s.as_str());
                     let target_spn = spns.get(&addr).ok_or_else(|| {
@@ -153,10 +154,10 @@ async fn connection_read(
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
                 loop {
-                    if tries >= 3 {
+                    if tries > 3 {
                         break;
                     }
-                    if tries > 0 {
+                    if tries > 1 {
                         let wait = thread_rng().gen_range(1, 4);
                         time::delay_for(Duration::from_secs(wait)).await
                     }
@@ -164,12 +165,18 @@ async fn connection_read(
                     let c = match con {
                         Some(ref mut c) => c,
                         None => {
-                            con = Some(try_cf!(
-                                "connect read",
-                                continue,
-                                connect_read(&resolver, &mut ctx, &desired_auth).await
-                            ));
-                            con.as_mut().unwrap()
+                            match connect_read(&resolver, &mut ctx, &desired_auth).await {
+                                Ok(c) => {
+                                    con = Some(c);
+                                    con.as_mut().unwrap()
+                                }
+                                Err(e) => {
+                                    ctx = None;
+                                    con = None;
+                                    warn!("connect_read failed: {}", e);
+                                    continue
+                                }
+                            }
                         }
                     };
                     for (_, m) in &*tx_batch {
@@ -436,6 +443,7 @@ async fn connection_write(
                                     con = Some(c);
                                 }
                                 Err(e) => {
+                                    ctx = None;
                                     warn!(
                                         "write connection to {:?} failed {}",
                                         resolver_addr, e
@@ -476,6 +484,7 @@ async fn connection_write(
                                         con.as_mut().unwrap()
                                     }
                                     Err(e) => {
+                                        ctx = None;
                                         warn!(
                                             "failed to connect to resolver {:?} {}",
                                             resolver_addr, e
