@@ -26,8 +26,8 @@ mod resolver {
     use super::*;
     use crate::protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, PermissionToken, Referral, Resolved, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret,
+        ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
     };
     use fxhash::FxBuildHasher;
     use proptest::{collection, option};
@@ -106,11 +106,17 @@ mod resolver {
     fn resolved() -> impl Strategy<Value = Resolved> {
         let resolver = any::<SocketAddr>();
         let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10));
-        (krb5_spns(), resolver, addrs).prop_map(|(krb5_spns, resolver, addrs)| Resolved {
-            krb5_spns,
-            resolver,
-            addrs,
-        })
+        let timestamp = any::<u64>();
+        let permissions = any::<u32>();
+        (krb5_spns(), resolver, addrs, timestamp, permissions).prop_map(
+            |(krb5_spns, resolver, addrs, timestamp, permissions)| Resolved {
+                krb5_spns,
+                resolver,
+                addrs,
+                timestamp,
+                permissions,
+            },
+        )
     }
 
     fn referral() -> impl Strategy<Value = Referral> {
@@ -133,10 +139,12 @@ mod resolver {
         ]
     }
 
-    fn permission_token() -> impl Strategy<Value = PermissionToken> {
-        (path(), any::<u32>(), any::<u64>()).prop_map(|(path, permissions, timestamp)| {
-            PermissionToken { path, permissions, timestamp }
-        })
+    fn secret() -> impl Strategy<Value = Secret> {
+        any::<u128>().prop_map(Secret)
+    }
+
+    fn ready_for_ownership_check() -> impl Strategy<Value = ReadyForOwnershipCheck> {
+        any::<u8>().prop_map(|_| ReadyForOwnershipCheck)
     }
 
     fn to_write() -> impl Strategy<Value = ToWrite> {
@@ -175,11 +183,6 @@ mod resolver {
         }
 
         #[test]
-        fn test_permission_token(a in permission_token()) {
-            check(a)
-        }
-
-        #[test]
         fn test_to_read(a in to_read()) {
             check(a)
         }
@@ -196,6 +199,16 @@ mod resolver {
 
         #[test]
         fn test_from_write(a in from_write()) {
+            check(a)
+        }
+
+        #[test]
+        fn test_secret(a in secret()) {
+            check(a)
+        }
+
+        #[test]
+        fn test_read_for_ownership_check(a in ready_for_ownership_check()) {
             check(a)
         }
     }
@@ -217,11 +230,15 @@ mod publisher {
 
     fn to() -> impl Strategy<Value = To> {
         prop_oneof![
-            (path(), any::<SocketAddr>(), bytes()).prop_map(|(p, i, b)| To::Subscribe {
-                path: p,
-                resolver: i,
-                token: b
-            }),
+            (path(), any::<SocketAddr>(), any::<u64>(), any::<u32>(), bytes()).prop_map(
+                |(path, resolver, timestamp, permissions, token)| To::Subscribe {
+                    path,
+                    resolver,
+                    timestamp,
+                    permissions,
+                    token
+                }
+            ),
             any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i)))
         ]
     }

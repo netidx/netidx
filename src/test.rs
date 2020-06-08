@@ -17,7 +17,7 @@ mod resolver {
     #[test]
     fn publish_resolve_simple() {
         Runtime::new().unwrap().block_on(async {
-            let mut cfg = config::Config::load_from_file("cfg/simple.json")
+            let mut cfg = config::Config::load("cfg/simple.json")
                 .expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
@@ -59,14 +59,14 @@ mod resolver {
     impl Ctx {
         async fn new() -> Ctx {
             let pmap = config::PMap::default();
-            let cfg_root = config::Config::load_from_file("cfg/complex-root.json")
+            let cfg_root = config::Config::load("cfg/complex-root.json")
                 .expect("root config");
-            let cfg_huge0 = config::Config::load_from_file("cfg/complex-huge0.json")
+            let cfg_huge0 = config::Config::load("cfg/complex-huge0.json")
                 .expect("huge0 config");
-            let cfg_huge1 = config::Config::load_from_file("cfg/complex-huge1.json")
+            let cfg_huge1 = config::Config::load("cfg/complex-huge1.json")
                 .expect("huge1 config");
             let cfg_huge1_sub =
-                config::Config::load_from_file("cfg/complex-huge1-sub.json")
+                config::Config::load("cfg/complex-huge1-sub.json")
                     .expect("huge1 sub config");
             let server0_root = Server::new(cfg_root.clone(), pmap.clone(), false, 0)
                 .await
@@ -255,7 +255,7 @@ mod publisher {
     fn publish_subscribe() {
         let mut rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let mut cfg = config::Config::load_from_file("cfg/simple.json")
+            let mut cfg = config::Config::load("cfg/simple.json")
                 .expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
