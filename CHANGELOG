@@ -1,4 +1,5 @@
 * 0.2.0:
+  - trim tokio features to the required set	
   - config in dns is removed due to limitations
   - reduce buffer slack 
   - fix a few cases where we didn't set tcp nodelay
