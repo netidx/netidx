@@ -124,7 +124,7 @@ impl Into<Value> for SValue {
     }
 }
 
-fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
+pub(crate) fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
     Ok(match s {
         "null" => SValue::Null,
         s => match typ {

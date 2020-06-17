@@ -1,4 +1,4 @@
-use crate::publisher::SValue;
+use crate::publisher::{SValue, Typ, parse_val};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use futures::{
@@ -35,23 +35,27 @@ impl FromStr for In {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if let Ok(i) = serde_json::from_str(s) {
-            Ok(i)
-        } else if s.starts_with("DROP|") && s.len() > 5 {
+        if s.starts_with("DROP|") && s.len() > 5 {
             Ok(In::Drop(String::from(&s[5..])))
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(String::from(&s[4..])))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
             match s[6..].find("|") {
                 None => Err(anyhow!("in write expected | between path and value")),
-                Some(i) => {
-                    let path = String::from(&s[6..i]);
-                    let val = serde_json::from_str(&s[i..])?;
-                    Ok(In::Write(path, val))
+                Some(path_end) => {
+                    match s[path_end..].find("|") {
+                        None => Err(anyhow!("in write expected | between path and type")),
+                        Some(typ_end) => {
+                            let path = String::from(&s[6..path_end]);
+                            let typ = s[path_end..typ_end].parse::<Typ>()?;
+                            let val = parse_val(typ, &s[typ_end..])?;
+                            Ok(In::Write(path, val))
+                        }
+                    }
                 }
             }
         } else {
-            Ok(In::Add(String::from(s)))
+            bail!("parse error, expected ADD, DROP, or WRITE")
         }
     }
 }
