@@ -34,7 +34,27 @@ pub enum Typ {
     F64,
     Bool,
     String,
-    Json,
+    Bytes,
+}
+
+impl Typ {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Typ::U32 => "u32",
+            Typ::V32 => "v32",
+            Typ::I32 => "i32",
+            Typ::Z32 => "z32",
+            Typ::U64 => "u64",
+            Typ::I64 => "i64",
+            Typ::V64 => "v64",
+            Typ::Z64 => "z64",
+            Typ::F32 => "f32",
+            Typ::F64 => "f64",
+            Typ::Bool => "bool",
+            Typ::String => "string",
+            Typ::Bytes => "bytes",
+        }
+    }
 }
 
 impl FromStr for Typ {
@@ -54,9 +74,9 @@ impl FromStr for Typ {
             "f64" => Ok(Typ::F64),
             "bool" => Ok(Typ::Bool),
             "string" => Ok(Typ::String),
-            "json" => Ok(Typ::Json),
+            "bytes" => Ok(Typ::Bytes),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, json", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes", s))
         }
     }
 }
@@ -78,6 +98,28 @@ pub(crate) enum SValue {
     True,
     False,
     Null,
+}
+
+impl SValue {
+    pub(crate) fn typ(&self) -> Option<Typ> {
+        match self {
+            SValue::U32(_) => Some(Typ::U32),
+            SValue::V32(_) => Some(Typ::V32),
+            SValue::I32(_) => Some(Typ::I32),
+            SValue::Z32(_) => Some(Typ::Z32),
+            SValue::U64(_) => Some(Typ::U64),
+            SValue::V64(_) => Some(Typ::V64),
+            SValue::I64(_) => Some(Typ::I64),
+            SValue::Z64(_) => Some(Typ::Z64),
+            SValue::F32(_) => Some(Typ::F32),
+            SValue::F64(_) => Some(Typ::F64),
+            SValue::String(_) => Some(Typ::String),
+            SValue::Bytes(_) => Some(Typ::Bytes),
+            SValue::True => Some(Typ::Bool),
+            SValue::False => Some(Typ::Bool),
+            SValue::Null => None
+        }
+    }
 }
 
 impl From<Value> for SValue {
@@ -143,7 +185,7 @@ pub(crate) fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
                 false => SValue::False,
             },
             Typ::String => SValue::String(String::from(s)),
-            Typ::Json => serde_json::from_str(s)?,
+            Typ::Bytes => SValue::Bytes(base64::decode(s)?),
         }
     })
 }

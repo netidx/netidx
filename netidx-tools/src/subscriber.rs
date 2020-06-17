@@ -77,13 +77,28 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
-    fn write(&self, to_stdout: &mut BytesMut, to_stderr: &mut BytesMut) {
-        match serde_json::to_writer(&mut BytesWriter(&mut *to_stdout), self) {
-            Ok(()) => to_stdout.extend_from_slice(b"\n"),
-            Err(e) => {
-                to_stderr.extend_from_slice(format!("{}|{}\n", self.path, e).as_ref());
-            }
-        }
+    fn write(&self, to_stdout: &mut BytesMut) {
+        to_stdout.extend_from_slice(self.path.as_bytes());
+        to_stdout.extend_from_slice(b"|");
+        to_stdout.extend_from_slice(match self.value.typ() {
+            None => b"none",
+            Some(typ) => typ.name().as_bytes(),
+        });
+        to_stdout.extend_from_slice(b"|");
+        let mut w = BytesWriter(to_stdout);
+        match &self.value {
+            SValue::U32(v) | SValue::V32(v) => write!(&mut w, "{}", v),
+            SValue::I32(v) | SValue::Z32(v) => write!(&mut w, "{}", v),
+            SValue::U64(v) | SValue::V64(v) => write!(&mut w, "{}", v),
+            SValue::I64(v) | SValue::Z64(v) => write!(&mut w, "{}", v),
+            SValue::F32(v) => write!(&mut w, "{}", v),
+            SValue::F64(v) => write!(&mut w, "{}", v),
+            SValue::String(v) => write!(&mut w, "{}", &*v),
+            SValue::Bytes(v) => write!(&mut w, "{}", &*base64::encode(v)),
+            SValue::True => write!(&mut w, "true"),
+            SValue::False => write!(&mut w, "false"),
+            SValue::Null => write!(&mut w, "null"),
+        }.unwrap() // this can't fail
     }
 }
 
@@ -224,7 +239,7 @@ impl Ctx {
                     if let Some(path) = self.paths.get(&id) {
                         let value = SValue::from(value);
                         Out { path: &**path, value }
-                            .write(&mut self.to_stdout, &mut self.to_stderr);
+                            .write(&mut self.to_stdout);
                     }
                 }
             }
