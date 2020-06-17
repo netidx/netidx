@@ -1,8 +1,8 @@
-use crate::publisher::{SValue, Typ, parse_val};
+use crate::publisher::{parse_val, SValue, Typ};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use futures::{
-    channel::mpsc::{self, Receiver, Sender, UnboundedSender, UnboundedReceiver},
+    channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
     select_biased,
     stream::{self, FusedStream},
@@ -16,8 +16,8 @@ use netidx::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    str::FromStr,
     io::Write,
+    str::FromStr,
 };
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -40,20 +40,17 @@ impl FromStr for In {
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(String::from(&s[4..])))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
-            match s[6..].find("|") {
-                None => Err(anyhow!("in write expected | between path and value")),
-                Some(path_end) => {
-                    match s[path_end..].find("|") {
-                        None => Err(anyhow!("in write expected | between path and type")),
-                        Some(typ_end) => {
-                            let path = String::from(&s[6..path_end]);
-                            let typ = s[path_end..typ_end].parse::<Typ>()?;
-                            let val = parse_val(typ, &s[typ_end..])?;
-                            Ok(In::Write(path, val))
-                        }
-                    }
-                }
-            }
+            let mut parts = s[6..].splitn(3, "|");
+            let path = String::from(
+                parts.next().ok_or_else(|| anyhow!("expected | before path"))?,
+            );
+            let typ = parts
+                .next()
+                .ok_or_else(|| anyhow!("expected | before type"))?
+                .parse::<Typ>()?;
+            let val =
+                parse_val(typ, parts.next().ok_or_else(|| anyhow!("expected value"))?)?;
+            Ok(In::Write(path, val))
         } else {
             bail!("parse error, expected ADD, DROP, or WRITE")
         }
@@ -121,7 +118,12 @@ impl Ctx {
             requests: {
                 let stdin = BufReader::new(io::stdin()).lines().map_err(Error::from);
                 Box::new(Batched::new(
-                    stream::iter(paths).map(|p| Ok(p)).chain(stdin),
+                    stream::iter(paths)
+                        .map(|mut p| {
+                            p.insert_str(0, "ADD|");
+                            Ok(p)
+                        })
+                        .chain(stdin),
                     1000,
                 ))
             },
