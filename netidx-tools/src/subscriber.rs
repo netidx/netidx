@@ -98,7 +98,8 @@ impl<'a> Out<'a> {
             SValue::True => write!(&mut w, "true"),
             SValue::False => write!(&mut w, "false"),
             SValue::Null => write!(&mut w, "null"),
-        }.unwrap(); // this can't fail
+        }
+        .unwrap(); // this can't fail
         write!(w, "\n").unwrap();
     }
 }
@@ -164,22 +165,26 @@ impl Ctx {
                 // us. We don't want to die in any of these cases.
                 self.requests = Box::new(stream::pending());
             }
-            Some(BatchItem::InBatch(Ok(l))) => match l.parse::<In>() {
-                Err(e) => eprintln!("parse error: {}", e),
-                Ok(In::Add(p)) => {
-                    if !self.drop.remove(&p) {
-                        self.add.insert(p);
+            Some(BatchItem::InBatch(Ok(l))) => {
+                if !l.trim().is_empty() {
+                    match l.parse::<In>() {
+                        Err(e) => eprintln!("parse error: {}", e),
+                        Ok(In::Add(p)) => {
+                            if !self.drop.remove(&p) {
+                                self.add.insert(p);
+                            }
+                        }
+                        Ok(In::Drop(p)) => {
+                            if !self.add.remove(&p) {
+                                self.drop.insert(p);
+                            }
+                        }
+                        Ok(In::Write(p, v)) => {
+                            self.write.push((p, v));
+                        }
                     }
                 }
-                Ok(In::Drop(p)) => {
-                    if !self.add.remove(&p) {
-                        self.drop.insert(p);
-                    }
-                }
-                Ok(In::Write(p, v)) => {
-                    self.write.push((p, v));
-                }
-            },
+            }
             Some(BatchItem::EndBatch) => {
                 for p in self.drop.drain() {
                     if let Some(sub) = self.subscriptions.remove(&*p) {
@@ -239,8 +244,7 @@ impl Ctx {
                 for (id, value) in batch.drain(..) {
                     if let Some(path) = self.paths.get(&id) {
                         let value = SValue::from(value);
-                        Out { path: &**path, value }
-                            .write(&mut self.to_stdout);
+                        Out { path: &**path, value }.write(&mut self.to_stdout);
                     }
                 }
             }
