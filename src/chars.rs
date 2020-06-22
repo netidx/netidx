@@ -76,6 +76,10 @@ impl Pack for Chars {
             Err(_) => Err(PackError::InvalidFormat),
         }
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <Chars as Pack>::decode(buf)?)
+    }
 }
 
 impl From<&'static str> for Chars {

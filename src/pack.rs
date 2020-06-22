@@ -1,10 +1,16 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use dynamic_pool::{DynamicPool, DynamicPoolItem, DynamicReset};
+use fxhash::FxBuildHasher;
 use std::{
+    any::{Any, TypeId},
+    cell::RefCell,
     cmp::Eq,
     collections::HashMap,
+    default::Default,
     error, fmt,
     hash::{BuildHasher, Hash},
-    mem, net, ops::{Deref, DerefMut},
+    mem, net,
+    ops::{Deref, DerefMut},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +34,40 @@ pub trait Pack {
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError>
     where
         Self: std::marker::Sized;
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError>;
+}
+
+thread_local! {
+    static POOLS: RefCell<HashMap<TypeId, Box<dyn Any>, FxBuildHasher>> =
+        RefCell::new(HashMap::default());
+}
+
+impl<T: Pack + Any + Default + DynamicReset> Pack for DynamicPoolItem<T> {
+    fn len(&self) -> usize {
+        <T as Pack>::len(&**self)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+        <T as Pack>::encode(&**self, buf)
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+        POOLS.with(|pools| {
+            let pool: &mut DynamicPool<T> = pools
+                .borrow_mut()
+                .entry(TypeId::of::<T>())
+                .or_insert_with(|| Box::new(DynamicPool::new(0, 10000, T::default)))
+                .downcast_mut()
+                .unwrap();
+            let mut t = pool.take();
+            <T as Pack>::decode_into(&mut *t, buf)?;
+            Ok(t)
+        })
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        <T as Pack>::decode_into(&mut **self, buf)
+    }
 }
 
 impl Pack for net::SocketAddr {
@@ -80,6 +120,10 @@ impl Pack for net::SocketAddr {
             _ => return Err(PackError::UnknownTag),
         }
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <net::SocketAddr as Pack>::decode(buf)?)
+    }
 }
 
 impl Pack for Bytes {
@@ -99,6 +143,10 @@ impl Pack for Bytes {
         } else {
             Ok(buf.split_to(len as usize).freeze())
         }
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <Bytes as Pack>::decode(buf)?)
     }
 }
 
@@ -160,6 +208,10 @@ impl Pack for u128 {
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
         Ok(buf.get_u128())
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <u128 as Pack>::decode(buf)?)
+    }
 }
 
 impl Pack for u64 {
@@ -173,6 +225,10 @@ impl Pack for u64 {
 
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
         Ok(buf.get_u64())
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <u64 as Pack>::decode(buf)?)
     }
 }
 
@@ -205,8 +261,12 @@ impl Pack for Z64 {
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
         Ok(Z64(decode_varint(buf)?))
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <Z64 as Pack>::decode(buf)?)
+    }
 }
-    
+
 impl Pack for u32 {
     fn len(&self) -> usize {
         mem::size_of::<u32>()
@@ -218,6 +278,10 @@ impl Pack for u32 {
 
     fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
         Ok(buf.get_u32())
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <u32 as Pack>::decode(buf)?)
     }
 }
 
@@ -242,6 +306,14 @@ impl<T: Pack> Pack for Vec<T> {
             data.push(<T as Pack>::decode(buf)?);
         }
         Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        for _ in 0..elts {
+            self.push(<T as Pack>::decode(buf)?);
+        }
+        Ok(())
     }
 }
 
@@ -276,6 +348,16 @@ where
         }
         Ok(data)
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        for _ in 0..elts {
+            let k = <K as Pack>::decode(buf)?;
+            let v = <V as Pack>::decode(buf)?;
+            self.insert(k, v);
+        }
+        Ok(())
+    }
 }
 
 impl<T: Pack> Pack for Option<T> {
@@ -303,6 +385,10 @@ impl<T: Pack> Pack for Option<T> {
             _ => return Err(PackError::UnknownTag),
         }
     }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <Option<T> as Pack>::decode(buf)?)
+    }
 }
 
 impl<T: Pack, U: Pack> Pack for (T, U) {
@@ -319,6 +405,10 @@ impl<T: Pack, U: Pack> Pack for (T, U) {
         let fst = <T as Pack>::decode(buf)?;
         let snd = <U as Pack>::decode(buf)?;
         Ok((fst, snd))
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <(T, U) as Pack>::decode(buf)?)
     }
 }
 
@@ -337,5 +427,9 @@ impl Pack for bool {
             1 => Ok(true),
             _ => Err(PackError::UnknownTag),
         }
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(*self = <bool as Pack>::decode(buf)?)
     }
 }
