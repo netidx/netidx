@@ -40,7 +40,7 @@ trait ToPath {
 impl ToPath for ToRead {
     fn path(&self) -> Option<&Path> {
         match self {
-            ToRead::List(p) | ToRead::Resolve(p) => Some(p),
+            ToRead::List(p) | ToRead::Table(p) | ToRead::Resolve(p) => Some(p),
         }
     }
 }

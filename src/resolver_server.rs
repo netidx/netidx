@@ -391,6 +391,22 @@ fn handle_batch_read(
                     }
                 }
             }
+            ToRead::Table(path) => {
+                if let Some(r) = s.check_referral(&path) {
+                    con.queue_send(&FromRead::Referral(r))?
+                } else {
+                    let allowed = secstore
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
+                        .unwrap_or(true);
+                    if !allowed {
+                        con.queue_send(&FromRead::Denied)?;
+                    } else {
+                        let rows = s.list(&path);
+                        let cols = s.columns(&path);
+                        con.queue_send(&FromRead::Table {rows, cols})?;
+                    }
+                }
+            }
         }
     }
     Ok(())

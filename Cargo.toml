@@ -39,6 +39,7 @@ base64 = "0.12"
 dirs = "2"
 sha3 = "0.8"
 digest = "0.8"
+dynamic-pool = "0.2"
 
 [dev-dependencies]
 proptest = "0.9"

@@ -1,6 +1,6 @@
 use crate::{
-    auth::Permissions, chars::Chars, path::Path, protocol::resolver::v1::Referral,
-    secstore::SecStoreInner, utils,
+    auth::Permissions, chars::Chars, pack::Z64, path::Path,
+    protocol::resolver::v1::Referral, secstore::SecStoreInner, utils,
 };
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
@@ -13,7 +13,7 @@ use std::{
         HashMap, HashSet,
     },
     convert::AsRef,
-    iter,
+    iter::{self, FromIterator},
     net::SocketAddr,
     ops::Deref,
     sync::{Arc, Weak},
@@ -76,11 +76,18 @@ impl HCAddrs {
     }
 }
 
+fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
+    let name = Path::basename(path)?;
+    let root = Path::dirname(Path::dirname(path)?)?;
+    Some((root, name))
+}
+
 #[derive(Debug)]
 pub(crate) struct StoreInner<T> {
     by_path: HashMap<Path, Addrs>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
+    columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
@@ -159,11 +166,60 @@ impl<T> StoreInner<T> {
         }
     }
 
+    fn add_column<S: AsRef<str>>(&mut self, path: &S) {
+        let (root, name) = match column_path_parts(path) {
+            None => return,
+            Some((r, n)) => (r, n),
+        };
+        match self.columns.get_mut(root) {
+            Some(cols) => match cols.get_mut(name) {
+                Some(c) => {
+                    *&mut **c += 1;
+                }
+                None => {
+                    cols.insert(Path::from(String::from(name)), Z64(1));
+                }
+            },
+            None => {
+                self.columns.insert(
+                    Path::from(String::from(root)),
+                    HashMap::from_iter(iter::once((
+                        Path::from(String::from(name)),
+                        Z64(1),
+                    ))),
+                );
+            }
+        }
+    }
+
+    fn remove_column<S: AsRef<str>>(&mut self, path: &S) {
+        let (root, name) = match column_path_parts(path) {
+            None => return,
+            Some((r, n)) => (r, n),
+        };
+        match self.columns.get_mut(root) {
+            None => (),
+            Some(cols) => match cols.get_mut(name) {
+                None => (),
+                Some(c) => {
+                    *&mut **c -= 1;
+                    if **c == 0 {
+                        cols.remove(name);
+                        if cols.is_empty() {
+                            self.columns.remove(root);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
     pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr, default: bool) {
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
         *addrs = self.addrs.add_address(addrs, addr);
         self.add_parents(path.as_ref());
+        self.add_column(&path);
         let n = Path::levels(path.as_ref());
         self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
         if default {
@@ -196,7 +252,8 @@ impl<T> StoreInner<T> {
                     self.by_level.get_mut(&n).into_iter().for_each(|s| {
                         s.remove(&path);
                     });
-                    self.remove_parents(path.as_ref())
+                    self.remove_parents(path.as_ref());
+                    self.remove_column(&path);
                 }
             },
         }
@@ -288,6 +345,10 @@ impl<T> StoreInner<T> {
             .unwrap_or_else(Vec::new)
     }
 
+    pub(crate) fn columns(&self, root: &Path) -> HashMap<Path, Z64> {
+        self.columns.get(root).cloned().unwrap_or_else(HashMap::new)
+    }
+
     pub(crate) fn gc(&mut self) {
         self.addrs.gc();
     }
@@ -326,6 +387,7 @@ impl<T> Store<T> {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
+            columns: HashMap::new(),
             defaults: BTreeSet::new(),
             parent,
             children,

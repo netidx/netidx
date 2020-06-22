@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     error, fmt,
     hash::{BuildHasher, Hash},
-    mem, net,
+    mem, net, ops::{Deref, DerefMut},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -176,6 +176,37 @@ impl Pack for u64 {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Default, Debug)]
+pub struct Z64(pub u64);
+
+impl Deref for Z64 {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Z64 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Pack for Z64 {
+    fn len(&self) -> usize {
+        varint_len(**self)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+        Ok(encode_varint(**self, buf))
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+        Ok(Z64(decode_varint(buf)?))
+    }
+}
+    
 impl Pack for u32 {
     fn len(&self) -> usize {
         mem::size_of::<u32>()

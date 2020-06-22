@@ -1,6 +1,6 @@
 use crate::{
     chars::Chars,
-    pack::{Pack, PackError},
+    pack::{Pack, PackError, Z64},
     path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -350,12 +350,16 @@ pub enum ToRead {
     Resolve(Path),
     /// List the paths published under the specified root path
     List(Path),
+    /// Describe the table rooted at the specified path
+    Table(Path),
 }
 
 impl Pack for ToRead {
     fn len(&self) -> usize {
         1 + match self {
-            ToRead::Resolve(path) | ToRead::List(path) => <Path as Pack>::len(path),
+            ToRead::Resolve(path) | ToRead::List(path) | ToRead::Table(path) => {
+                <Path as Pack>::len(path)
+            }
         }
     }
 
@@ -367,6 +371,10 @@ impl Pack for ToRead {
             }
             ToRead::List(path) => {
                 buf.put_u8(1);
+                <Path as Pack>::encode(path, buf)
+            }
+            ToRead::Table(path) => {
+                buf.put_u8(2);
                 <Path as Pack>::encode(path, buf)
             }
         }
@@ -381,6 +389,10 @@ impl Pack for ToRead {
             1 => {
                 let path = <Path as Pack>::decode(buf)?;
                 Ok(ToRead::List(path))
+            }
+            2 => {
+                let path = <Path as Pack>::decode(buf)?;
+                Ok(ToRead::Table(path))
             }
             _ => Err(Error::UnknownTag),
         }
@@ -462,6 +474,7 @@ impl Pack for Referral {
 pub enum FromRead {
     Resolved(Resolved),
     List(Vec<Path>),
+    Table { rows: Vec<Path>, cols: HashMap<Path, Z64> },
     Referral(Referral),
     Denied,
     Error(Chars),
@@ -472,6 +485,9 @@ impl Pack for FromRead {
         1 + match self {
             FromRead::Resolved(a) => Resolved::len(a),
             FromRead::List(l) => <Vec<Path> as Pack>::len(l),
+            FromRead::Table { rows, cols } => {
+                <Vec<Path> as Pack>::len(rows) + <HashMap<Path, Z64> as Pack>::len(cols)
+            }
             FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
@@ -488,13 +504,18 @@ impl Pack for FromRead {
                 buf.put_u8(1);
                 <Vec<Path> as Pack>::encode(l, buf)
             }
-            FromRead::Referral(r) => {
+            FromRead::Table {rows, cols} => {
                 buf.put_u8(2);
+                <Vec<Path> as Pack>::encode(rows, buf)?;
+                <HashMap<Path, Z64>>::encode(cols, buf)
+            }
+            FromRead::Referral(r) => {
+                buf.put_u8(3);
                 <Referral as Pack>::encode(r, buf)
             }
-            FromRead::Denied => Ok(buf.put_u8(3)),
+            FromRead::Denied => Ok(buf.put_u8(4)),
             FromRead::Error(e) => {
-                buf.put_u8(4);
+                buf.put_u8(5);
                 <Chars as Pack>::encode(e, buf)
             }
         }
@@ -504,9 +525,14 @@ impl Pack for FromRead {
         match buf.get_u8() {
             0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
             1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
-            2 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
-            3 => Ok(FromRead::Denied),
-            4 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
+            2 => {
+                let rows = <Vec<Path> as Pack>::decode(buf)?;
+                let cols = <HashMap<Path, Z64>>::decode(buf)?;
+                Ok(FromRead::Table {rows, cols})
+            }
+            3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
+            4 => Ok(FromRead::Denied),
+            5 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
