@@ -16,10 +16,10 @@ pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());
-        let paths = r.list(Path::from("/bench")).await.expect("list");
+        let mut paths = r.list(Path::from("/bench")).await.expect("list");
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs = paths
-            .into_iter()
+            .drain(..)
             .map(|path| subscriber.durable_subscribe(path))
             .collect::<Vec<Dval>>();
         let (tx, mut vals) = mpsc::channel(3);

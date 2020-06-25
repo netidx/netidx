@@ -10,8 +10,9 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
+    pool::Pooled,
     resolver::Auth,
-    subscriber::{Batch, DvState, Dval, SubId, Subscriber},
+    subscriber::{DvState, Dval, SubId, Subscriber, Value},
     utils::{BatchItem, Batched},
 };
 use std::{
@@ -105,13 +106,13 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    sender_updates: Sender<Batch>,
+    sender_updates: Sender<Pooled<Vec<(SubId, Value)>>>,
     sender_states: UnboundedSender<(SubId, DvState)>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String>>> + Unpin>,
-    updates: Batched<Receiver<Batch>>,
+    updates: Batched<Receiver<Pooled<Vec<(SubId, Value)>>>>,
     states: UnboundedReceiver<(SubId, DvState)>,
     stdout: io::Stdout,
     stderr: io::Stderr,
@@ -227,7 +228,10 @@ impl Ctx {
         }
     }
 
-    async fn process_update(&mut self, u: Option<BatchItem<Batch>>) -> Result<()> {
+    async fn process_update(
+        &mut self,
+        u: Option<BatchItem<Pooled<Vec<(SubId, Value)>>>>,
+    ) -> Result<()> {
         Ok(match u {
             None => unreachable!(), // channel will never close
             Some(BatchItem::EndBatch) => {

@@ -17,14 +17,14 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                 for (addr, principal) in resolved[0].krb5_spns.iter() {
                     println!("{}: {}", addr, principal);
                 }
-                for (addr, _) in &resolved[0].addrs {
+                for (addr, _) in resolved[0].addrs.iter() {
                     println!("{}", addr);
                 }
             }
             ResolverCmd::List { path } => {
                 let resolver = ResolverRead::new(config, auth);
                 let path = path.unwrap_or_else(|| Path::from("/"));
-                for p in resolver.list(path).await.unwrap() {
+                for p in resolver.list(path).await.unwrap().iter() {
                     println!("{}", p);
                 }
             }
