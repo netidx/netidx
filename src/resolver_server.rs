@@ -17,6 +17,7 @@ use crate::{
     resolver_store::{Store, StoreInner},
     secstore::SecStore,
     utils,
+    pool::Pool,
 };
 use anyhow::Result;
 use bytes::{Buf, Bytes};
@@ -342,7 +343,9 @@ fn handle_batch_read(
                     match secstore {
                         None => {
                             let a = Resolved {
-                                krb5_spns: HashMap::with_hasher(FxBuildHasher::default()),
+                                krb5_spns: Pool::orphan(HashMap::with_hasher(
+                                    FxBuildHasher::default(),
+                                )),
                                 resolver: id,
                                 addrs: s.resolve(&path),
                                 timestamp: now,
@@ -403,7 +406,7 @@ fn handle_batch_read(
                     } else {
                         let rows = s.list(&path);
                         let cols = s.columns(&path);
-                        con.queue_send(&FromRead::Table {rows, cols})?;
+                        con.queue_send(&FromRead::Table { rows, cols })?;
                     }
                 }
             }

@@ -1,4 +1,4 @@
-use crate::{path::Path, protocol::resolver::v1::Referral, utils};
+use crate::{path::Path, protocol::resolver::v1::Referral, utils, pool::Pooled};
 use anyhow::Result;
 use serde_json::from_str;
 use std::{
@@ -19,7 +19,8 @@ use std::{
 pub(crate) mod file {
     use super::Auth;
     use crate::{
-        chars::Chars, path::Path, protocol::resolver::v1::Referral as Pref, utils,
+        chars::Chars, path::Path, pool::Pooled, protocol::resolver::v1::Referral as Pref,
+        utils,
     };
     use anyhow::Result;
     use std::{collections::HashMap, net::SocketAddr};
@@ -67,12 +68,13 @@ pub(crate) mod file {
             Ok(Pref {
                 path,
                 ttl: self.ttl,
-                addrs: self.addrs,
-                krb5_spns: self
-                    .krb5_spns
-                    .into_iter()
-                    .map(|(a, s)| (a, Chars::from(s)))
-                    .collect(),
+                addrs: Pooled::orphan(self.addrs),
+                krb5_spns: Pooled::orphan(
+                    self.krb5_spns
+                        .into_iter()
+                        .map(|(a, s)| (a, Chars::from(s)))
+                        .collect(),
+                ),
             })
         }
     }
@@ -134,7 +136,7 @@ pub struct Config {
     pub reader_ttl: Duration,
     pub writer_ttl: Duration,
     pub hello_timeout: Duration,
-    pub addrs: Vec<SocketAddr>,
+    pub addrs: Pooled<Vec<SocketAddr>>,
     pub auth: Auth,
 }
 
@@ -149,7 +151,7 @@ impl From<Referral> for Config {
             reader_ttl: Duration::from_secs(120),
             writer_ttl: Duration::from_secs(600),
             hello_timeout: Duration::from_secs(10),
-            addrs: r.addrs,
+            addrs: Pooled::orphan(r.addrs),
             auth: {
                 if r.krb5_spns.is_empty() {
                     Auth::Anonymous

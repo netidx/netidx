@@ -1,6 +1,12 @@
 use crate::{
-    auth::Permissions, chars::Chars, pack::Z64, path::Path,
-    protocol::resolver::v1::Referral, secstore::SecStoreInner, utils,
+    auth::Permissions,
+    chars::Chars,
+    pack::Z64,
+    path::Path,
+    pool::{Pool, Pooled},
+    protocol::resolver::v1::Referral,
+    secstore::SecStoreInner,
+    utils,
 };
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
@@ -93,6 +99,11 @@ pub(crate) struct StoreInner<T> {
     children: BTreeMap<Path, Referral>,
     addrs: HCAddrs,
     clinfos: HashMap<SocketAddr, T, FxBuildHasher>,
+    spn_pool: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+    signed_addrs_pool: Pool<Vec<(SocketAddr, Bytes)>>,
+    addrs_pool: Pool<Vec<SocketAddr>>,
+    paths_pool: Pool<Vec<Path>>,
+    cols_pool: Pool<HashMap<Path, Z64>>,
 }
 
 impl<T> StoreInner<T> {
@@ -267,7 +278,7 @@ impl<T> StoreInner<T> {
         })
     }
 
-    fn resolve_default(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
+    fn resolve_default(&self, path: &Path) -> Pooled<Vec<(SocketAddr, Bytes)>> {
         let default = self
             .defaults
             .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -276,32 +287,43 @@ impl<T> StoreInner<T> {
             ))
             .next_back();
         match default {
-            None => Vec::new(),
+            None => self.signed_addrs_pool.take(),
             Some(p) if path.starts_with(p.as_ref()) => {
                 match self.by_path.get(p.as_ref()) {
-                    None => Vec::new(),
-                    Some(a) => a.iter().map(|a| (*a, Bytes::new())).collect(),
+                    None => self.signed_addrs_pool.take(),
+                    Some(a) => {
+                        let mut addrs = self.signed_addrs_pool.take();
+                        addrs.extend(a.iter().map(|a| (*a, Bytes::new())));
+                        addrs
+                    }
                 }
             }
-            Some(_) => Vec::new(),
+            Some(_) => self.signed_addrs_pool.take(),
         }
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> Vec<(SocketAddr, Bytes)> {
-        self.by_path
-            .get(path.as_ref())
-            .map(|a| a.iter().map(|addr| (*addr, Bytes::new())).collect())
-            .unwrap_or_else(|| self.resolve_default(path))
+    pub(crate) fn resolve(&self, path: &Path) -> Pooled<Vec<(SocketAddr, Bytes)>> {
+        match self.by_path.get(path.as_ref()) {
+            None => self.resolve_default(path),
+            Some(a) => {
+                let mut addrs = self.signed_addrs_pool.take();
+                addrs.extend(a.iter().map(|addr| (*addr, Bytes::new())));
+                addrs
+            }
+        }
     }
 
     pub(crate) fn resolve_and_sign(
         &self,
         sec: &SecStoreInner,
-        krb5_spns: &mut HashMap<SocketAddr, Chars, FxBuildHasher>,
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> Vec<(SocketAddr, Bytes)> {
+    ) -> (
+        Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+        Pooled<Vec<(SocketAddr, Bytes)>>,
+    ) {
+        let mut krb5_spns = self.spn_pool.take();
         let mut sign_addr = |addr: &SocketAddr| match sec.get_write(addr) {
             None => (*addr, Bytes::new()),
             Some((spn, secret, _)) => {
@@ -322,31 +344,29 @@ impl<T> StoreInner<T> {
                 )
             }
         };
-        self.by_path
-            .get(&*path)
-            .map(|addrs| addrs.iter().map(&mut sign_addr).collect())
-            .unwrap_or_else(|| {
-                self.resolve_default(path)
-                    .into_iter()
-                    .map(|(a, _)| sign_addr(&a))
-                    .collect()
-            })
+        let mut signed_addrs = self.signed_addrs_pool.take();
+        match self.by_path.get(&*path) {
+            None => signed_addrs
+                .extend(self.resolve_default(path).drain(..).map(|(a, _)| sign_addr(&a))),
+            Some(addrs) => signed_addrs.extend(addrs.iter().map(&mut sign_addr)),
+        }
+        (krb5_spns, signed_addrs)
     }
 
-    pub(crate) fn list(&self, parent: &Path) -> Vec<Path> {
-        self.by_level
-            .get(&(Path::levels(&**parent) + 1))
-            .map(|l| {
-                l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                    .take_while(|p| p.as_ref().starts_with(&**parent))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_else(Vec::new)
+    pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
+        let mut paths = self.paths_pool.take();
+        paths.extend(self.by_level.get(&(Path::levels(&**parent) + 1)).map(|l| {
+            l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
+                .take_while(|p| p.as_ref().starts_with(&**parent))
+                .cloned()
+        }));
+        paths
     }
 
-    pub(crate) fn columns(&self, root: &Path) -> HashMap<Path, Z64> {
-        self.columns.get(root).cloned().unwrap_or_else(HashMap::new)
+    pub(crate) fn columns(&self, root: &Path) -> Pooled<HashMap<Path, Z64>> {
+        let mut cols = self.cols_pool.take();
+        cols.extend(self.columns.get(root).cloned());
+        cols
     }
 
     pub(crate) fn gc(&mut self) {
@@ -393,6 +413,11 @@ impl<T> Store<T> {
             children,
             addrs: HCAddrs::new(),
             clinfos: HashMap::with_hasher(FxBuildHasher::default()),
+            spn_pool: Pool::new(100),
+            signed_addrs_pool: Pool::new(100),
+            addrs_pool: Pool::new(100),
+            paths_pool: Pool::new(100),
+            cols_pool: Pool::new(100),
         };
         let children = inner.children.keys().cloned().collect::<Vec<_>>();
         for child in children {

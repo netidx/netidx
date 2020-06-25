@@ -4,12 +4,13 @@ use crate::{
     config::{self, Config},
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
+    pool::{Pool, Pooled},
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
         FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
         ServerHelloWrite, ToRead, ToWrite,
     },
-    utils::{self, Pooled},
+    utils,
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
@@ -38,6 +39,15 @@ use tokio::{
 const HELLO_TO: Duration = Duration::from_secs(5);
 
 static TTL: u64 = 120;
+
+lazy_static! {
+    pub(crate) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000);
+    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000);
+    pub(crate) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000);
+    pub(crate) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000);
+    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000);
+    pub(crate) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(1000);
+}
 
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -135,11 +145,8 @@ async fn connect_read(
     }
 }
 
-make_pool!(pub(crate), TOREADPOOL, ToReadBatch, (usize, ToRead), 1000);
-make_pool!(pub(crate), FROMREADPOOL, FromReadBatch, (usize, FromRead), 1000);
-make_pool!(RAWFROMREADPOOL, RawFromReadBatch, FromRead, 1000);
-
-type ReadBatch = (ToReadBatch, oneshot::Sender<FromReadBatch>);
+type ReadBatch =
+    (Pooled<Vec<(usize, ToRead)>>, oneshot::Sender<Pooled<Vec<(usize, FromRead)>>>);
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
@@ -174,7 +181,7 @@ async fn connection_read(
                                     ctx = None;
                                     con = None;
                                     warn!("connect_read failed: {}", e);
-                                    continue
+                                    continue;
                                 }
                             }
                         }
@@ -195,7 +202,7 @@ async fn connection_read(
                         }
                         Ok(()) => {
                             let mut err = false;
-                            let mut rx_batch = RawFromReadBatch::new();
+                            let mut rx_batch = RAWFROMREADPOOL.take();
                             while rx_batch.len() < tx_batch.len() {
                                 match c.receive_batch(&mut *rx_batch).await {
                                     Ok(()) => (),
@@ -209,7 +216,7 @@ async fn connection_read(
                             if err {
                                 con = None;
                             } else {
-                                let mut result = FromReadBatch::new();
+                                let mut result = FROMREADPOOL.take();
                                 result.extend(
                                     rx_batch
                                         .drain(..)
@@ -240,7 +247,10 @@ impl ResolverRead {
         ResolverRead(to_tx)
     }
 
-    pub(crate) fn send(&self, batch: ToReadBatch) -> oneshot::Receiver<FromReadBatch> {
+    pub(crate) fn send(
+        &self,
+        batch: Pooled<Vec<(usize, ToRead)>>,
+    ) -> oneshot::Receiver<Pooled<Vec<(usize, FromRead)>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.send((batch, tx));
         rx
@@ -380,12 +390,11 @@ async fn connect_write(
     }
 }
 
-make_pool!(pub(crate), TOWRITEPOOL, ToWriteBatch, (usize, ToWrite), 1000);
-make_pool!(pub(crate), FROMWRITEPOOL, FromWriteBatch, (usize, FromWrite), 1000);
-make_pool!(RAWFROMWRITEPOOL, RawFromWriteBatch, FromWrite, 1000);
-
 async fn connection_write(
-    receiver: mpsc::Receiver<(Arc<ToWriteBatch>, oneshot::Sender<FromWriteBatch>)>,
+    receiver: mpsc::Receiver<(
+        Arc<Pooled<Vec<(usize, ToWrite)>>>,
+        oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
+    )>,
     resolver: Config,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
@@ -507,7 +516,7 @@ async fn connection_write(
                             }
                             Ok(()) => {
                                 let mut err = false;
-                                let mut rx_batch = RawFromWriteBatch::new();
+                                let mut rx_batch = RAWFROMWRITEPOOL.take();
                                 while rx_batch.len() < tx_batch.len() {
                                     match c.receive_batch(&mut *rx_batch).await {
                                         Ok(()) => (),
@@ -521,7 +530,7 @@ async fn connection_write(
                                 if err {
                                     con = None;
                                 } else {
-                                    let mut result = FromWriteBatch::new();
+                                    let mut result = FROMWRITEPOOL.take();
                                     for (i, m) in rx_batch.drain(..).enumerate() {
                                         result.push((tx_batch[i].0, m))
                                     }
@@ -537,7 +546,8 @@ async fn connection_write(
     }
 }
 
-type WriteBatch = (ToWriteBatch, oneshot::Sender<FromWriteBatch>);
+type WriteBatch =
+    (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>);
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
@@ -620,7 +630,10 @@ impl ResolverWrite {
         ResolverWrite(to_tx)
     }
 
-    pub(crate) fn send(&self, batch: ToWriteBatch) -> oneshot::Receiver<FromWriteBatch> {
+    pub(crate) fn send(
+        &self,
+        batch: Pooled<Vec<(usize, ToWrite)>>,
+    ) -> oneshot::Receiver<Pooled<Vec<(usize, FromWrite)>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.send((batch, tx));
         rx

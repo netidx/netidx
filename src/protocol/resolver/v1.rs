@@ -2,6 +2,7 @@ use crate::{
     chars::Chars,
     pack::{Pack, PackError, Z64},
     path::Path,
+    pool::Pooled,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fxhash::FxBuildHasher;
@@ -144,6 +145,12 @@ impl Pack for ClientHelloWrite {
         let write_addr = <SocketAddr as Pack>::decode(buf)?;
         let auth = ClientAuthWrite::decode(buf)?;
         Ok(ClientHelloWrite { write_addr, auth })
+    }
+
+    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<()> {
+        self.write_addr = <SocketAddr as Pack>::decode(buf)?;
+        self.auth = <ClientAuthWrite as Pack>::decode(buf)?;
+        Ok(())
     }
 }
 
@@ -401,37 +408,38 @@ impl Pack for ToRead {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
+    pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
     pub resolver: SocketAddr,
-    pub addrs: Vec<(SocketAddr, Bytes)>,
+    pub addrs: Pooled<Vec<(SocketAddr, Bytes)>>,
     pub timestamp: u64,
     pub permissions: u32,
 }
 
 impl Pack for Resolved {
     fn len(&self) -> usize {
-        <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
+        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::len(&self.krb5_spns)
             + <SocketAddr as Pack>::len(&self.resolver)
-            + <Vec<(SocketAddr, Bytes)> as Pack>::len(&self.addrs)
+            + <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::len(&self.addrs)
             + <u64 as Pack>::len(&self.timestamp)
             + <u32 as Pack>::len(&self.permissions)
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::encode(
+        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encode(
             &self.krb5_spns,
             buf,
         )?;
         <SocketAddr as Pack>::encode(&self.resolver, buf)?;
-        <Vec<(SocketAddr, Bytes)> as Pack>::encode(&self.addrs, buf)?;
+        <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)?;
         <u64 as Pack>::encode(&self.timestamp, buf)?;
         <u32 as Pack>::encode(&self.permissions, buf)
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
-        let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
+        let krb5_spns =
+            <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::decode(buf)?;
         let resolver = <SocketAddr as Pack>::decode(buf)?;
-        let addrs = <Vec<(SocketAddr, Bytes)> as Pack>::decode(buf)?;
+        let addrs = <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
         let timestamp = <u64 as Pack>::decode(buf)?;
         let permissions = <u32 as Pack>::decode(buf)?;
         Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions })
@@ -442,30 +450,36 @@ impl Pack for Resolved {
 pub struct Referral {
     pub path: Path,
     pub ttl: u64,
-    pub addrs: Vec<SocketAddr>,
-    pub krb5_spns: HashMap<SocketAddr, Chars, FxBuildHasher>,
+    pub addrs: Pooled<Vec<SocketAddr>>,
+    pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
 }
 
 impl Pack for Referral {
     fn len(&self) -> usize {
         <Path as Pack>::len(&self.path)
             + <u64 as Pack>::len(&self.ttl)
-            + <Vec<SocketAddr> as Pack>::len(&self.addrs)
-            + <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::len(&self.krb5_spns)
+            + <Pooled<Vec<SocketAddr>> as Pack>::len(&self.addrs)
+            + <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::len(
+                &self.krb5_spns,
+            )
     }
 
     fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         <Path as Pack>::encode(&self.path, buf)?;
         <u64 as Pack>::encode(&self.ttl, buf)?;
-        <Vec<SocketAddr> as Pack>::encode(&self.addrs, buf)?;
-        <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::encode(&self.krb5_spns, buf)
+        <Pooled<Vec<SocketAddr>> as Pack>::encode(&self.addrs, buf)?;
+        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encode(
+            &self.krb5_spns,
+            buf,
+        )
     }
 
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         let path = <Path as Pack>::decode(buf)?;
         let ttl = <u64 as Pack>::decode(buf)?;
-        let addrs = <Vec<SocketAddr> as Pack>::decode(buf)?;
-        let krb5_spns = <HashMap<SocketAddr, Chars, FxBuildHasher> as Pack>::decode(buf)?;
+        let addrs = <Pooled<Vec<SocketAddr>> as Pack>::decode(buf)?;
+        let krb5_spns =
+            <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::decode(buf)?;
         Ok(Referral { path, ttl, addrs, krb5_spns })
     }
 }
@@ -473,8 +487,8 @@ impl Pack for Referral {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
     Resolved(Resolved),
-    List(Vec<Path>),
-    Table { rows: Vec<Path>, cols: HashMap<Path, Z64> },
+    List(Pooled<Vec<Path>>),
+    Table { rows: Pooled<Vec<Path>>, cols: Pooled<HashMap<Path, Z64>> },
     Referral(Referral),
     Denied,
     Error(Chars),
@@ -484,9 +498,10 @@ impl Pack for FromRead {
     fn len(&self) -> usize {
         1 + match self {
             FromRead::Resolved(a) => Resolved::len(a),
-            FromRead::List(l) => <Vec<Path> as Pack>::len(l),
+            FromRead::List(l) => <Pooled<Vec<Path>> as Pack>::len(l),
             FromRead::Table { rows, cols } => {
-                <Vec<Path> as Pack>::len(rows) + <HashMap<Path, Z64> as Pack>::len(cols)
+                <Pooled<Vec<Path>> as Pack>::len(rows)
+                    + <Pooled<HashMap<Path, Z64>> as Pack>::len(cols)
             }
             FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
@@ -502,12 +517,12 @@ impl Pack for FromRead {
             }
             FromRead::List(l) => {
                 buf.put_u8(1);
-                <Vec<Path> as Pack>::encode(l, buf)
+                <Pooled<Vec<Path>> as Pack>::encode(l, buf)
             }
-            FromRead::Table {rows, cols} => {
+            FromRead::Table { rows, cols } => {
                 buf.put_u8(2);
-                <Vec<Path> as Pack>::encode(rows, buf)?;
-                <HashMap<Path, Z64>>::encode(cols, buf)
+                <Pooled<Vec<Path>> as Pack>::encode(rows, buf)?;
+                <Pooled<HashMap<Path, Z64>>>::encode(cols, buf)
             }
             FromRead::Referral(r) => {
                 buf.put_u8(3);
@@ -524,11 +539,11 @@ impl Pack for FromRead {
     fn decode(buf: &mut BytesMut) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
-            1 => Ok(FromRead::List(<Vec<Path> as Pack>::decode(buf)?)),
+            1 => Ok(FromRead::List(<Pooled<Vec<Path>> as Pack>::decode(buf)?)),
             2 => {
-                let rows = <Vec<Path> as Pack>::decode(buf)?;
-                let cols = <HashMap<Path, Z64>>::decode(buf)?;
-                Ok(FromRead::Table {rows, cols})
+                let rows = <Pooled<Vec<Path>> as Pack>::decode(buf)?;
+                let cols = <Pooled<HashMap<Path, Z64>>>::decode(buf)?;
+                Ok(FromRead::Table { rows, cols })
             }
             3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
             4 => Ok(FromRead::Denied),
