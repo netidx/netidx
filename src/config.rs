@@ -1,4 +1,4 @@
-use crate::{path::Path, protocol::resolver::v1::Referral, utils, pool::Pooled};
+use crate::{path::Path, protocol::resolver::v1::Referral, utils};
 use anyhow::Result;
 use serde_json::from_str;
 use std::{
@@ -136,12 +136,12 @@ pub struct Config {
     pub reader_ttl: Duration,
     pub writer_ttl: Duration,
     pub hello_timeout: Duration,
-    pub addrs: Pooled<Vec<SocketAddr>>,
+    pub addrs: Vec<SocketAddr>,
     pub auth: Auth,
 }
 
 impl From<Referral> for Config {
-    fn from(r: Referral) -> Config {
+    fn from(mut r: Referral) -> Config {
         // not for use with a server
         Config {
             parent: None,
@@ -151,13 +151,13 @@ impl From<Referral> for Config {
             reader_ttl: Duration::from_secs(120),
             writer_ttl: Duration::from_secs(600),
             hello_timeout: Duration::from_secs(10),
-            addrs: Pooled::orphan(r.addrs),
+            addrs: r.addrs.detach(),
             auth: {
                 if r.krb5_spns.is_empty() {
                     Auth::Anonymous
                 } else {
                     Auth::Krb5(
-                        r.krb5_spns.into_iter().map(|(k, v)| (k, v.into())).collect(),
+                        r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect(),
                     )
                 }
             },

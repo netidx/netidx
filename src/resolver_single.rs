@@ -17,15 +17,13 @@ use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
     fmt::Debug,
-    mem,
     net::SocketAddr,
-    ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
 };
@@ -559,7 +557,7 @@ async fn write_mgr(
     let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut senders = {
         let mut senders = Vec::new();
-        for addr in &resolver.addrs {
+        for addr in resolver.addrs.iter() {
             let (sender, receiver) = mpsc::channel(100);
             let addr = *addr;
             let resolver = resolver.clone();

@@ -188,26 +188,6 @@ pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
     })
 }
 
-pub(crate) enum Either<A, B> {
-    A(A),
-    B(B),
-}
-
-impl<A, B, I> Iterator for Either<A, B>
-where
-    A: Iterator<Item = I>,
-    B: Iterator<Item = I>,
-{
-    type Item = I;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Either::A(a) => a.next(),
-            Either::B(b) => b.next(),
-        }
-    }
-}
-
 pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();

@@ -355,17 +355,21 @@ impl<T> StoreInner<T> {
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let mut paths = self.paths_pool.take();
-        paths.extend(self.by_level.get(&(Path::levels(&**parent) + 1)).map(|l| {
-            l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                .take_while(|p| p.as_ref().starts_with(&**parent))
-                .cloned()
-        }));
+        if let Some(l) = self.by_level.get(&(Path::levels(&**parent) + 1)) {
+            paths.extend(
+                l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
+                    .take_while(|p| p.as_ref().starts_with(&**parent))
+                    .cloned(),
+            )
+        }
         paths
     }
 
     pub(crate) fn columns(&self, root: &Path) -> Pooled<HashMap<Path, Z64>> {
         let mut cols = self.cols_pool.take();
-        cols.extend(self.columns.get(root).cloned());
+        if let Some(c) = self.columns.get(root) {
+            cols.extend(c.iter().map(|(name, cnt)| (name.clone(), *cnt)));
+        }
         cols
     }
 

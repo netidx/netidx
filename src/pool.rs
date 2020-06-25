@@ -4,10 +4,12 @@ use crossbeam::queue::ArrayQueue;
 use std::{
     collections::HashMap,
     default::Default,
-    fmt::{Debug, Formatter},
+    fmt::Debug,
     hash::{BuildHasher, Hash},
     ops::{Deref, DerefMut},
     sync::{Arc, Weak},
+    cmp::{PartialEq, PartialOrd, Eq, Ord, Ordering},
+    mem,
 };
 
 pub trait Poolable {
@@ -122,6 +124,26 @@ pub struct Pooled<T: Poolable> {
     object: Option<T>,
 }
 
+impl<T: Poolable + PartialEq> PartialEq for Pooled<T> {
+    fn eq(&self, other: &Pooled<T>) -> bool {
+        self.object.eq(&other.object)
+    }
+}
+
+impl<T: Poolable + Eq> Eq for Pooled<T> {}
+
+impl<T: Poolable + PartialOrd> PartialOrd for Pooled<T> {
+    fn partial_cmp(&self, other: &Pooled<T>) -> Option<Ordering> {
+        self.object.partial_cmp(&other.object)
+    }
+}
+
+impl<T: Poolable + Ord> Ord for Pooled<T> {
+    fn cmp(&self, other: &Pooled<T>) -> Ordering {
+        self.object.cmp(&other.object)
+    }
+}
+
 impl<T: Poolable> Pooled<T> {
     /// Creates a `Pooled` that isn't connected to any pool. E.G. for
     /// branches where you know a given `Pooled` will always be empty.
@@ -130,6 +152,10 @@ impl<T: Poolable> Pooled<T> {
             pool: Weak::new(),
             object: Some(t)
         }
+    }
+
+    pub fn detach(mut self) -> T {
+        mem::replace(&mut self.object, None).unwrap()
     }
 }
 
