@@ -5,9 +5,10 @@ use crate::{
     config::Config,
     os::{self, Krb5Ctx, ServerCtx},
     path::Path,
+    pool::{Pool, Pooled},
     protocol::publisher::{self, v1::Id},
     resolver::{Auth, ResolverWrite},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
@@ -43,7 +44,9 @@ use tokio::{
 
 static MAX_CLIENTS: usize = 768;
 
-make_pool!(pub, BATCHES, Batch, (Id, Value), 1000);
+lazy_static! {
+    static ref BATCHES: Pool<Vec<(Id, Value)>> = Pool::new(1000);
+}
 
 // a socketaddr wrapper that implements Ord so we can put clients in a
 // set.
@@ -169,7 +172,7 @@ impl Val {
     /// channels, and you can register the same channel on multiple
     /// `Val` objects. If no channels are registered to receive writes
     /// they will be ignored.
-    pub fn writes(&self, tx: fmpsc::Sender<Batch>) {
+    pub fn writes(&self, tx: fmpsc::Sender<Pooled<Vec<(Id, Value)>>>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut pb = publisher.0.lock();
             let e = pb
@@ -268,8 +271,13 @@ struct PublisherInner {
     hc_subscribed: HashMap<BTreeSet<Addr>, Subscribed, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, ValWeak, FxBuildHasher>,
-    on_write_chans: HashMap<ChanWrap<Batch>, (ChanId, HashSet<Id>), FxBuildHasher>,
-    on_write: HashMap<Id, Vec<(ChanId, fmpsc::Sender<Batch>)>, FxBuildHasher>,
+    on_write_chans:
+        HashMap<ChanWrap<Pooled<Vec<(Id, Value)>>>, (ChanId, HashSet<Id>), FxBuildHasher>,
+    on_write: HashMap<
+        Id,
+        Vec<(ChanId, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>)>,
+        FxBuildHasher,
+    >,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_publish_default: HashSet<Path>,
@@ -858,7 +866,11 @@ async fn handle_batch(
     addr: &SocketAddr,
     msgs: impl Iterator<Item = publisher::v1::To>,
     con: &mut Channel<ServerCtx>,
-    write_batches: &mut HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher>,
+    write_batches: &mut HashMap<
+        ChanId,
+        (Pooled<Vec<(Id, Value)>>, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>),
+        FxBuildHasher,
+    >,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     auth: &Auth,
     now: u64,
@@ -942,7 +954,9 @@ async fn handle_batch(
                                     for (cid, ch) in ow.iter() {
                                         write_batches
                                             .entry(*cid)
-                                            .or_insert_with(|| (Batch::new(), ch.clone()))
+                                            .or_insert_with(|| {
+                                                (BATCHES.take(), ch.clone())
+                                            })
                                             .0
                                             .push((id, v.clone()))
                                     }
@@ -1032,8 +1046,11 @@ async fn client_loop(
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::v1::To> = Vec::new();
-    let mut write_batches: HashMap<ChanId, (Batch, fmpsc::Sender<Batch>), FxBuildHasher> =
-        HashMap::with_hasher(FxBuildHasher::default());
+    let mut write_batches: HashMap<
+        ChanId,
+        (Pooled<Vec<(Id, Value)>>, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>),
+        FxBuildHasher,
+    > = HashMap::with_hasher(FxBuildHasher::default());
     let mut flushes = flushes.fuse();
     let mut hb = time::interval(HB).fuse();
     let mut msg_sent = false;

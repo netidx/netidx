@@ -15,7 +15,6 @@ use std::{
     cell::RefCell,
     hash::Hash,
     net::{IpAddr, SocketAddr},
-    ops::{Deref, DerefMut},
     pin::Pin,
     str, iter::{Iterator, IntoIterator},
 };
@@ -223,76 +222,6 @@ impl<T> Hash for ChanWrap<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hash_receiver(state)
     }
-}
-
-pub trait Pooled<T>: Deref<Target = Vec<T>> + DerefMut<Target = Vec<T>> {
-    fn new() -> Self;
-}
-
-macro_rules! make_pool_items {
-    ($typedef:item, $gname:ident, $tname:ident, $type:ty, $max:expr) => {
-        lazy_static! {
-            static ref $gname: Mutex<Vec<Vec<$type>>> = Mutex::new(Vec::new());
-        }
-
-        #[derive(Debug, Clone)]
-        $typedef
-
-        impl $tname {
-            fn new() -> Self {
-                let v = $gname.lock().pop();
-                $tname(v.unwrap_or_else(Vec::new))
-            }
-        }
-
-        impl Deref for $tname {
-            type Target = Vec<$type>;
-
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        impl DerefMut for $tname {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-
-        impl Drop for $tname {
-            fn drop(&mut self) {
-                self.clear();
-                let mut batches = $gname.lock();
-                if batches.len() < $max {
-                    batches.push(mem::replace(&mut self.0, Vec::new()));
-                }
-            }
-        }
-
-        impl Pooled<$type> for $tname {
-            fn new() -> Self {
-                $tname::new()
-            }
-        }
-    }
-}
-
-macro_rules! make_pool {
-    ($gname:ident, $tname:ident, $type:ty, $max:expr) => {
-        make_pool_items!(struct $tname(Vec<$type>);, $gname, $tname, $type, $max);
-    };
-    (pub, $gname:ident, $tname:ident, $type:ty, $max:expr) => {
-        make_pool_items!(pub struct $tname(Vec<$type>);, $gname, $tname, $type, $max);
-    };
-    (pub(crate), $gname:ident, $tname:ident, $type:ty, $max:expr) => {
-        make_pool_items!(
-            pub(crate) struct $tname(Vec<$type>);,
-            $gname,
-            $tname,
-            $type,
-            $max
-        );
-    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

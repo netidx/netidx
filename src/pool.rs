@@ -17,53 +17,6 @@ pub trait Poolable {
     fn reset(&mut self);
 }
 
-impl<T> Poolable for Option<T>
-where
-    T: Poolable,
-{
-    fn alloc() -> Self {
-        None
-    }
-
-    fn reset(&mut self) {
-        if let Some(x) = self {
-            x.reset();
-        }
-    }
-}
-
-impl<T1, T2> Poolable for (T1, T2)
-where
-    T1: Poolable,
-    T2: Poolable,
-{
-    fn alloc() -> Self {
-        (T1::alloc(), T2::alloc())
-    }
-
-    fn reset(&mut self) {
-        self.0.reset();
-        self.1.reset();
-    }
-}
-
-impl<T1, T2, T3> Poolable for (T1, T2, T3)
-where
-    T1: Poolable,
-    T2: Poolable,
-    T3: Poolable,
-{
-    fn alloc() -> Self {
-        (T1::alloc(), T2::alloc(), T3::alloc())
-    }
-
-    fn reset(&mut self) {
-        self.0.reset();
-        self.1.reset();
-        self.2.reset();
-    }
-}
-
 impl<K, V, R> Poolable for HashMap<K, V, R>
 where
     K: Hash + Eq,

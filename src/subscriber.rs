@@ -5,9 +5,10 @@ use crate::{
     config::Config,
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
+    pool::{Pool, Pooled},
     protocol::publisher::v1::{From, Id, To},
     resolver::{Auth, ResolverRead},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Pooled},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
@@ -27,7 +28,6 @@ use std::{
     hash::Hash,
     iter, mem,
     net::SocketAddr,
-    ops::{Deref, DerefMut},
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -90,7 +90,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Last(Id, oneshot::Sender<Value>),
-    Stream { id: Id, sub_id: SubId, tx: Sender<Batch>, last: bool },
+    Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Value)>>>, last: bool },
     Write(Id, Value),
     Flush(oneshot::Sender<()>),
 }
@@ -147,7 +147,11 @@ impl Val {
     /// You may register multiple different channels to receive
     /// updates from a `Val`, and you may register one channel to
     /// receive updates from multiple `Val`s.
-    pub fn updates(&self, begin_with_last: bool, tx: Sender<Batch>) {
+    pub fn updates(
+        &self,
+        begin_with_last: bool,
+        tx: Sender<Pooled<Vec<(SubId, Value)>>>,
+    ) {
         let m = ToCon::Stream {
             tx,
             sub_id: self.0.sub_id,
@@ -196,7 +200,7 @@ enum SubState {
 struct DvalInner {
     sub_id: SubId,
     sub: SubState,
-    streams: Vec<Sender<Batch>>,
+    streams: Vec<Sender<Pooled<Vec<(SubId, Value)>>>>,
     states: Vec<UnboundedSender<(SubId, DvState)>>,
     tries: usize,
     next_try: Instant,
@@ -294,7 +298,11 @@ impl Dval {
     /// You may register multiple different channels to receive
     /// updates from a `Dval`, and you may register one channel to
     /// receive updates from multiple `Dval`s.
-    pub fn updates(&self, begin_with_last: bool, tx: mpsc::Sender<Batch>) {
+    pub fn updates(
+        &self,
+        begin_with_last: bool,
+        tx: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
+    ) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
         if let SubState::FatalError(_) = t.sub {
@@ -643,7 +651,8 @@ impl Subscriber {
                                         target_spn,
                                         rx,
                                         desired_auth,
-                                    ).await;
+                                    )
+                                    .await;
                                     info!("connection to {} shutdown {:?}", addr, res);
                                 });
                                 tx
@@ -815,7 +824,7 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, ChanId, Sender<Batch>)>,
+    streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Value)>>>)>,
     last: Value,
 }
 
@@ -903,15 +912,21 @@ async fn hello_publisher(
 const PERIOD: Duration = Duration::from_secs(10);
 const FLUSH: Duration = Duration::from_secs(1);
 
-make_pool!(pub, BATCHES, Batch, (SubId, Value), 1000);
-make_pool!(DECODE_BATCHES, DecodeBatch, From, 1000);
+lazy_static! {
+    static ref BATCHES: Pool<Vec<(SubId, Value)>> = Pool::new(1000);
+    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(1000);
+}
 
 // This is the fast path for the common case where the batch contains
 // only updates. As of 2020-04-30, sending to an mpsc channel is
 // pretty slow, about 250ns, so we go to great lengths to avoid it.
 async fn process_updates_batch(
-    by_chan: &mut HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher>,
-    mut batch: DecodeBatch,
+    by_chan: &mut HashMap<
+        ChanId,
+        (Sender<Pooled<Vec<(SubId, Value)>>>, Pooled<Vec<(SubId, Value)>>),
+        FxBuildHasher,
+    >,
+    mut batch: Pooled<Vec<From>>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
     for m in batch.drain(..) {
@@ -920,7 +935,7 @@ async fn process_updates_batch(
                 for (sub_id, chan_id, c) in sub.streams.iter() {
                     by_chan
                         .entry(*chan_id)
-                        .or_insert_with(|| (c.clone(), Batch::new()))
+                        .or_insert_with(|| (c.clone(), BATCHES.take()))
                         .1
                         .push((*sub_id, m.clone()))
                 }
@@ -934,7 +949,7 @@ async fn process_updates_batch(
 }
 
 async fn process_batch(
-    mut batch: DecodeBatch,
+    mut batch: Pooled<Vec<From>>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
     con: &mut WriteChannel<ClientCtx>,
@@ -946,7 +961,7 @@ async fn process_batch(
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
                     for (id, _, c) in sub.streams.iter_mut() {
-                        let mut b = Batch::new();
+                        let mut b = BATCHES.take();
                         b.push((*id, m.clone()));
                         let _ = c.send(b).await;
                     }
@@ -1012,11 +1027,11 @@ async fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
 fn decode_task(
     mut con: ReadChannel<ClientCtx>,
     stop: oneshot::Receiver<()>,
-) -> Receiver<Result<(DecodeBatch, bool)>> {
+) -> Receiver<Result<(Pooled<Vec<From>>, bool)>> {
     let (mut send, recv) = mpsc::channel(3);
     let mut stop = stop.fuse();
     task::spawn(async move {
-        let mut buf = DecodeBatch::new();
+        let mut buf = DECODE_BATCHES.take();
         let r: Result<(), anyhow::Error> = loop {
             select_biased! {
                 _ = stop => { break Ok(()); },
@@ -1026,7 +1041,7 @@ fn decode_task(
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
-                        let batch = mem::replace(&mut buf, DecodeBatch::new());
+                        let batch = mem::replace(&mut buf, DECODE_BATCHES.take());
                         let only_updates = batch.iter().all(|v| match v {
                             From::Update(_, _) => true,
                             _ => false
@@ -1062,9 +1077,13 @@ async fn connection(
     let (tx_stop, rx_stop) = oneshot::channel();
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
-    let mut by_receiver: HashMap<ChanWrap<Batch>, ChanId> = HashMap::new();
-    let mut by_chan: HashMap<ChanId, (Sender<Batch>, Batch), FxBuildHasher> =
-        HashMap::with_hasher(FxBuildHasher::default());
+    let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Value)>>>, ChanId> =
+        HashMap::new();
+    let mut by_chan: HashMap<
+        ChanId,
+        (Sender<Pooled<Vec<(SubId, Value)>>>, Pooled<Vec<(SubId, Value)>>),
+        FxBuildHasher,
+    > = HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -1134,7 +1153,7 @@ async fn connection(
                         });
                         if last {
                             let m = sub.last.clone();
-                            let mut b = Batch::new();
+                            let mut b = BATCHES.take();
                             b.push((sub_id, m));
                             match tx.send(b).await {
                                 Err(_) => continue,
