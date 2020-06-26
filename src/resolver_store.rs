@@ -103,7 +103,7 @@ pub(crate) struct StoreInner<T> {
     signed_addrs_pool: Pool<Vec<(SocketAddr, Bytes)>>,
     addrs_pool: Pool<Vec<SocketAddr>>,
     paths_pool: Pool<Vec<Path>>,
-    cols_pool: Pool<HashMap<Path, Z64>>,
+    cols_pool: Pool<Vec<(Path, Z64)>>,
 }
 
 impl<T> StoreInner<T> {
@@ -365,7 +365,7 @@ impl<T> StoreInner<T> {
         paths
     }
 
-    pub(crate) fn columns(&self, root: &Path) -> Pooled<HashMap<Path, Z64>> {
+    pub(crate) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
         let mut cols = self.cols_pool.take();
         if let Some(c) = self.columns.get(root) {
             cols.extend(c.iter().map(|(name, cnt)| (name.clone(), *cnt)));

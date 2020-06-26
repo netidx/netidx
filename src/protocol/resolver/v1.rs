@@ -488,7 +488,7 @@ impl Pack for Referral {
 pub enum FromRead {
     Resolved(Resolved),
     List(Pooled<Vec<Path>>),
-    Table { rows: Pooled<Vec<Path>>, cols: Pooled<HashMap<Path, Z64>> },
+    Table { rows: Pooled<Vec<Path>>, cols: Pooled<Vec<(Path, Z64)>> },
     Referral(Referral),
     Denied,
     Error(Chars),
@@ -501,7 +501,7 @@ impl Pack for FromRead {
             FromRead::List(l) => <Pooled<Vec<Path>> as Pack>::len(l),
             FromRead::Table { rows, cols } => {
                 <Pooled<Vec<Path>> as Pack>::len(rows)
-                    + <Pooled<HashMap<Path, Z64>> as Pack>::len(cols)
+                    + <Pooled<Vec<(Path, Z64)>> as Pack>::len(cols)
             }
             FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
@@ -522,7 +522,7 @@ impl Pack for FromRead {
             FromRead::Table { rows, cols } => {
                 buf.put_u8(2);
                 <Pooled<Vec<Path>> as Pack>::encode(rows, buf)?;
-                <Pooled<HashMap<Path, Z64>>>::encode(cols, buf)
+                <Pooled<Vec<(Path, Z64)>>>::encode(cols, buf)
             }
             FromRead::Referral(r) => {
                 buf.put_u8(3);
@@ -542,7 +542,7 @@ impl Pack for FromRead {
             1 => Ok(FromRead::List(<Pooled<Vec<Path>> as Pack>::decode(buf)?)),
             2 => {
                 let rows = <Pooled<Vec<Path>> as Pack>::decode(buf)?;
-                let cols = <Pooled<HashMap<Path, Z64>>>::decode(buf)?;
+                let cols = <Pooled<Vec<(Path, Z64)>>>::decode(buf)?;
                 Ok(FromRead::Table { rows, cols })
             }
             3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
