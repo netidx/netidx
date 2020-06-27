@@ -3,7 +3,9 @@ use crate::{
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::{FromRead, FromWrite, Referral, Resolved, ToRead, ToWrite},
+    protocol::resolver::v1::{
+        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
+    },
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
@@ -396,7 +398,19 @@ impl ResolverRead {
         }
     }
 
-//    pub async fn table(&self, path: Path) -> Result<>
+    pub async fn table(&self, path: Path) -> Result<Table> {
+        let mut to = RAWTOREADPOOL.take();
+        to.push(ToRead::Table(path));
+        let mut result = self.send(&to).await?;
+        if result.len() != 1 {
+            bail!("expected 1 result from table got {}", result.len());
+        } else {
+            match result.pop().unwrap() {
+                FromRead::Table(table) => Ok(table),
+                m => bail!("unexpected result from table {:?}", m),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
