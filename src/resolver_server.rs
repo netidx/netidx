@@ -11,7 +11,7 @@ use crate::{
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
             FromWrite, ReadyForOwnershipCheck, Resolved, Secret, ServerAuthWrite,
-            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite, Table
         },
     },
     resolver_store::{Store, StoreInner},
@@ -403,7 +403,7 @@ fn handle_batch_read(
                     } else {
                         let rows = s.list(&path);
                         let cols = s.columns(&path);
-                        con.queue_send(&FromRead::Table { rows, cols })?;
+                        con.queue_send(&FromRead::Table(Table { rows, cols }))?;
                     }
                 }
             }

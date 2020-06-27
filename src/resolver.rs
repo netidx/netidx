@@ -395,6 +395,8 @@ impl ResolverRead {
             }
         }
     }
+
+//    pub async fn table(&self, path: Path) -> Result<>
 }
 
 #[derive(Debug, Clone)]

@@ -485,10 +485,33 @@ impl Pack for Referral {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+    pub rows: Pooled<Vec<Path>>,
+    pub cols: Pooled<Vec<(Path, Z64)>>,
+}
+
+impl Pack for Table {
+    fn len(&self) -> usize {
+        <Pooled<Vec<Path>>>::len(&self.rows) + <Pooled<Vec<(Path, Z64)>>>::len(&self.cols)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+        <Pooled<Vec<Path>>>::encode(&self.rows, buf)?;
+        <Pooled<Vec<(Path, Z64)>>>::encode(&self.cols, buf)
+    }
+
+    fn decode(buf: &mut BytesMut) -> Result<Self> {
+        let rows = <Pooled<Vec<Path>>>::decode(buf)?;
+        let cols = <Pooled<Vec<(Path, Z64)>>>::decode(buf)?;
+        Ok(Table { rows, cols })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
     Resolved(Resolved),
     List(Pooled<Vec<Path>>),
-    Table { rows: Pooled<Vec<Path>>, cols: Pooled<Vec<(Path, Z64)>> },
+    Table(Table),
     Referral(Referral),
     Denied,
     Error(Chars),
@@ -499,10 +522,7 @@ impl Pack for FromRead {
         1 + match self {
             FromRead::Resolved(a) => Resolved::len(a),
             FromRead::List(l) => <Pooled<Vec<Path>> as Pack>::len(l),
-            FromRead::Table { rows, cols } => {
-                <Pooled<Vec<Path>> as Pack>::len(rows)
-                    + <Pooled<Vec<(Path, Z64)>> as Pack>::len(cols)
-            }
+            FromRead::Table(t) => <Table as Pack>::len(t),
             FromRead::Referral(r) => <Referral as Pack>::len(r),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
@@ -519,10 +539,9 @@ impl Pack for FromRead {
                 buf.put_u8(1);
                 <Pooled<Vec<Path>> as Pack>::encode(l, buf)
             }
-            FromRead::Table { rows, cols } => {
+            FromRead::Table(t) => {
                 buf.put_u8(2);
-                <Pooled<Vec<Path>> as Pack>::encode(rows, buf)?;
-                <Pooled<Vec<(Path, Z64)>>>::encode(cols, buf)
+                <Table as Pack>::encode(t, buf)
             }
             FromRead::Referral(r) => {
                 buf.put_u8(3);
@@ -540,11 +559,7 @@ impl Pack for FromRead {
         match buf.get_u8() {
             0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
             1 => Ok(FromRead::List(<Pooled<Vec<Path>> as Pack>::decode(buf)?)),
-            2 => {
-                let rows = <Pooled<Vec<Path>> as Pack>::decode(buf)?;
-                let cols = <Pooled<Vec<(Path, Z64)>>>::decode(buf)?;
-                Ok(FromRead::Table { rows, cols })
-            }
+            2 => Ok(FromRead::Table(<Table as Pack>::decode(buf)?)),
             3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
             4 => Ok(FromRead::Denied),
             5 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
