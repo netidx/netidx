@@ -1,16 +1,25 @@
-use netidx::{path::Path, protocol::publisher::v1::Value};
+use netidx::{path::Path, publisher::Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Either<T, U> {
-    A(T),
-    B(U),
+enum Source {
+    Constant(Value),
+    Load(Path),
+    Variable(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Sink {
+    Store(Path),
+    Variable(String),
+    Script(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Keybind {
     key: String,
-    source: Either<Path, Value>,
-    sink: Path,
+    source: Source,
+    sink: Sink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,36 +30,50 @@ enum Direction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Widget {
-    Table(Path),
-    Single(Either<Path, Value>),
+    Table(Source),
+    Display(Source),
+    Action {
+        source: Source,
+        sink: Sink
+    },
     Button {
-        enabled: Either<Path, Value>,
-        label: Either<Path, Value>,
-        source: Either<Path, Value>,
-        sink: Path,
+        enabled: Source,
+        label: Source,
+        source: Source,
+        sink: Sink,
     },
     Toggle {
-        enabled: Either<Path, Value>,
-        value: Path,
+        enabled: Source,
+        source: Source,
+        sink: Sink,
     },
     ComboBox {
-        enabled: Either<Path, Value>,
-        choices: Either<Path, Vec<String>>,
-        value: Path,
+        enabled: Source,
+        choices: Source,
+        source: Source,
+        sink: Sink,
     },
     Radio {
-        enabled: Either<Path, Value>,
-        choices: Either<Path, Vec<String>>,
-        value: Path,
+        enabled: Source,
+        choices: Source,
+        value: Sink,
     },
     Entry {
-        enabled: Either<Path, Value>,
-        lines: Either<Path, Value>,
-        value: Path,
+        enabled: Source,
+        lines: Source,
+        source: Source,
+        sink: Sink,
     },
     Container {
         direction: Direction,
         keybinds: Vec<Keybind>,
+        variables: HashMap<String, Value>,
         children: Vec<Widget>,
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct View {
+    scripts: Vec<Source>,
+    root: Widget,
 }

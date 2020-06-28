@@ -11,11 +11,13 @@ use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
+mod browser;
 mod publisher;
 mod resolver;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
+mod view;
 
 #[cfg(unix)]
 mod resolver_server;
@@ -44,12 +46,21 @@ struct Opt {
         help = "override the default config file location (~/.config/netidx.json)"
     )]
     config: Option<String>,
+    #[structopt(short = "a", long = "anonymous", help = "disable Kerberos 5")]
+    anon: bool,
+    #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
+    upn: Option<String>,
     #[structopt(subcommand)]
     cmd: Sub,
 }
 
 #[derive(StructOpt, Debug)]
 enum Sub {
+    #[structopt(name = "browser", about = "netidx browser")]
+    Browser {
+        #[structopt(name = "path")]
+        path: Option<Path>,
+    },
     #[structopt(name = "resolver-server", about = "run a resolver")]
     ResolverServer {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
@@ -74,25 +85,17 @@ enum Sub {
     },
     #[structopt(name = "resolver", about = "query the resolver")]
     Resolver {
-        #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
-        krb5: bool,
-        #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-        upn: Option<String>,
         #[structopt(subcommand)]
         cmd: ResolverCmd,
     },
     #[structopt(name = "publisher", about = "publish data")]
     Publisher {
-        #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
-        krb5: bool,
         #[structopt(
             short = "b",
             long = "bind",
             help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
         )]
         bind: BindCfg,
-        #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-        upn: Option<String>,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
         #[structopt(long = "type", help = "data type (use help for a list)")]
@@ -105,10 +108,6 @@ enum Sub {
     },
     #[structopt(name = "subscriber", about = "subscribe to values")]
     Subscriber {
-        #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
-        krb5: bool,
-        #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-        upn: Option<String>,
         #[structopt(name = "paths")]
         paths: Vec<String>,
     },
@@ -148,35 +147,34 @@ enum ResolverCmd {
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
     Publisher {
-        #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
-        krb5: bool,
         #[structopt(
             short = "b",
             long = "bind",
             help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
         )]
         bind: BindCfg,
-        #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-        upn: Option<String>,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
         #[structopt(name = "nvals", default_value = "100")]
         nvals: usize,
     },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
-    Subscriber {
-        #[structopt(short = "k", long = "krb5", help = "use Kerberos 5")]
-        krb5: bool,
-        #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-        upn: Option<String>,
-    },
+    Subscriber,
 }
 
-fn auth(krb5: bool, upn: Option<String>, spn: Option<String>) -> Auth {
-    if !krb5 {
+fn auth(
+    anon: bool,
+    cfg: &config::Config,
+    upn: Option<String>,
+    spn: Option<String>,
+) -> Auth {
+    if anon {
         Auth::Anonymous
     } else {
-        Auth::Krb5 { upn, spn }
+        match cfg.auth {
+            config::Auth::Anonymous => Auth::Anonymous,
+            config::Auth::Krb5(_) => Auth::Krb5 { upn, spn },
+        }
     }
 }
 
@@ -188,6 +186,7 @@ fn main() {
         Some(path) => config::Config::load(path).unwrap(),
     };
     match opt.cmd {
+        Sub::Browser { path } => todo!(),
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
                 todo!("the resolver server is not yet ported to this platform")
@@ -207,21 +206,21 @@ fn main() {
             };
             resolver_server::run(cfg, permissions, !foreground, delay_reads, id)
         }
-        Sub::Resolver { krb5, upn, cmd } => {
-            resolver::run(cfg, cmd, auth(krb5, upn, None))
+        Sub::Resolver { cmd } => {
+            resolver::run(cfg, cmd, auth(opt.anon, &cfg, &opt.upn, None))
         }
-        Sub::Publisher { bind, krb5, upn, spn, typ, timeout } => {
-            publisher::run(cfg, bind, typ, timeout, auth(krb5, upn, spn))
+        Sub::Publisher { bind, spn, typ, timeout } => {
+            publisher::run(cfg, bind, typ, timeout, auth(opt.anon, &opt.upn, spn))
         }
-        Sub::Subscriber { krb5, upn, paths } => {
-            subscriber::run(cfg, paths, auth(krb5, upn, None))
+        Sub::Subscriber { paths } => {
+            subscriber::run(cfg, paths, auth(opt.anon, &opt.upn, None))
         }
         Sub::Stress { cmd } => match cmd {
-            Stress::Subscriber { krb5, upn } => {
-                stress_subscriber::run(cfg, auth(krb5, upn, None))
+            Stress::Subscriber => {
+                stress_subscriber::run(cfg, auth(opt.anon, &opt.upn, None))
             }
-            Stress::Publisher { bind, krb5, upn, spn, nvals } => {
-                stress_publisher::run(cfg, bind, nvals, auth(krb5, upn, spn))
+            Stress::Publisher { bind, spn, nvals } => {
+                stress_publisher::run(cfg, bind, nvals, auth(opt.anon, &opt.upn, spn))
             }
         },
     }

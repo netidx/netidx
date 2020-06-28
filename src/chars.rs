@@ -11,7 +11,7 @@ use std::{
 
 /// This is a thin wrapper around a Bytes that guarantees that it's contents are
 /// well formed unicode.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Chars(Bytes);
 
 impl Chars {

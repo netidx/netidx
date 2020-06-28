@@ -184,7 +184,7 @@ impl Pack for To {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Value {
     /// full 4 byte u32
     U32(u32),
