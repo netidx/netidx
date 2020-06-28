@@ -24,7 +24,7 @@ pub static SEP: char = '/';
 /// unicode character may be used. Path lengths are not limited on the
 /// local machine, but may be restricted by maximum message size on
 /// the wire.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Path(Chars);
 
 impl Pack for Path {

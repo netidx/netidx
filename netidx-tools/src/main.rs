@@ -207,20 +207,25 @@ fn main() {
             resolver_server::run(cfg, permissions, !foreground, delay_reads, id)
         }
         Sub::Resolver { cmd } => {
-            resolver::run(cfg, cmd, auth(opt.anon, &cfg, &opt.upn, None))
+            let auth = auth(opt.anon, &cfg, opt.upn, None);
+            resolver::run(cfg, cmd, auth)
         }
         Sub::Publisher { bind, spn, typ, timeout } => {
-            publisher::run(cfg, bind, typ, timeout, auth(opt.anon, &opt.upn, spn))
+            let auth = auth(opt.anon, &cfg, opt.upn, spn);
+            publisher::run(cfg, bind, typ, timeout, auth)
         }
         Sub::Subscriber { paths } => {
-            subscriber::run(cfg, paths, auth(opt.anon, &opt.upn, None))
+            let auth = auth(opt.anon, &cfg, opt.upn, None);
+            subscriber::run(cfg, paths, auth)
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber => {
-                stress_subscriber::run(cfg, auth(opt.anon, &opt.upn, None))
+                let auth = auth(opt.anon, &cfg, opt.upn, None);
+                stress_subscriber::run(cfg, auth)
             }
             Stress::Publisher { bind, spn, nvals } => {
-                stress_publisher::run(cfg, bind, nvals, auth(opt.anon, &opt.upn, spn))
+                let auth = auth(opt.anon, &cfg, opt.upn, spn);
+                stress_publisher::run(cfg, bind, nvals, auth)
             }
         },
     }
