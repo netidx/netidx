@@ -185,7 +185,7 @@ fn main() {
         Some(path) => config::Config::load(path).unwrap(),
     };
     match opt.cmd {
-        Sub::Browser { path } => todo!(),
+        Sub::Browser { path } => browser::run(),
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
                 todo!("the resolver server is not yet ported to this platform")

@@ -2,34 +2,34 @@ use netidx::{path::Path, publisher::Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Source {
+pub enum Source {
     Constant(Value),
     Load(Path),
     Variable(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Sink {
+pub enum Sink {
     Store(Path),
     Variable(String),
     Script(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Keybind {
-    key: String,
-    source: Source,
-    sink: Sink,
+pub struct Keybind {
+    pub key: String,
+    pub source: Source,
+    pub sink: Sink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Direction {
+pub enum Direction {
     Horizontal,
     Vertical
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Widget {
+pub enum Widget {
     Table(Source),
     Display(Source),
     Action {
@@ -66,6 +66,8 @@ enum Widget {
     },
     Container {
         direction: Direction,
+        hpct: f32,
+        vpct: f32,
         keybinds: Vec<Keybind>,
         variables: HashMap<String, Value>,
         children: Vec<Widget>,
@@ -73,7 +75,7 @@ enum Widget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct View {
-    scripts: Vec<Source>,
-    root: Widget,
+pub struct View {
+    pub scripts: Vec<Source>,
+    pub root: Widget,
 }
