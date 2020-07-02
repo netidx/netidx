@@ -4,7 +4,7 @@ use crate::{
     path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{mem, net::SocketAddr, result};
+use std::{mem, net::SocketAddr, result, fmt};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -216,6 +216,24 @@ pub enum Value {
     False,
     /// Empty value
     Null,
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::U32(v) | Value::V32(v) => write!(f, "{}", v),
+            Value::I32(v) | Value::Z32(v) => write!(f, "{}", v),
+            Value::U64(v) | Value::V64(v) => write!(f, "{}", v),
+            Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
+            Value::F32(v) => write!(f, "{}", v),
+            Value::F64(v) => write!(f, "{}", v),
+            Value::String(v) => write!(f, "{}", &*v),
+            Value::Bytes(_) => write!(f, "<binary>"),
+            Value::True => write!(f, "True"),
+            Value::False => write!(f, "False"),
+            Value::Null => write!(f, "Null"),
+        }
+    }
 }
 
 impl Pack for Value {

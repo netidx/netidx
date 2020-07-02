@@ -12,15 +12,17 @@ use netidx::{
 };
 use netidx_protocols::view::{Direction, Keybind, Sink, Source, View, Widget};
 use std::{
-    cell::Cell,
+    cell::RefCell,
     cmp::{max, min},
     collections::HashMap,
     io::{self, Write},
     iter,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
 struct TableDval {
+    cols: usize,
     row: usize,
     col: usize,
     table_name: Path,
@@ -28,9 +30,23 @@ struct TableDval {
     last_rendered: Instant,
 }
 
-struct SubscriptionManager {
+struct SubMgrInner {
     subscriber: Subscriber,
-    table_subscriptions: HashMap<SubId, TableDval>,
+    by_id: HashMap<SubId, Path>,
+    tables: HashMap<Path, TableDval>,
+}
+
+#[derive(Clone)]
+struct SubMgr(Rc<RefCell<SubMgrInner>>);
+
+fn pad(i: usize, len: usize, s: &str) -> String {
+    if i == 0 {
+        format!("{} ", s)
+    } else if i == len - 1 {
+        format!(" {}", s)
+    } else {
+        format!(" {} ", s)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,16 +57,12 @@ struct TableCell {
 
 struct NetidxTable {
     root: LinearLayout,
-    base_path: Path,
-    subscription_manager: SubscriptionManager,
+    submgr: SubMgr,
 }
 
 impl NetidxTable {
-    fn new(
-        subscription_manager: SubscriptionManager,
-        base_path: Path,
-        table: Table,
-    ) -> NetidxTable {
+    fn new(submgr: SubMgr, base_path: Path, table: Table) -> NetidxTable {
+        fn on_select(c: &mut Cursive, t: &TableCell) {}
         let len = table.rows.len();
         let columns = Rc::new(
             iter::once(base_path.append(Path::from("name")))
@@ -69,12 +81,34 @@ impl NetidxTable {
                 Some(name) => ll.child(TextView::new(name)),
             }
         });
-        let data =
-            ScrollView::new(columns.iter().fold(LinearLayout::horizontal(), |ll, _| {
-                let mut col = SelectView::<TableCell>::new();
-                for r in &table.rows {}
-            }));
-        fn on_select(c: &mut Cursive, t: &TableCell) {}
+        let data = ScrollView::new(
+            columns
+                .clone()
+                .iter()
+                .enumerate()
+                .fold(LinearLayout::horizontal(), |ll, (i, cname)| {
+                    match Path::basename(cname) {
+                        None => ll,
+                        Some(cname) => {
+                            let mut col = SelectView::<TableCell>::new();
+                            let smi = submgr.borrow();
+                            for r in &table.rows {
+                                let path = r.append(cname);
+                                let lbl = match smi.tables.get(&path) {
+                                    None => {
+                                let d = TableCell {
+                                    columns: columns.clone(),
+                                    path,
+                                };
+                                col.add_item(lbl, d)
+                            }
+                            col.set_on_select(on_select);
+                            ll.child(col)
+                        }
+                    }
+                })
+                .with_name(&*base_path),
+        );
         let root = LinearLayout.vertical().child(header).child(data);
         NetidxTable { root, base_path, subscriber, subscribed: HashMap::new() }
     }
