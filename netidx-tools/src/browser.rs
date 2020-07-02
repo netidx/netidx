@@ -8,7 +8,7 @@ use cursive::{
 use netidx::{
     path::Path,
     protocol::resolver::Table,
-    subscriber::{DVal, SubId, Subscriber, Value},
+    subscriber::{DVal, DvState, SubId, Subscriber, Value},
 };
 use netidx_protocols::view::{Direction, Keybind, Sink, Source, View, Widget};
 use std::{
@@ -27,6 +27,7 @@ struct TableDval {
     col: usize,
     table_name: Path,
     sub: Dval,
+    last: Option<Value>,
     last_rendered: Instant,
 }
 
@@ -95,11 +96,17 @@ impl NetidxTable {
                             for r in &table.rows {
                                 let path = r.append(cname);
                                 let lbl = match smi.tables.get(&path) {
-                                    None => {
-                                let d = TableCell {
-                                    columns: columns.clone(),
-                                    path,
+                                    None => pad(i, len, "#u"),
+                                    Some(tdv) => match tdv.sub.state {
+                                        DvState::Unsubscribed => pad(i, len, "#u"),
+                                        DvState::FatalError => pad(i, len, "#e"),
+                                        DvState::Subscribed => match tdv.last {
+                                            None => pad(i, len, "#n"),
+                                            Some(v) => pad(i, len, &format!("{}", v)),
+                                        },
+                                    },
                                 };
+                                let d = TableCell { columns: columns.clone(), path };
                                 col.add_item(lbl, d)
                             }
                             col.set_on_select(on_select);
