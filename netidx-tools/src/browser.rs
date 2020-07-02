@@ -37,14 +37,12 @@ struct TableDval {
 struct SubMgrInner {
     updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
     subscriber: Subscriber,
-    by_id: HashMap<SubId, Path>,
     tables: HashMap<Path, TableDval>,
 }
 
 impl SubMgrInner {
     fn subscribe_table_cell(&mut self, path: Path, name: Path, row: usize, col: usize) {
         let sub = self.subscriber.durable_subscribe(path.clone());
-        self.by_id.insert(sub.id(), path.clone());
         sub.updates(true, self.updates.clone());
         self.tables.insert(
             path,
@@ -82,12 +80,48 @@ struct NetidxTable {
 
 impl View for NetidxTable {
     fn draw(&self, printer: &Printer) {
-        let start_row = printer.offset.y;
-        let nrows = printer.output_size.y;
-        let mut visible = Vec::new();
-        if let Some(c) = root.get_child(1) {
-            if let Some(c) = c.downcast::<NamedView<LinearLayout>>() {}
-        }
+        self.update_subscriptions(printer.output_size.y);
+        self.root.draw(printer);
+    }
+
+    fn layout(&mut self, v: XY<usize>) {
+        self.root.layout(v)
+    }
+
+    fn needs_relayout(&self) -> bool {
+        self.root.needs_relayout()
+    }
+
+    fn required_size(&mut self, constraint: XY<usize>) -> XY<usize> {
+        self.root.required_size(constraint)
+    }
+
+    fn on_event(&mut self, e: Event) -> EventResult {
+        self.root.on_event(e)
+    }
+
+    fn call_on_any(
+        &mut self,
+        s: &Selector,
+        f: &'a mut (dyn FnMut(&mut (dyn View + 'static)) + 'a),
+    ) {
+        self.root.call_on_any(s, f)
+    }
+
+    fn focus_view(&mut self, s: &Selector) -> Result<(), ()> {
+        self.root.focus_view(s)
+    }
+
+    fn take_focus(&mut self, source: Direction) -> bool {
+        self.root.take_focus(source)
+    }
+
+    fn important_area(&self, view_size: XY<usize>) -> Rect {
+        self.root.important_area(view_size)
+    }
+
+    fn type_name(&self) -> &'static str {
+        self.root.type_name()
     }
 }
 
