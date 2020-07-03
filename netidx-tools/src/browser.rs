@@ -8,12 +8,12 @@ use cursive::{
     views::{LinearLayout, NamedView, PaddedView, ScrollView, SelectView, TextView},
     Cursive, CursiveExt, Printer, Rect, XY,
 };
-use futures::{prelude::*, channel::mpsc};
+use futures::{channel::mpsc, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    resolver::{Table, Auth},
+    resolver::{Auth, Table},
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view;
@@ -23,8 +23,8 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     iter,
-    sync::Arc,
     rc::Rc,
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -141,11 +141,12 @@ impl View for NetidxTable {
 }
 
 fn table_on_select(c: &mut Cursive, t: &TableCell) {
+    let submgr = c.user_data::<SubMgr>().unwrap().clone();
     c.call_on_name(&*t.name, |v: &mut NamedView<ScrollView<LinearLayout>>| {
-        let v = v.get_mut();
+        let mut v = v.get_mut();
         let nrows = v.content_viewport().height();
         let ll = v.get_inner_mut();
-        let visible = c.user_data::<Vec<(Path, usize, usize)>>().unwrap();
+        let mut visible = Vec::new(); // estokes: pooled
         for col in 0..ll.len() {
             if let Some(c) = ll.get_child_mut(col) {
                 if let Some(vcol) = c.downcast_mut::<SelectView<TableCell>>() {
@@ -160,9 +161,8 @@ fn table_on_select(c: &mut Cursive, t: &TableCell) {
                 }
             }
         }
-        let submgr = c.user_data::<SubMgr>().unwrap();
         let mut mgr = submgr.0.lock();
-        for (path, row, col) in visible.drain(..) {
+        for (path, row, col) in visible {
             match mgr.table_by_path.get_mut(&path) {
                 Some(tdv) => {
                     tdv.0.lock().last_rendered = Instant::now();
@@ -189,12 +189,14 @@ impl NetidxTable {
                 }))
                 .collect::<Vec<_>>(),
         );
-        let header = columns.iter().fold(LinearLayout::horizontal(), |ll, p| {
-            match Path::basename(p) {
-                None => ll,
-                Some(name) => ll.child(TextView::new(name)),
-            }
-        });
+        let header =
+            columns.iter().fold(
+                LinearLayout::horizontal(),
+                |ll, p| match Path::basename(p) {
+                    None => ll,
+                    Some(name) => ll.child(TextView::new(name)),
+                },
+            );
         let data = ScrollView::new(columns.clone().iter().enumerate().fold(
             LinearLayout::horizontal(),
             |ll, (i, cname)| match Path::basename(cname) {
@@ -235,15 +237,11 @@ impl NetidxTable {
         NetidxTable { root, name: base_path, submgr }
     }
 
-    fn process_update(&mut self, batch: Pooled<Vec<(SubId, Value)>>) {
-        let data = self
-            .root
-            .get_child_mut(1)
-            .unwrap()
-            .downcast_mut::<NamedView<ScrollView<LinearLayout>>>()
-            .unwrap()
-            .get_mut()
-            .get_inner_mut();
+    fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
+        let mut data = self.root.get_child_mut(1).unwrap();
+        let mut data = data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
+        let mut data = data.get_mut();
+        let mut data = data.get_inner_mut();
         let mgr = self.submgr.0.lock();
         for (id, v) in batch.drain(..) {
             if let Some(tdv) = mgr.table_by_id.get(&id) {
@@ -282,7 +280,6 @@ async fn async_main(
     let table = resolver.table(path.clone()).await.expect("can't load initial table");
     gui.send(Box::new(move |c: &mut Cursive| {
         c.set_user_data(submgr.clone());
-        c.set_user_data::<Vec<(Path, usize, usize)>>(Vec::new());
         c.add_fullscreen_layer(NetidxTable::new(submgr, path, table).with_name("root"));
     }));
     while let Some(batch) = rx_updates.next().await {
