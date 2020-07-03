@@ -89,7 +89,7 @@ struct TableCell {
 }
 
 struct NetidxTable {
-    root: LinearLayout,
+    root: NamedView<ScrollView<LinearLayout>>,
     name: Path,
     submgr: SubMgr,
 }
@@ -189,14 +189,6 @@ impl NetidxTable {
                 }))
                 .collect::<Vec<_>>(),
         );
-        let header =
-            columns.iter().fold(
-                LinearLayout::horizontal(),
-                |ll, p| match Path::basename(p) {
-                    None => ll,
-                    Some(name) => ll.child(TextView::new(name)),
-                },
-            );
         let data = ScrollView::new(columns.clone().iter().enumerate().fold(
             LinearLayout::horizontal(),
             |ll, (i, cname)| match Path::basename(cname) {
@@ -204,7 +196,14 @@ impl NetidxTable {
                 Some(cname) => {
                     let mut col = SelectView::<TableCell>::new();
                     let smi = submgr.0.lock();
+                    col.add_item(pad(i, columns.len(), &cname), TableCell {
+                        columns: columns.clone(),
+                        path: Path::from(""),
+                        name: base_path.clone(),
+                        id: 0
+                    });
                     for (j, r) in table.rows.iter().enumerate() {
+                        let j = j + 1;
                         if i == 0 { // row name column
                             let path = Path::from("");
                             let name = Path::basename(r).unwrap_or("");
@@ -245,15 +244,11 @@ impl NetidxTable {
             },
         ))
         .with_name(&*base_path);
-        let root = LinearLayout::vertical().child(header).child(data);
-        NetidxTable { root, name: base_path, submgr }
+        NetidxTable { root: data, name: base_path, submgr }
     }
 
     fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
-        let mut data = self.root.get_child_mut(1).unwrap();
-        let mut data =
-            data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
-        let mut data = data.get_mut();
+        let mut data = self.root.get_mut();
         let mut data = data.get_inner_mut();
         let mgr = self.submgr.0.lock();
         for (id, v) in batch.drain(..) {
