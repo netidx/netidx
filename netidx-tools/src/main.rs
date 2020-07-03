@@ -187,7 +187,7 @@ fn main() {
     match opt.cmd {
         Sub::Browser { path } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
-            browser::run(cfg, auth, path)
+            browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
         },
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {

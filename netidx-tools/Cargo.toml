@@ -39,3 +39,4 @@ crossbeam-channel = "0.4"
 crossterm = "0.17"
 cursive = {version = "0.15", default_features = false, features = ["crossterm-backend"]}
 Boa = "0.8"
+parking_lot = "0.10"

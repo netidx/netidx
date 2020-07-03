@@ -1,11 +1,9 @@
-pub use crate::resolver_single::Auth;
+pub use crate::{protocol::resolver::v1::{Resolved, Table}, resolver_single::Auth};
 use crate::{
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::{
-        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
-    },
+    protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
