@@ -205,27 +205,39 @@ impl NetidxTable {
                     let mut col = SelectView::<TableCell>::new();
                     let smi = submgr.0.lock();
                     for (j, r) in table.rows.iter().enumerate() {
-                        let path = r.append(cname);
-                        let lbl = match smi.table_by_path.get(&path) {
-                            None => pad(i, len, "#u"),
-                            Some(tdv) => {
-                                let tdv = tdv.0.lock();
-                                match tdv.sub.state() {
-                                    DvState::Unsubscribed => pad(i, len, "#u"),
-                                    DvState::FatalError(_) => pad(i, len, "#e"),
-                                    DvState::Subscribed => {
-                                        pad(i, len, &format!("{}", tdv.last))
+                        if i == 0 { // row name column
+                            let path = Path::from("");
+                            let name = Path::basename(r).unwrap_or("");
+                            let d = TableCell {
+                                columns: columns.clone(),
+                                path,
+                                name: base_path.clone(),
+                                id: j,
+                            };
+                            col.add_item(name, d);
+                        } else { // data column
+                            let path = r.append(cname);
+                            let lbl = match smi.table_by_path.get(&path) {
+                                None => pad(i, len, "#u"),
+                                Some(tdv) => {
+                                    let tdv = tdv.0.lock();
+                                    match tdv.sub.state() {
+                                        DvState::Unsubscribed => pad(i, len, "#u"),
+                                        DvState::FatalError(_) => pad(i, len, "#e"),
+                                        DvState::Subscribed => {
+                                            pad(i, len, &format!("{}", tdv.last))
+                                        }
                                     }
                                 }
-                            }
-                        };
-                        let d = TableCell {
-                            columns: columns.clone(),
-                            path,
-                            name: base_path.clone(),
-                            id: j,
-                        };
-                        col.add_item(lbl, d)
+                            };
+                            let d = TableCell {
+                                columns: columns.clone(),
+                                path,
+                                name: base_path.clone(),
+                                id: j,
+                            };
+                            col.add_item(lbl, d)
+                        }
                     }
                     col.set_on_select(table_on_select);
                     ll.child(col)
@@ -239,7 +251,8 @@ impl NetidxTable {
 
     fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
         let mut data = self.root.get_child_mut(1).unwrap();
-        let mut data = data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
+        let mut data =
+            data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
         let mut data = data.get_mut();
         let mut data = data.get_inner_mut();
         let mgr = self.submgr.0.lock();
@@ -252,8 +265,12 @@ impl NetidxTable {
                 };
                 if let Some(column) = data.get_child_mut(col) {
                     if let Some(column) = column.downcast_mut::<SelectView<TableCell>>() {
-                        if let Some((l, _)) = column.get_item_mut(row) {
-                            *l = SpannedString::<Style>::plain(format!("{}", v));
+                        if let Some((l, t)) = column.get_item_mut(row) {
+                            *l = SpannedString::<Style>::plain(pad(
+                                col,
+                                t.columns.len(),
+                                &format!("{}", v),
+                            ));
                         }
                     }
                 }
@@ -285,7 +302,6 @@ async fn async_main(
     while let Some(batch) = rx_updates.next().await {
         gui.send(Box::new(move |c: &mut Cursive| {
             c.call_on_name("root", |v: &mut NetidxTable| v.process_update(batch));
-            c.refresh();
         }));
     }
 }
@@ -304,6 +320,7 @@ fn run_async(
 
 pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let mut c = Cursive::crossterm().unwrap();
+    c.set_fps(1);
     run_async(cfg, auth, path, c.cb_sink().clone());
     c.run()
 }

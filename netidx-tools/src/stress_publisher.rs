@@ -47,7 +47,6 @@ async fn run_publisher(
         let now = Instant::now();
         let elapsed = now - last_stat;
         if elapsed > one_second {
-            v = 0;
             select! {
                 _ = publisher.wait_any_client().fuse() => (),
                 _ = signal::ctrl_c().fuse() => break,
