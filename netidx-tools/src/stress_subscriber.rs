@@ -16,12 +16,17 @@ pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());
-        let mut paths = r.list(Path::from("/bench")).await.expect("list");
+        let mut table = r.table(Path::from("/bench")).await.expect("table");
         let subscriber = Subscriber::new(config, auth).unwrap();
-        let subs = paths
-            .drain(..)
-            .map(|path| subscriber.durable_subscribe(path))
-            .collect::<Vec<Dval>>();
+        let subs = {
+            let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
+            for row in table.rows.iter() {
+                for (col, _) in table.cols.iter() {
+                    subs.push(subscriber.durable_subscribe(row.append(col)));
+                }
+            }
+            subs
+        };
         let (tx, mut vals) = mpsc::channel(3);
         for s in subs.iter() {
             s.updates(true, tx.clone())
