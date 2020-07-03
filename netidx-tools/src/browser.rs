@@ -151,7 +151,7 @@ fn table_on_select(c: &mut Cursive, t: &TableCell) {
             if let Some(c) = ll.get_child_mut(col) {
                 if let Some(vcol) = c.downcast_mut::<SelectView<TableCell>>() {
                     vcol.set_selection(t.id);
-                    let start_row = max(0, t.id - nrows);
+                    let start_row = if t.id < nrows { 0 } else { t.id - nrows };
                     let end_row = min(vcol.len(), t.id + nrows);
                     for row in start_row..end_row {
                         if let Some((_, t)) = vcol.get_item(row) {
