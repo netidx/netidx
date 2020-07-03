@@ -185,7 +185,10 @@ fn main() {
         Some(path) => config::Config::load(path).unwrap(),
     };
     match opt.cmd {
-        Sub::Browser { path } => browser::run(),
+        Sub::Browser { path } => {
+            let auth = auth(opt.anon, &cfg, opt.upn, None);
+            browser::run(cfg, auth, path)
+        },
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
                 todo!("the resolver server is not yet ported to this platform")

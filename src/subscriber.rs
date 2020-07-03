@@ -207,11 +207,11 @@ struct DvalInner {
 }
 
 #[derive(Debug, Clone)]
-struct DvalWeak(Weak<Mutex<DvalInner>>, Path);
+struct DvalWeak(Weak<Mutex<DvalInner>>);
 
 impl DvalWeak {
     fn upgrade(&self) -> Option<Dval> {
-        Weak::upgrade(&self.0).map(|s| Dval(s, self.1.clone()))
+        Weak::upgrade(&self.0).map(|s| Dval(s))
     }
 }
 
@@ -243,11 +243,11 @@ impl DvalWeak {
 /// If all user held references to `Dval` are dropped it will be
 /// unsubscribed.
 #[derive(Debug, Clone)]
-pub struct Dval(Arc<Mutex<DvalInner>>, Path);
+pub struct Dval(Arc<Mutex<DvalInner>>);
 
 impl Dval {
     fn downgrade(&self) -> DvalWeak {
-        DvalWeak(Arc::downgrade(&self.0), self.1.clone())
+        DvalWeak(Arc::downgrade(&self.0))
     }
 
     /// Get the last value published by the publisher, or None if the
@@ -338,10 +338,6 @@ impl Dval {
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
-
-    pub fn path(&self) -> &Path {
-        &self.1
-    }
 }
 
 enum SubStatus {
@@ -387,6 +383,10 @@ impl Subscriber {
         })));
         t.start_resub_task(rx);
         Ok(t)
+    }
+
+    pub fn resolver(&self) -> ResolverRead {
+        self.0.lock().resolver.clone()
     }
 
     fn downgrade(&self) -> SubscriberWeak {
@@ -797,7 +797,7 @@ impl Subscriber {
             states: Vec::new(),
             tries: 0,
             next_try: Instant::now(),
-        })), path.clone());
+        })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
         s
