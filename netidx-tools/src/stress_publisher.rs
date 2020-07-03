@@ -8,18 +8,29 @@ use netidx::{
 use std::time::{Duration, Instant};
 use tokio::{runtime::Runtime, signal, time};
 
-async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) {
+async fn run_publisher(
+    config: Config,
+    bcfg: BindCfg,
+    delay: u64,
+    rows: usize,
+    cols: usize,
+    auth: Auth,
+) {
+    let delay = if delay == 0 { None } else { Some(Duration::from_millis(delay)) };
     let publisher =
         Publisher::new(config, auth, bcfg).await.expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
-    let published = (0..nvals)
-        .into_iter()
-        .map(|i| {
-            let path = Path::from(format!("/bench/{}", i));
-            publisher.publish(path, Value::V64(v)).expect("encode")
-        })
-        .collect::<Vec<_>>();
+    let published = {
+        let mut published = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let path = Path::from(format!("/bench/{}/{}", row, col));
+                published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
+            }
+        }
+        published
+    };
     publisher.flush(None).await.expect("publish");
     let mut last_stat = Instant::now();
     let one_second = Duration::from_secs(1);
@@ -30,6 +41,9 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
             sent += 1;
         }
         publisher.flush(None).await.expect("flush");
+        if let Some(delay) = delay {
+            time::delay_for(delay).await;
+        }
         let now = Instant::now();
         let elapsed = now - last_stat;
         if elapsed > one_second {
@@ -45,10 +59,17 @@ async fn run_publisher(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) 
     }
 }
 
-pub(crate) fn run(config: Config, bcfg: BindCfg, nvals: usize, auth: Auth) {
+pub(crate) fn run(
+    config: Config,
+    bcfg: BindCfg,
+    delay: u64,
+    rows: usize,
+    cols: usize,
+    auth: Auth,
+) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        run_publisher(config, bcfg, nvals, auth).await;
+        run_publisher(config, bcfg, delay, rows, cols, auth).await;
         // Allow the publisher time to send the clear message
         time::delay_for(Duration::from_secs(1)).await;
     });

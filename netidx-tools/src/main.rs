@@ -154,8 +154,14 @@ enum Stress {
         bind: BindCfg,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
-        #[structopt(name = "nvals", default_value = "100")]
-        nvals: usize,
+        #[structopt(long = "delay",
+                    help = "time in ms to wait between batches",
+                    default_value = "100")]
+        delay: u64,
+        #[structopt(name = "rows", default_value = "100")]
+        rows: usize,
+        #[structopt(name = "cols", default_value = "10")]
+        cols: usize,
     },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
     Subscriber,
@@ -225,9 +231,9 @@ fn main() {
                 let auth = auth(opt.anon, &cfg, opt.upn, None);
                 stress_subscriber::run(cfg, auth)
             }
-            Stress::Publisher { bind, spn, nvals } => {
+            Stress::Publisher { bind, spn, delay, rows, cols } => {
                 let auth = auth(opt.anon, &cfg, opt.upn, spn);
-                stress_publisher::run(cfg, bind, nvals, auth)
+                stress_publisher::run(cfg, bind, delay, rows, cols, auth)
             }
         },
     }
