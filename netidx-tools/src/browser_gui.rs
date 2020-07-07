@@ -1,13 +1,13 @@
+use anyhow::Result;
 use fltk::{
     app::{self, App},
     draw,
-    enums::{Color, Font, FrameType},
+    enums::{CallbackTrigger, Color, Event, Font, FrameType, Key},
     prelude::*,
     table::{Table, TableContext},
     window::DoubleWindow,
 };
 use futures::{channel::mpsc, prelude::*, select_biased};
-use anyhow::Result;
 use log::{error, info};
 use netidx::{
     chars::Chars,
@@ -49,15 +49,15 @@ struct Cell(Rc<RefCell<CellInner>>);
 struct NetidxTable {
     base: Path,
     table: Table,
-    by_loc: Rc<RefCell<HashMap<(i32, i32), Cell>>>,
     by_id: Rc<RefCell<HashMap<SubId, Cell>>>,
-    subscriber: Subscriber,
 }
 
 impl Drop for NetidxTable {
     fn drop(&mut self) {
-        // eliminate the self reference in table
-        self.table.draw_cell(Box::new(move |_, _, _, _, _, _, _| ()))
+        // eliminate self references so the table can be dropped
+        self.table.draw_cell(Box::new(move |_, _, _, _, _, _, _| ()));
+        self.table.set_callback(Box::new(move || ()));
+        self.table.handle(Box::new(move |_| false));
     }
 }
 
@@ -68,6 +68,7 @@ impl NetidxTable {
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
         base: Path,
         descriptor: resolver::Table,
+        tx_async: mpsc::UnboundedSender<ToAsync>,
     ) -> Self {
         let mut table = Table::default().with_pos(0, 0).size_of(root);
         root.insert(&table, 0);
@@ -77,10 +78,45 @@ impl NetidxTable {
         table.set_row_header_width(
             descriptor.rows.iter().map(|p| p.len()).max().unwrap_or(0) as i32 * 10,
         );
-        table.set_cols(descriptor.cols.len() as u32);
+        table.set_cols(max(1, descriptor.cols.len() as u32));
         table.set_col_header(true);
         table.set_col_resize(true);
         table.end();
+        let descriptor = Rc::new(descriptor);
+        {
+            let table_c = table.clone();
+            let descriptor = Rc::clone(&descriptor);
+            let base = base.clone();
+            table.handle(Box::new(move |e: Event| {
+                let k = app::event_key();
+                if e == Event::KeyUp && k == Key::Enter {
+                    let mut row_top = 0;
+                    let mut row_bot = 0;
+                    let mut col_left = 0;
+                    let mut col_right = 0;
+                    table_c.get_selection(
+                        &mut row_top,
+                        &mut col_left,
+                        &mut row_bot,
+                        &mut col_right,
+                    );
+                    let len = descriptor.rows.len();
+                    if row_top == row_bot && (row_top as usize) < len && row_top >= 0 {
+                        let path = descriptor.rows[row_top as usize].clone();
+                        let _ = tx_async.unbounded_send(ToAsync::Navigate(path));
+                    }
+                    true
+                } else if e == Event::KeyUp && k == Key::BackSpace {
+                    let path = Path::dirname(&base)
+                        .map(|p| Path::from(String::from(p)))
+                        .unwrap_or_else(Path::root);
+                    let _ = tx_async.unbounded_send(ToAsync::Navigate(path));
+                    true
+                } else {
+                    false
+                }
+            }));
+        }
         let by_loc: Rc<RefCell<HashMap<_, Cell>>> = Rc::new(RefCell::new(HashMap::new()));
         let by_id: Rc<RefCell<HashMap<_, _>>> = Rc::new(RefCell::new(HashMap::new()));
         fn draw_header(s: &str, x: i32, y: i32, w: i32, h: i32) {
@@ -108,11 +144,16 @@ impl NetidxTable {
             let by_loc = Rc::clone(&by_loc);
             let by_id = Rc::clone(&by_id);
             let subscriber = subscriber.clone();
+            let descriptor = Rc::clone(&descriptor);
             table.draw_cell(Box::new(move |ctx, row, col, x, y, w, h| match ctx {
                 TableContext::StartPage => draw::set_font(Font::Courier, 12),
                 TableContext::ColHeader => {
-                    let s = descriptor.cols[col as usize].0.as_ref();
-                    draw_header(s, x, y, w, h)
+                    if descriptor.cols.len() == 0 {
+                        draw_header("value", x, y, w, h)
+                    } else {
+                        let s = descriptor.cols[col as usize].0.as_ref();
+                        draw_header(s, x, y, w, h)
+                    }
                 }
                 TableContext::RowHeader => {
                     let s = descriptor.rows[row as usize].as_ref();
@@ -126,26 +167,30 @@ impl NetidxTable {
                         draw_data(&format!("{}", v.last), x, y, w, h, selected)
                     }
                     Entry::Vacant(e) => {
-                        let path = descriptor.rows[row as usize]
-                            .append(descriptor.cols[col as usize].0.as_ref());
+                        let path = if descriptor.cols.len() == 0 {
+                            descriptor.rows[row as usize].clone()
+                        } else {
+                            descriptor.rows[row as usize]
+                                .append(descriptor.cols[col as usize].0.as_ref())
+                        };
                         let sub = subscriber.durable_subscribe(path);
                         sub.updates(true, updates.clone());
                         let id = sub.id();
                         let cell = Cell(Rc::new(RefCell::new(CellInner {
                             sub,
-                            last: Value::String(Chars::from("#u")),
+                            last: Value::String(Chars::from("")),
                             last_used: Instant::now(),
                         })));
                         e.insert(cell.clone());
                         by_id.borrow_mut().insert(id, cell);
                         let selected = table_c.is_selected(row, col);
-                        draw_data("#u", x, y, w, h, selected);
+                        draw_data("", x, y, w, h, selected);
                     }
                 },
                 _ => (),
             }));
         }
-        NetidxTable { base, table, by_loc, by_id, subscriber }
+        NetidxTable { base, table, by_id }
     }
 }
 
@@ -239,8 +284,16 @@ pub(crate) fn run(cfg: Config, auth: resolver::Auth, path: Path) {
                     Err(_) | Ok(None) => break,
                     Ok(Some(FromAsync::Table(sub, path, t))) => {
                         info!("building table {}", path);
-                        let tbl =
-                            NetidxTable::new(&mut wind, sub, tx_updates.clone(), path, t);
+                        root = None;
+                        wind.clear();
+                        let tbl = NetidxTable::new(
+                            &mut wind,
+                            sub,
+                            tx_updates.clone(),
+                            path,
+                            t,
+                            tx_async.clone(),
+                        );
                         root = Some(tbl);
                     }
                     Ok(Some(FromAsync::Batch(mut b))) => match &mut root {
