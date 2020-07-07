@@ -4,7 +4,7 @@ use fltk::{
     enums::{Color, Font, FrameType},
     prelude::*,
     table::{Table, TableContext},
-    window::Window,
+    window::DoubleWindow,
 };
 use futures::{channel::mpsc, prelude::*, select_biased};
 use log::{error, info};
@@ -222,7 +222,7 @@ pub(crate) fn run(cfg: Config, auth: resolver::Auth, path: Path) {
     let (tx_gui_msg, mut rx_gui_msg) = mpsc::unbounded();
     let (tx_async, rx_async) = mpsc::unbounded();
     let app = App::default();
-    let mut wind = Window::new(100, 100, 800, 600, "Hello from rust");
+    let mut wind = DoubleWindow::new(100, 100, 800, 600, "Hello from rust");
     wind.end();
     wind.show();
     run_async(cfg, auth, rx_async, rx_updates, tx_gui_msg, tx_gui_trigger);
