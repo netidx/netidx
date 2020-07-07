@@ -11,7 +11,7 @@ use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
-mod browser;
+//mod browser;
 mod browser_gui;
 mod publisher;
 mod resolver;

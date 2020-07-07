@@ -7,8 +7,10 @@ use fltk::{
     window::DoubleWindow,
 };
 use futures::{channel::mpsc, prelude::*, select_biased};
+use anyhow::Result;
 use log::{error, info};
 use netidx::{
+    chars::Chars,
     config::Config,
     path::Path,
     pool::Pooled,
@@ -18,16 +20,22 @@ use netidx::{
 use netidx_protocols::view;
 use parking_lot::Mutex;
 use std::{
+    cell::RefCell,
     cmp::{max, min},
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     io::{self, Write},
     iter,
+    ops::Drop,
     rc::Rc,
     sync::Arc,
     thread,
     time::Duration,
 };
-use tokio::{runtime::Runtime, task, time::{self, Instant}};
+use tokio::{
+    runtime::Runtime,
+    task,
+    time::{self, Instant},
+};
 
 struct CellInner {
     sub: Dval,
@@ -36,20 +44,22 @@ struct CellInner {
 }
 
 #[derive(Clone)]
-struct Cell(Arc<Mutex<CellInner>>);
+struct Cell(Rc<RefCell<CellInner>>);
 
-struct NetidxTableInner {
+struct NetidxTable {
     base: Path,
     table: Table,
-    by_loc: HashMap<(i32, i32), Cell>,
-    by_id: HashMap<SubId, Cell>,
-    descriptor: resolver::Table,
+    by_loc: Rc<RefCell<HashMap<(i32, i32), Cell>>>,
+    by_id: Rc<RefCell<HashMap<SubId, Cell>>>,
     subscriber: Subscriber,
-    updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
 }
 
-#[derive(Clone)]
-struct NetidxTable(Arc<Mutex<NetidxTableInner>>);
+impl Drop for NetidxTable {
+    fn drop(&mut self) {
+        // eliminate the self reference in table
+        self.table.draw_cell(Box::new(move |_, _, _, _, _, _, _| ()))
+    }
+}
 
 impl NetidxTable {
     fn new<W: WidgetExt + GroupExt>(
@@ -71,15 +81,8 @@ impl NetidxTable {
         table.set_col_header(true);
         table.set_col_resize(true);
         table.end();
-        let t = NetidxTable(Arc::new(Mutex::new(NetidxTableInner {
-            base,
-            table: table.clone(),
-            descriptor,
-            by_loc: HashMap::new(),
-            by_id: HashMap::new(),
-            subscriber,
-            updates,
-        })));
+        let by_loc: Rc<RefCell<HashMap<_, Cell>>> = Rc::new(RefCell::new(HashMap::new()));
+        let by_id: Rc<RefCell<HashMap<_, _>>> = Rc::new(RefCell::new(HashMap::new()));
         fn draw_header(s: &str, x: i32, y: i32, w: i32, h: i32) {
             draw::push_clip(x, y, w, h);
             draw::draw_box(FrameType::ThinUpBox, x, y, w, h, Color::FrameDefault);
@@ -101,50 +104,48 @@ impl NetidxTable {
             draw::pop_clip();
         }
         {
-            let t = t.clone();
             let table_c = table.clone();
-            table.draw_cell(Box::new(move |ctx, row, col, x, y, w, h| {
-                let mut inner = t.0.lock();
-                match ctx {
-                    TableContext::StartPage => draw::set_font(Font::Courier, 12),
-                    TableContext::ColHeader => {
-                        let s = inner.descriptor.cols[col as usize].0.as_ref();
-                        draw_header(s, x, y, w, h)
-                    }
-                    TableContext::RowHeader => {
-                        let s = inner.descriptor.rows[row as usize].as_ref();
-                        draw_header(s, x, y, w, h)
-                    }
-                    TableContext::Cell => match inner.by_loc.get(&(row, col)) {
-                        Some(v) => {
-                            let mut v = v.0.lock();
-                            v.last_used = Instant::now();
-                            let s = format!("{}", v.last);
-                            let selected = table_c.is_selected(row, col);
-                            draw_data(&s, x, y, w, h, selected)
-                        }
-                        None => {
-                            let path = inner.descriptor.rows[row as usize]
-                                .append(inner.descriptor.cols[col as usize].0.as_ref());
-                            let sub = inner.subscriber.durable_subscribe(path);
-                            sub.updates(true, inner.updates.clone());
-                            let id = sub.id();
-                            let cell = Cell(Arc::new(Mutex::new(CellInner {
-                                sub,
-                                last: Value::Null,
-                                last_used: Instant::now(),
-                            })));
-                            inner.by_loc.insert((row, col), cell.clone());
-                            inner.by_id.insert(id, cell);
-                            let selected = table_c.is_selected(row, col);
-                            draw_data("#u", x, y, w, h, selected);
-                        }
-                    },
-                    _ => (),
+            let by_loc = Rc::clone(&by_loc);
+            let by_id = Rc::clone(&by_id);
+            let subscriber = subscriber.clone();
+            table.draw_cell(Box::new(move |ctx, row, col, x, y, w, h| match ctx {
+                TableContext::StartPage => draw::set_font(Font::Courier, 12),
+                TableContext::ColHeader => {
+                    let s = descriptor.cols[col as usize].0.as_ref();
+                    draw_header(s, x, y, w, h)
                 }
+                TableContext::RowHeader => {
+                    let s = descriptor.rows[row as usize].as_ref();
+                    draw_header(s, x, y, w, h)
+                }
+                TableContext::Cell => match by_loc.borrow_mut().entry((row, col)) {
+                    Entry::Occupied(e) => {
+                        let mut v = e.get().0.borrow_mut();
+                        v.last_used = Instant::now();
+                        let selected = table_c.is_selected(row, col);
+                        draw_data(&format!("{}", v.last), x, y, w, h, selected)
+                    }
+                    Entry::Vacant(e) => {
+                        let path = descriptor.rows[row as usize]
+                            .append(descriptor.cols[col as usize].0.as_ref());
+                        let sub = subscriber.durable_subscribe(path);
+                        sub.updates(true, updates.clone());
+                        let id = sub.id();
+                        let cell = Cell(Rc::new(RefCell::new(CellInner {
+                            sub,
+                            last: Value::String(Chars::from("#u")),
+                            last_used: Instant::now(),
+                        })));
+                        e.insert(cell.clone());
+                        by_id.borrow_mut().insert(id, cell);
+                        let selected = table_c.is_selected(row, col);
+                        draw_data("#u", x, y, w, h, selected);
+                    }
+                },
+                _ => (),
             }));
         }
-        t
+        NetidxTable { base, table, by_loc, by_id, subscriber }
     }
 }
 
@@ -165,22 +166,22 @@ async fn async_main(
     updates: mpsc::Receiver<Pooled<Vec<(SubId, Value)>>>,
     mut outgoing: mpsc::UnboundedSender<FromAsync>,
     mut trigger: app::Sender<()>,
-) {
+) -> Result<()> {
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let mut updates = updates.fuse();
     let mut incoming = incoming.fuse();
-    let mut redraw = time::interval(Duration::from_secs(1)).fuse();
+    let mut redraw = time::interval(Duration::from_millis(500)).fuse();
     let resolver = subscriber.resolver();
     loop {
         select_biased! {
             _ = redraw.next() => {
-                outgoing.unbounded_send(FromAsync::Redraw);
+                outgoing.unbounded_send(FromAsync::Redraw)?;
                 trigger.send(());
             },
             b = updates.next() => match b {
                 None => break,
                 Some(b) => {
-                    outgoing.unbounded_send(FromAsync::Batch(b));
+                    outgoing.unbounded_send(FromAsync::Batch(b))?;
                     trigger.send(());
                 }
             },
@@ -192,7 +193,7 @@ async fn async_main(
                         Ok(t) => {
                             outgoing.unbounded_send(
                                 FromAsync::Table(subscriber.clone(), p, t)
-                            );
+                            )?;
                             trigger.send(());
                         }
                     }
@@ -200,6 +201,7 @@ async fn async_main(
             },
         }
     }
+    Ok(())
 }
 
 fn run_async(
@@ -212,7 +214,7 @@ fn run_async(
 ) {
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(async_main(cfg, auth, incoming, updates, outgoing, trigger));
+        rt.block_on(async_main(cfg, auth, incoming, updates, outgoing, trigger)).unwrap();
     });
 }
 
@@ -223,39 +225,42 @@ pub(crate) fn run(cfg: Config, auth: resolver::Auth, path: Path) {
     let (tx_async, rx_async) = mpsc::unbounded();
     let app = App::default();
     let mut wind = DoubleWindow::new(100, 100, 800, 600, "Hello from rust");
+    wind.make_resizable(true);
     wind.end();
     wind.show();
     run_async(cfg, auth, rx_async, rx_updates, tx_gui_msg, tx_gui_trigger);
-    tx_async.unbounded_send(ToAsync::Navigate(path));
+    tx_async.unbounded_send(ToAsync::Navigate(path)).unwrap();
     let mut root = None;
     let mut redraw = false;
     while app.wait().unwrap() {
         if let Some(()) = rx_gui_trigger.recv() {
-            match rx_gui_msg.try_next() {
-                Err(_) => break,
-                Ok(None) => (),
-                Ok(Some(FromAsync::Table(sub, path, t))) => {
-                    info!("building table {}", path);
-                    let tbl =
-                        NetidxTable::new(&mut wind, sub, tx_updates.clone(), path, t);
-                    root = Some(tbl);
-                }
-                Ok(Some(FromAsync::Batch(mut b))) => match &mut root {
-                    None => (),
-                    Some(tbl) => {
-                        info!("processing update");
-                        let inner = tbl.0.lock();
-                        for (id, v) in b.drain(..) {
-                            if let Some(cell) = inner.by_id.get(&id) {
-                                cell.0.lock().last = v;
-                            }
-                        }
-                        redraw = true;
+            loop {
+                match rx_gui_msg.try_next() {
+                    Err(_) | Ok(None) => break,
+                    Ok(Some(FromAsync::Table(sub, path, t))) => {
+                        info!("building table {}", path);
+                        let tbl =
+                            NetidxTable::new(&mut wind, sub, tx_updates.clone(), path, t);
+                        root = Some(tbl);
                     }
-                },
-                Ok(Some(FromAsync::Redraw)) => if redraw {
-                    redraw = false;
-                    app.redraw();
+                    Ok(Some(FromAsync::Batch(mut b))) => match &mut root {
+                        None => (),
+                        Some(tbl) => {
+                            let by_id = tbl.by_id.borrow();
+                            for (id, v) in b.drain(..) {
+                                if let Some(cell) = by_id.get(&id) {
+                                    cell.0.borrow_mut().last = v;
+                                }
+                            }
+                            redraw = true;
+                        }
+                    },
+                    Ok(Some(FromAsync::Redraw)) => {
+                        if redraw {
+                            redraw = false;
+                            app.redraw();
+                        }
+                    }
                 }
             }
         }
