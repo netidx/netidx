@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use structopt::StructOpt;
 
 mod browser;
+mod browser_gui;
 mod publisher;
 mod resolver;
 mod stress_publisher;
@@ -193,7 +194,7 @@ fn main() {
     match opt.cmd {
         Sub::Browser { path } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
-            browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
+            browser_gui::run(cfg, auth, path.unwrap_or(Path::from("/")))
         },
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
