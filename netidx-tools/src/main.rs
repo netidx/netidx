@@ -11,7 +11,7 @@ use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
-//mod browser;
+mod browser;
 mod publisher;
 mod resolver;
 mod stress_publisher;
@@ -154,9 +154,11 @@ enum Stress {
         bind: BindCfg,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
-        #[structopt(long = "delay",
-                    help = "time in ms to wait between batches",
-                    default_value = "100")]
+        #[structopt(
+            long = "delay",
+            help = "time in ms to wait between batches",
+            default_value = "100"
+        )]
         delay: u64,
         #[structopt(name = "rows", default_value = "100")]
         rows: usize,
@@ -192,9 +194,9 @@ fn main() {
     };
     match opt.cmd {
         Sub::Browser { path } => {
-            //let auth = auth(opt.anon, &cfg, opt.upn, None);
-            //browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
-        },
+            let auth = auth(opt.anon, &cfg, opt.upn, None);
+            browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
+        }
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
                 todo!("the resolver server is not yet ported to this platform")

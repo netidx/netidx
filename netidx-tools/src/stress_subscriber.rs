@@ -4,7 +4,7 @@ use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
-    subscriber::{DvState, Dval, Subscriber},
+    subscriber::{DvState, Subscriber},
 };
 use std::time::Duration;
 use tokio::{
@@ -16,7 +16,7 @@ pub(crate) fn run(config: Config, auth: Auth) {
     let mut rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());
-        let mut table = r.table(Path::from("/bench")).await.expect("table");
+        let table = r.table(Path::from("/bench")).await.expect("table");
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs = {
             let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
