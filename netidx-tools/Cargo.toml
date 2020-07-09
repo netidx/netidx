@@ -35,9 +35,8 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.7"
 base64 = "0.12"
-#crossbeam-channel = "0.4"
-#crossterm = "0.17"
-#cursive = {version = "0.15", default_features = false, features = ["crossterm-backend"]}
-Boa = "0.8"
+crossbeam-channel = "0.4"
+crossterm = "0.17"
+cursive = {version = "0.15", default_features = false, features = ["crossterm-backend"]}
+Boa = "0.9"
 parking_lot = "0.10"
-fltk = { version = "0.7", features = ["fltk-bundled"] }
