@@ -118,9 +118,16 @@ impl View for NetidxTable {
 }
 
 impl NetidxTable {
-    fn new(sub: Subscriber, base_path: Path, mut table: Table) -> NetidxTable {
+    fn new(
+        sub: Subscriber,
+        base_path: Path,
+        mut table: Table,
+        rows: usize,
+    ) -> NetidxTable {
         let len = table.rows.len();
         table.cols.retain(|(_, i)| i.0 >= (len as u64 / 2));
+        table.cols.sort_by_key(|v| v.0.clone());
+        table.rows.sort();
         let table = Rc::new(table);
         let columns = Rc::new(
             iter::once(Path::from("name"))
@@ -159,8 +166,11 @@ impl NetidxTable {
                                     let c = Cell { sub, row: r, col };
                                     if row == 0 {
                                         column.insert_item(0, "#u", c);
+                                        column.remove_item(column.len() - 1);
+                                        column.set_selection(1);
                                     } else {
-                                        column.add_item("#u", c)
+                                        column.add_item("#u", c);
+                                        column.remove_item(0);
                                     }
                                 }
                             }
@@ -181,8 +191,10 @@ impl NetidxTable {
                                 ));
                                 if row == 0 {
                                     column.insert_child(0, lbl);
+                                    column.remove_child(column.len() - 1);
                                 } else {
                                     column.add_child(lbl);
+                                    column.remove_child(0);
                                 }
                             }
                         }
@@ -196,7 +208,7 @@ impl NetidxTable {
                 if i == 0 {
                     // row name column
                     let mut col = LinearLayout::vertical();
-                    for r in table.rows.iter().take(100) {
+                    for r in table.rows.iter().take(rows) {
                         let lbl = TextView::new(&pad(
                             i,
                             columns.len(),
@@ -209,7 +221,7 @@ impl NetidxTable {
                     // data column
                     let mut col = SelectView::<Cell>::new();
                     col.set_on_select(on_select());
-                    for (j, r) in table.rows.iter().enumerate().take(100) {
+                    for (j, r) in table.rows.iter().enumerate().take(rows) {
                         let sub = sub.durable_subscribe(r.append(cname));
                         let lbl = pad(i, columns.len(), "#u".into());
                         col.add_item(lbl, Cell { sub, row: j, col: i });
@@ -274,7 +286,8 @@ async fn async_main(
     let table = resolver.table(path.clone()).await.expect("can't load initial table");
     gui.send(Box::new(move |c: &mut Cursive| {
         c.add_fullscreen_layer(
-            NetidxTable::new(subscriber, path, table).with_name("root"),
+            NetidxTable::new(subscriber, path, table, dbg!(c.screen_size().y))
+                .with_name("root"),
         );
     }))
     .unwrap();
