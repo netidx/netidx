@@ -80,6 +80,26 @@ fn pad(i: usize, len: usize, s: &str) -> String {
     }
 }
 
+fn fit(i: usize, s: &str) -> String {
+    let mut res = String::with_capacity(i);
+    if s.len() >= i {
+        res.push_str(&s[0..i]);
+        res
+    } else {
+        let pad = i - s.len();
+        let hpad = pad / 2;
+        for _ in 0..hpad {
+            res.push(' ');
+        }
+        res.push_str(s);
+        let hpad = if pad % 2 == 0 { hpad } else { hpad + 1 };
+        for _ in 0..hpad {
+            res.push(' ');
+        }
+        res
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TableCell {
     columns: Rc<Vec<Path>>,
@@ -92,6 +112,7 @@ struct NetidxTable {
     root: LinearLayout,
     name: Path,
     submgr: SubMgr,
+    columns: Rc<Vec<Path>>,
 }
 
 impl View for NetidxTable {
@@ -249,7 +270,7 @@ impl NetidxTable {
         ))
         .with_name(&*base_path);
         let root = LinearLayout::vertical().child(head).child(data);
-        NetidxTable { root, name: base_path, submgr }
+        NetidxTable { root, name: base_path, submgr, columns }
     }
 
     fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
@@ -275,6 +296,32 @@ impl NetidxTable {
                                 &format!("{}", v),
                             ));
                         }
+                    }
+                }
+            }
+        }
+        let mut max_widths = Vec::new();
+        for col in 0..data.len() {
+            max_widths.push(0);
+            if let Some(column) = data.get_child(col) {
+                if let Some(column) = column.downcast_ref::<SelectView<TableCell>>() {
+                    for row in 0..column.len() {
+                        if let Some((l, _)) = column.get_item(row) {
+                            max_widths[col] = max(max_widths[col], l.len());
+                        }
+                    }
+                }
+            }
+        }
+        let mut head = self.root.get_child_mut(0).unwrap();
+        let mut head = head.downcast_mut::<LinearLayout>().unwrap();
+        for i in 0..max_widths.len() {
+            if let Some(l) = head.get_child_mut(i) {
+                if let Some(l) = l.downcast_mut::<TextView>() {
+                    let c = l.get_shared_content();
+                    if c.get_content().width() != max_widths[i] {
+                        let hd = Path::basename(&self.columns[i]).unwrap_or("");
+                        c.set_content(fit(max_widths[i], hd));
                     }
                 }
             }
