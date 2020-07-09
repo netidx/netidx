@@ -30,88 +30,58 @@ use std::{
 };
 use tokio::{runtime::Runtime, task, time::Instant};
 
-struct TableDvalInner {
-    row: usize,
-    col: usize,
-    name: Path,
-    sub: Dval,
-    last: Value,
-    last_rendered: Instant,
-}
-
-#[derive(Clone)]
-struct TableDval(Arc<Mutex<TableDvalInner>>);
-
-struct SubMgrInner {
-    updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
-    subscriber: Subscriber,
-    table_by_id: HashMap<SubId, TableDval>,
-    table_by_path: HashMap<Path, TableDval>,
-}
-
-impl SubMgrInner {
-    fn subscribe_table_cell(&mut self, path: Path, name: Path, row: usize, col: usize) {
-        let sub = self.subscriber.durable_subscribe(path.clone());
-        sub.updates(true, self.updates.clone());
-        let id = sub.id();
-        let dv = TableDval(Arc::new(Mutex::new(TableDvalInner {
-            row,
-            col,
-            name,
-            sub,
-            last: Value::Null,
-            last_rendered: Instant::now(),
-        })));
-        self.table_by_path.insert(path, dv.clone());
-        self.table_by_id.insert(id, dv);
-    }
-}
-
-#[derive(Clone)]
-struct SubMgr(Arc<Mutex<SubMgrInner>>);
-
-fn pad(i: usize, len: usize, s: &str) -> String {
+fn pad(i: usize, len: usize, mut s: String) -> String {
     if i == 0 {
-        format!("{} ", s)
+        s.push(' ');
+        s
     } else if i == len - 1 {
-        format!(" {}", s)
+        s.insert(0, ' ');
+        s
     } else {
-        format!(" {} ", s)
+        s.insert(0, ' ');
+        s.push(' ');
+        s
     }
 }
 
-fn fit(i: usize, s: &str) -> String {
-    let mut res = String::with_capacity(i);
+fn fit(i: usize, mut s: String) -> String {
     if s.len() >= i {
-        res.push_str(&s[0..i]);
-        res
+        while s.len() > i {
+            s.pop();
+        }
+        s
     } else {
         let pad = i - s.len();
         let hpad = pad / 2;
         for _ in 0..hpad {
-            res.push(' ');
+            s.insert(0, ' ');
         }
-        res.push_str(s);
         let hpad = if pad % 2 == 0 { hpad } else { hpad + 1 };
         for _ in 0..hpad {
-            res.push(' ');
+            s.push(' ');
         }
-        res
+        s
     }
 }
 
-#[derive(Debug, Clone)]
-struct TableCell {
-    columns: Rc<Vec<Path>>,
-    path: Path,
-    name: Path,
-    id: usize,
+fn expand(i: usize, s: String) -> String {
+    if s.len() < i {
+        fit(i, s)
+    } else {
+        s
+    }
+}
+
+struct Cell {
+    sub: Dval,
+    row: usize,
+    col: usize,
 }
 
 struct NetidxTable {
     root: LinearLayout,
-    name: Path,
-    submgr: SubMgr,
+    base_path: Path,
+    table: Table,
     columns: Rc<Vec<Path>>,
 }
 
@@ -161,155 +131,139 @@ impl View for NetidxTable {
     }
 }
 
-fn table_on_select(c: &mut Cursive, t: &TableCell) {
-    let submgr = c.user_data::<SubMgr>().unwrap().clone();
-    c.call_on_name(&*t.name, |v: &mut NamedView<ScrollView<LinearLayout>>| {
-        let mut v = v.get_mut();
-        let nrows = v.content_viewport().height();
-        let ll = v.get_inner_mut();
-        let mut visible = Vec::new();
-        for col in 0..ll.len() {
-            if let Some(c) = ll.get_child_mut(col) {
-                if let Some(vcol) = c.downcast_mut::<SelectView<TableCell>>() {
-                    vcol.set_selection(t.id);
-                    if col > 0 { // skip the row name column
-                        let start_row = if t.id < nrows { 0 } else { t.id - nrows };
-                        let end_row = min(vcol.len(), t.id + nrows);
-                        for row in start_row..end_row {
-                            if let Some((_, t)) = vcol.get_item(row) {
-                                visible.push((t.path.clone(), row, col));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let mut mgr = submgr.0.lock();
-        for (path, row, col) in visible {
-            match mgr.table_by_path.get_mut(&path) {
-                Some(tdv) => {
-                    tdv.0.lock().last_rendered = Instant::now();
-                }
-                None => {
-                    mgr.subscribe_table_cell(path, t.name.clone(), row, col);
-                }
-            }
-        }
-    });
-}
-
 impl NetidxTable {
-    fn new(submgr: SubMgr, base_path: Path, table: Table) -> NetidxTable {
+    fn new(sub: Subscriber, base_path: Path, mut table: Table) -> NetidxTable {
         let len = table.rows.len();
+        table.cols.retain(|(_, i)| i >= threshold);
+        let table = Rc::new(table);
         let columns = Rc::new(
-            iter::once(base_path.append("name"))
-                .chain(table.cols.iter().filter_map(|(p, c)| {
-                    if c.0 < (len / 2) as u64 {
-                        None
-                    } else {
-                        Some(base_path.append(p))
-                    }
-                }))
+            iter::once(Path::from("name"))
+                .chain(table.cols.iter().map(|(p, _)| p.clone()))
                 .collect::<Vec<_>>(),
         );
-        let head =
-            columns.iter().fold(
-                LinearLayout::horizontal(),
-                |ll, col| match Path::basename(&col) {
-                    None => ll,
-                    Some(col) => ll.child(TextView::new(col)),
-                },
-            );
-        let data = ScrollView::new(columns.clone().iter().enumerate().fold(
-            LinearLayout::horizontal(),
-            |ll, (i, cname)| match Path::basename(cname) {
-                None => ll,
-                Some(cname) => {
-                    let mut col = SelectView::<TableCell>::new();
-                    let smi = submgr.0.lock();
-                    for (j, r) in table.rows.iter().enumerate() {
-                        if i == 0 {
-                            // row name column
-                            let d = TableCell {
-                                columns: columns.clone(),
-                                path: Path::from(""),
-                                name: base_path.clone(),
-                                id: j,
-                            };
-                            let lbl = Path::basename(&r).unwrap_or("");
-                            col.add_item(pad(i, len, lbl), d);
-                        } else {
-                            // data column
-                            let path = r.append(cname);
-                            let lbl = match smi.table_by_path.get(&path) {
-                                None => pad(i, len, "#u"),
-                                Some(tdv) => {
-                                    let tdv = tdv.0.lock();
-                                    match tdv.sub.state() {
-                                        DvState::Unsubscribed => pad(i, len, "#u"),
-                                        DvState::FatalError(_) => pad(i, len, "#e"),
-                                        DvState::Subscribed => {
-                                            pad(i, len, &format!("{}", tdv.last))
-                                        }
+        let head = columns.iter().fold(LinearLayout::horizontal(), |ll, col| {
+            ll.child(TextView::new(col.as_ref()))
+        });
+        let on_select = {
+            let columns = Rc::clone(&columns);
+            let table = table.clone();
+            let base_path = base_path.clone();
+            let sub = sub.clone();
+            Rc::new(move |c: &mut Cursive, t: &Cell| {
+                c.call_on_name(
+                    &*base_path,
+                    |v: &mut NamedView<ScrollView<LinearLayout>>| {
+                        let mut data = v.get_mut();
+                        let mut column = data.get_child_mut(t.col).unwrap();
+                        let mut column =
+                            column.downcast_mut::<SelectView<Cell>>().unwrap();
+                        if let Some(row) = column.selected_id() {
+                            let len = column.len();
+                            let must_add = (row == 0 && t.row > 0)
+                                || row == len - 1 && t.row < table.rows.len() - 1;
+                            // sync the row selection
+                            for col in 1..data.len() {
+                                let mut column = data.get_child_mut(col).unwrap();
+                                let mut column =
+                                    column.downcast_mut::<SelectView<Cell>>().unwrap();
+                                column.set_selection(row); // ignore the callback
+                                                           // add the new data rows
+                                if must_add {
+                                    let r = if row == 0 { t.row - 1 } else { t.row + 1 };
+                                    let path = table.rows[r].append(&columns[col]);
+                                    let sub = sub.durable_subscribe(path);
+                                    let c = Cell { sub, row: r, col };
+                                    if row == 0 {
+                                        column.insert_item(0, "#u", c);
+                                    } else {
+                                        column.add_item("#u", c)
                                     }
                                 }
-                            };
-                            let d = TableCell {
-                                columns: columns.clone(),
-                                path,
-                                name: base_path.clone(),
-                                id: j,
-                            };
-                            col.add_item(lbl, d)
+                            }
+                            // add the new row name row
+                            if must_add {
+                                let mut column = data.get_child_mut(0).unwrap();
+                                let mut column =
+                                    column.downcast_mut::<LinearLayout>().unwrap();
+                                let r = if row == 0 { t.row - 1 } else { t.row + 1 };
+                                let lbl = TextView::new(pad(
+                                    0,
+                                    columns.len(),
+                                    expand(
+                                        columns[0].len(),
+                                        Path::basename(&table.rows[r])
+                                            .unwrap_or("")
+                                            .into(),
+                                    ),
+                                ));
+                                if row == 0 {
+                                    column.insert_child(0, lbl);
+                                } else {
+                                    column.add_child(lbl);
+                                }
+                            }
                         }
+                    },
+                )
+            })
+        };
+        let data = ScrollView::new(columns.iter().enumerate().fold(
+            LinearLayout::horizontal(),
+            |ll, (i, cname)| {
+                if i == 0 {
+                    // row name column
+                    let mut col = LinearLayout::new();
+                    for (j, r) in table.rows.iter().enumerate().take(100) {
+                        let lbl = TextView::new(&pad(
+                            i,
+                            len,
+                            expand(cname.len(), Path::basename(&r).unwrap_or("").into()),
+                        ));
+                        col.add_child(lbl);
                     }
-                    col.set_on_select(table_on_select);
+                    ll.child(col)
+                } else {
+                    // data column
+                    let mut col = SelectView::<Cell>::new();
+                    for (j, r) in table.rows.iter().enumerate().take(100) {
+                        let path = r.append(cname);
+                        let sub = sub.durable_subscribe(path);
+                        col.add_item("#u", Cell { sub, row: j, col: i });
+                        col.set_on_select(on_select.clone());
+                    }
                     ll.child(col)
                 }
             },
         ))
         .with_name(&*base_path);
         let root = LinearLayout::vertical().child(head).child(data);
-        NetidxTable { root, name: base_path, submgr, columns }
+        NetidxTable { root, base_path, table, columns }
     }
 
-    fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
+    fn update(&mut self) {
         let mut data = self.root.get_child_mut(1).unwrap();
         let mut data =
             data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
         let mut data = data.get_mut();
         let mut data = data.get_inner_mut();
-        let mgr = self.submgr.0.lock();
-        for (id, v) in batch.drain(..) {
-            if let Some(tdv) = mgr.table_by_id.get(&id) {
-                let (row, col) = {
-                    let mut tdv = tdv.0.lock();
-                    tdv.last = v.clone();
-                    (tdv.row, tdv.col)
-                };
-                if let Some(column) = data.get_child_mut(col) {
-                    if let Some(column) = column.downcast_mut::<SelectView<TableCell>>() {
-                        if let Some((l, t)) = column.get_item_mut(row) {
-                            *l = SpannedString::<Style>::plain(pad(
-                                col,
-                                t.columns.len(),
-                                &format!("{}", v),
-                            ));
-                        }
-                    }
-                }
-            }
+        let mut max_widths: Vec<_> = self.columns.iter().map(|c| c.len()).collect();
+        let mut name_col = data.get_child(0).unwrap();
+        let mut name_col = name_col.downcast_ref::<LinearLayout>().unwrap();
+        for row in 0..name_col.len() {
+            let tv = name_col.get_child(row).unwrap();
+            max_widths[0] = max(max_widths[0], tv.content().len());
         }
-        let mut max_widths = Vec::new();
-        for col in 0..data.len() {
-            max_widths.push(0);
-            if let Some(column) = data.get_child(col) {
-                if let Some(column) = column.downcast_ref::<SelectView<TableCell>>() {
-                    for row in 0..column.len() {
-                        if let Some((l, _)) = column.get_item(row) {
-                            max_widths[col] = max(max_widths[col], l.len());
-                        }
-                    }
+        for col in 1..data.len() {
+            let mut column = data.get_child_mut(col).unwrap();
+            let mut column = column.downcast_mut::<SelectView<TableCell>>();
+            for row in 0..column.len() {
+                if let Some((l, t)) = column.get_item(row) {
+                    *l = SpannedString::<Style>::plain(pad(
+                        col,
+                        t.columns.len(),
+                        expand(max_widths[col], format!("{}", t.sub.last())),
+                    ));
+                    max_widths[col] = max(max_widths[col], l.len());
                 }
             }
         }
@@ -321,7 +275,7 @@ impl NetidxTable {
                     let c = l.get_shared_content();
                     if c.get_content().width() != max_widths[i] {
                         let hd = Path::basename(&self.columns[i]).unwrap_or("");
-                        c.set_content(fit(max_widths[i], hd));
+                        c.set_content(fit(max_widths[i], hd.into()));
                     }
                 }
             }
@@ -338,20 +292,15 @@ async fn async_main(
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let (tx_updates, mut rx_updates) = mpsc::channel(3);
     let resolver = subscriber.resolver();
-    let submgr = SubMgr(Arc::new(Mutex::new(SubMgrInner {
-        updates: tx_updates,
-        subscriber,
-        table_by_id: HashMap::new(),
-        table_by_path: HashMap::new(),
-    })));
     let table = resolver.table(path.clone()).await.expect("can't load initial table");
     gui.send(Box::new(move |c: &mut Cursive| {
-        c.set_user_data(submgr.clone());
-        c.add_fullscreen_layer(NetidxTable::new(submgr, path, table).with_name("root"));
+        c.add_fullscreen_layer(
+            NetidxTable::new(subscriber, path, table).with_name("root"),
+        );
     }));
     while let Some(batch) = rx_updates.next().await {
         gui.send(Box::new(move |c: &mut Cursive| {
-            c.call_on_name("root", |v: &mut NetidxTable| v.process_update(batch));
+            c.call_on_name("root", |v: &mut NetidxTable| v.update());
         }));
     }
 }

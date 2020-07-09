@@ -89,7 +89,6 @@ struct SubscribeValRequest {
 enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
-    Last(Id, oneshot::Sender<Value>),
     Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Value)>>>, last: bool },
     Write(Id, Value),
     Flush(oneshot::Sender<()>),
@@ -101,6 +100,7 @@ struct ValInner {
     id: Id,
     addr: SocketAddr,
     connection: UnboundedSender<ToCon>,
+    last: Arc<Mutex<Value>>,
 }
 
 impl Drop for ValInner {
@@ -131,13 +131,8 @@ impl Val {
     /// Get the last published value, or None if the subscription is
     /// dead. Will only return `None` if the subscription is dead,
     /// otherwise there WILL be a value.
-    pub async fn last(&self) -> Option<Value> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.0.connection.unbounded_send(ToCon::Last(self.0.id, tx));
-        match rx.await {
-            Ok(b) => Some(b),
-            Err(_) => None,
-        }
+    pub fn last(&self) -> Value {
+        self.0.last.lock().clone()
     }
 
     /// Register `tx` to receive updates to this `Val`. If
@@ -252,12 +247,12 @@ impl Dval {
 
     /// Get the last value published by the publisher, or None if the
     /// subscription is currently dead.
-    pub async fn last(&self) -> Option<Value> {
+    pub fn last(&self) -> Option<Value> {
         let sub = match self.0.lock().sub {
             SubState::Unsubscribed | SubState::FatalError(_) => return None,
             SubState::Subscribed(ref sub) => sub.clone(),
         };
-        sub.last().await
+        Some(sub.last())
     }
 
     /// Register `tx` to receive messages about subscription state
@@ -829,7 +824,7 @@ impl Subscriber {
 struct Sub {
     path: Path,
     streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Value)>>>)>,
-    last: Value,
+    last: Arc<Mutex<Value>>,
 }
 
 fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketAddr) {
@@ -943,7 +938,7 @@ async fn process_updates_batch(
                         .1
                         .push((*sub_id, m.clone()))
                 }
-                sub.last = m;
+                *sub.last.lock() = m;
             }
         }
     }
@@ -969,7 +964,7 @@ async fn process_batch(
                         b.push((*id, m.clone()));
                         let _ = c.send(b).await;
                     }
-                    sub.last = m;
+                    *sub.last.lock() = m;
                 }
                 None => con.queue_send(&To::Unsubscribe(i))?,
             },
@@ -994,18 +989,20 @@ async fn process_batch(
                 None => con.queue_send(&To::Unsubscribe(id))?,
                 Some(req) => {
                     let sub_id = SubId::new();
+                    let last = Arc::new(Mutex::new(m));
                     let s = Ok(Val(Arc::new(ValInner {
                         sub_id,
                         id,
                         addr,
                         connection: req.con,
+                        last: last.clone(),
                     })));
                     match req.finished.send(s) {
                         Err(_) => con.queue_send(&To::Unsubscribe(id))?,
                         Ok(()) => {
                             subscriptions.insert(
                                 id,
-                                Sub { path: req.path, last: m, streams: Vec::new() },
+                                Sub { path: req.path, last, streams: Vec::new() },
                             );
                         }
                     }
@@ -1140,11 +1137,6 @@ async fn connection(
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
                     try_cf!(write_con.queue_send(&To::Unsubscribe(id)))
                 }
-                Some(BatchItem::InBatch(ToCon::Last(id, tx))) => {
-                    if let Some(sub) = subscriptions.get(&id) {
-                        let _ = tx.send(sub.last.clone());
-                    }
-                }
                 Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {
                     if let Some(sub) = subscriptions.get_mut(&id) {
                         sub.streams.retain(|(_, _, c)| {
@@ -1156,7 +1148,7 @@ async fn connection(
                             }
                         });
                         if last {
-                            let m = sub.last.clone();
+                            let m = sub.last.lock().clone();
                             let mut b = BATCHES.take();
                             b.push((sub_id, m));
                             match tx.send(b).await {
