@@ -89,7 +89,7 @@ struct TableCell {
 }
 
 struct NetidxTable {
-    root: NamedView<ScrollView<LinearLayout>>,
+    root: LinearLayout,
     name: Path,
     submgr: SubMgr,
 }
@@ -146,16 +146,18 @@ fn table_on_select(c: &mut Cursive, t: &TableCell) {
         let mut v = v.get_mut();
         let nrows = v.content_viewport().height();
         let ll = v.get_inner_mut();
-        let mut visible = Vec::new(); // estokes: pooled
+        let mut visible = Vec::new();
         for col in 0..ll.len() {
             if let Some(c) = ll.get_child_mut(col) {
                 if let Some(vcol) = c.downcast_mut::<SelectView<TableCell>>() {
                     vcol.set_selection(t.id);
-                    let start_row = if t.id < nrows { 0 } else { t.id - nrows };
-                    let end_row = min(vcol.len(), t.id + nrows);
-                    for row in start_row..end_row {
-                        if let Some((_, t)) = vcol.get_item(row) {
-                            visible.push((t.path.clone(), row, col));
+                    if col > 0 { // skip the row name column
+                        let start_row = if t.id < nrows { 0 } else { t.id - nrows };
+                        let end_row = min(vcol.len(), t.id + nrows);
+                        for row in start_row..end_row {
+                            if let Some((_, t)) = vcol.get_item(row) {
+                                visible.push((t.path.clone(), row, col));
+                            }
                         }
                     }
                 }
@@ -189,6 +191,14 @@ impl NetidxTable {
                 }))
                 .collect::<Vec<_>>(),
         );
+        let head =
+            columns.iter().fold(
+                LinearLayout::horizontal(),
+                |ll, col| match Path::basename(&col) {
+                    None => ll,
+                    Some(col) => ll.child(TextView::new(col)),
+                },
+            );
         let data = ScrollView::new(columns.clone().iter().enumerate().fold(
             LinearLayout::horizontal(),
             |ll, (i, cname)| match Path::basename(cname) {
@@ -196,25 +206,19 @@ impl NetidxTable {
                 Some(cname) => {
                     let mut col = SelectView::<TableCell>::new();
                     let smi = submgr.0.lock();
-                    col.add_item(pad(i, columns.len(), &cname), TableCell {
-                        columns: columns.clone(),
-                        path: Path::from(""),
-                        name: base_path.clone(),
-                        id: 0
-                    });
                     for (j, r) in table.rows.iter().enumerate() {
-                        let j = j + 1;
-                        if i == 0 { // row name column
-                            let path = Path::from("");
-                            let name = Path::basename(r).unwrap_or("");
+                        if i == 0 {
+                            // row name column
                             let d = TableCell {
                                 columns: columns.clone(),
-                                path,
+                                path: Path::from(""),
                                 name: base_path.clone(),
                                 id: j,
                             };
-                            col.add_item(name, d);
-                        } else { // data column
+                            let lbl = Path::basename(&r).unwrap_or("");
+                            col.add_item(pad(i, len, lbl), d);
+                        } else {
+                            // data column
                             let path = r.append(cname);
                             let lbl = match smi.table_by_path.get(&path) {
                                 None => pad(i, len, "#u"),
@@ -244,11 +248,15 @@ impl NetidxTable {
             },
         ))
         .with_name(&*base_path);
-        NetidxTable { root: data, name: base_path, submgr }
+        let root = LinearLayout::vertical().child(head).child(data);
+        NetidxTable { root, name: base_path, submgr }
     }
 
     fn process_update(&mut self, mut batch: Pooled<Vec<(SubId, Value)>>) {
-        let mut data = self.root.get_mut();
+        let mut data = self.root.get_child_mut(1).unwrap();
+        let mut data =
+            data.downcast_mut::<NamedView<ScrollView<LinearLayout>>>().unwrap();
+        let mut data = data.get_mut();
         let mut data = data.get_inner_mut();
         let mgr = self.submgr.0.lock();
         for (id, v) in batch.drain(..) {
