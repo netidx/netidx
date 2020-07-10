@@ -21,6 +21,10 @@ lto = true
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 
+[features]
+default = ["browser"]
+browser = ["gtk/v3_24", "gio", "glib"]
+
 [dependencies]
 futures = "0.3"
 tokio = { version = "0.2", features = ["full"] }
@@ -35,8 +39,8 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.7"
 base64 = "0.12"
-crossbeam-channel = "0.4"
-crossterm = "0.17"
-cursive = {version = "0.15", default_features = false, features = ["crossterm-backend"]}
 Boa = "0.9"
 parking_lot = "0.10"
+gtk = { version = "0.9", features = ["v3_24"], optional = true }
+gio = { version = "0.9", optional = true }
+glib = { version = "0.10", optional = true }

@@ -202,10 +202,14 @@ struct DvalInner {
 }
 
 #[derive(Debug, Clone)]
-struct DvalWeak(Weak<Mutex<DvalInner>>);
+pub struct DvalWeak(Weak<Mutex<DvalInner>>);
 
 impl DvalWeak {
-    fn upgrade(&self) -> Option<Dval> {
+    pub fn new() -> Self {
+        DvalWeak(Weak::new())
+    }
+
+    pub fn upgrade(&self) -> Option<Dval> {
         Weak::upgrade(&self.0).map(|s| Dval(s))
     }
 }
@@ -241,7 +245,7 @@ impl DvalWeak {
 pub struct Dval(Arc<Mutex<DvalInner>>);
 
 impl Dval {
-    fn downgrade(&self) -> DvalWeak {
+    pub fn downgrade(&self) -> DvalWeak {
         DvalWeak(Arc::downgrade(&self.0))
     }
 
@@ -335,11 +339,13 @@ impl Dval {
     }
 }
 
+#[derive(Debug)]
 enum SubStatus {
     Subscribed(ValWeak),
     Pending(Vec<oneshot::Sender<Result<Val>>>),
 }
 
+#[derive(Debug)]
 struct SubscriberInner {
     resolver: ResolverRead,
     connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
@@ -359,7 +365,7 @@ impl SubscriberWeak {
 }
 
 /// create subscriptions
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {

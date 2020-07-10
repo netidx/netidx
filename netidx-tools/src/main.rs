@@ -1,16 +1,16 @@
 #![recursion_limit = "1024"]
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate netidx;
-#[macro_use]
-extern crate anyhow;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate netidx;
+#[macro_use] extern crate anyhow;
+#[cfg(feature = "browser")]
+#[macro_use] extern crate glib;
 
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
+#[cfg(feature = "browser")]
 mod browser;
 mod publisher;
 mod resolver;
@@ -185,6 +185,16 @@ fn auth(
     }
 }
 
+#[cfg(feature = "browser")]
+fn start_browser(auth: Auth, cfg: config::Config, path: Option<Path>) {
+    browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
+}
+
+#[cfg(not(feature = "browser"))]
+fn start_browser(auth: Auth, _cfg: config::Config, _path: String) {
+    panic!("the browser is not available")
+}
+
 fn main() {
     env_logger::init();
     let opt = Opt::from_args();
@@ -195,8 +205,8 @@ fn main() {
     match opt.cmd {
         Sub::Browser { path } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
-            browser::run(cfg, auth, path.unwrap_or(Path::from("/")))
-        }
+            start_browser(auth, cfg, path)
+        },
         Sub::ResolverServer { foreground, delay_reads, id, permissions } => {
             if !cfg!(unix) {
                 todo!("the resolver server is not yet ported to this platform")
