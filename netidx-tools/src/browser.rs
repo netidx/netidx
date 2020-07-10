@@ -4,7 +4,7 @@ use glib::{self, prelude::*, subclass::prelude::*};
 use gtk::{
     prelude::*, Application, ApplicationWindow, CellLayout, CellRenderer,
     CellRendererText, ListStore, TreeIter, TreeModel, TreeStore, TreeView,
-    TreeViewColumn,
+    TreeViewColumn, ScrolledWindow, Adjustment,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -38,6 +38,7 @@ struct Subscription {
 }
 
 struct NetidxTable {
+    root: ScrolledWindow,
     view: TreeView,
     store: ListStore,
     subscribed: Rc<RefCell<HashMap<SubId, Subscription>>>,
@@ -137,7 +138,10 @@ impl NetidxTable {
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(Box::new(f)));
             view.append_column(&column);
         }
-        NetidxTable { view, store, subscribed }
+        view.set_model(Some(&store));
+        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        root.add(&view);
+        NetidxTable { root, view, store, subscribed }
     }
 }
 
@@ -191,6 +195,10 @@ fn run_gui(
 ) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
+    let window = ApplicationWindow::new(&app);
+    window.set_title("Netidx browser");
+    window.set_default_size(800, 600);
+    window.show_all();
     main_context.spawn_local(async move {
         let mut current: Option<NetidxTable> = None;
         while let Some(m) = to_gui.next().await {
@@ -210,10 +218,7 @@ fn run_gui(
                 }
                 ToGui::Table(subscriber, path, table) => {
                     let cur = NetidxTable::new(subscriber, path, table, updates.clone());
-                    let window = ApplicationWindow::new(&app);
-                    window.set_title("Netidx browser");
-                    window.set_default_size(800, 600);
-                    window.add(&cur.view);
+                    window.add(&cur.root);
                     window.show_all();
                     current = Some(cur);
                 }
