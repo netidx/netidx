@@ -4,7 +4,7 @@ use glib::{self, prelude::*, subclass::prelude::*};
 use gtk::{
     prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
     CellRendererText, ListStore, ScrolledWindow, TreeIter, TreeModel, TreeStore,
-    TreeView, TreeViewColumn,
+    TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -77,6 +77,7 @@ impl NetidxTable {
             column.set_title("name");
             column.add_attribute(&cell, "text", 0);
             column.set_sort_column_id(0);
+            column.set_sizing(TreeViewColumnSizing::Fixed);
             column
         });
         for col in 0..descriptor.cols.len() {
@@ -87,8 +88,10 @@ impl NetidxTable {
             column.set_title(descriptor.cols[col].0.as_ref());
             column.add_attribute(&cell, "text", id);
             column.set_sort_column_id(id);
+            column.set_sizing(TreeViewColumnSizing::Fixed);
             view.append_column(&column);
         }
+        view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
@@ -267,7 +270,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let application = Application::new(Some("org.netidx.browser"), Default::default())
         .expect("failed to initialize GTK application");
     application.connect_activate(move |app| {
-        let (tx_updates, rx_updates) = mpsc::channel(3);
+        let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = mpsc::channel(2);
         run_netidx(cfg.clone(), auth.clone(), path.clone(), rx_updates, tx_to_gui);
         run_gui(app, tx_updates, rx_to_gui)
