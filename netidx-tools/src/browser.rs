@@ -59,13 +59,9 @@ impl NetidxTable {
             .collect::<Vec<_>>();
         let store = ListStore::new(&column_types);
         for row in descriptor.rows.iter() {
-            let row_name = Path::basename(row).unwrap_or("");
+            let row_name = Path::basename(row).unwrap_or("").to_value();
             let row = store.append();
             store.set_value(&row, 0, &row_name.to_value());
-            for col in 0..descriptor.cols.len() {
-                let id = (col + 1) as u32;
-                store.set_value(&row, id, &None::<&str>.to_value());
-            }
         }
         let by_id: Rc<RefCell<HashMap<SubId, Subscription>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -103,18 +99,16 @@ impl NetidxTable {
             let mut subscribed: RefCell<BTreeSet<TreeIter>> =
                 RefCell::new(BTreeSet::new());
             va.connect_value_changed(move |a| {
-                println!(
-                    "scrolled {} {} {}",
-                    a.get_value(),
-                    a.get_lower(),
-                    a.get_upper()
-                );
                 let (mut start, mut end) = match view.get_visible_range() {
                     None => return,
                     Some((s, e)) => (s, e),
                 };
-                start.prev();
-                end.next();
+                for i in 0..50 {
+                    start.prev();
+                }
+                for i in 0..50 {
+                    end.next();
+                }
                 let mut setval = Vec::new();
                 // unsubscribe invisible rows
                 by_id.borrow_mut().retain(|_, v| {
