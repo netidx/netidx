@@ -18,7 +18,7 @@ use netidx::{
 use std::{
     cell::{Cell, RefCell},
     cmp::max,
-    collections::HashMap,
+    collections::{HashMap, BTreeSet},
     iter,
     rc::Rc,
     thread,
@@ -29,62 +29,14 @@ use tokio::{
     time::{self, Instant},
 };
 
-#[derive(Clone, Copy)]
-enum CellState {
-    Invisible(Instant),
-    Visible(Instant),
-}
-
 struct CellValueInner {
-    value: RefCell<String>,
-    id: Cell<Option<SubId>>,
-    state: Cell<CellState>,
+    value: String,
+    id: Option<SubId>,
 }
 
 #[derive(Clone, GBoxed)]
 #[gboxed(type_name = "GBoxedCellValue")]
-struct CellValue(Rc<CellValueInner>);
-
-impl CellValue {
-    fn is_invisible_for(&self, duration: Duration) -> bool {
-        match self.0.state.get() {
-            CellState::Invisible(ts) => ts.elapsed() >= duration,
-            CellState::Visible(_) => false,
-        }
-    }
-
-    fn is_visible_for(&self, duration: Duration) -> bool {
-        match self.0.state.get() {
-            CellState::Visible(ts) => ts.elapsed() >= duration,
-            CellState::Invisible(_) => false,
-        }
-    }
-
-    fn is_visible(&self) -> bool {
-        match self.0.state.get() {
-            CellState::Visible(_) => true,
-            CellState::Invisible(_) => false,
-        }
-    }
-
-    fn update_visible(&self, visible: bool) {
-        if visible {
-            match self.0.state.get() {
-                CellState::Visible(_) => (),
-                CellState::Invisible(_) => {
-                    self.0.state.set(CellState::Visible(Instant::now()));
-                }
-            }
-        } else {
-            match self.0.state.get() {
-                CellState::Invisible(_) => (),
-                CellState::Visible(_) => {
-                    self.0.state.set(CellState::Invisible(Instant::now()));
-                }
-            }
-        }
-    }
-}
+struct CellValue(Rc<RefCell<CellValueInner>>);
 
 struct Subscription {
     sub: Dval,
@@ -110,7 +62,6 @@ impl NetidxTable {
         descriptor.rows.sort();
         descriptor.cols.sort_by_key(|(p, _)| p.clone());
         descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
-        let descriptor = Rc::new(descriptor);
         let column_types = (0..descriptor.cols.len() + 1)
             .into_iter()
             .map(|i| {
@@ -128,11 +79,10 @@ impl NetidxTable {
             store.set_value(&row, 0, &row_name.to_value());
             for col in 0..descriptor.cols.len() {
                 let id = (col + 1) as u32;
-                let cell = CellValue(Rc::new(CellValueInner {
-                    value: RefCell::new(String::from("#subscribe")),
-                    id: Cell::new(None),
-                    state: Cell::new(CellState::Invisible(Instant::now())),
-                }));
+                let cell = CellValue(Rc::new(RefCell::new(CellValueInner {
+                    value: String::from("#subscribe"),
+                    id: None,
+                })));
                 store.set_value(&row, id, &cell.to_value());
             }
         }
@@ -155,59 +105,14 @@ impl NetidxTable {
             column.pack_start(&cell, true);
             column.set_title(descriptor.cols[col].0.as_ref());
             column.set_sort_column_id(id);
-            let f = {
-                let descriptor = Rc::clone(&descriptor);
-                let subscribed = Rc::clone(&subscribed);
-                let base_path = base_path.clone();
-                let subscriber = subscriber.clone();
-                let updates = updates.clone();
-                let view = view.clone();
-                move |_: &TreeViewColumn,
-                      cell: &CellRenderer,
-                      model: &TreeModel,
-                      row: &TreeIter| {
-                    let cell = cell.clone().downcast::<CellRendererText>().unwrap();
-                    let sub_row = model.get_value(row, id);
-                    let sub = sub_row.get::<&CellValue>().unwrap().unwrap();
-                    cell.set_property_text(Some(&*sub.0.value.borrow()));
-                    let path = model.get_path(row).unwrap();
-                    sub.update_visible(match view.get_visible_range() {
-                        None => false,
-                        Some((s, e)) => path >= s && path <= e,
-                    });
-                    match sub.0.id.get() {
-                        Some(subid) => {
-                            if sub.is_invisible_for(Duration::from_secs(1)) {
-                                sub.0.id.set(None);
-                                *sub.0.value.borrow_mut() = String::from("#subscribe");
-                                subscribed.borrow_mut().remove(&subid);
-                                model.row_changed(&path, &row);
-                            }
-                        }
-                        None => {
-                            if sub.is_visible() {
-                                let row_name_v = model.get_value(row, 0);
-                                let row_name = row_name_v.get::<&str>().unwrap().unwrap();
-                                let p = base_path
-                                    .append(row_name)
-                                    .append(&descriptor.cols[col].0);
-                                let s = subscriber.durable_subscribe(p);
-                                sub.0.id.set(Some(s.id()));
-                                *sub.0.value.borrow_mut() = String::from("#subscribe");
-                                s.updates(true, updates.clone());
-                                subscribed.borrow_mut().insert(
-                                    s.id(),
-                                    Subscription {
-                                        sub: s,
-                                        row: row.clone(),
-                                        col: id as u32,
-                                    },
-                                );
-                                model.row_changed(&path, &row)
-                            }
-                        }
-                    }
-                }
+            let f = move |_: &TreeViewColumn,
+                          cell: &CellRenderer,
+                          model: &TreeModel,
+                          row: &TreeIter| {
+                let cell = cell.clone().downcast::<CellRendererText>().unwrap();
+                let sub_row = model.get_value(row, id);
+                let sub = sub_row.get::<&CellValue>().unwrap().unwrap();
+                cell.set_property_text(Some(&*sub.0.borrow().value));
             };
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(Box::new(f)));
             view.append_column(&column);
@@ -215,6 +120,82 @@ impl NetidxTable {
         view.set_model(Some(&store));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
+        let va = root.get_vadjustment().unwrap();
+        {
+            let view = view.clone();
+            let store = store.clone();
+            let subscribed = subscribed.clone();
+            va.connect_value_changed(move |a| {
+                println!("scrolled {} {} {}", a.get_value(), a.get_lower(), a.get_upper());
+                let mut notify = BTreeSet::new();
+                let (mut start, mut end) = match view.get_visible_range() {
+                    None => return,
+                    Some((s, e)) => (s, e),
+                };
+                start.prev();
+                end.next();
+                // unsubscribe invisible rows
+                subscribed.borrow_mut().retain(|_, v| {
+                    let (path, visible) = match store.get_path(&v.row) {
+                        None => return false,
+                        Some(p) => {
+                            let visible = p >= start && p <= end;
+                            (p, visible)
+                        }
+                    };
+                    if !visible {
+                        for col in 0..descriptor.cols.len() {
+                            let id = col + 1;
+                            let cell = store.get_value(&v.row, id as i32);
+                            if let Ok(Some(cell)) = cell.get::<&CellValue>() {
+                                let mut inner = cell.0.borrow_mut();
+                                inner.id = None;
+                                inner.value = String::from("#subscribe");
+                                notify.insert((path.clone(), v.row.clone()));
+                            }
+                        }
+                    }
+                    visible
+                });
+                while start < end {
+                    if let Some(row) = store.get_iter(&start) {
+                        for col in 0..descriptor.cols.len() {
+                            let id = col + 1;
+                            let cell = store.get_value(&row, id as i32);
+                            if let Ok(Some(cell)) = cell.get::<&CellValue>() {
+                                let mut inner = cell.0.borrow_mut();
+                                if inner.id.is_none() {
+                                    let row_name_v = store.get_value(&row, 0);
+                                    if let Ok(Some(row_name)) = row_name_v.get::<&str>()
+                                    {
+                                        let p = base_path
+                                            .append(row_name)
+                                            .append(&descriptor.cols[col].0);
+                                        let s = subscriber.durable_subscribe(p);
+                                        inner.id = Some(s.id());
+                                        inner.value = String::from("#subscribe");
+                                        s.updates(true, updates.clone());
+                                        subscribed.borrow_mut().insert(
+                                            s.id(),
+                                            Subscription {
+                                                sub: s,
+                                                row: row.clone(),
+                                                col: id as u32,
+                                            },
+                                        );
+                                        notify.insert((start.clone(), row.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    start.next();
+                }
+                for (path, row) in notify {
+                    store.row_changed(&path, &row);
+                }
+            });
+        }
         NetidxTable { root, view, store, subscribed }
     }
 }
@@ -290,10 +271,15 @@ fn run_gui(
                         for (id, (row, col, v)) in changed.drain() {
                             if let Some(path) = t.store.get_path(&row) {
                                 let cell_v = t.store.get_value(&row, col as i32);
-                                let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
-                                *cell.0.value.borrow_mut() = format!("{}", v);
-                                t.store.row_changed(&path, &row);
+                                if let Ok(Some(cell)) = cell_v.get::<&CellValue>() {
+                                    cell.0.borrow_mut().value = format!("{}", v);
+                                    t.store.row_changed(&path, &row);
+                                }
                             }
+                        }
+                        if t.subscribed.borrow().len() == 0 {
+                            // kickstart subscription
+                            t.root.get_vadjustment().map(|a| a.value_changed());
                         }
                     }
                 }
