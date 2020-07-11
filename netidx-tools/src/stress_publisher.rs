@@ -36,8 +36,8 @@ async fn run_publisher(
     let one_second = Duration::from_secs(1);
     loop {
         v += 1;
-        for p in published.iter() {
-            p.update(Value::V64(v));
+        for (i, p) in published.iter().enumerate() {
+            p.update(Value::V64(v + i as u64));
             sent += 1;
         }
         publisher.flush(None).await.expect("flush");

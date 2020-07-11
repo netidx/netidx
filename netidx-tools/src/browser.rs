@@ -29,20 +29,60 @@ use tokio::{
     time::{self, Instant},
 };
 
+#[derive(Clone, Copy)]
+enum CellState {
+    Invisible(Instant),
+    Visible(Instant),
+}
+
 struct CellValueInner {
     value: Cell<Option<String>>,
     id: Cell<Option<SubId>>,
+    state: Cell<CellState>,
 }
 
 #[derive(Clone, GBoxed)]
 #[gboxed(type_name = "GBoxedCellValue")]
 struct CellValue(Rc<CellValueInner>);
 
+impl CellValue {
+    fn is_invisible_for(&self, duration: Duration) -> bool {
+        match self.0.state.get() {
+            CellState::Invisible(ts) => ts.elapsed() >= duration,
+            CellState::Visible(_) => false,
+        }
+    }
+
+    fn is_visible_for(&self, duration: Duration) -> bool {
+        match self.0.state.get() {
+            CellState::Visible(ts) => ts.elapsed() >= duration,
+            CellState::Invisible(_) => false,
+        }
+    }
+
+    fn update_visible(&self, visible: bool) {
+        if visible {
+            match self.0.state.get() {
+                CellState::Visible(_) => (),
+                CellState::Invisible(_) => {
+                    self.0.state.set(CellState::Visible(Instant::now()));
+                }
+            }
+        } else {
+            match self.0.state.get() {
+                CellState::Invisible(_) => (),
+                CellState::Visible(_) => {
+                    self.0.state.set(CellState::Invisible(Instant::now()));
+                }
+            }
+        }
+    }
+}
+
 struct Subscription {
     sub: Dval,
     row: TreeIter,
     col: u32,
-    last: Instant,
 }
 
 struct NetidxTable {
@@ -84,6 +124,7 @@ impl NetidxTable {
                 let cell = CellValue(Rc::new(CellValueInner {
                     value: Cell::new(Some(String::from("#subscribe"))),
                     id: Cell::new(None),
+                    state: Cell::new(CellState::Invisible(Instant::now())),
                 }));
                 store.set_value(&row, id, &cell.to_value());
             }
@@ -125,41 +166,41 @@ impl NetidxTable {
                         cell.set_property_text(Some(&txt));
                     }
                     let path = model.get_path(row).unwrap();
-                    let visible = match view.get_visible_range() {
+                    sub.update_visible(match view.get_visible_range() {
                         None => false,
-                        Some((s, e)) => path >= s && path <= e
-                    };
-                    let mut subscribed = subscribed.borrow_mut();
+                        Some((s, e)) => path >= s && path <= e,
+                    });
                     match sub.0.id.get() {
                         Some(subid) => {
-                            if visible {
-                                subscribed.get_mut(&subid).unwrap().last = Instant::now();
-                            } else {
+                            if sub.is_invisible_for(Duration::from_secs(1)) {
                                 sub.0.id.set(None);
-                                subscribed.remove(&subid);
-                                cell.set_property_text(Some("#subscribe"));
+                                sub.0.value.set(Some(String::from("#dropped")));
+                                subscribed.borrow_mut().remove(&subid);
+                                model.row_changed(&path, &row);
                             }
                         }
-                        None => {
-                            if visible {
+                        None => match sub.0.state.get() {
+                            CellState::Invisible(_) => (),
+                            CellState::Visible(_) => {
                                 let row_name_v = model.get_value(row, 0);
                                 let row_name = row_name_v.get::<&str>().unwrap().unwrap();
-                                let path = base_path
+                                let s = subscriber.durable_subscribe(dbg!(base_path
                                     .append(row_name)
-                                    .append(&descriptor.cols[col].0);
-                                let s = subscriber.durable_subscribe(path);
+                                    .append(&descriptor.cols[col].0)));
+                                sub.0.id.set(Some(s.id()));
+                                sub.0.value.set(Some(String::from("#subscribe")));
                                 s.updates(true, updates.clone());
-                                subscribed.insert(
+                                subscribed.borrow_mut().insert(
                                     s.id(),
                                     Subscription {
                                         sub: s,
                                         row: row.clone(),
                                         col: id as u32,
-                                        last: Instant::now(),
                                     },
                                 );
+                                model.row_changed(&path, &row)
                             }
-                        }
+                        },
                     }
                 }
             };
@@ -179,6 +220,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 enum ToGui {
     Table(Subscriber, Path, Table),
     Batch(Batch),
+    Refresh,
 }
 
 async fn netidx_main(
@@ -191,13 +233,19 @@ async fn netidx_main(
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let resolver = subscriber.resolver();
     let table = resolver.table(path.clone()).await.expect("can't load initial table");
+    let mut refresh = time::interval(Duration::from_secs(1)).fuse();
     to_gui.send(ToGui::Table(subscriber.clone(), path, table)).await.unwrap();
-    while let Some(batch) = updates.next().await {
-        match to_gui.send(ToGui::Batch(batch)).await {
-            Ok(()) => (),
-            Err(e) => {
-                warn!("tokio thread shutting down {}", e);
-                break;
+    loop {
+        select_biased! {
+            _ = refresh.next() => match to_gui.send(ToGui::Refresh).await {
+                Ok(()) => (),
+                Err(e) => break
+            },
+            b = updates.next() => if let Some(batch) = b {
+                match to_gui.send(ToGui::Batch(batch)).await {
+                    Ok(()) => (),
+                    Err(e) => break
+                }
             }
         }
     }
@@ -229,24 +277,28 @@ fn run_gui(
     window.show_all();
     main_context.spawn_local(async move {
         let mut current: Option<NetidxTable> = None;
+        let mut changed: HashMap<SubId, (TreeIter, u32, Value)> = HashMap::new();
         while let Some(m) = to_gui.next().await {
             match m {
+                ToGui::Refresh => {
+                    if let Some(t) = &mut current {
+                        for (id, (row, col, v)) in changed.drain() {
+                            if let Some(path) = t.store.get_path(&row) {
+                                let cell_v = t.store.get_value(&row, col as i32);
+                                let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
+                                cell.0.value.set(Some(format!("{}", v)));
+                                t.store.row_changed(&path, &row);
+                            }
+                        }
+                    }
+                }
                 ToGui::Batch(mut b) => {
                     if let Some(t) = &mut current {
+                        let subs = t.subscribed.borrow();
                         for (id, v) in b.drain(..) {
-                            let (row, col) = {
-                                let subs = t.subscribed.borrow();
-                                match subs.get(&id) {
-                                    None => continue,
-                                    Some(sub) => (sub.row.clone(), sub.col),
-                                }
-                            };
-                            let cell_v = t.store.get_value(&row, col as i32);
-                            let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
-                            cell.0.value.set(Some(format!("{}", v)));
-                            cell.0.id.set(Some(id));
-                            let path = t.store.get_path(&row).unwrap();
-                            t.store.row_changed(&path, &row);
+                            if let Some(sub) = subs.get(&id) {
+                                changed.insert(id, (sub.row.clone(), sub.col, v));
+                            }
                         }
                     }
                 }
