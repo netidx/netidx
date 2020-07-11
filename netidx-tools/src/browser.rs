@@ -60,6 +60,13 @@ impl CellValue {
         }
     }
 
+    fn is_visible(&self) -> bool {
+        match self.0.state.get() {
+            CellState::Visible(_) => true,
+            CellState::Invisible(_) => false,
+        }
+    }
+
     fn update_visible(&self, visible: bool) {
         if visible {
             match self.0.state.get() {
@@ -177,14 +184,14 @@ impl NetidxTable {
                                 model.row_changed(&path, &row);
                             }
                         }
-                        None => match sub.0.state.get() {
-                            CellState::Invisible(_) => (),
-                            CellState::Visible(_) => {
+                        None => {
+                            if sub.is_visible() {
                                 let row_name_v = model.get_value(row, 0);
                                 let row_name = row_name_v.get::<&str>().unwrap().unwrap();
-                                let s = subscriber.durable_subscribe(dbg!(base_path
+                                let p = base_path
                                     .append(row_name)
-                                    .append(&descriptor.cols[col].0)));
+                                    .append(&descriptor.cols[col].0);
+                                let s = subscriber.durable_subscribe(p);
                                 sub.0.id.set(Some(s.id()));
                                 *sub.0.value.borrow_mut() = String::from("#subscribe");
                                 s.updates(true, updates.clone());
@@ -198,7 +205,7 @@ impl NetidxTable {
                                 );
                                 model.row_changed(&path, &row)
                             }
-                        },
+                        }
                     }
                 }
             };
