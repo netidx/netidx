@@ -244,7 +244,6 @@ fn run_gui(
                             let cell_v = t.store.get_value(&row, col as i32);
                             let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
                             cell.0.value.set(Some(format!("{}", v)));
-
                             cell.0.id.set(Some(id));
                             let path = t.store.get_path(&row).unwrap();
                             t.store.row_changed(&path, &row);
