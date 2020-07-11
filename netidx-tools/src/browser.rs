@@ -36,7 +36,7 @@ enum CellState {
 }
 
 struct CellValueInner {
-    value: Cell<Option<String>>,
+    value: RefCell<String>,
     id: Cell<Option<SubId>>,
     state: Cell<CellState>,
 }
@@ -122,7 +122,7 @@ impl NetidxTable {
             for col in 0..descriptor.cols.len() {
                 let id = (col + 1) as u32;
                 let cell = CellValue(Rc::new(CellValueInner {
-                    value: Cell::new(Some(String::from("#subscribe"))),
+                    value: RefCell::new(String::from("#subscribe")),
                     id: Cell::new(None),
                     state: Cell::new(CellState::Invisible(Instant::now())),
                 }));
@@ -162,9 +162,7 @@ impl NetidxTable {
                     let cell = cell.clone().downcast::<CellRendererText>().unwrap();
                     let sub_row = model.get_value(row, id);
                     let sub = sub_row.get::<&CellValue>().unwrap().unwrap();
-                    if let Some(txt) = sub.0.value.take() {
-                        cell.set_property_text(Some(&txt));
-                    }
+                    cell.set_property_text(Some(&*sub.0.value.borrow()));
                     let path = model.get_path(row).unwrap();
                     sub.update_visible(match view.get_visible_range() {
                         None => false,
@@ -174,7 +172,7 @@ impl NetidxTable {
                         Some(subid) => {
                             if sub.is_invisible_for(Duration::from_secs(1)) {
                                 sub.0.id.set(None);
-                                sub.0.value.set(Some(String::from("#dropped")));
+                                *sub.0.value.borrow_mut() = String::from("#subscribe");
                                 subscribed.borrow_mut().remove(&subid);
                                 model.row_changed(&path, &row);
                             }
@@ -188,7 +186,7 @@ impl NetidxTable {
                                     .append(row_name)
                                     .append(&descriptor.cols[col].0)));
                                 sub.0.id.set(Some(s.id()));
-                                sub.0.value.set(Some(String::from("#subscribe")));
+                                *sub.0.value.borrow_mut() = String::from("#subscribe");
                                 s.updates(true, updates.clone());
                                 subscribed.borrow_mut().insert(
                                     s.id(),
@@ -286,7 +284,7 @@ fn run_gui(
                             if let Some(path) = t.store.get_path(&row) {
                                 let cell_v = t.store.get_value(&row, col as i32);
                                 let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
-                                cell.0.value.set(Some(format!("{}", v)));
+                                *cell.0.value.borrow_mut() = format!("{}", v);
                                 t.store.row_changed(&path, &row);
                             }
                         }
