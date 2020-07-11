@@ -1,10 +1,10 @@
-use futures::{channel::mpsc, prelude::*};
+use futures::{channel::mpsc, prelude::*, select_biased};
 use gio::prelude::*;
 use glib::{self, prelude::*, subclass::prelude::*};
 use gtk::{
-    prelude::*, Application, ApplicationWindow, CellLayout, CellRenderer,
-    CellRendererText, ListStore, TreeIter, TreeModel, TreeStore, TreeView,
-    TreeViewColumn, ScrolledWindow, Adjustment,
+    prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
+    CellRendererText, ListStore, ScrolledWindow, TreeIter, TreeModel, TreeStore,
+    TreeView, TreeViewColumn,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -16,19 +16,27 @@ use netidx::{
     subscriber::{Dval, SubId, Subscriber, Value},
 };
 use std::{
-    cell::RefCell, cmp::max, collections::HashMap, iter, rc::Rc, thread, time::Duration,
+    cell::{Cell, RefCell},
+    cmp::max,
+    collections::HashMap,
+    iter,
+    rc::Rc,
+    thread,
+    time::Duration,
 };
 use tokio::{
     runtime::Runtime,
     time::{self, Instant},
 };
 
+struct CellValueInner {
+    value: Cell<Option<String>>,
+    id: Cell<Option<SubId>>,
+}
+
 #[derive(Clone, GBoxed)]
 #[gboxed(type_name = "GBoxedCellValue")]
-struct CellValue {
-    value: Value,
-    id: Option<SubId>,
-}
+struct CellValue(Rc<CellValueInner>);
 
 struct Subscription {
     sub: Dval,
@@ -52,6 +60,8 @@ impl NetidxTable {
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
     ) -> NetidxTable {
         let nrows = descriptor.rows.len();
+        descriptor.rows.sort();
+        descriptor.cols.sort_by_key(|(p, _)| p.clone());
         descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
         let descriptor = Rc::new(descriptor);
         let column_types = (0..descriptor.cols.len() + 1)
@@ -71,8 +81,11 @@ impl NetidxTable {
             store.set_value(&row, 0, &row_name.to_value());
             for col in 0..descriptor.cols.len() {
                 let id = (col + 1) as u32;
-                let value = Value::String(Chars::from("#subscribe"));
-                store.set_value(&row, id, &CellValue { value, id: None }.to_value());
+                let cell = CellValue(Rc::new(CellValueInner {
+                    value: Cell::new(Some(String::from("#subscribe"))),
+                    id: Cell::new(None),
+                }));
+                store.set_value(&row, id, &cell.to_value());
             }
         }
         let subscribed: Rc<RefCell<HashMap<SubId, Subscription>>> =
@@ -100,6 +113,7 @@ impl NetidxTable {
                 let base_path = base_path.clone();
                 let subscriber = subscriber.clone();
                 let updates = updates.clone();
+                let view = view.clone();
                 move |_: &TreeViewColumn,
                       cell: &CellRenderer,
                       model: &TreeModel,
@@ -107,30 +121,44 @@ impl NetidxTable {
                     let cell = cell.clone().downcast::<CellRendererText>().unwrap();
                     let sub_row = model.get_value(row, id);
                     let sub = sub_row.get::<&CellValue>().unwrap().unwrap();
-                    cell.set_property_text(Some(&format!("{}", &sub.value)));
+                    if let Some(txt) = sub.0.value.take() {
+                        cell.set_property_text(Some(&txt));
+                    }
+                    let path = model.get_path(row).unwrap();
+                    let visible = match view.get_visible_range() {
+                        None => false,
+                        Some((s, e)) => path >= s && path <= e
+                    };
                     let mut subscribed = subscribed.borrow_mut();
-                    match sub.id {
+                    match sub.0.id.get() {
                         Some(subid) => {
-                            let sub = subscribed.get_mut(&subid).unwrap();
-                            sub.last = Instant::now();
+                            if visible {
+                                subscribed.get_mut(&subid).unwrap().last = Instant::now();
+                            } else {
+                                sub.0.id.set(None);
+                                subscribed.remove(&subid);
+                                cell.set_property_text(Some("#subscribe"));
+                            }
                         }
                         None => {
-                            let row_name_v = model.get_value(row, 0);
-                            let row_name = row_name_v.get::<&str>().unwrap().unwrap();
-                            let path = base_path
-                                .append(row_name)
-                                .append(&descriptor.cols[col].0);
-                            let s = subscriber.durable_subscribe(path);
-                            s.updates(true, updates.clone());
-                            subscribed.insert(
-                                s.id(),
-                                Subscription {
-                                    sub: s,
-                                    row: row.clone(),
-                                    col: id as u32,
-                                    last: Instant::now(),
-                                },
-                            );
+                            if visible {
+                                let row_name_v = model.get_value(row, 0);
+                                let row_name = row_name_v.get::<&str>().unwrap().unwrap();
+                                let path = base_path
+                                    .append(row_name)
+                                    .append(&descriptor.cols[col].0);
+                                let s = subscriber.durable_subscribe(path);
+                                s.updates(true, updates.clone());
+                                subscribed.insert(
+                                    s.id(),
+                                    Subscription {
+                                        sub: s,
+                                        row: row.clone(),
+                                        col: id as u32,
+                                        last: Instant::now(),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -205,15 +233,22 @@ fn run_gui(
             match m {
                 ToGui::Batch(mut b) => {
                     if let Some(t) = &mut current {
-                        t.view.set_model(None::<&TreeStore>);
-                        let subs = t.subscribed.borrow();
                         for (id, v) in b.drain(..) {
-                            if let Some(sub) = subs.get(&id) {
-                                let v = CellValue { value: v, id: Some(id) };
-                                t.store.set_value(&sub.row, sub.col, &v.to_value());
-                            }
+                            let (row, col) = {
+                                let subs = t.subscribed.borrow();
+                                match subs.get(&id) {
+                                    None => continue,
+                                    Some(sub) => (sub.row.clone(), sub.col),
+                                }
+                            };
+                            let cell_v = t.store.get_value(&row, col as i32);
+                            let cell = cell_v.get::<&CellValue>().unwrap().unwrap();
+                            cell.0.value.set(Some(format!("{}", v)));
+
+                            cell.0.id.set(Some(id));
+                            let path = t.store.get_path(&row).unwrap();
+                            t.store.row_changed(&path, &row);
                         }
-                        t.view.set_model(Some(&t.store));
                     }
                 }
                 ToGui::Table(subscriber, path, table) => {
