@@ -70,10 +70,15 @@ impl NetidxTable {
         descriptor.rows.sort();
         descriptor.cols.sort_by_key(|(p, _)| p.clone());
         descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
-        let column_types = (0..descriptor.cols.len() + 1)
-            .into_iter()
-            .map(|_| String::static_type())
-            .collect::<Vec<_>>();
+        let vector_mode = descriptor.cols.len() == 0;
+        let column_types = if vector_mode {
+            vec![String::static_type(); 2]
+        } else {
+            (0..descriptor.cols.len() + 1)
+                .into_iter()
+                .map(|_| String::static_type())
+                .collect::<Vec<_>>()
+        };
         let store = ListStore::new(&column_types);
         for row in descriptor.rows.iter() {
             let row_name = Path::basename(row).unwrap_or("").to_value();
@@ -93,12 +98,16 @@ impl NetidxTable {
             column.set_sizing(TreeViewColumnSizing::Fixed);
             column
         });
-        for col in 0..descriptor.cols.len() {
+        for col in 0..(if vector_mode { 1 } else { descriptor.cols.len() }) {
             let id = (col + 1) as i32;
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
             column.pack_start(&cell, true);
-            column.set_title(descriptor.cols[col].0.as_ref());
+            column.set_title(if vector_mode {
+                "value"
+            } else {
+                descriptor.cols[col].0.as_ref()
+            });
             column.add_attribute(&cell, "text", id);
             column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
@@ -106,26 +115,26 @@ impl NetidxTable {
         }
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
-        view.connect_row_activated(clone!(@weak store, @strong base_path,
-               @strong from_gui => move |_view, path, _col| {
-            if let Some(row) = store.get_iter(&path) {
-                let row_name = store.get_value(&row, 0);
-                if let Ok(Some(row_name)) = row_name.get::<&str>() {
-                    let path = base_path.append(row_name);
-                    let _ = from_gui.unbounded_send(FromGui::Navigate(path));
+        view.connect_row_activated(clone!(
+            @weak store, @strong base_path,
+            @strong from_gui => move |_view, path, _col| {
+                if let Some(row) = store.get_iter(&path) {
+                    let row_name = store.get_value(&row, 0);
+                    if let Ok(Some(row_name)) = row_name.get::<&str>() {
+                        let path = base_path.append(row_name);
+                        let _ = from_gui.unbounded_send(FromGui::Navigate(path));
+                    }
                 }
-            }
         }));
-        view.connect_key_press_event(
-            clone!(@strong base_path, @strong from_gui => move |_, key| {
+        view.connect_key_press_event(clone!(
+            @strong base_path, @strong from_gui => move |_, key| {
                 if key.get_keyval() == keys::constants::BackSpace {
                     let path = Path::dirname(&base_path).unwrap_or("/");
                     let m = FromGui::Navigate(Path::from(String::from(path)));
                     let _ = from_gui.unbounded_send(m);
                 }
                 Inhibit(false)
-            }),
-        );
+        }));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
         let update_subscriptions = Rc::new({
@@ -172,13 +181,18 @@ impl NetidxTable {
                         if !subscribed.borrow().contains(&row) {
                             setval.push((row.clone(), Some("#subscribe")));
                             subscribed.borrow_mut().insert(row.clone());
-                            for col in 0..descriptor.cols.len() {
+                            let cols =
+                                if vector_mode { 1 } else { descriptor.cols.len() };
+                            for col in 0..cols {
                                 let id = col + 1;
                                 let row_name_v = store.get_value(&row, 0);
                                 if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                                    let p = base_path
-                                        .append(row_name)
-                                        .append(&descriptor.cols[col].0);
+                                    let p = base_path.append(row_name);
+                                    let p = if vector_mode {
+                                        p
+                                    } else {
+                                        p.append(&descriptor.cols[col].0)
+                                    };
                                     let s = subscriber.durable_subscribe(p);
                                     s.updates(true, updates.clone());
                                     by_id.borrow_mut().insert(
@@ -196,7 +210,8 @@ impl NetidxTable {
                     start.next();
                 }
                 for (row, val) in setval {
-                    for id in 1..descriptor.cols.len() + 1 {
+                    for id in 1..(if vector_mode { 2 } else { descriptor.cols.len() + 1 })
+                    {
                         store.set_value(&row, id as u32, &val.to_value());
                     }
                 }
@@ -309,6 +324,7 @@ fn run_gui(
                         window.remove(&cur.root);
                     }
                     changed.clear();
+                    window.set_title(&format!("Netidx Browser {}", path));
                     let cur = NetidxTable::new(
                         subscriber,
                         path,
