@@ -40,6 +40,7 @@ struct NetidxTable {
     view: TreeView,
     store: ListStore,
     by_id: Rc<RefCell<HashMap<SubId, Subscription>>>,
+    update_subscriptions: Rc<Fn()>,
 }
 
 impl NetidxTable {
@@ -91,14 +92,13 @@ impl NetidxTable {
         view.set_model(Some(&store));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
-        {
-            let va = root.get_vadjustment().unwrap();
+        let update_subscriptions = Rc::new({
             let view = view.clone();
             let store = store.clone();
             let by_id = by_id.clone();
             let mut subscribed: RefCell<BTreeSet<TreeIter>> =
                 RefCell::new(BTreeSet::new());
-            va.connect_value_changed(move |a| {
+            move || {
                 let (mut start, mut end) = match view.get_visible_range() {
                     None => return,
                     Some((s, e)) => (s, e),
@@ -157,9 +157,13 @@ impl NetidxTable {
                     }
                 }
                 view.columns_autosize();
-            });
-        }
-        NetidxTable { root, view, store, by_id }
+            }
+        });
+        root.get_vadjustment().map(|va| {
+            let f = Rc::clone(&update_subscriptions);
+            va.connect_value_changed(move |_| f());
+        });
+        NetidxTable { root, view, store, by_id, update_subscriptions }
     }
 }
 
@@ -236,8 +240,7 @@ fn run_gui(
                         }
                         t.view.columns_autosize();
                         if t.by_id.borrow().len() == 0 {
-                            // kickstart subscription
-                            t.root.get_vadjustment().map(|a| a.value_changed());
+                            (t.update_subscriptions)();
                         }
                     }
                 }
