@@ -156,7 +156,6 @@ impl NetidxTable {
                         store.set_value(&row, id as u32, &val.to_value());
                     }
                 }
-                view.columns_autosize();
             }
         });
         root.get_vadjustment().map(|va| {
