@@ -1,6 +1,7 @@
 use futures::{channel::mpsc, prelude::*, select_biased};
+use gdk::{keys, EventKey};
 use gio::prelude::*;
-use glib::{self, prelude::*, subclass::prelude::*};
+use glib::{self, clone, prelude::*, signal::Inhibit, subclass::prelude::*};
 use gtk::{
     prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
     CellRendererText, ListStore, ScrolledWindow, TreeIter, TreeModel, TreeStore,
@@ -29,6 +30,20 @@ use tokio::{
     time::{self, Instant},
 };
 
+type Batch = Pooled<Vec<(SubId, Value)>>;
+
+#[derive(Debug, Clone)]
+enum ToGui {
+    Table(Subscriber, Path, Table),
+    Batch(Batch),
+    Refresh,
+}
+
+#[derive(Debug, Clone)]
+enum FromGui {
+    Navigate(Path),
+}
+
 struct Subscription {
     sub: Dval,
     row: TreeIter,
@@ -49,6 +64,7 @@ impl NetidxTable {
         base_path: Path,
         mut descriptor: Table,
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
+        from_gui: mpsc::UnboundedSender<FromGui>,
     ) -> NetidxTable {
         let nrows = descriptor.rows.len();
         descriptor.rows.sort();
@@ -90,15 +106,43 @@ impl NetidxTable {
         }
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
+        view.connect_row_activated(clone!(@weak store, @strong base_path,
+               @strong from_gui => move |_view, path, _col| {
+            if let Some(row) = store.get_iter(&path) {
+                let row_name = store.get_value(&row, 0);
+                if let Ok(Some(row_name)) = row_name.get::<&str>() {
+                    let path = base_path.append(row_name);
+                    let _ = from_gui.unbounded_send(FromGui::Navigate(path));
+                }
+            }
+        }));
+        view.connect_key_press_event(
+            clone!(@strong base_path, @strong from_gui => move |_, key| {
+                if key.get_keyval() == keys::constants::BackSpace {
+                    let path = Path::dirname(&base_path).unwrap_or("/");
+                    let m = FromGui::Navigate(Path::from(String::from(path)));
+                    let _ = from_gui.unbounded_send(m);
+                }
+                Inhibit(false)
+            }),
+        );
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
         let update_subscriptions = Rc::new({
-            let view = view.clone();
-            let store = store.clone();
+            let view = view.downgrade();
+            let store = store.downgrade();
             let by_id = by_id.clone();
             let mut subscribed: RefCell<BTreeSet<TreeIter>> =
                 RefCell::new(BTreeSet::new());
             move || {
+                let view = match view.upgrade() {
+                    None => return,
+                    Some(view) => view,
+                };
+                let store = match store.upgrade() {
+                    None => return,
+                    Some(store) => store,
+                };
                 let (mut start, mut end) = match view.get_visible_range() {
                     None => return,
                     Some((s, e)) => (s, e),
@@ -166,27 +210,16 @@ impl NetidxTable {
     }
 }
 
-type Batch = Pooled<Vec<(SubId, Value)>>;
-
-#[derive(Debug, Clone)]
-enum ToGui {
-    Table(Subscriber, Path, Table),
-    Batch(Batch),
-    Refresh,
-}
-
 async fn netidx_main(
     cfg: Config,
     auth: Auth,
-    path: Path,
     mut updates: mpsc::Receiver<Batch>,
     mut to_gui: mpsc::Sender<ToGui>,
+    mut from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let resolver = subscriber.resolver();
-    let table = resolver.table(path.clone()).await.expect("can't load initial table");
     let mut refresh = time::interval(Duration::from_secs(1)).fuse();
-    to_gui.send(ToGui::Table(subscriber.clone(), path, table)).await.unwrap();
     loop {
         select_biased! {
             _ = refresh.next() => match to_gui.send(ToGui::Refresh).await {
@@ -198,6 +231,23 @@ async fn netidx_main(
                     Ok(()) => (),
                     Err(e) => break
                 }
+            },
+            m = from_gui.next() => match m {
+                None => break,
+                Some(FromGui::Navigate(path)) => {
+                    let table = match resolver.table(path.clone()).await {
+                        Ok(table) => table,
+                        Err(e) => {
+                            error!("can't load path {}", e);
+                            continue
+                        }
+                    };
+                    let m = ToGui::Table(subscriber.clone(), path, table);
+                    match to_gui.send(m).await {
+                        Err(_) => break,
+                        Ok(()) => ()
+                    }
+                }
             }
         }
     }
@@ -206,13 +256,13 @@ async fn netidx_main(
 fn run_netidx(
     cfg: Config,
     auth: Auth,
-    path: Path,
     updates: mpsc::Receiver<Batch>,
     to_gui: mpsc::Sender<ToGui>,
+    from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(netidx_main(cfg, auth, path, updates, to_gui));
+        rt.block_on(netidx_main(cfg, auth, updates, to_gui, from_gui));
     });
 }
 
@@ -220,6 +270,7 @@ fn run_gui(
     app: &Application,
     updates: mpsc::Sender<Batch>,
     mut to_gui: mpsc::Receiver<ToGui>,
+    from_gui: mpsc::UnboundedSender<FromGui>,
 ) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
@@ -254,7 +305,17 @@ fn run_gui(
                     }
                 }
                 ToGui::Table(subscriber, path, table) => {
-                    let cur = NetidxTable::new(subscriber, path, table, updates.clone());
+                    if let Some(cur) = current.take() {
+                        window.remove(&cur.root);
+                    }
+                    changed.clear();
+                    let cur = NetidxTable::new(
+                        subscriber,
+                        path,
+                        table,
+                        updates.clone(),
+                        from_gui.clone(),
+                    );
                     window.add(&cur.root);
                     window.show_all();
                     current = Some(cur);
@@ -270,8 +331,11 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = mpsc::channel(2);
-        run_netidx(cfg.clone(), auth.clone(), path.clone(), rx_updates, tx_to_gui);
-        run_gui(app, tx_updates, rx_to_gui)
+        let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
+        // navigate to the initial location
+        tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
+        run_netidx(cfg.clone(), auth.clone(), rx_updates, tx_to_gui, rx_from_gui);
+        run_gui(app, tx_updates, rx_to_gui, tx_from_gui)
     });
     application.run(&[]);
 }

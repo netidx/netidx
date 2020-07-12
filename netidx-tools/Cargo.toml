@@ -23,7 +23,7 @@ daemonize = "0.4"
 
 [features]
 default = ["browser"]
-browser = ["gtk/v3_24", "gio", "glib"]
+browser = ["gtk/v3_24", "gio", "glib", "gdk"]
 
 [dependencies]
 futures = "0.3"
@@ -44,3 +44,4 @@ parking_lot = "0.10"
 gtk = { version = "0.9", features = ["v3_24"], optional = true }
 gio = { version = "0.9", optional = true }
 glib = { version = "0.10", optional = true }
+gdk = { version = "0.13", optional = true }
