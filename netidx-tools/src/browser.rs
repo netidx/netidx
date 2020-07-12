@@ -91,8 +91,8 @@ impl NetidxTable {
         view.set_model(Some(&store));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
-        let va = root.get_vadjustment().unwrap();
         {
+            let va = root.get_vadjustment().unwrap();
             let view = view.clone();
             let store = store.clone();
             let by_id = by_id.clone();
@@ -156,6 +156,7 @@ impl NetidxTable {
                         store.set_value(&row, id as u32, &val.to_value());
                     }
                 }
+                view.columns_autosize();
             });
         }
         NetidxTable { root, view, store, by_id }
@@ -233,6 +234,7 @@ fn run_gui(
                         for (id, (row, col, v)) in changed.drain() {
                             t.store.set_value(&row, col, &format!("{}", v).to_value());
                         }
+                        t.view.columns_autosize();
                         if t.by_id.borrow().len() == 0 {
                             // kickstart subscription
                             t.root.get_vadjustment().map(|a| a.value_changed());
