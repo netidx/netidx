@@ -4,8 +4,8 @@ use gio::prelude::*;
 use glib::{self, clone, prelude::*, signal::Inhibit, subclass::prelude::*};
 use gtk::{
     prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
-    CellRendererText, ListStore, ScrolledWindow, TreeIter, TreeModel, TreeStore,
-    TreeView, TreeViewColumn, TreeViewColumnSizing,
+    CellRendererText, ListStore, ScrolledWindow, StateFlags, TreeIter, TreeModel,
+    TreePath, TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -55,7 +55,7 @@ struct NetidxTable {
     view: TreeView,
     store: ListStore,
     by_id: Rc<RefCell<HashMap<SubId, Subscription>>>,
-    update_subscriptions: Rc<Fn()>,
+    update_subscriptions: Rc<dyn Fn()>,
 }
 
 impl NetidxTable {
@@ -88,6 +88,9 @@ impl NetidxTable {
         let by_id: Rc<RefCell<HashMap<SubId, Subscription>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let view = TreeView::new();
+        let style = view.get_style_context();
+        let focus_column: Rc<RefCell<Option<TreeViewColumn>>> =
+            Rc::new(RefCell::new(None));
         view.append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -103,21 +106,53 @@ impl NetidxTable {
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
             column.pack_start(&cell, true);
+            TreeViewColumnExt::set_cell_data_func(
+                &column,
+                &cell,
+                Some(Box::new({
+                    let focus_column = Rc::clone(&focus_column);
+                    let style = style.clone();
+                    move |c: &TreeViewColumn,
+                          cr: &CellRenderer,
+                          s: &TreeModel,
+                          i: &TreeIter| {
+                        let cr = cr.clone().downcast::<CellRendererText>().unwrap();
+                        if let Ok(Some(v)) = s.get_value(i, id).get::<&str>() {
+                            cr.set_property_text(Some(v));
+                            match &*focus_column.borrow() {
+                                Some(fc) => {
+                                    if fc == c {
+                                        let fg = style.get_color(StateFlags::SELECTED);
+                                        let bg = style
+                                            .get_background_color(StateFlags::SELECTED);
+                                        cr.set_property_cell_background_rgba(Some(&bg));
+                                        cr.set_property_foreground_rgba(Some(&fg));
+                                    } else {
+                                        cr.set_property_cell_background(None);
+                                        cr.set_property_foreground(None);
+                                    }
+                                }
+                                _ => {
+                                    cr.set_property_cell_background(None);
+                                    cr.set_property_foreground(None);
+                                }
+                            }
+                        }
+                    }
+                })),
+            );
             column.set_title(if vector_mode {
                 "value"
             } else {
                 descriptor.cols[col].0.as_ref()
             });
-            column.add_attribute(&cell, "text", id);
-            column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             view.append_column(&column);
         }
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
         view.connect_row_activated(clone!(
-            @weak store, @strong base_path,
-            @strong from_gui => move |_view, path, _col| {
+            @weak store, @strong base_path, @strong from_gui => move |_view, path, _col| {
                 if let Some(row) = store.get_iter(&path) {
                     let row_name = store.get_value(&row, 0);
                     if let Ok(Some(row_name)) = row_name.get::<&str>() {
@@ -127,22 +162,45 @@ impl NetidxTable {
                 }
         }));
         view.connect_key_press_event(clone!(
-            @strong base_path, @strong from_gui => move |_, key| {
+            @strong base_path, @strong from_gui, @weak view, @weak focus_column =>
+            @default-return Inhibit(false), move |_, key| {
                 if key.get_keyval() == keys::constants::BackSpace {
                     let path = Path::dirname(&base_path).unwrap_or("/");
                     let m = FromGui::Navigate(Path::from(String::from(path)));
                     let _ = from_gui.unbounded_send(m);
                 }
+                if key.get_keyval() == keys::constants::Escape {
+                    // unset the focus
+                    view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
+                    view.get_selection().unselect_all();
+                    *focus_column.borrow_mut() = None;
+                }
                 Inhibit(false)
         }));
+        view.connect_cursor_changed(clone!(
+            @weak focus_column, @weak store => move |v: &TreeView| {
+                let (_, c) = v.get_cursor();
+                *focus_column.borrow_mut() = c;
+                v.columns_autosize();
+                let (mut start, end) = match v.get_visible_range() {
+                    None => return,
+                    Some((s, e)) => (s, e)
+                };
+                while start <= end {
+                    if let Some(i) = store.get_iter(&start) {
+                        store.row_changed(&start, &i);
+                    }
+                    start.next();
+                }
+            }
+        ));
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
         let update_subscriptions = Rc::new({
             let view = view.downgrade();
             let store = store.downgrade();
             let by_id = by_id.clone();
-            let mut subscribed: RefCell<BTreeSet<TreeIter>> =
-                RefCell::new(BTreeSet::new());
+            let subscribed: RefCell<BTreeSet<TreeIter>> = RefCell::new(BTreeSet::new());
             move || {
                 let view = match view.upgrade() {
                     None => return,
@@ -156,10 +214,10 @@ impl NetidxTable {
                     None => return,
                     Some((s, e)) => (s, e),
                 };
-                for i in 0..50 {
+                for _ in 0..50 {
                     start.prev();
                 }
-                for i in 0..50 {
+                for _ in 0..50 {
                     end.next();
                 }
                 let mut setval = Vec::new();
