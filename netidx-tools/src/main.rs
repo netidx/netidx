@@ -196,7 +196,7 @@ fn start_browser(auth: Auth, cfg: config::Config, path: Option<Path>) {
 }
 
 #[cfg(not(feature = "browser"))]
-fn start_browser(auth: Auth, _cfg: config::Config, _path: String) {
+fn start_browser(_auth: Auth, _cfg: config::Config, _path: Option<Path>) {
     panic!("the browser is not available")
 }
 
