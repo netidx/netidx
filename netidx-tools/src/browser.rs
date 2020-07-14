@@ -6,7 +6,7 @@ use gtk::{
     prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
     CellRendererText, ListStore, Orientation, ScrolledWindow, StateFlags, TreeIter,
     TreeModel, TreePath, TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
-    Label, Box as GtkBox,
+    Label, Box as GtkBox, PackType, Align,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -71,8 +71,12 @@ impl NetidxTable {
         let tablewin = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         let root = GtkBox::new(Orientation::Vertical, 5);
         let selected_path = Label::new(None);
+        selected_path.set_halign(Align::Start);
+        selected_path.set_margin_start(5);
         tablewin.add(&view);
         root.add(&tablewin);
+        root.set_child_packing(&tablewin, true, true, 2, PackType::Start);
+        root.set_child_packing(&selected_path, false, false, 2, PackType::End);
         root.add(&selected_path);
         selected_path.set_selectable(true);
         selected_path.set_single_line_mode(true);
@@ -198,6 +202,8 @@ impl NetidxTable {
                     })
                 });
                 let col_name = if vector_mode {
+                    None
+                } else if v.get_column(0) == c {
                     None
                 } else {
                     c.as_ref().and_then(|c| c.get_title())
