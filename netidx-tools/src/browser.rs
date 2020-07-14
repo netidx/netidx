@@ -241,22 +241,19 @@ impl NetidxTable {
                                 if !subscribed.borrow().contains(row_name) {
                                     setval.push((row.clone(), Some("#subscribe")));
                                     subscribed.borrow_mut().insert(row_name.into());
-                                    let row_name_v = store.get_value(&row, id);
-                                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                                        let p = base_path.append(row_name).append(
-                                            &descriptor.cols[(id - 1) as usize].0,
-                                        );
-                                        let s = subscriber.durable_subscribe(p);
-                                        s.updates(true, updates.clone());
-                                        by_id.borrow_mut().insert(
-                                            s.id(),
-                                            Subscription {
-                                                sub: s,
-                                                row: row.clone(),
-                                                col: id as u32,
-                                            },
-                                        );
-                                    }
+                                    let p = base_path.append(row_name).append(
+                                        &descriptor.cols[(id - 1) as usize].0,
+                                    );
+                                    let s = subscriber.durable_subscribe(p);
+                                    s.updates(true, updates.clone());
+                                    by_id.borrow_mut().insert(
+                                        s.id(),
+                                        Subscription {
+                                            sub: s,
+                                            row: row.clone(),
+                                            col: id as u32,
+                                        },
+                                    );
                                 }
                             }
                             if !store.iter_next(&row) {
