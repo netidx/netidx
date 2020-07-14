@@ -214,7 +214,7 @@ impl NetidxTable {
         }));
         view.connect_key_press_event(clone!(
             @strong base_path, @strong from_gui, @weak view, @weak focus_column,
-            @weak selected_path, @strong cursor_changed =>
+            @weak selected_path =>
             @default-return Inhibit(false), move |_, key| {
                 if key.get_keyval() == keys::constants::BackSpace {
                     let path = Path::dirname(&base_path).unwrap_or("/");
@@ -225,7 +225,8 @@ impl NetidxTable {
                     // unset the focus
                     view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
                     view.get_selection().unselect_all();
-                    cursor_changed(&view);
+                    *focus_column.borrow_mut() = None;
+                    selected_path.set_label("");
                 }
                 Inhibit(false)
         }));
