@@ -4,8 +4,9 @@ use gio::prelude::*;
 use glib::{self, clone, prelude::*, signal::Inhibit, subclass::prelude::*};
 use gtk::{
     prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
-    CellRendererText, ListStore, ScrolledWindow, StateFlags, TreeIter, TreeModel,
-    TreePath, TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    CellRendererText, ListStore, Orientation, ScrolledWindow, StateFlags, TreeIter,
+    TreeModel, TreePath, TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    Label, Box as GtkBox,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -51,7 +52,7 @@ struct Subscription {
 }
 
 struct NetidxTable {
-    root: ScrolledWindow,
+    root: GtkBox,
     view: TreeView,
     store: ListStore,
     by_id: Rc<RefCell<HashMap<SubId, Subscription>>>,
@@ -66,6 +67,15 @@ impl NetidxTable {
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
         from_gui: mpsc::UnboundedSender<FromGui>,
     ) -> NetidxTable {
+        let view = TreeView::new();
+        let tablewin = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        let root = GtkBox::new(Orientation::Vertical, 5);
+        let selected_path = Label::new(None);
+        tablewin.add(&view);
+        root.add(&tablewin);
+        root.add(&selected_path);
+        selected_path.set_selectable(true);
+        selected_path.set_single_line_mode(true);
         let nrows = descriptor.rows.len();
         descriptor.rows.sort();
         descriptor.cols.sort_by_key(|(p, _)| p.clone());
@@ -87,7 +97,6 @@ impl NetidxTable {
         }
         let by_id: Rc<RefCell<HashMap<SubId, Subscription>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        let view = TreeView::new();
         let style = view.get_style_context();
         let focus_column: Rc<RefCell<Option<TreeViewColumn>>> =
             Rc::new(RefCell::new(None));
@@ -162,8 +171,8 @@ impl NetidxTable {
                 }
         }));
         view.connect_key_press_event(clone!(
-            @strong base_path, @strong from_gui, @weak view, @weak focus_column =>
-            @default-return Inhibit(false), move |_, key| {
+            @strong base_path, @strong from_gui, @weak view, @weak focus_column,
+            @weak selected_path => @default-return Inhibit(false), move |_, key| {
                 if key.get_keyval() == keys::constants::BackSpace {
                     let path = Path::dirname(&base_path).unwrap_or("/");
                     let m = FromGui::Navigate(Path::from(String::from(path)));
@@ -174,12 +183,32 @@ impl NetidxTable {
                     view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
                     view.get_selection().unselect_all();
                     *focus_column.borrow_mut() = None;
+                    selected_path.set_label("");
                 }
                 Inhibit(false)
         }));
         view.connect_cursor_changed(clone!(
-            @weak focus_column, @weak store => move |v: &TreeView| {
-                let (_, c) = v.get_cursor();
+            @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
+            move |v: &TreeView| {
+                let (p, c) = v.get_cursor();
+                let row_name = p.and_then(|p| {
+                    store.get_iter(&p).and_then(|i| {
+                        store.get_value(&i, 0).get::<&str>().ok().flatten()
+                            .map(String::from)
+                    })
+                });
+                let col_name = if vector_mode {
+                    None
+                } else {
+                    c.as_ref().and_then(|c| c.get_title())
+                };
+                let path = match row_name {
+                    None => Path::from(""),
+                    Some(row_name) =>
+                        base_path.append(row_name.as_str())
+                            .append(col_name.as_ref().map(|s| s.as_ref()).unwrap_or(""))
+                };
+                selected_path.set_label(&*path);
                 *focus_column.borrow_mut() = c;
                 v.columns_autosize();
                 let (mut start, end) = match v.get_visible_range() {
@@ -194,8 +223,6 @@ impl NetidxTable {
                 }
             }
         ));
-        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
-        root.add(&view);
         let update_subscriptions = Rc::new({
             let view = view.downgrade();
             let store = store.downgrade();
@@ -275,7 +302,7 @@ impl NetidxTable {
                 }
             }
         });
-        root.get_vadjustment().map(|va| {
+        tablewin.get_vadjustment().map(|va| {
             let f = Rc::clone(&update_subscriptions);
             va.connect_value_changed(move |_| f());
         });
