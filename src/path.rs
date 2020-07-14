@@ -390,6 +390,11 @@ impl Path {
         Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i]) })
     }
 
+    pub fn dirname_with_sep<T: AsRef<str> + ?Sized>(s: &T) -> Option<&str> {
+        let s = s.as_ref();
+        Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i+1]) })
+    }
+
     /// return the last part of the path, or return None if the path
     /// is empty.
     ///

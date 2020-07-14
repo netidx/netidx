@@ -109,6 +109,10 @@ pub(crate) struct StoreInner<T> {
 impl<T> StoreInner<T> {
     fn remove_parents(&mut self, mut p: &str) {
         loop {
+            let p_with_sep = match Path::dirname_with_sep(p) {
+                None => break,
+                Some(p) => p,
+            };
             match Path::dirname(p) {
                 None => break,
                 Some(parent) => p = parent,
@@ -121,10 +125,12 @@ impl<T> StoreInner<T> {
                     .get(&n)
                     .map(|l| {
                         let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
-                            Included(p),
+                            Included(p_with_sep),
                             Unbounded,
                         ));
-                        r.next().map(|o| o.as_ref().starts_with(p)).unwrap_or(false)
+                        r.next()
+                            .map(|o| o.as_ref().starts_with(p_with_sep))
+                            .unwrap_or(false)
                     })
                     .unwrap_or(false);
             if save {
