@@ -164,34 +164,7 @@ impl NetidxTable {
         }
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
-        view.connect_row_activated(clone!(
-            @weak store, @strong base_path, @strong from_gui => move |_view, path, _col| {
-                if let Some(row) = store.get_iter(&path) {
-                    let row_name = store.get_value(&row, 0);
-                    if let Ok(Some(row_name)) = row_name.get::<&str>() {
-                        let path = base_path.append(row_name);
-                        let _ = from_gui.unbounded_send(FromGui::Navigate(path));
-                    }
-                }
-        }));
-        view.connect_key_press_event(clone!(
-            @strong base_path, @strong from_gui, @weak view, @weak focus_column,
-            @weak selected_path => @default-return Inhibit(false), move |_, key| {
-                if key.get_keyval() == keys::constants::BackSpace {
-                    let path = Path::dirname(&base_path).unwrap_or("/");
-                    let m = FromGui::Navigate(Path::from(String::from(path)));
-                    let _ = from_gui.unbounded_send(m);
-                }
-                if key.get_keyval() == keys::constants::Escape {
-                    // unset the focus
-                    view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
-                    view.get_selection().unselect_all();
-                    *focus_column.borrow_mut() = None;
-                    selected_path.set_label("");
-                }
-                Inhibit(false)
-        }));
-        view.connect_cursor_changed(clone!(
+        let cursor_changed = Rc::new(clone!(
             @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
             move |v: &TreeView| {
                 let (p, c) = v.get_cursor();
@@ -229,10 +202,42 @@ impl NetidxTable {
                 }
             }
         ));
+        view.connect_row_activated(clone!(
+            @weak store, @strong base_path, @strong from_gui => move |_view, path, _col| {
+                if let Some(row) = store.get_iter(&path) {
+                    let row_name = store.get_value(&row, 0);
+                    if let Ok(Some(row_name)) = row_name.get::<&str>() {
+                        let path = base_path.append(row_name);
+                        let _ = from_gui.unbounded_send(FromGui::Navigate(path));
+                    }
+                }
+        }));
+        view.connect_key_press_event(clone!(
+            @strong base_path, @strong from_gui, @weak view, @weak focus_column,
+            @weak selected_path, @strong cursor_changed =>
+            @default-return Inhibit(false), move |_, key| {
+                if key.get_keyval() == keys::constants::BackSpace {
+                    let path = Path::dirname(&base_path).unwrap_or("/");
+                    let m = FromGui::Navigate(Path::from(String::from(path)));
+                    let _ = from_gui.unbounded_send(m);
+                }
+                if key.get_keyval() == keys::constants::Escape {
+                    // unset the focus
+                    view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
+                    view.get_selection().unselect_all();
+                    cursor_changed(&view);
+                }
+                Inhibit(false)
+        }));
+        view.connect_cursor_changed({
+            let cursor_changed = Rc::clone(&cursor_changed);
+            move |v| { cursor_changed(v) }
+        });
         let update_subscriptions = Rc::new({
             let view = view.downgrade();
             let store = store.downgrade();
             let by_id = by_id.clone();
+            let cursor_changed = Rc::clone(&cursor_changed);
             let subscribed: RefCell<BTreeSet<TreeIter>> = RefCell::new(BTreeSet::new());
             move || {
                 let view = match view.upgrade() {
@@ -306,6 +311,7 @@ impl NetidxTable {
                         store.set_value(&row, id as u32, &val.to_value());
                     }
                 }
+                cursor_changed(&view);
             }
         });
         tablewin.get_vadjustment().map(|va| {
