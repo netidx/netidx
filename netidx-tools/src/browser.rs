@@ -3,10 +3,10 @@ use gdk::{keys, EventKey};
 use gio::prelude::*;
 use glib::{self, clone, prelude::*, signal::Inhibit, subclass::prelude::*};
 use gtk::{
-    prelude::*, Adjustment, Application, ApplicationWindow, CellLayout, CellRenderer,
-    CellRendererText, ListStore, Orientation, ScrolledWindow, StateFlags, TreeIter,
-    TreeModel, TreePath, TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
-    Label, Box as GtkBox, PackType, Align,
+    prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
+    CellLayout, CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
+    ScrolledWindow, StateFlags, TreeIter, TreeModel, TreePath, TreeStore, TreeView,
+    TreeViewColumn, TreeViewColumnSizing,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -168,24 +168,32 @@ impl NetidxTable {
             @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
             move |v: &TreeView| {
                 let (p, c) = v.get_cursor();
-                let row_name = p.and_then(|p| {
-                    store.get_iter(&p).and_then(|i| {
-                        store.get_value(&i, 0).get::<&str>().ok().flatten()
-                            .map(String::from)
-                    })
-                });
-                let col_name = if vector_mode {
-                    None
-                } else if v.get_column(0) == c {
-                    None
-                } else {
-                    c.as_ref().and_then(|c| c.get_title())
+                let row_name = match p {
+                    None => None,
+                    Some(p) => match store.get_iter(&p) {
+                        None => None,
+                        Some(i) => Some(store.get_value(&i, 0))
+                    }
                 };
                 let path = match row_name {
                     None => Path::from(""),
-                    Some(row_name) =>
-                        base_path.append(row_name.as_str())
-                            .append(col_name.as_ref().map(|s| s.as_ref()).unwrap_or(""))
+                    Some(row_name) => match row_name.get::<&str>().ok().flatten() {
+                        None => Path::from(""),
+                        Some(row_name) => {
+                            let col_name = if vector_mode {
+                                None
+                            } else if v.get_column(0) == c {
+                                None
+                            } else {
+                                c.as_ref().and_then(|c| c.get_title())
+                            };
+                            match col_name {
+                                None => base_path.append(row_name),
+                                Some(col_name) =>
+                                    base_path.append(row_name).append(col_name.as_str()),
+                            }
+                        }
+                    }
                 };
                 selected_path.set_label(&*path);
                 *focus_column.borrow_mut() = c;
@@ -232,7 +240,7 @@ impl NetidxTable {
         }));
         view.connect_cursor_changed({
             let cursor_changed = Rc::clone(&cursor_changed);
-            move |v| { cursor_changed(v) }
+            move |v| cursor_changed(v)
         });
         let update_subscriptions = Rc::new({
             let view = view.downgrade();
@@ -420,6 +428,7 @@ fn run_gui(
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {
                         window.remove(&cur.root);
+                        cur.view.set_model(None::<&ListStore>);
                     }
                     changed.clear();
                     window.set_title(&format!("Netidx Browser {}", path));
