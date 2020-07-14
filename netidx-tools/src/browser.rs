@@ -160,7 +160,7 @@ impl NetidxTable {
             let cursor_changed = Rc::clone(&cursor_changed);
             let descriptor = Rc::clone(&descriptor);
             let sort_column = Rc::clone(&sort_column);
-            let subscribed: RefCell<BTreeSet<TreeIter>> = RefCell::new(BTreeSet::new());
+            let subscribed: RefCell<BTreeSet<String>> = RefCell::new(BTreeSet::new());
             move || {
                 let view = match view.upgrade() {
                     None => return,
@@ -183,29 +183,33 @@ impl NetidxTable {
                 let mut setval = Vec::new();
                 let sort_column = *sort_column.borrow();
                 // unsubscribe invisible rows
-                by_id.borrow_mut().retain(|_, v| {
-                    let visible = match store.get_path(&v.row) {
-                        None => false,
-                        Some(p) => p >= start && p <= end,
-                    };
-                    if !visible && Some(v.col as i32) != sort_column {
-                        subscribed.borrow_mut().remove(&v.row);
-                        setval.push((v.row.clone(), None));
+                by_id.borrow_mut().retain(|_, v| match store.get_path(&v.row) {
+                    None => false,
+                    Some(p) => {
+                        let visible = (p >= start && p <= end)
+                            || (Some(v.col as i32) == sort_column);
+                        if !visible {
+                            let row_name_v = store.get_value(&v.row, 0);
+                            if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                                subscribed.borrow_mut().remove(row_name);
+                            }
+                            setval.push((v.row.clone(), None));
+                        }
+                        visible
                     }
-                    visible
                 });
                 // subscribe to all the visible rows
                 while start < end {
                     if let Some(row) = store.get_iter(&start) {
-                        if !subscribed.borrow().contains(&row) {
-                            setval.push((row.clone(), Some("#subscribe")));
-                            subscribed.borrow_mut().insert(row.clone());
-                            let cols =
-                                if vector_mode { 1 } else { descriptor.cols.len() };
-                            for col in 0..cols {
-                                let id = col + 1;
-                                let row_name_v = store.get_value(&row, 0);
-                                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                        let row_name_v = store.get_value(&row, 0);
+                        if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                            if !subscribed.borrow().contains(row_name) {
+                                setval.push((row.clone(), Some("#subscribe")));
+                                subscribed.borrow_mut().insert(row_name.into());
+                                let cols =
+                                    if vector_mode { 1 } else { descriptor.cols.len() };
+                                for col in 0..cols {
+                                    let id = col + 1;
                                     let p = base_path.append(row_name);
                                     let p = if vector_mode {
                                         p
@@ -232,27 +236,32 @@ impl NetidxTable {
                 if let Some(id) = sort_column {
                     if let Some(row) = store.get_iter_first() {
                         loop {
-                            if !subscribed.borrow().contains(&row) {
-                                setval.push((row.clone(), Some("#subscribe")));
-                                subscribed.borrow_mut().insert(row.clone());
-                                let row_name_v = store.get_value(&row, id);
-                                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                                    let p = base_path
-                                        .append(row_name)
-                                        .append(&descriptor.cols[(id - 1) as usize].0);
-                                    let s = subscriber.durable_subscribe(p);
-                                    s.updates(true, updates.clone());
-                                    by_id.borrow_mut().insert(
-                                        s.id(),
-                                        Subscription {
-                                            sub: s,
-                                            row: row.clone(),
-                                            col: id as u32,
-                                        }
-                                    );
+                            let row_name_v = store.get_value(&row, 0);
+                            if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                                if !subscribed.borrow().contains(row_name) {
+                                    setval.push((row.clone(), Some("#subscribe")));
+                                    subscribed.borrow_mut().insert(row_name.into());
+                                    let row_name_v = store.get_value(&row, id);
+                                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                                        let p = base_path.append(row_name).append(
+                                            &descriptor.cols[(id - 1) as usize].0,
+                                        );
+                                        let s = subscriber.durable_subscribe(p);
+                                        s.updates(true, updates.clone());
+                                        by_id.borrow_mut().insert(
+                                            s.id(),
+                                            Subscription {
+                                                sub: s,
+                                                row: row.clone(),
+                                                col: id as u32,
+                                            },
+                                        );
+                                    }
                                 }
                             }
-                            if !store.iter_next(&row) { break }
+                            if !store.iter_next(&row) {
+                                break;
+                            }
                         }
                     }
                 }
