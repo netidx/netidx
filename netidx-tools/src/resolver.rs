@@ -28,6 +28,19 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     println!("{}", p);
                 }
             }
+            ResolverCmd::Table { path } => {
+                let resolver = ResolverRead::new(config, auth);
+                let path = path.unwrap_or_else(|| Path::from("/"));
+                let desc = resolver.table(path).await.unwrap();
+                println!("columns:");
+                for (name, count) in desc.cols.iter() {
+                    println!("{}: {}", name, count.0)
+                }
+                println!("rows:");
+                for row in desc.rows.iter() {
+                    println!("{}", row);
+                }
+            }
             ResolverCmd::Add { path, socketaddr } => {
                 let resolver = ResolverWrite::new(config, auth, socketaddr);
                 resolver.publish(vec![path]).await.unwrap();

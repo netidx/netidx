@@ -126,6 +126,11 @@ enum ResolverCmd {
         #[structopt(name = "path")]
         path: Option<Path>,
     },
+    #[structopt(name = "table", about = "table descriptor for path")]
+    Table {
+        #[structopt(name = "path")]
+        path: Option<Path>,
+    },
     #[structopt(name = "add", about = "add a new entry")]
     Add {
         #[structopt(name = "path")]

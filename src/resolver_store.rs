@@ -2,7 +2,7 @@ use crate::{
     auth::Permissions,
     chars::Chars,
     pack::Z64,
-    path::Path,
+    path::{self, Path},
     pool::{Pool, Pooled},
     protocol::resolver::v1::Referral,
     secstore::SecStoreInner,
@@ -354,12 +354,20 @@ impl<T> StoreInner<T> {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
+        let n = Path::levels(&**parent);
+        let mut parent = String::from(&**parent);
+        if !parent.ends_with(path::SEP) {
+            parent.push(path::SEP);
+        }
         let mut paths = self.paths_pool.take();
-        if let Some(l) = self.by_level.get(&(Path::levels(&**parent) + 1)) {
+        if let Some(l) = self.by_level.get(&(n + 1)) {
             paths.extend(
-                l.range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-                    .take_while(|p| p.as_ref().starts_with(&**parent))
-                    .cloned(),
+                l.range::<str, (Bound<&str>, Bound<&str>)>((
+                    Excluded(parent.as_str()),
+                    Unbounded,
+                ))
+                .take_while(|p| p.as_ref().starts_with(parent.as_str()))
+                .cloned(),
             )
         }
         paths

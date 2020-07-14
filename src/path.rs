@@ -1,6 +1,6 @@
 use crate::{
+    pack::{Pack, PackError, varint_len, encode_varint, decode_varint},
     chars::Chars,
-    pack::{Pack, PackError},
     utils,
 };
 use std::{
@@ -12,8 +12,10 @@ use std::{
     iter::Iterator,
     ops::Deref,
     result::Result,
-    str::FromStr,
+    str::{self, FromStr},
+    sync::Arc,
 };
+use bytes::Buf;
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -25,19 +27,29 @@ pub static SEP: char = '/';
 /// local machine, but may be restricted by maximum message size on
 /// the wire.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Path(Chars);
+pub struct Path(Arc<str>);
 
 impl Pack for Path {
     fn len(&self) -> usize {
-        <Chars as Pack>::len(&self.0)
+        varint_len(self.0.len() as u64) + self.0.len()
     }
 
     fn encode(&self, buf: &mut bytes::BytesMut) -> Result<(), PackError> {
-        Ok(<Chars as Pack>::encode(&self.0, buf)?)
+        encode_varint(self.0.len() as u64, buf);
+        Ok(buf.extend_from_slice(self.0.as_bytes()))
     }
 
     fn decode(buf: &mut bytes::BytesMut) -> Result<Self, PackError> {
-        Ok(Path(<Chars as Pack>::decode(buf)?))
+        let len = decode_varint(buf)?;
+        if len as usize > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            let bytes = buf.split_to(len as usize);
+            match str::from_utf8(&*bytes) {
+                Err(_) => Err(PackError::InvalidFormat),
+                Ok(s) => Ok(Path(Arc::from(s)))
+            }            
+        }
     }
 }
 
@@ -70,9 +82,9 @@ impl Deref for Path {
 impl From<Chars> for Path {
     fn from(c: Chars) -> Path {
         if is_canonical(&c) {
-            Path(c)
+            Path(Arc::from(c.as_ref()))
         } else {
-            Path(Chars::from(canonize(&c)))
+            Path(Arc::from(canonize(&c)))
         }
     }
 }
@@ -80,9 +92,9 @@ impl From<Chars> for Path {
 impl From<String> for Path {
     fn from(s: String) -> Path {
         if is_canonical(&s) {
-            Path(Chars::from(s))
+            Path(Arc::from(s))
         } else {
-            Path(Chars::from(canonize(&s)))
+            Path(Arc::from(canonize(&s)))
         }
     }
 }
@@ -90,9 +102,9 @@ impl From<String> for Path {
 impl From<&'static str> for Path {
     fn from(s: &'static str) -> Path {
         if is_canonical(s) {
-            Path(Chars::from(s))
+            Path(Arc::from(s))
         } else {
-            Path(Chars::from(canonize(s)))
+            Path(Arc::from(canonize(s)))
         }
     }
 }
@@ -100,9 +112,9 @@ impl From<&'static str> for Path {
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {
         if is_canonical(s.as_str()) {
-            Path(Chars::from(s.clone()))
+            Path(Arc::from(s.clone()))
         } else {
-            Path(Chars::from(canonize(s.as_str())))
+            Path(Arc::from(canonize(s.as_str())))
         }
     }
 }
@@ -111,7 +123,7 @@ impl FromStr for Path {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Path(Chars::from(String::from(s))))
+        Ok(Path(Arc::from(s)))
     }
 }
 
@@ -194,10 +206,6 @@ impl<'a> Iterator for BaseNames<'a> {
 }
 
 impl Path {
-    pub fn as_chars(self) -> Chars {
-        self.0
-    }
-
     /// returns /
     pub fn root() -> Path {
         Path::from("/")
