@@ -99,11 +99,172 @@ impl NetidxTable {
             let row = store.append();
             store.set_value(&row, 0, &row_name.to_value());
         }
+        let descriptor = Rc::new(descriptor);
         let by_id: Rc<RefCell<HashMap<SubId, Subscription>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let style = view.get_style_context();
         let focus_column: Rc<RefCell<Option<TreeViewColumn>>> =
             Rc::new(RefCell::new(None));
+        let sort_column: Rc<RefCell<Option<i32>>> = Rc::new(RefCell::new(None));
+        let cursor_changed = Rc::new(clone!(
+            @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
+            move |v: &TreeView| {
+                let (p, c) = v.get_cursor();
+                let row_name = match p {
+                    None => None,
+                    Some(p) => match store.get_iter(&p) {
+                        None => None,
+                        Some(i) => Some(store.get_value(&i, 0))
+                    }
+                };
+                let path = match row_name {
+                    None => Path::from(""),
+                    Some(row_name) => match row_name.get::<&str>().ok().flatten() {
+                        None => Path::from(""),
+                        Some(row_name) => {
+                            let col_name = if vector_mode {
+                                None
+                            } else if v.get_column(0) == c {
+                                None
+                            } else {
+                                c.as_ref().and_then(|c| c.get_title())
+                            };
+                            match col_name {
+                                None => base_path.append(row_name),
+                                Some(col_name) =>
+                                    base_path.append(row_name).append(col_name.as_str()),
+                            }
+                        }
+                    }
+                };
+                selected_path.set_label(&*path);
+                *focus_column.borrow_mut() = c;
+                v.columns_autosize();
+                let (mut start, end) = match v.get_visible_range() {
+                    None => return,
+                    Some((s, e)) => (s, e)
+                };
+                while start <= end {
+                    if let Some(i) = store.get_iter(&start) {
+                        store.row_changed(&start, &i);
+                    }
+                    start.next();
+                }
+            }
+        ));
+        let update_subscriptions = Rc::new({
+            let base_path = base_path.clone();
+            let view = view.downgrade();
+            let store = store.downgrade();
+            let by_id = by_id.clone();
+            let cursor_changed = Rc::clone(&cursor_changed);
+            let descriptor = Rc::clone(&descriptor);
+            let sort_column = Rc::clone(&sort_column);
+            let subscribed: RefCell<BTreeSet<TreeIter>> = RefCell::new(BTreeSet::new());
+            move || {
+                let view = match view.upgrade() {
+                    None => return,
+                    Some(view) => view,
+                };
+                let store = match store.upgrade() {
+                    None => return,
+                    Some(store) => store,
+                };
+                let (mut start, mut end) = match view.get_visible_range() {
+                    None => return,
+                    Some((s, e)) => (s, e),
+                };
+                for _ in 0..50 {
+                    start.prev();
+                }
+                for _ in 0..50 {
+                    end.next();
+                }
+                let mut setval = Vec::new();
+                let sort_column = *sort_column.borrow();
+                // unsubscribe invisible rows
+                by_id.borrow_mut().retain(|_, v| {
+                    let visible = match store.get_path(&v.row) {
+                        None => false,
+                        Some(p) => p >= start && p <= end,
+                    };
+                    if !visible && Some(v.col as i32) != sort_column {
+                        subscribed.borrow_mut().remove(&v.row);
+                        setval.push((v.row.clone(), None));
+                    }
+                    visible
+                });
+                // subscribe to all the visible rows
+                while start < end {
+                    if let Some(row) = store.get_iter(&start) {
+                        if !subscribed.borrow().contains(&row) {
+                            setval.push((row.clone(), Some("#subscribe")));
+                            subscribed.borrow_mut().insert(row.clone());
+                            let cols =
+                                if vector_mode { 1 } else { descriptor.cols.len() };
+                            for col in 0..cols {
+                                let id = col + 1;
+                                let row_name_v = store.get_value(&row, 0);
+                                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                                    let p = base_path.append(row_name);
+                                    let p = if vector_mode {
+                                        p
+                                    } else {
+                                        p.append(&descriptor.cols[col].0)
+                                    };
+                                    let s = subscriber.durable_subscribe(p);
+                                    s.updates(true, updates.clone());
+                                    by_id.borrow_mut().insert(
+                                        s.id(),
+                                        Subscription {
+                                            sub: s,
+                                            row: row.clone(),
+                                            col: id as u32,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    start.next();
+                }
+                // subscribe to all rows in the sort column
+                if let Some(id) = sort_column {
+                    if let Some(row) = store.get_iter_first() {
+                        loop {
+                            if !subscribed.borrow().contains(&row) {
+                                setval.push((row.clone(), Some("#subscribe")));
+                                subscribed.borrow_mut().insert(row.clone());
+                                let row_name_v = store.get_value(&row, id);
+                                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                                    let p = base_path
+                                        .append(row_name)
+                                        .append(&descriptor.cols[(id - 1) as usize].0);
+                                    let s = subscriber.durable_subscribe(p);
+                                    s.updates(true, updates.clone());
+                                    by_id.borrow_mut().insert(
+                                        s.id(),
+                                        Subscription {
+                                            sub: s,
+                                            row: row.clone(),
+                                            col: id as u32,
+                                        }
+                                    );
+                                }
+                            }
+                            if !store.iter_next(&row) { break }
+                        }
+                    }
+                }
+                for (row, val) in setval {
+                    for id in 1..(if vector_mode { 2 } else { descriptor.cols.len() + 1 })
+                    {
+                        store.set_value(&row, id as u32, &val.to_value());
+                    }
+                }
+                cursor_changed(&view);
+            }
+        });
         view.append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -112,6 +273,14 @@ impl NetidxTable {
             column.add_attribute(&cell, "text", 0);
             column.set_sort_column_id(0);
             column.set_sizing(TreeViewColumnSizing::Fixed);
+            column.connect_clicked({
+                let sort_column = Rc::clone(&sort_column);
+                let update_subscriptions = Rc::clone(&update_subscriptions);
+                move |_| {
+                    *sort_column.borrow_mut() = None;
+                    update_subscriptions();
+                }
+            });
             column
         });
         for col in 0..(if vector_mode { 1 } else { descriptor.cols.len() }) {
@@ -159,57 +328,20 @@ impl NetidxTable {
             } else {
                 descriptor.cols[col].0.as_ref()
             });
+            column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             view.append_column(&column);
+            column.connect_clicked({
+                let sort_column = Rc::clone(&sort_column);
+                let update_subscriptions = Rc::clone(&update_subscriptions);
+                move |_| {
+                    *sort_column.borrow_mut() = Some(id);
+                    update_subscriptions();
+                }
+            });
         }
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
-        let cursor_changed = Rc::new(clone!(
-            @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
-            move |v: &TreeView| {
-                let (p, c) = v.get_cursor();
-                let row_name = match p {
-                    None => None,
-                    Some(p) => match store.get_iter(&p) {
-                        None => None,
-                        Some(i) => Some(store.get_value(&i, 0))
-                    }
-                };
-                let path = match row_name {
-                    None => Path::from(""),
-                    Some(row_name) => match row_name.get::<&str>().ok().flatten() {
-                        None => Path::from(""),
-                        Some(row_name) => {
-                            let col_name = if vector_mode {
-                                None
-                            } else if v.get_column(0) == c {
-                                None
-                            } else {
-                                c.as_ref().and_then(|c| c.get_title())
-                            };
-                            match col_name {
-                                None => base_path.append(row_name),
-                                Some(col_name) =>
-                                    base_path.append(row_name).append(col_name.as_str()),
-                            }
-                        }
-                    }
-                };
-                selected_path.set_label(&*path);
-                *focus_column.borrow_mut() = c;
-                v.columns_autosize();
-                let (mut start, end) = match v.get_visible_range() {
-                    None => return,
-                    Some((s, e)) => (s, e)
-                };
-                while start <= end {
-                    if let Some(i) = store.get_iter(&start) {
-                        store.row_changed(&start, &i);
-                    }
-                    start.next();
-                }
-            }
-        ));
         view.connect_row_activated(clone!(
             @weak store, @strong base_path, @strong from_gui => move |_view, path, _col| {
                 if let Some(row) = store.get_iter(&path) {
@@ -241,87 +373,6 @@ impl NetidxTable {
         view.connect_cursor_changed({
             let cursor_changed = Rc::clone(&cursor_changed);
             move |v| cursor_changed(v)
-        });
-        let update_subscriptions = Rc::new({
-            let view = view.downgrade();
-            let store = store.downgrade();
-            let by_id = by_id.clone();
-            let cursor_changed = Rc::clone(&cursor_changed);
-            let subscribed: RefCell<BTreeSet<TreeIter>> = RefCell::new(BTreeSet::new());
-            move || {
-                let view = match view.upgrade() {
-                    None => return,
-                    Some(view) => view,
-                };
-                let store = match store.upgrade() {
-                    None => return,
-                    Some(store) => store,
-                };
-                let (mut start, mut end) = match view.get_visible_range() {
-                    None => return,
-                    Some((s, e)) => (s, e),
-                };
-                for _ in 0..50 {
-                    start.prev();
-                }
-                for _ in 0..50 {
-                    end.next();
-                }
-                let mut setval = Vec::new();
-                // unsubscribe invisible rows
-                by_id.borrow_mut().retain(|_, v| {
-                    let visible = match store.get_path(&v.row) {
-                        None => false,
-                        Some(p) => p >= start && p <= end,
-                    };
-                    if !visible {
-                        subscribed.borrow_mut().remove(&v.row);
-                        setval.push((v.row.clone(), None));
-                    }
-                    visible
-                });
-                // subscribe to all the visible rows
-                while start < end {
-                    if let Some(row) = store.get_iter(&start) {
-                        if !subscribed.borrow().contains(&row) {
-                            setval.push((row.clone(), Some("#subscribe")));
-                            subscribed.borrow_mut().insert(row.clone());
-                            let cols =
-                                if vector_mode { 1 } else { descriptor.cols.len() };
-                            for col in 0..cols {
-                                let id = col + 1;
-                                let row_name_v = store.get_value(&row, 0);
-                                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                                    let p = base_path.append(row_name);
-                                    let p = if vector_mode {
-                                        p
-                                    } else {
-                                        p.append(&descriptor.cols[col].0)
-                                    };
-                                    let s = subscriber.durable_subscribe(p);
-                                    s.updates(true, updates.clone());
-                                    by_id.borrow_mut().insert(
-                                        s.id(),
-                                        Subscription {
-                                            sub: s,
-                                            row: row.clone(),
-                                            col: id as u32,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    start.next();
-                }
-                for (row, val) in setval {
-                    for id in 1..(if vector_mode { 2 } else { descriptor.cols.len() + 1 })
-                    {
-                        store.set_value(&row, id as u32, &val.to_value());
-                    }
-                }
-                cursor_changed(&view);
-            }
         });
         tablewin.get_vadjustment().map(|va| {
             let f = Rc::clone(&update_subscriptions);
@@ -410,9 +461,7 @@ fn run_gui(
                             t.store.set_value(&row, col, &format!("{}", v).to_value());
                         }
                         t.view.columns_autosize();
-                        if t.by_id.borrow().len() == 0 {
-                            (t.update_subscriptions)();
-                        }
+                        (t.update_subscriptions)();
                     }
                 }
                 ToGui::Batch(mut b) => {
