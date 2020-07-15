@@ -181,7 +181,13 @@ impl NetidxTable {
                 let mut setval = Vec::new();
                 let sort_column = match store.get_sort_column_id() {
                     None | Some((SortColumn::Default, _)) => None,
-                    Some((SortColumn::Index(c), _)) => Some(c),
+                    Some((SortColumn::Index(c), _)) => {
+                        if c == 0 {
+                            None
+                        } else {
+                            Some(c)
+                        }
+                    }
                 };
                 // unsubscribe invisible rows
                 by_id.borrow_mut().retain(|_, v| match store.get_path(&v.row) {
@@ -192,7 +198,6 @@ impl NetidxTable {
                         if !visible {
                             let row_name_v = store.get_value(&v.row, 0);
                             if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                                println!("unsubscribe: {}, {}", row_name, v.col);
                                 let mut sub = subscribed.borrow_mut();
                                 match sub.get_mut(row_name) {
                                     None => (),
@@ -209,27 +214,28 @@ impl NetidxTable {
                         visible
                     }
                 });
-                let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
-                    let mut subs = subscribed.borrow_mut();
-                    if !subs.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
-                        subs.entry(row_name.into())
-                            .or_insert_with(HashSet::new)
-                            .insert(id);
-                        setval.push((row.clone(), id, Some("#subscribe")));
-                        let p = base_path.append(row_name);
-                        let p = if vector_mode {
-                            p
-                        } else {
-                            p.append(&descriptor.cols[(id - 1) as usize].0)
-                        };
-                        let s = subscriber.durable_subscribe(p);
-                        s.updates(true, updates.clone());
-                        by_id.borrow_mut().insert(
-                            s.id(),
-                            Subscription { sub: s, row: row.clone(), col: id as u32 },
-                        );
-                    }
-                };
+                let mut maybe_subscribe_col =
+                    |row: &TreeIter, row_name: &str, id: u32| {
+                        let mut subs = subscribed.borrow_mut();
+                        if !subs.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
+                            subs.entry(row_name.into())
+                                .or_insert_with(HashSet::new)
+                                .insert(id);
+                            setval.push((row.clone(), id, Some("#subscribe")));
+                            let p = base_path.append(row_name);
+                            let p = if vector_mode {
+                                p
+                            } else {
+                                p.append(&descriptor.cols[(id - 1) as usize].0)
+                            };
+                            let s = subscriber.durable_subscribe(p);
+                            s.updates(true, updates.clone());
+                            by_id.borrow_mut().insert(
+                                s.id(),
+                                Subscription { sub: s, row: row.clone(), col: id as u32 },
+                            );
+                        }
+                    };
                 // subscribe to all the visible rows
                 while start < end {
                     if let Some(row) = store.get_iter(&start) {
