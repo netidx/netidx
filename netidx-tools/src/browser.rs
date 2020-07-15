@@ -495,28 +495,27 @@ fn run_gui(
     window.show_all();
     main_context.spawn_local(async move {
         let mut current: Option<NetidxTable> = None;
-        let mut changed: HashMap<SubId, (TreeIter, u32, Value)> = HashMap::new();
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Refresh(changed) => {
                     if let Some(t) = &mut current {
+                        let store = t.0.borrow().store.clone();
                         for (id, v) in changed {
-                            let (row, col) = match t.by_id.borrow().get(&id) {
+                            let (row, col) = match t.0.borrow().by_id.get(&id) {
                                 Some(sub) => (sub.row.clone(), sub.col),
                                 None => continue,
                             };
-                            t.store.set_value(&row, col, &format!("{}", v).to_value());
+                            store.set_value(&row, col, &format!("{}", v).to_value());
                         }
-                        t.view.columns_autosize();
-                        (t.update_subscriptions)();
+                        t.0.borrow().view.columns_autosize();
+                        t.update_subscriptions();
                     }
                 }
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {
                         window.remove(&cur.root);
-                        cur.view.set_model(None::<&ListStore>);
+                        cur.0.borrow().view.set_model(None::<&ListStore>);
                     }
-                    changed.clear();
                     window.set_title(&format!("Netidx Browser {}", path));
                     let cur = NetidxTable::new(
                         subscriber,
@@ -525,7 +524,7 @@ fn run_gui(
                         updates.clone(),
                         from_gui.clone(),
                     );
-                    window.add(&cur.root);
+                    window.add(&cur.0.borrow().root);
                     window.show_all();
                     current = Some(cur);
                 }
