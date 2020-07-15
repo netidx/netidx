@@ -5,8 +5,8 @@ use glib::{self, clone, prelude::*, signal::Inhibit, subclass::prelude::*};
 use gtk::{
     prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
     CellLayout, CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
-    ScrolledWindow, SortColumn, StateFlags, TreeIter, TreeModel, TreePath, TreeStore,
-    TreeView, TreeViewColumn, TreeViewColumnSizing,
+    ScrolledWindow, SelectionMode, SortColumn, StateFlags, TreeIter, TreeModel, TreePath,
+    TreeStore, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use log::{debug, error, info, warn};
 use netidx::{
@@ -75,8 +75,8 @@ impl NetidxTable {
         selected_path.set_margin_start(5);
         tablewin.add(&view);
         root.add(&tablewin);
-        root.set_child_packing(&tablewin, true, true, 2, PackType::Start);
-        root.set_child_packing(&selected_path, false, false, 2, PackType::End);
+        root.set_child_packing(&tablewin, true, true, 1, PackType::Start);
+        root.set_child_packing(&selected_path, false, false, 1, PackType::End);
         root.add(&selected_path);
         selected_path.set_selectable(true);
         selected_path.set_single_line_mode(true);
@@ -84,6 +84,7 @@ impl NetidxTable {
         descriptor.rows.sort();
         descriptor.cols.sort_by_key(|(p, _)| p.clone());
         descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
+        view.get_selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
             vec![String::static_type(); 2]
@@ -131,8 +132,10 @@ impl NetidxTable {
         let style = view.get_style_context();
         let focus_column: Rc<RefCell<Option<TreeViewColumn>>> =
             Rc::new(RefCell::new(None));
+        let focus_row: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let cursor_changed = Rc::new(clone!(
-            @weak focus_column, @weak store, @weak selected_path, @strong base_path =>
+            @weak focus_column, @weak focus_row, @weak store,
+            @weak selected_path, @strong base_path =>
             move |v: &TreeView| {
                 let (p, c) = v.get_cursor();
                 let row_name = match p {
@@ -147,6 +150,8 @@ impl NetidxTable {
                     Some(row_name) => match row_name.get::<&str>().ok().flatten() {
                         None => Path::from(""),
                         Some(row_name) => {
+                            *focus_column.borrow_mut() = c.clone();
+                            *focus_row.borrow_mut() = Some(String::from(row_name));
                             let col_name = if vector_mode {
                                 None
                             } else if v.get_column(0) == c {
@@ -163,7 +168,6 @@ impl NetidxTable {
                     }
                 };
                 selected_path.set_label(&*path);
-                *focus_column.borrow_mut() = c;
                 v.columns_autosize();
                 let (mut start, end) = match v.get_visible_range() {
                     None => return,
@@ -314,26 +318,26 @@ impl NetidxTable {
                 &cell,
                 Some(Box::new({
                     let focus_column = Rc::clone(&focus_column);
+                    let focus_row = Rc::clone(&focus_row);
                     let style = style.clone();
                     move |c: &TreeViewColumn,
                           cr: &CellRenderer,
                           s: &TreeModel,
                           i: &TreeIter| {
                         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
+                        let rn_v = s.get_value(i, 0);
+                        let rn = rn_v.get::<&str>();
                         if let Ok(Some(v)) = s.get_value(i, id).get::<&str>() {
                             cr.set_property_text(Some(v));
-                            match &*focus_column.borrow() {
-                                Some(fc) => {
-                                    if fc == c {
-                                        let fg = style.get_color(StateFlags::SELECTED);
-                                        let bg = style
-                                            .get_background_color(StateFlags::SELECTED);
-                                        cr.set_property_cell_background_rgba(Some(&bg));
-                                        cr.set_property_foreground_rgba(Some(&fg));
-                                    } else {
-                                        cr.set_property_cell_background(None);
-                                        cr.set_property_foreground(None);
-                                    }
+                            match (&*focus_column.borrow(), &*focus_row.borrow(), rn) {
+                                (Some(fc), Some(fr), Ok(Some(rn)))
+                                    if fc == c && fr.as_str() == rn =>
+                                {
+                                    let fg = style.get_color(StateFlags::SELECTED);
+                                    let bg =
+                                        style.get_background_color(StateFlags::SELECTED);
+                                    cr.set_property_cell_background_rgba(Some(&bg));
+                                    cr.set_property_foreground_rgba(Some(&fg));
                                 }
                                 _ => {
                                     cr.set_property_cell_background(None);
@@ -381,8 +385,8 @@ impl NetidxTable {
                 if key.get_keyval() == keys::constants::Escape {
                     // unset the focus
                     view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
-                    view.get_selection().unselect_all();
                     *focus_column.borrow_mut() = None;
+                    *focus_row.borrow_mut() = None;
                     selected_path.set_label("");
                 }
                 Inhibit(false)
