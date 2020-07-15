@@ -62,6 +62,9 @@ struct NetidxTableInner {
     descriptor: Table,
     vector_mode: bool,
     base_path: Path,
+    update_subscriptions_running: bool,
+    sort_column: Option<u32>,
+    sort_temp_disabled: bool,
 }
 
 struct NetidxTable(Rc<RefCell<NetidxTableInner>>);
@@ -84,12 +87,25 @@ impl clone::Upgrade for NetidxTableWeak {
     }
 }
 
+fn get_sort_column(store: &ListStore) -> Option<u32> {
+    match store.get_sort_column_id() {
+        None | Some((SortColumn::Default, _)) => None,
+        Some((SortColumn::Index(c), _)) => {
+            if c == 0 {
+                None
+            } else {
+                Some(c)
+            }
+        }
+    }
+}
+
 fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Ordering {
     let v0_v = m.get_value(r0, col);
     let v1_v = m.get_value(r1, col);
     let v0_r = v0_v.get::<&str>();
     let v1_r = v1_v.get::<&str>();
-    match dbg!((v0_r, v1_r)) {
+    match (v0_r, v1_r) {
         (Err(_), Err(_)) => Ordering::Equal,
         (Err(_), _) => Ordering::Greater,
         (_, Err(_)) => Ordering::Less,
@@ -162,6 +178,9 @@ impl NetidxTable {
             subscribed: HashMap::new(),
             focus_column: None,
             focus_row: None,
+            update_subscriptions_running: false,
+            sort_column: None,
+            sort_temp_disabled: false,
         })));
         view.append_column(&{
             let column = TreeViewColumn::new();
@@ -198,7 +217,16 @@ impl NetidxTable {
             view.append_column(&column);
         }
         store.connect_sort_column_changed(
-            clone!(@weak t => move |_| t.update_subscriptions()),
+            clone!(@weak t => move |_| {
+                {
+                    let mut inner = t.0.borrow_mut();
+                    if inner.sort_temp_disabled {
+                        return
+                    }
+                    inner.sort_column = get_sort_column(&inner.store);
+                }
+                t.update_subscriptions()
+            }),
         );
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
@@ -319,10 +347,9 @@ impl NetidxTable {
         }
     }
 
-    fn update_subscriptions(&self) {
-        println!("update subscriptions");
+    fn update_subscriptions_inner(&self) {
         let (setval, store) = {
-            let mut setval = Vec::new();
+            let mut setval: Vec<(TreeIter, u32, Option<&'static str>)> = Vec::new();
             let mut inner = self.0.borrow_mut();
             let t = &mut *inner;
             let by_id = &mut t.by_id;
@@ -333,6 +360,7 @@ impl NetidxTable {
             let descriptor = &t.descriptor;
             let base_path = &t.base_path;
             let vector_mode = t.vector_mode;
+            let sort_column = t.sort_column;
             let ncols = if t.vector_mode { 1 } else { t.descriptor.cols.len() };
             let (mut start, mut end) = match t.view.get_visible_range() {
                 None => return,
@@ -342,16 +370,6 @@ impl NetidxTable {
                 start.prev();
                 end.next();
             }
-            let sort_column = match t.store.get_sort_column_id() {
-                None | Some((SortColumn::Default, _)) => None,
-                Some((SortColumn::Index(c), _)) => {
-                    if c == 0 {
-                        None
-                    } else {
-                        Some(c)
-                    }
-                }
-            };
             // unsubscribe invisible rows
             by_id.retain(|_, v| match store.get_path(&v.row) {
                 None => false,
@@ -430,7 +448,18 @@ impl NetidxTable {
         self.cursor_changed();
     }
 
+    fn update_subscriptions(&self) {
+        if self.0.borrow().update_subscriptions_running {
+            return;
+        } else {
+            self.0.borrow_mut().update_subscriptions_running = true;
+            self.update_subscriptions_inner();
+            self.0.borrow_mut().update_subscriptions_running = false;
+        }
+    }
+
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
+        self.0.borrow_mut().sort_temp_disabled = true;
         let col = self.store().get_sort_column_id();
         self.view().freeze_child_notify();
         self.store().set_unsorted();
@@ -442,6 +471,7 @@ impl NetidxTable {
             self.store().set_sort_column_id(col, dir);
         }
         self.view().thaw_child_notify();
+        self.0.borrow_mut().sort_temp_disabled = false;
     }
 
     fn root(&self) -> GtkBox {
@@ -534,7 +564,6 @@ fn run_gui(
             match m {
                 ToGui::Refresh(changed) => {
                     if let Some(t) = &mut current {
-                        println!("sorting off, starting update");
                         let sav = t.disable_sort();
                         for (id, v) in changed {
                             let (row, col) = match t.0.borrow().by_id.get(&id) {
@@ -543,7 +572,6 @@ fn run_gui(
                             };
                             t.store().set_value(&row, col, &format!("{}", v).to_value());
                         }
-                        println!("update finished, sorting back on");
                         t.enable_sort(sav);
                         t.view().columns_autosize();
                         t.update_subscriptions();
