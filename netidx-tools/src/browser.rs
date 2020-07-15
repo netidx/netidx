@@ -18,6 +18,7 @@ use netidx::{
 };
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     mem,
     rc::{Rc, Weak},
@@ -83,34 +84,24 @@ impl clone::Upgrade for NetidxTableWeak {
     }
 }
 
-/*
-        for col in 1..descriptor.cols.len() + 1 {
-            let col = col as u32;
-            let f = move |m: &TreeModel, r0: &TreeIter, r1: &TreeIter| -> Ordering {
-                let v0_v = m.get_value(r0, col as i32);
-                let v1_v = m.get_value(r1, col as i32);
-                let v0_r = v0_v.get::<&str>();
-                let v1_r = v1_v.get::<&str>();
-                match (v0_r, v1_r) {
-                    (Err(_), Err(_)) => Ordering::Equal,
-                    (Err(_), _) => Ordering::Greater,
-                    (_, Err(_)) => Ordering::Less,
-                    (Ok(None), Ok(None)) => Ordering::Equal,
-                    (Ok(None), _) => Ordering::Less,
-                    (_, Ok(None)) => Ordering::Greater,
-                    (Ok(Some(v0)), Ok(Some(v1))) => {
-                        match (v0.parse::<f64>(), v1.parse::<f64>()) {
-                            (Ok(v0f), Ok(v1f)) => {
-                                v0f.partial_cmp(&v1f).unwrap_or(Ordering::Equal)
-                            }
-                            (_, _) => v0.cmp(v1),
-                        }
-                    }
-                }
-            };
-            store.set_sort_func(SortColumn::Index(col), f);
-        }
-*/
+fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Ordering {
+    let v0_v = m.get_value(r0, col);
+    let v1_v = m.get_value(r1, col);
+    let v0_r = v0_v.get::<&str>();
+    let v1_r = v1_v.get::<&str>();
+    match (v0_r, v1_r) {
+        (Err(_), Err(_)) => Ordering::Equal,
+        (Err(_), _) => Ordering::Greater,
+        (_, Err(_)) => Ordering::Less,
+        (Ok(None), Ok(None)) => Ordering::Equal,
+        (Ok(None), _) => Ordering::Less,
+        (_, Ok(None)) => Ordering::Greater,
+        (Ok(Some(v0)), Ok(Some(v1))) => match (v0.parse::<f64>(), v1.parse::<f64>()) {
+            (Ok(v0f), Ok(v1f)) => v0f.partial_cmp(&v1f).unwrap_or(Ordering::Equal),
+            (_, _) => v0.cmp(v1),
+        },
+    }
+}
 
 impl NetidxTable {
     fn new(
@@ -160,7 +151,7 @@ impl NetidxTable {
             root,
             view: view.clone(),
             selected_path,
-            store,
+            store: store.clone(),
             descriptor,
             vector_mode,
             base_path,
@@ -178,7 +169,7 @@ impl NetidxTable {
             column.pack_start(&cell, true);
             column.set_title("name");
             column.add_attribute(&cell, "text", 0);
-            //column.set_sort_column_id(0);
+            column.set_sort_column_id(0);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             column
         });
@@ -199,12 +190,18 @@ impl NetidxTable {
             } else {
                 inner.descriptor.cols[col].0.as_ref()
             });
-            //column.set_sort_column_id(id);
+            store.set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
+                compare_row(id, m, r0, r1)
+            });
+            column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             view.append_column(&column);
         }
+        store.connect_sort_column_changed(
+            clone!(@weak t => move |_| t.update_subscriptions()),
+        );
         view.set_fixed_height_mode(true);
-        view.set_model(Some(&t.0.borrow().store));
+        view.set_model(Some(&store));
         view.connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
         view.connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
@@ -222,20 +219,21 @@ impl NetidxTable {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
         let rn_v = inner.store.get_value(i, 0);
         let rn = rn_v.get::<&str>();
-        if let Ok(Some(v)) = inner.store.get_value(i, id).get::<&str>() {
-            cr.set_property_text(Some(v));
-            match (&inner.focus_column, &inner.focus_row, rn) {
-                (Some(fc), Some(fr), Ok(Some(rn))) if fc == c && fr.as_str() == rn => {
-                    let st = StateFlags::SELECTED;
-                    let fg = inner.style.get_color(st);
-                    let bg = inner.style.get_background_color(st);
-                    cr.set_property_cell_background_rgba(Some(&bg));
-                    cr.set_property_foreground_rgba(Some(&fg));
-                }
-                _ => {
-                    cr.set_property_cell_background(None);
-                    cr.set_property_foreground(None);
-                }
+        cr.set_property_text(match inner.store.get_value(i, id).get::<&str>() {
+            Ok(it) => it,
+            _ => return,
+        });
+        match (&inner.focus_column, &inner.focus_row, rn) {
+            (Some(fc), Some(fr), Ok(Some(rn))) if fc == c && fr.as_str() == rn => {
+                let st = StateFlags::SELECTED;
+                let fg = inner.style.get_color(st);
+                let bg = inner.style.get_background_color(st);
+                cr.set_property_cell_background_rgba(Some(&bg));
+                cr.set_property_foreground_rgba(Some(&fg));
+            }
+            _ => {
+                cr.set_property_cell_background(None);
+                cr.set_property_foreground(None);
             }
         }
     }
@@ -428,6 +426,18 @@ impl NetidxTable {
         }
         self.cursor_changed();
     }
+
+    fn root(&self) -> GtkBox {
+        self.0.borrow().root.clone()
+    }
+
+    fn view(&self) -> TreeView {
+        self.0.borrow().view.clone()
+    }
+
+    fn store(&self) -> ListStore {
+        self.0.borrow().store.clone()
+    }
 }
 
 async fn netidx_main(
@@ -507,23 +517,28 @@ fn run_gui(
             match m {
                 ToGui::Refresh(changed) => {
                     if let Some(t) = &mut current {
-                        let store = t.0.borrow().store.clone();
+                        let col = t.store().get_sort_column_id();
+                        t.view().freeze_child_notify();
+                        t.store().set_unsorted();
                         for (id, v) in changed {
                             let (row, col) = match t.0.borrow().by_id.get(&id) {
                                 Some(sub) => (sub.row.clone(), sub.col),
                                 None => continue,
                             };
-                            store.set_value(&row, col, &format!("{}", v).to_value());
+                            t.store().set_value(&row, col, &format!("{}", v).to_value());
                         }
-                        t.0.borrow().view.columns_autosize();
+                        if let Some((col, dir)) = col {
+                            t.store().set_sort_column_id(col, dir);
+                        }
+                        t.view().thaw_child_notify();
+                        t.view().columns_autosize();
                         t.update_subscriptions();
                     }
                 }
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {
-                        let inner = cur.0.borrow();
-                        window.remove(&inner.root);
-                        inner.view.set_model(None::<&ListStore>);
+                        window.remove(&cur.root());
+                        cur.view().set_model(None::<&ListStore>);
                     }
                     window.set_title(&format!("Netidx Browser {}", path));
                     let cur = NetidxTable::new(
