@@ -19,7 +19,7 @@ use netidx::{
 };
 use std::{
     cell::{Cell, RefCell},
-    cmp::max,
+    cmp::{max, Ordering},
     collections::{HashMap, HashSet},
     iter,
     rc::Rc,
@@ -98,6 +98,32 @@ impl NetidxTable {
             let row_name = Path::basename(row).unwrap_or("").to_value();
             let row = store.append();
             store.set_value(&row, 0, &row_name.to_value());
+        }
+        for col in 1..descriptor.cols.len() + 1 {
+            let col = col as u32;
+            let f = move |m: &TreeModel, r0: &TreeIter, r1: &TreeIter| -> Ordering {
+                let v0_v = m.get_value(r0, col as i32);
+                let v1_v = m.get_value(r1, col as i32);
+                let v0_r = v0_v.get::<&str>();
+                let v1_r = v1_v.get::<&str>();
+                match (v0_r, v1_r) {
+                    (Err(_), Err(_)) => Ordering::Equal,
+                    (Err(_), _) => Ordering::Greater,
+                    (_, Err(_)) => Ordering::Less,
+                    (Ok(None), Ok(None)) => Ordering::Equal,
+                    (Ok(None), _) => Ordering::Less,
+                    (_, Ok(None)) => Ordering::Greater,
+                    (Ok(Some(v0)), Ok(Some(v1))) => {
+                        match (v0.parse::<f64>(), v1.parse::<f64>()) {
+                            (Ok(v0f), Ok(v1f)) => {
+                                v0f.partial_cmp(&v1f).unwrap_or(Ordering::Equal)
+                            }
+                            (_, _) => v0.cmp(v1),
+                        }
+                    }
+                }
+            };
+            store.set_sort_func(SortColumn::Index(col), f);
         }
         let descriptor = Rc::new(descriptor);
         let by_id: Rc<RefCell<HashMap<SubId, Subscription>>> =
