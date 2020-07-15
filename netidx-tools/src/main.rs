@@ -3,7 +3,6 @@
 #[macro_use] extern crate netidx;
 #[macro_use] extern crate anyhow;
 #[cfg(feature = "browser")]
-#[macro_use] extern crate glib;
 
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
