@@ -5,8 +5,8 @@ use glib::{self, clone, signal::Inhibit};
 use gtk::{
     prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
     CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
-    ScrolledWindow, SelectionMode, SortColumn, StateFlags, StyleContext, TreeIter,
-    TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
+    TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use log::error;
 use netidx::{
@@ -89,7 +89,7 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     let v1_v = m.get_value(r1, col);
     let v0_r = v0_v.get::<&str>();
     let v1_r = v1_v.get::<&str>();
-    match (v0_r, v1_r) {
+    match dbg!((v0_r, v1_r)) {
         (Err(_), Err(_)) => Ordering::Equal,
         (Err(_), _) => Ordering::Greater,
         (_, Err(_)) => Ordering::Less,
@@ -320,6 +320,7 @@ impl NetidxTable {
     }
 
     fn update_subscriptions(&self) {
+        println!("update subscriptions");
         let (setval, store) = {
             let mut setval = Vec::new();
             let mut inner = self.0.borrow_mut();
@@ -421,10 +422,26 @@ impl NetidxTable {
             }
             (setval, store.clone())
         };
+        let sav = self.disable_sort();
         for (row, id, val) in setval {
             store.set_value(&row, id, &val.to_value());
         }
+        self.enable_sort(sav);
         self.cursor_changed();
+    }
+
+    fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
+        let col = self.store().get_sort_column_id();
+        self.view().freeze_child_notify();
+        self.store().set_unsorted();
+        col
+    }
+
+    fn enable_sort(&self, col: Option<(SortColumn, SortType)>) {
+        if let Some((col, dir)) = col {
+            self.store().set_sort_column_id(col, dir);
+        }
+        self.view().thaw_child_notify();
     }
 
     fn root(&self) -> GtkBox {
@@ -517,9 +534,8 @@ fn run_gui(
             match m {
                 ToGui::Refresh(changed) => {
                     if let Some(t) = &mut current {
-                        let col = t.store().get_sort_column_id();
-                        t.view().freeze_child_notify();
-                        t.store().set_unsorted();
+                        println!("sorting off, starting update");
+                        let sav = t.disable_sort();
                         for (id, v) in changed {
                             let (row, col) = match t.0.borrow().by_id.get(&id) {
                                 Some(sub) => (sub.row.clone(), sub.col),
@@ -527,10 +543,8 @@ fn run_gui(
                             };
                             t.store().set_value(&row, col, &format!("{}", v).to_value());
                         }
-                        if let Some((col, dir)) = col {
-                            t.store().set_sort_column_id(col, dir);
-                        }
-                        t.view().thaw_child_notify();
+                        println!("update finished, sorting back on");
+                        t.enable_sort(sav);
                         t.view().columns_autosize();
                         t.update_subscriptions();
                     }
