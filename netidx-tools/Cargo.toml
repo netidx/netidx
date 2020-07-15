@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [profile.release]
 codegen-units = 1
+opt-level = 3
 lto = true
 
 [target.'cfg(unix)'.dependencies]
