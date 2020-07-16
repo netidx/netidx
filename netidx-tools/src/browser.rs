@@ -1,11 +1,7 @@
 use futures::{channel::mpsc, prelude::*, select_biased};
 use gdk::{keys, EventKey};
 use gio::prelude::*;
-use glib::{
-    self, clone,
-    signal::Inhibit,
-    source::{idle_add_local, Continue, SourceId},
-};
+use glib::{self, clone, signal::Inhibit};
 use gtk::{
     prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
     CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
@@ -29,7 +25,10 @@ use std::{
     thread,
     time::Duration,
 };
-use tokio::{runtime::Runtime, time};
+use tokio::{
+    runtime::Runtime,
+    time::{self, Instant},
+};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
@@ -42,7 +41,7 @@ enum ToGui {
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
-    Backoff,
+    Backoff(Duration),
 }
 
 struct Subscription {
@@ -69,7 +68,6 @@ struct NetidxTableInner {
     base_path: Path,
     sort_column: Option<u32>,
     sort_temp_disabled: bool,
-    update_subscriptions: Option<SourceId>,
 }
 
 #[derive(Clone)]
@@ -186,7 +184,6 @@ impl NetidxTable {
             focus_row: None,
             sort_column: None,
             sort_temp_disabled: false,
-            update_subscriptions: None,
         })));
         view.append_column(&{
             let column = TreeViewColumn::new();
@@ -309,7 +306,7 @@ impl NetidxTable {
     }
 
     fn cursor_changed(&self) {
-        let (store, mut start, end) = {
+        let (store, view, mut start, end) = {
             let mut inner = self.0.borrow_mut();
             let t = &mut *inner;
             let (p, c) = t.view.get_cursor();
@@ -344,13 +341,13 @@ impl NetidxTable {
                 },
             };
             t.selected_path.set_label(&*path);
-            t.view.columns_autosize();
             let (start, end) = match t.view.get_visible_range() {
                 None => return,
                 Some((s, e)) => (s, e),
             };
-            (t.store.clone(), start, end)
+            (t.store.clone(), t.view.clone(), start, end)
         };
+        view.columns_autosize();
         while start <= end {
             if let Some(i) = store.get_iter(&start) {
                 store.row_changed(&start, &i);
@@ -360,20 +357,6 @@ impl NetidxTable {
     }
 
     fn update_subscriptions(&self) {
-        if self.0.borrow().update_subscriptions.is_none() {
-            let id = idle_add_local({
-                let t = self.clone();
-                move || {
-                    t.update_subscriptions_inner();
-                    t.0.borrow_mut().update_subscriptions = None;
-                    Continue(false)
-                }
-            });
-            self.0.borrow_mut().update_subscriptions = Some(id);
-        }
-    }
-
-    fn update_subscriptions_inner(&self) {
         let (setval, store) = {
             let mut setval: Vec<(TreeIter, u32, Option<&'static str>)> = Vec::new();
             let mut inner = self.0.borrow_mut();
@@ -417,34 +400,38 @@ impl NetidxTable {
                     visible
                 }
             });
-            let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
-                if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
-                    subscribed
-                        .entry(row_name.into())
-                        .or_insert_with(HashSet::new)
-                        .insert(id);
-                    setval.push((row.clone(), id, Some("#subscribe")));
-                    let p = base_path.append(row_name);
-                    let p = if vector_mode {
-                        p
-                    } else {
-                        p.append(&descriptor.cols[(id - 1) as usize].0)
-                    };
-                    let s = subscriber.durable_subscribe(p);
-                    s.updates(true, updates.clone());
-                    by_id.insert(
-                        s.id(),
-                        Subscription { _sub: s, row: row.clone(), col: id as u32 },
-                    );
-                }
-            };
+            let mut maybe_subscribe_col =
+                |row: &TreeIter, row_name: &str, id: u32, setv: bool| {
+                    if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false)
+                    {
+                        subscribed
+                            .entry(row_name.into())
+                            .or_insert_with(HashSet::new)
+                            .insert(id);
+                        if setv {
+                            setval.push((row.clone(), id, Some("#subscribe")));
+                        }
+                        let p = base_path.append(row_name);
+                        let p = if vector_mode {
+                            p
+                        } else {
+                            p.append(&descriptor.cols[(id - 1) as usize].0)
+                        };
+                        let s = subscriber.durable_subscribe(p);
+                        s.updates(true, updates.clone());
+                        by_id.insert(
+                            s.id(),
+                            Subscription { _sub: s, row: row.clone(), col: id as u32 },
+                        );
+                    }
+                };
             // subscribe to all the visible rows
             while start < end {
                 if let Some(row) = store.get_iter(&start) {
                     let row_name_v = store.get_value(&row, 0);
                     if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
                         for col in 0..ncols {
-                            maybe_subscribe_col(&row, row_name, (col + 1) as u32);
+                            maybe_subscribe_col(&row, row_name, (col + 1) as u32, true);
                         }
                     }
                 }
@@ -456,7 +443,7 @@ impl NetidxTable {
                     loop {
                         let row_name_v = store.get_value(&row, 0);
                         if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                            maybe_subscribe_col(&row, row_name, id);
+                            maybe_subscribe_col(&row, row_name, id, false);
                         }
                         if !store.iter_next(&row) {
                             break;
@@ -513,8 +500,8 @@ async fn netidx_main(
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let resolver = subscriber.resolver();
     let mut changed = HashMap::new();
-    let mut interval: u64 = 1;
-    let mut refresh = time::interval(Duration::from_secs(interval)).fuse();
+    let mut interval = Duration::from_secs(1);
+    let mut refresh = time::interval(interval).fuse();
     loop {
         select_biased! {
             _ = refresh.next() => {
@@ -533,13 +520,22 @@ async fn netidx_main(
             },
             m = from_gui.next() => match m {
                 None => break,
-                Some(FromGui::Backoff) => {
-                    interval *= 2;
-                    refresh = time::interval(Duration::from_secs(interval)).fuse();
+                Some(FromGui::Backoff(dur)) => {
+                    let cur = interval.as_millis();
+                    let new = dur.as_millis();
+                    if new > cur {
+                        println!("new interval {:?}", interval);
+                        interval = dur;
+                        refresh = time::interval(interval).fuse();
+                    } else if cur / new >= 2 {
+                        println!("new interval {:?}", interval);
+                        interval = dur;
+                        refresh = time::interval(interval).fuse();
+                    }
                 },
                 Some(FromGui::Navigate(path)) => {
-                    interval = 1;
-                    refresh = time::interval(Duration::from_secs(interval)).fuse();
+                    interval = Duration::from_secs(1);
+                    refresh = time::interval(interval).fuse();
                     let table = match resolver.table(path.clone()).await {
                         Ok(table) => table,
                         Err(e) => {
@@ -575,12 +571,11 @@ fn run_gui(
     app: &Application,
     updates: mpsc::Sender<Batch>,
     mut to_gui: mpsc::Receiver<ToGui>,
-    mut from_gui: mpsc::UnboundedSender<FromGui>,
+    from_gui: mpsc::UnboundedSender<FromGui>,
 ) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let changed: Rc<RefCell<Option<HashMap<SubId, Value>>>> = Rc::new(RefCell::new(None));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
@@ -588,47 +583,23 @@ fn run_gui(
         let mut current: Option<NetidxTable> = None;
         while let Some(m) = to_gui.next().await {
             match m {
-                ToGui::Refresh(batch) => {
-                    if changed.borrow().is_some() {
-                        let mut inner = changed.borrow_mut();
-                        let c = inner.as_mut().unwrap();
-                        for (id, v) in batch {
-                            c.insert(id, v);
+                ToGui::Refresh(mut batch) => {
+                    let start = Instant::now();
+                    if let Some(t) = &current {
+                        let sav = t.disable_sort();
+                        for (id, v) in batch.drain() {
+                            let (row, col) = match t.0.borrow().by_id.get(&id) {
+                                Some(sub) => (sub.row.clone(), sub.col),
+                                None => continue,
+                            };
+                            t.store().set_value(&row, col, &format!("{}", v).to_value());
                         }
-                        let _ = from_gui.unbounded_send(FromGui::Backoff);
-                    } else {
-                        *changed.borrow_mut() = Some(batch);
-                        idle_add_local({
-                            let current = current.clone();
-                            let changed = changed.clone();
-                            move || {
-                                if let Some(t) = &current {
-                                    if let Some(changed) = &mut *changed.borrow_mut() {
-                                        let sav = t.disable_sort();
-                                        for (id, v) in changed.drain() {
-                                            let (row, col) =
-                                                match t.0.borrow().by_id.get(&id) {
-                                                    Some(sub) => {
-                                                        (sub.row.clone(), sub.col)
-                                                    }
-                                                    None => continue,
-                                                };
-                                            t.store().set_value(
-                                                &row,
-                                                col,
-                                                &format!("{}", v).to_value(),
-                                            );
-                                        }
-                                        t.enable_sort(sav);
-                                        t.view().columns_autosize();
-                                        t.update_subscriptions();
-                                    }
-                                }
-                                *changed.borrow_mut() = None;
-                                Continue(false)
-                            }
-                        });
+                        t.enable_sort(sav);
+                        t.view().columns_autosize();
+                        t.update_subscriptions();
                     }
+                    let m = FromGui::Backoff(start.elapsed());
+                    let _ = from_gui.unbounded_send(m);
                 }
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {

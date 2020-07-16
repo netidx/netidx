@@ -345,6 +345,11 @@ enum SubStatus {
     Pending(Vec<oneshot::Sender<Result<Val>>>),
 }
 
+fn pick(n: usize) -> usize {
+    let mut rng = rand::thread_rng();
+    rng.gen_range(0, n)
+}
+
 #[derive(Debug)]
 struct SubscriberInner {
     resolver: ResolverRead,
@@ -463,7 +468,8 @@ impl Subscriber {
                         match r {
                             Err(e) => {
                                 ds.tries += 1;
-                                ds.next_try = now + Duration::from_secs(ds.tries as u64);
+                                ds.next_try =
+                                    now + Duration::from_secs(pick(ds.tries) as u64);
                                 warn!(
                                     "resubscription error {}: {}, next try: {:?}",
                                     p, e, ds.next_try
@@ -594,10 +600,6 @@ impl Subscriber {
             }
             t.resolver.clone()
         };
-        fn pick(n: usize) -> usize {
-            let mut rng = rand::thread_rng();
-            rng.gen_range(0, n)
-        }
         {
             // Resolve, Connect, Subscribe
             let to_resolve = pending
