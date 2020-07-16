@@ -433,6 +433,7 @@ impl Subscriber {
                     let mut gc = Vec::new();
                     let mut subscriber = subscriber.0.lock();
                     let mut max_tries = 0;
+                    let ndead = subscriber.durable_dead.len();
                     for (p, w) in &subscriber.durable_dead {
                         match w.upgrade() {
                             None => {
@@ -453,7 +454,7 @@ impl Subscriber {
                     for p in gc {
                         subscriber.durable_dead.remove(&p);
                     }
-                    (b, Duration::from_secs(10 + max_tries as u64))
+                    (b, Duration::from_secs(max(10, ((ndead / 10000) * max_tries) as u64)))
                 };
                 if batch.len() == 0 {
                     let mut subscriber = subscriber.0.lock();
