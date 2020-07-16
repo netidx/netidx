@@ -42,6 +42,7 @@ enum ToGui {
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
+    Backoff,
 }
 
 struct Subscription {
@@ -512,7 +513,8 @@ async fn netidx_main(
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let resolver = subscriber.resolver();
     let mut changed = HashMap::new();
-    let mut refresh = time::interval(Duration::from_secs(1)).fuse();
+    let mut interval: u64 = 1;
+    let mut refresh = time::interval(Duration::from_secs(interval)).fuse();
     loop {
         select_biased! {
             _ = refresh.next() => {
@@ -531,7 +533,13 @@ async fn netidx_main(
             },
             m = from_gui.next() => match m {
                 None => break,
+                Some(FromGui::Backoff) => {
+                    interval *= 2;
+                    refresh = time::interval(Duration::from_secs(interval)).fuse();
+                },
                 Some(FromGui::Navigate(path)) => {
+                    interval = 1;
+                    refresh = time::interval(Duration::from_secs(interval)).fuse();
                     let table = match resolver.table(path.clone()).await {
                         Ok(table) => table,
                         Err(e) => {
@@ -567,7 +575,7 @@ fn run_gui(
     app: &Application,
     updates: mpsc::Sender<Batch>,
     mut to_gui: mpsc::Receiver<ToGui>,
-    from_gui: mpsc::UnboundedSender<FromGui>,
+    mut from_gui: mpsc::UnboundedSender<FromGui>,
 ) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
@@ -587,6 +595,7 @@ fn run_gui(
                         for (id, v) in batch {
                             c.insert(id, v);
                         }
+                        let _ = from_gui.unbounded_send(FromGui::Backoff);
                     } else {
                         *changed.borrow_mut() = Some(batch);
                         idle_add_local({
