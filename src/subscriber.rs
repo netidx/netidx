@@ -28,6 +28,7 @@ use std::{
     hash::Hash,
     iter, mem,
     net::SocketAddr,
+    result,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -105,7 +106,8 @@ struct ValInner {
 
 impl Drop for ValInner {
     fn drop(&mut self) {
-        let _ = self.connection.send(ToCon::Unsubscribe(self.id));
+        let _: result::Result<_, _> =
+            self.connection.unbounded_send(ToCon::Unsubscribe(self.id));
     }
 }
 
@@ -361,6 +363,7 @@ struct SubscriberInner {
     desired_auth: Auth,
 }
 
+#[derive(Debug)]
 struct SubscriberWeak(Weak<Mutex<SubscriberInner>>);
 
 impl SubscriberWeak {
@@ -452,9 +455,16 @@ impl Subscriber {
                         }
                     }
                     for p in gc {
+                        info!("removing dropped subscription {}", p);
                         subscriber.durable_dead.remove(&p);
                     }
-                    (b, Duration::from_secs(max(10, ((ndead / 10000) * max_tries) as u64)))
+                    (
+                        b,
+                        Duration::from_secs(max(
+                            30,
+                            ((ndead / 10000) * max_tries) as u64,
+                        )),
+                    )
                 };
                 if batch.len() == 0 {
                     let mut subscriber = subscriber.0.lock();
@@ -917,7 +927,7 @@ async fn hello_publisher(
     Ok(())
 }
 
-const PERIOD: Duration = Duration::from_secs(10);
+const PERIOD: Duration = Duration::from_secs(100);
 const FLUSH: Duration = Duration::from_secs(1);
 
 lazy_static! {
@@ -1144,6 +1154,7 @@ async fn connection(
                     }))
                 }
                 Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
+                    info!("unsubscribe {:?}", id);
                     try_cf!(write_con.queue_send(&To::Unsubscribe(id)))
                 }
                 Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {

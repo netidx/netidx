@@ -1,12 +1,17 @@
 use futures::{channel::mpsc, prelude::*, select_biased};
 use gdk::{keys, EventKey};
 use gio::prelude::*;
-use glib::{self, clone, signal::Inhibit};
+use glib::{
+    self, clone,
+    signal::Inhibit,
+    source::{Continue, PRIORITY_LOW},
+};
 use gtk::{
-    prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
-    CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
-    ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
-    TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    idle_add, prelude::*, Adjustment, Align, Application, ApplicationWindow,
+    Box as GtkBox, CellRenderer, CellRendererText, Label, ListStore, Orientation,
+    PackType, ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags,
+    StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
+    TreeViewColumnSizing,
 };
 use log::error;
 use netidx::{
@@ -21,31 +26,29 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     mem,
+    ops::Drop,
     rc::{Rc, Weak},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{
-    runtime::Runtime,
-    time::{self, Instant},
-};
+use tokio::{runtime::Runtime, time};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
 #[derive(Debug, Clone)]
 enum ToGui {
     Table(Subscriber, Path, Table),
-    Refresh(HashMap<SubId, Value>),
+    Refresh(Option<HashMap<SubId, Value>>),
 }
 
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
-    Backoff(Duration),
+    Refreshed,
 }
 
 struct Subscription {
-    _sub: Dval,
+    sub: Dval,
     row: TreeIter,
     col: u32,
 }
@@ -53,6 +56,7 @@ struct Subscription {
 struct NetidxTableInner {
     subscriber: Subscriber,
     updates: mpsc::Sender<Batch>,
+    to_gui: mpsc::UnboundedSender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
     root: GtkBox,
     view: TreeView,
@@ -72,6 +76,12 @@ struct NetidxTableInner {
 
 #[derive(Clone)]
 struct NetidxTable(Rc<RefCell<NetidxTableInner>>);
+
+impl Drop for NetidxTableInner {
+    fn drop(&mut self) {
+        println!("drop Table {}", self.base_path);
+    }
+}
 
 struct NetidxTableWeak(Weak<RefCell<NetidxTableInner>>);
 
@@ -129,6 +139,7 @@ impl NetidxTable {
         base_path: Path,
         mut descriptor: Table,
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
+        to_gui: mpsc::UnboundedSender<ToGui>,
         from_gui: mpsc::UnboundedSender<FromGui>,
     ) -> NetidxTable {
         let view = TreeView::new();
@@ -169,12 +180,13 @@ impl NetidxTable {
         let t = NetidxTable(Rc::new(RefCell::new(NetidxTableInner {
             subscriber,
             root,
-            view: view.clone(),
+            view,
             selected_path,
-            store: store.clone(),
+            store,
             descriptor,
             vector_mode,
             base_path,
+            to_gui,
             from_gui,
             updates,
             style,
@@ -185,7 +197,7 @@ impl NetidxTable {
             sort_column: None,
             sort_temp_disabled: false,
         })));
-        view.append_column(&{
+        t.view().append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
             column.pack_start(&cell, true);
@@ -206,20 +218,19 @@ impl NetidxTable {
                       _: &TreeModel,
                       i: &TreeIter| t.render_cell(id, c, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            let inner = t.0.borrow();
-            column.set_title(if vector_mode {
-                "value"
+            column.set_title(&if vector_mode {
+                Path::from("value")
             } else {
-                inner.descriptor.cols[col].0.as_ref()
+                t.0.borrow().descriptor.cols[col].0.clone()
             });
-            store.set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
+            t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
                 compare_row(id, m, r0, r1)
             });
             column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
-            view.append_column(&column);
+            t.view().append_column(&column);
         }
-        store.connect_sort_column_changed(clone!(@weak t => move |_| {
+        t.store().connect_sort_column_changed(clone!(@weak t => move |_| {
             let set_unsorted = {
                 let mut inner = t.0.borrow_mut();
                 if inner.sort_temp_disabled {
@@ -236,18 +247,19 @@ impl NetidxTable {
             if let Some(store) = set_unsorted {
                 store.set_unsorted();
             }
-            t.update_subscriptions();
+            let _ = t.0.borrow().to_gui.unbounded_send(ToGui::Refresh(None));
         }));
-        view.set_fixed_height_mode(true);
-        view.set_model(Some(&store));
-        view.connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
-        view.connect_key_press_event(clone!(
+        t.view().set_fixed_height_mode(true);
+        t.view().set_model(Some(&t.store()));
+        t.view()
+            .connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
+        t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
-        view.connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
+        t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         tablewin.get_vadjustment().map(|va| {
-            va.connect_value_changed(
-                clone!(@weak t => move |_| t.update_subscriptions()),
-            );
+            va.connect_value_changed(clone!(@weak t => move |_| {
+                let _ = t.0.borrow().to_gui.unbounded_send(ToGui::Refresh(None));
+            }));
         });
         t
     }
@@ -372,7 +384,10 @@ impl NetidxTable {
             let sort_column = t.sort_column;
             let ncols = if t.vector_mode { 1 } else { t.descriptor.cols.len() };
             let (mut start, mut end) = match t.view.get_visible_range() {
-                None => return,
+                None => {
+                    let _ = t.to_gui.unbounded_send(ToGui::Refresh(None));
+                    return;
+                }
                 Some((s, e)) => (s, e),
             };
             for _ in 0..50 {
@@ -421,7 +436,7 @@ impl NetidxTable {
                         s.updates(true, updates.clone());
                         by_id.insert(
                             s.id(),
-                            Subscription { _sub: s, row: row.clone(), col: id as u32 },
+                            Subscription { sub: s, row: row.clone(), col: id as u32 },
                         );
                     }
                 };
@@ -494,20 +509,23 @@ async fn netidx_main(
     cfg: Config,
     auth: Auth,
     mut updates: mpsc::Receiver<Batch>,
-    mut to_gui: mpsc::Sender<ToGui>,
+    to_gui: mpsc::UnboundedSender<ToGui>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
     let resolver = subscriber.resolver();
     let mut changed = HashMap::new();
-    let mut interval = Duration::from_secs(1);
-    let mut refresh = time::interval(interval).fuse();
+    let mut refresh = time::interval(Duration::from_secs(1)).fuse();
+    let mut refreshing = false;
     loop {
         select_biased! {
             _ = refresh.next() => {
-                if changed.len() > 0 {
-                    let m = ToGui::Refresh(mem::replace(&mut changed, HashMap::new()));
-                    match to_gui.send(m).await {
+                //let _ = subscriber.flush().await;
+                if !refreshing && changed.len() > 0 {
+                    refreshing = true;
+                    let b = mem::replace(&mut changed, HashMap::new());
+                    let m = ToGui::Refresh(Some(b));
+                    match to_gui.unbounded_send(m) {
                         Ok(()) => (),
                         Err(e) => break
                     }
@@ -520,22 +538,8 @@ async fn netidx_main(
             },
             m = from_gui.next() => match m {
                 None => break,
-                Some(FromGui::Backoff(dur)) => {
-                    let cur = interval.as_millis();
-                    let new = dur.as_millis();
-                    if new > cur {
-                        println!("new interval {:?}", interval);
-                        interval = dur;
-                        refresh = time::interval(interval).fuse();
-                    } else if cur / new >= 2 {
-                        println!("new interval {:?}", interval);
-                        interval = dur;
-                        refresh = time::interval(interval).fuse();
-                    }
-                },
+                Some(FromGui::Refreshed) => { refreshing = false; },
                 Some(FromGui::Navigate(path)) => {
-                    interval = Duration::from_secs(1);
-                    refresh = time::interval(interval).fuse();
                     let table = match resolver.table(path.clone()).await {
                         Ok(table) => table,
                         Err(e) => {
@@ -544,7 +548,7 @@ async fn netidx_main(
                         }
                     };
                     let m = ToGui::Table(subscriber.clone(), path, table);
-                    match to_gui.send(m).await {
+                    match to_gui.unbounded_send(m) {
                         Err(_) => break,
                         Ok(()) => ()
                     }
@@ -558,7 +562,7 @@ fn run_netidx(
     cfg: Config,
     auth: Auth,
     updates: mpsc::Receiver<Batch>,
-    to_gui: mpsc::Sender<ToGui>,
+    to_gui: mpsc::UnboundedSender<ToGui>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     thread::spawn(move || {
@@ -570,7 +574,8 @@ fn run_netidx(
 fn run_gui(
     app: &Application,
     updates: mpsc::Sender<Batch>,
-    mut to_gui: mpsc::Receiver<ToGui>,
+    tx_to_gui: mpsc::UnboundedSender<ToGui>,
+    mut to_gui: mpsc::UnboundedReceiver<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
 ) {
     let main_context = glib::MainContext::default();
@@ -579,27 +584,60 @@ fn run_gui(
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
-    main_context.spawn_local(async move {
+    main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
         let mut current: Option<NetidxTable> = None;
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Refresh(mut batch) => {
-                    let start = Instant::now();
-                    if let Some(t) = &current {
-                        let sav = t.disable_sort();
-                        for (id, v) in batch.drain() {
-                            let (row, col) = match t.0.borrow().by_id.get(&id) {
-                                Some(sub) => (sub.row.clone(), sub.col),
-                                None => continue,
-                            };
-                            t.store().set_value(&row, col, &format!("{}", v).to_value());
+                    let sav = batch
+                        .as_ref()
+                        .and_then(|_| current.as_ref().and_then(|t| t.disable_sort()));
+                    idle_add({
+                        let current = current.clone();
+                        let from_gui = from_gui.clone();
+                        move || {
+                            if let Some(t) = &current {
+                                if let Some(batch) = &mut batch {
+                                    let st = Instant::now();
+                                    for _ in 0..1000 {
+                                        match batch.keys().next().copied() {
+                                            None => break,
+                                            Some(id) => {
+                                                let v = batch.remove(&id).unwrap();
+                                                let (row, col) =
+                                                    match t.0.borrow().by_id.get(&id) {
+                                                        Some(sub) => {
+                                                            (sub.row.clone(), sub.col)
+                                                        }
+                                                        None => continue,
+                                                    };
+                                                t.store().set_value(
+                                                    &row,
+                                                    col,
+                                                    &format!("{}", v).to_value(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if batch.len() > 0 {
+                                        println!(
+                                            "refresh update step done {:?}, {} remaining",
+                                            st.elapsed(),
+                                            batch.len()
+                                        );
+                                        return Continue(true);
+                                    }
+                                    println!("refresh update done {:?}", st.elapsed());
+                                    let st = Instant::now();
+                                    t.enable_sort(sav);
+                                    println!("refresh sort done {:?}", st.elapsed());
+                                }
+                                t.update_subscriptions();
+                            }
+                            let _ = from_gui.unbounded_send(FromGui::Refreshed);
+                            Continue(false)
                         }
-                        t.enable_sort(sav);
-                        t.view().columns_autosize();
-                        t.update_subscriptions();
-                    }
-                    let m = FromGui::Backoff(start.elapsed());
-                    let _ = from_gui.unbounded_send(m);
+                    });
                 }
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {
@@ -612,12 +650,13 @@ fn run_gui(
                         path,
                         table,
                         updates.clone(),
+                        tx_to_gui.clone(),
                         from_gui.clone(),
                     );
                     window.add(&cur.0.borrow().root);
                     window.show_all();
-                    current = Some(cur.clone());
-                    cur.update_subscriptions();
+                    current = Some(cur);
+                    let _ = tx_to_gui.unbounded_send(ToGui::Refresh(None));
                 }
             }
         }
@@ -629,12 +668,12 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         .expect("failed to initialize GTK application");
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
-        let (tx_to_gui, rx_to_gui) = mpsc::channel(2);
+        let (tx_to_gui, rx_to_gui) = mpsc::unbounded();
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
-        run_netidx(cfg.clone(), auth.clone(), rx_updates, tx_to_gui, rx_from_gui);
-        run_gui(app, tx_updates, rx_to_gui, tx_from_gui)
+        run_netidx(cfg.clone(), auth.clone(), rx_updates, tx_to_gui.clone(), rx_from_gui);
+        run_gui(app, tx_updates, tx_to_gui, rx_to_gui, tx_from_gui)
     });
     application.run(&[]);
 }
