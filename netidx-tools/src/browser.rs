@@ -1,7 +1,11 @@
 use futures::{channel::mpsc, prelude::*, select_biased};
 use gdk::{keys, EventKey};
 use gio::prelude::*;
-use glib::{self, clone, signal::Inhibit};
+use glib::{
+    self, clone,
+    signal::Inhibit,
+    source::{idle_add_local, Continue, SourceId},
+};
 use gtk::{
     prelude::*, Adjustment, Align, Application, ApplicationWindow, Box as GtkBox,
     CellRenderer, CellRendererText, Label, ListStore, Orientation, PackType,
@@ -62,11 +66,12 @@ struct NetidxTableInner {
     descriptor: Table,
     vector_mode: bool,
     base_path: Path,
-    update_subscriptions_running: bool,
     sort_column: Option<u32>,
     sort_temp_disabled: bool,
+    update_subscriptions: Option<SourceId>,
 }
 
+#[derive(Clone)]
 struct NetidxTable(Rc<RefCell<NetidxTableInner>>);
 
 struct NetidxTableWeak(Weak<RefCell<NetidxTableInner>>);
@@ -178,9 +183,9 @@ impl NetidxTable {
             subscribed: HashMap::new(),
             focus_column: None,
             focus_row: None,
-            update_subscriptions_running: false,
             sort_column: None,
             sort_temp_disabled: false,
+            update_subscriptions: None,
         })));
         view.append_column(&{
             let column = TreeViewColumn::new();
@@ -216,18 +221,25 @@ impl NetidxTable {
             column.set_sizing(TreeViewColumnSizing::Fixed);
             view.append_column(&column);
         }
-        store.connect_sort_column_changed(
-            clone!(@weak t => move |_| {
-                {
-                    let mut inner = t.0.borrow_mut();
-                    if inner.sort_temp_disabled {
-                        return
-                    }
-                    inner.sort_column = get_sort_column(&inner.store);
+        store.connect_sort_column_changed(clone!(@weak t => move |_| {
+            let set_unsorted = {
+                let mut inner = t.0.borrow_mut();
+                if inner.sort_temp_disabled {
+                    return
                 }
-                t.update_subscriptions()
-            }),
-        );
+                match get_sort_column(&inner.store) {
+                    Some(col) => { inner.sort_column = Some(col); None }
+                    None => {
+                        inner.sort_column = None;
+                        Some(inner.store.clone())
+                    }
+                }
+            };
+            if let Some(store) = set_unsorted {
+                store.set_unsorted();
+            }
+            t.update_subscriptions();
+        }));
         view.set_fixed_height_mode(true);
         view.set_model(Some(&store));
         view.connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
@@ -267,19 +279,18 @@ impl NetidxTable {
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
-        let mut inner = self.0.borrow_mut();
-        let t = &mut *inner;
         if key.get_keyval() == keys::constants::BackSpace {
-            let path = Path::dirname(&t.base_path).unwrap_or("/");
+            let base_path = self.0.borrow().base_path.clone();
+            let path = Path::dirname(&base_path).unwrap_or("/");
             let m = FromGui::Navigate(Path::from(String::from(path)));
-            let _ = t.from_gui.unbounded_send(m);
+            let _ = self.0.borrow_mut().from_gui.unbounded_send(m);
         }
         if key.get_keyval() == keys::constants::Escape {
             // unset the focus
-            t.view.set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
-            t.focus_column = None;
-            t.focus_row = None;
-            t.selected_path.set_label("");
+            self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
+            self.0.borrow_mut().focus_column = None;
+            self.0.borrow_mut().focus_row = None;
+            self.0.borrow().selected_path.set_label("");
         }
         Inhibit(false)
     }
@@ -344,6 +355,20 @@ impl NetidxTable {
                 store.row_changed(&start, &i);
             }
             start.next();
+        }
+    }
+
+    fn update_subscriptions(&self) {
+        if self.0.borrow().update_subscriptions.is_none() {
+            let id = idle_add_local({
+                let t = self.clone();
+                move || {
+                    t.update_subscriptions_inner();
+                    t.0.borrow_mut().update_subscriptions = None;
+                    Continue(false)
+                }
+            });
+            self.0.borrow_mut().update_subscriptions = Some(id);
         }
     }
 
@@ -448,16 +473,6 @@ impl NetidxTable {
         self.cursor_changed();
     }
 
-    fn update_subscriptions(&self) {
-        if self.0.borrow().update_subscriptions_running {
-            return;
-        } else {
-            self.0.borrow_mut().update_subscriptions_running = true;
-            self.update_subscriptions_inner();
-            self.0.borrow_mut().update_subscriptions_running = false;
-        }
-    }
-
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
         self.0.borrow_mut().sort_temp_disabled = true;
         let col = self.store().get_sort_column_id();
@@ -555,6 +570,7 @@ fn run_gui(
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
+    let changed: Rc<RefCell<Option<HashMap<SubId, Value>>>> = Rc::new(RefCell::new(None));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
@@ -562,19 +578,45 @@ fn run_gui(
         let mut current: Option<NetidxTable> = None;
         while let Some(m) = to_gui.next().await {
             match m {
-                ToGui::Refresh(changed) => {
-                    if let Some(t) = &mut current {
-                        let sav = t.disable_sort();
-                        for (id, v) in changed {
-                            let (row, col) = match t.0.borrow().by_id.get(&id) {
-                                Some(sub) => (sub.row.clone(), sub.col),
-                                None => continue,
-                            };
-                            t.store().set_value(&row, col, &format!("{}", v).to_value());
+                ToGui::Refresh(batch) => {
+                    if changed.borrow().is_some() {
+                        let mut inner = changed.borrow_mut();
+                        let c = inner.as_mut().unwrap();
+                        for (id, v) in batch {
+                            c.insert(id, v);
                         }
-                        t.enable_sort(sav);
-                        t.view().columns_autosize();
-                        t.update_subscriptions();
+                    } else {
+                        *changed.borrow_mut() = Some(batch);
+                        idle_add_local({
+                            let current = current.clone();
+                            let changed = changed.clone();
+                            move || {
+                                if let Some(t) = &current {
+                                    if let Some(changed) = &mut *changed.borrow_mut() {
+                                        let sav = t.disable_sort();
+                                        for (id, v) in changed.drain() {
+                                            let (row, col) =
+                                                match t.0.borrow().by_id.get(&id) {
+                                                    Some(sub) => {
+                                                        (sub.row.clone(), sub.col)
+                                                    }
+                                                    None => continue,
+                                                };
+                                            t.store().set_value(
+                                                &row,
+                                                col,
+                                                &format!("{}", v).to_value(),
+                                            );
+                                        }
+                                        t.enable_sort(sav);
+                                        t.view().columns_autosize();
+                                        t.update_subscriptions();
+                                    }
+                                }
+                                *changed.borrow_mut() = None;
+                                Continue(false)
+                            }
+                        });
                     }
                 }
                 ToGui::Table(subscriber, path, table) => {
