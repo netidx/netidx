@@ -516,10 +516,12 @@ async fn netidx_main(
     loop {
         select_biased! {
             _ = refresh.next() => {
-                let m = ToGui::Refresh(mem::replace(&mut changed, HashMap::new()));
-                match to_gui.send(m).await {
-                    Ok(()) => (),
-                    Err(e) => break
+                if changed.len() > 0 {
+                    let m = ToGui::Refresh(mem::replace(&mut changed, HashMap::new()));
+                    match to_gui.send(m).await {
+                        Ok(()) => (),
+                        Err(e) => break
+                    }
                 }
             },
             b = updates.next() => if let Some(mut batch) = b {
@@ -634,7 +636,8 @@ fn run_gui(
                     );
                     window.add(&cur.0.borrow().root);
                     window.show_all();
-                    current = Some(cur);
+                    current = Some(cur.clone());
+                    cur.update_subscriptions();
                 }
             }
         }
