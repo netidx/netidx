@@ -231,21 +231,15 @@ impl NetidxTable {
             t.view().append_column(&column);
         }
         t.store().connect_sort_column_changed(clone!(@weak t => move |_| {
-            let set_unsorted = {
-                let mut inner = t.0.borrow_mut();
-                if inner.sort_temp_disabled {
-                    return
+            if t.0.borrow().sort_temp_disabled {
+                return
+            }
+            match get_sort_column(&t.store()) {
+                Some(col) => { t.0.borrow_mut().sort_column = Some(col); }
+                None => {
+                    t.0.borrow_mut().sort_column = None;
+                    t.store().set_unsorted();
                 }
-                match get_sort_column(&inner.store) {
-                    Some(col) => { inner.sort_column = Some(col); None }
-                    None => {
-                        inner.sort_column = None;
-                        Some(inner.store.clone())
-                    }
-                }
-            };
-            if let Some(store) = set_unsorted {
-                store.set_unsorted();
             }
             let _ = t.0.borrow().to_gui.unbounded_send(ToGui::Refresh(None));
         }));
@@ -369,8 +363,7 @@ impl NetidxTable {
     }
 
     fn update_subscriptions(&self) {
-        let (setval, store) = {
-            let mut setval: Vec<(TreeIter, u32, Option<&'static str>)> = Vec::new();
+        {
             let mut inner = self.0.borrow_mut();
             let t = &mut *inner;
             let by_id = &mut t.by_id;
@@ -410,22 +403,18 @@ impl NetidxTable {
                                 }
                             }
                         }
-                        setval.push((v.row.clone(), v.col, None));
                     }
                     visible
                 }
             });
             let mut maybe_subscribe_col =
-                |row: &TreeIter, row_name: &str, id: u32, setv: bool| {
+                |row: &TreeIter, row_name: &str, id: u32| {
                     if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false)
                     {
                         subscribed
                             .entry(row_name.into())
                             .or_insert_with(HashSet::new)
                             .insert(id);
-                        if setv {
-                            setval.push((row.clone(), id, Some("#subscribe")));
-                        }
                         let p = base_path.append(row_name);
                         let p = if vector_mode {
                             p
@@ -446,7 +435,7 @@ impl NetidxTable {
                     let row_name_v = store.get_value(&row, 0);
                     if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
                         for col in 0..ncols {
-                            maybe_subscribe_col(&row, row_name, (col + 1) as u32, true);
+                            maybe_subscribe_col(&row, row_name, (col + 1) as u32);
                         }
                     }
                 }
@@ -458,7 +447,7 @@ impl NetidxTable {
                     loop {
                         let row_name_v = store.get_value(&row, 0);
                         if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                            maybe_subscribe_col(&row, row_name, id, false);
+                            maybe_subscribe_col(&row, row_name, id);
                         }
                         if !store.iter_next(&row) {
                             break;
@@ -466,13 +455,7 @@ impl NetidxTable {
                     }
                 }
             }
-            (setval, store.clone())
-        };
-        let sav = self.disable_sort();
-        for (row, id, val) in setval {
-            store.set_value(&row, id, &val.to_value());
         }
-        self.enable_sort(sav);
         self.cursor_changed();
     }
 
@@ -599,7 +582,7 @@ fn run_gui(
                             if let Some(t) = &current {
                                 if let Some(batch) = &mut batch {
                                     let st = Instant::now();
-                                    for _ in 0..1000 {
+                                    for _ in 0..10000 {
                                         match batch.keys().next().copied() {
                                             None => break,
                                             Some(id) => {

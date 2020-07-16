@@ -455,7 +455,6 @@ impl Subscriber {
                         }
                     }
                     for p in gc {
-                        info!("removing dropped subscription {}", p);
                         subscriber.durable_dead.remove(&p);
                     }
                     (
