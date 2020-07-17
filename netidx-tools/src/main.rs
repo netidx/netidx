@@ -2,7 +2,6 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate netidx;
 #[macro_use] extern crate anyhow;
-#[cfg(feature = "browser")]
 
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
