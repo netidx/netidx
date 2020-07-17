@@ -54,7 +54,7 @@ involved.
  let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
  let path = Path::from("/hw/washu-chan/cpu-temp");
  let temp = subscriber.subscribe_one(path, None).await?;
- println!("washu-chan cpu temp is: {:?}", temp.last().await);
+ println!("washu-chan cpu temp is: {:?}", temp.last());
 
  let (tx, mut rx) = mpsc::channel(10);
  temp.updates(false, tx);
@@ -79,6 +79,11 @@ netidx to efficiently send any kind of message you like. However
 it's advised to stick to primitives and express structure with
 muliple published values in a hierarchy, since this makes your
 system more discoverable, and is also quite efficient.
+
+In the case where you publish values in a regular structure you can
+use netidx browser to view them together as a table.
+
+[netidx-browser]: netidx-browser.webm
 
 In many environments it would be completely nuts to build a system
 like this without security, whereas in others it's not necessary
