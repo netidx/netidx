@@ -1,5 +1,5 @@
 use futures::{channel::mpsc, prelude::*, select_biased};
-use gdk::{keys, EventKey};
+use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{
     self, clone,
@@ -26,11 +26,10 @@ use std::{
     cell::RefCell,
     cmp::{min, Ordering},
     collections::{HashMap, HashSet},
-    mem,
+    mem, process,
     rc::{Rc, Weak},
     thread,
     time::Duration,
-    process,
 };
 use tokio::{runtime::Runtime, time};
 
@@ -269,8 +268,11 @@ impl NetidxTable {
             (Some(fc), Some(fr), Ok(Some(rn))) if fc == c && fr.as_str() == rn => {
                 let st = StateFlags::SELECTED;
                 let fg = inner.style.get_color(st);
-                let bg = inner.style.get_background_color(st);
-                cr.set_property_cell_background_rgba(Some(&bg));
+                let bg =
+                    StyleContextExt::get_property(&inner.style, "background-color", st);
+                let bg = bg.get::<RGBA>().unwrap();
+                //let bg = inner.style.get_background_color(st);
+                cr.set_property_cell_background_rgba(bg.as_ref());
                 cr.set_property_foreground_rgba(Some(&fg));
             }
             _ => {

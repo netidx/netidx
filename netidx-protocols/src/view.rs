@@ -12,7 +12,7 @@ pub enum Source {
 pub enum Sink {
     Store(Path),
     Variable(String),
-    Script(String),
+    Function(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
