@@ -13,7 +13,7 @@ use gtk::{
     StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
     TreeViewColumnSizing,
 };
-use log::error;
+use log::{error, info};
 use netidx::{
     config::Config,
     path::Path,
@@ -23,7 +23,7 @@ use netidx::{
 };
 use std::{
     cell::RefCell,
-    cmp::Ordering,
+    cmp::{min, Ordering},
     collections::{HashMap, HashSet},
     mem,
     ops::Drop,
@@ -38,7 +38,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 #[derive(Debug, Clone)]
 enum ToGui {
     Table(Subscriber, Path, Table),
-    Refresh(Option<HashMap<SubId, Value>>),
+    Refresh(Option<Vec<(SubId, Value)>>),
 }
 
 #[derive(Debug, Clone)]
@@ -407,28 +407,26 @@ impl NetidxTable {
                     visible
                 }
             });
-            let mut maybe_subscribe_col =
-                |row: &TreeIter, row_name: &str, id: u32| {
-                    if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false)
-                    {
-                        subscribed
-                            .entry(row_name.into())
-                            .or_insert_with(HashSet::new)
-                            .insert(id);
-                        let p = base_path.append(row_name);
-                        let p = if vector_mode {
-                            p
-                        } else {
-                            p.append(&descriptor.cols[(id - 1) as usize].0)
-                        };
-                        let s = subscriber.durable_subscribe(p);
-                        s.updates(true, updates.clone());
-                        by_id.insert(
-                            s.id(),
-                            Subscription { sub: s, row: row.clone(), col: id as u32 },
-                        );
-                    }
-                };
+            let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
+                if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
+                    subscribed
+                        .entry(row_name.into())
+                        .or_insert_with(HashSet::new)
+                        .insert(id);
+                    let p = base_path.append(row_name);
+                    let p = if vector_mode {
+                        p
+                    } else {
+                        p.append(&descriptor.cols[(id - 1) as usize].0)
+                    };
+                    let s = subscriber.durable_subscribe(p);
+                    s.updates(true, updates.clone());
+                    by_id.insert(
+                        s.id(),
+                        Subscription { sub: s, row: row.clone(), col: id as u32 },
+                    );
+                }
+            };
             // subscribe to all the visible rows
             while start < end {
                 if let Some(row) = store.get_iter(&start) {
@@ -464,12 +462,16 @@ impl NetidxTable {
         let col = self.store().get_sort_column_id();
         self.view().freeze_child_notify();
         self.store().set_unsorted();
+        self.0.borrow_mut().sort_temp_disabled = false;
         col
     }
 
     fn enable_sort(&self, col: Option<(SortColumn, SortType)>) {
+        self.0.borrow_mut().sort_temp_disabled = true;
         if let Some((col, dir)) = col {
-            self.store().set_sort_column_id(col, dir);
+            if self.0.borrow().sort_column.is_some() {
+                self.store().set_sort_column_id(col, dir);
+            }
         }
         self.view().thaw_child_notify();
         self.0.borrow_mut().sort_temp_disabled = false;
@@ -503,10 +505,10 @@ async fn netidx_main(
     loop {
         select_biased! {
             _ = refresh.next() => {
-                //let _ = subscriber.flush().await;
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
                     let b = mem::replace(&mut changed, HashMap::new());
+                    let b = b.into_iter().collect::<Vec<_>>();
                     let m = ToGui::Refresh(Some(b));
                     match to_gui.unbounded_send(m) {
                         Ok(()) => (),
@@ -564,6 +566,7 @@ fn run_gui(
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
+    let mut refreshing = Rc::new(RefCell::new(None));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
@@ -572,55 +575,49 @@ fn run_gui(
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Refresh(mut batch) => {
+                    if let (None, Some(_)) = (&batch, &*refreshing.borrow()) {
+                        continue;
+                    }
                     let sav = batch
                         .as_ref()
                         .and_then(|_| current.as_ref().and_then(|t| t.disable_sort()));
-                    idle_add({
+                    *refreshing.borrow_mut() = Some(idle_add({
                         let current = current.clone();
                         let from_gui = from_gui.clone();
+                        let refreshing = refreshing.clone();
                         move || {
                             if let Some(t) = &current {
                                 if let Some(batch) = &mut batch {
                                     let st = Instant::now();
-                                    for _ in 0..10000 {
-                                        match batch.keys().next().copied() {
-                                            None => break,
-                                            Some(id) => {
-                                                let v = batch.remove(&id).unwrap();
-                                                let (row, col) =
-                                                    match t.0.borrow().by_id.get(&id) {
-                                                        Some(sub) => {
-                                                            (sub.row.clone(), sub.col)
-                                                        }
-                                                        None => continue,
-                                                    };
-                                                t.store().set_value(
-                                                    &row,
-                                                    col,
-                                                    &format!("{}", v).to_value(),
-                                                );
-                                            }
-                                        }
+                                    for _ in 0..min(batch.len(), 10000) {
+                                        let (id, v) = batch.pop().unwrap();
+                                        let (r, c) = match t.0.borrow().by_id.get(&id) {
+                                            None => continue,
+                                            Some(sub) => (sub.row.clone(), sub.col),
+                                        };
+                                        let s = &format!("{}", v).to_value();
+                                        t.store().set_value(&r, c, s);
                                     }
                                     if batch.len() > 0 {
-                                        println!(
+                                        info!(
                                             "refresh update step done {:?}, {} remaining",
                                             st.elapsed(),
                                             batch.len()
                                         );
                                         return Continue(true);
                                     }
-                                    println!("refresh update done {:?}", st.elapsed());
+                                    info!("refresh update done {:?}", st.elapsed());
                                     let st = Instant::now();
                                     t.enable_sort(sav);
-                                    println!("refresh sort done {:?}", st.elapsed());
+                                    info!("refresh sort done {:?}", st.elapsed());
+                                    let _ = from_gui.unbounded_send(FromGui::Refreshed);
                                 }
                                 t.update_subscriptions();
                             }
-                            let _ = from_gui.unbounded_send(FromGui::Refreshed);
+                            *refreshing.borrow_mut() = None;
                             Continue(false)
                         }
-                    });
+                    }));
                 }
                 ToGui::Table(subscriber, path, table) => {
                     if let Some(cur) = current.take() {
