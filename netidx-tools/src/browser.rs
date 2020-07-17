@@ -13,7 +13,7 @@ use gtk::{
     StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
     TreeViewColumnSizing,
 };
-use log::{error, info};
+use log::error;
 use netidx::{
     chars::Chars,
     config::Config,
@@ -27,10 +27,10 @@ use std::{
     cmp::{min, Ordering},
     collections::{HashMap, HashSet},
     mem,
-    ops::Drop,
     rc::{Rc, Weak},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
+    process,
 };
 use tokio::{runtime::Runtime, time};
 
@@ -49,7 +49,7 @@ enum FromGui {
 }
 
 struct Subscription {
-    sub: Dval,
+    _sub: Dval,
     row: TreeIter,
     col: u32,
 }
@@ -78,12 +78,6 @@ struct NetidxTableInner {
 
 #[derive(Clone)]
 struct NetidxTable(Rc<RefCell<NetidxTableInner>>);
-
-impl Drop for NetidxTableInner {
-    fn drop(&mut self) {
-        println!("drop Table {}", self.base_path);
-    }
-}
 
 struct NetidxTableWeak(Weak<RefCell<NetidxTableInner>>);
 
@@ -429,7 +423,7 @@ impl NetidxTable {
                     s.state_updates(true, state_updates.clone());
                     by_id.insert(
                         s.id(),
-                        Subscription { sub: s, row: row.clone(), col: id as u32 },
+                        Subscription { _sub: s, row: row.clone(), col: id as u32 },
                     );
                 }
             };
@@ -586,10 +580,11 @@ fn run_gui(
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let mut refreshing = Rc::new(RefCell::new(None));
+    let refreshing = Rc::new(RefCell::new(None));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
+    window.connect_destroy(move |_| process::exit(0));
     main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
         let mut current: Option<NetidxTable> = None;
         while let Some(m) = to_gui.next().await {
@@ -608,7 +603,6 @@ fn run_gui(
                         move || {
                             if let Some(t) = &current {
                                 if let Some(batch) = &mut batch {
-                                    let st = Instant::now();
                                     for _ in 0..min(batch.len(), 10000) {
                                         let (id, v) = batch.pop().unwrap();
                                         let (r, c) = match t.0.borrow().by_id.get(&id) {
@@ -619,17 +613,9 @@ fn run_gui(
                                         t.store().set_value(&r, c, s);
                                     }
                                     if batch.len() > 0 {
-                                        info!(
-                                            "refresh update step done {:?}, {} remaining",
-                                            st.elapsed(),
-                                            batch.len()
-                                        );
                                         return Continue(true);
                                     }
-                                    info!("refresh update done {:?}", st.elapsed());
-                                    let st = Instant::now();
                                     t.enable_sort(sav);
-                                    info!("refresh sort done {:?}", st.elapsed());
                                     let _ = from_gui.unbounded_send(FromGui::Refreshed);
                                 }
                                 t.update_subscriptions();
