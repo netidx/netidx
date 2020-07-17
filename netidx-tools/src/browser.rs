@@ -15,11 +15,12 @@ use gtk::{
 };
 use log::{error, info};
 use netidx::{
+    chars::Chars,
     config::Config,
     path::Path,
     pool::Pooled,
     resolver::{Auth, Table},
-    subscriber::{Dval, SubId, Subscriber, Value},
+    subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use std::{
     cell::RefCell,
@@ -56,6 +57,7 @@ struct Subscription {
 struct NetidxTableInner {
     subscriber: Subscriber,
     updates: mpsc::Sender<Batch>,
+    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
     to_gui: mpsc::UnboundedSender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
     root: GtkBox,
@@ -139,6 +141,7 @@ impl NetidxTable {
         base_path: Path,
         mut descriptor: Table,
         updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
+        state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
         to_gui: mpsc::UnboundedSender<ToGui>,
         from_gui: mpsc::UnboundedSender<FromGui>,
     ) -> NetidxTable {
@@ -189,6 +192,7 @@ impl NetidxTable {
             to_gui,
             from_gui,
             updates,
+            state_updates,
             style,
             by_id: HashMap::new(),
             subscribed: HashMap::new(),
@@ -371,6 +375,7 @@ impl NetidxTable {
             let subscribed = &mut t.subscribed;
             let subscriber = &t.subscriber;
             let updates = &t.updates;
+            let state_updates = &t.state_updates;
             let descriptor = &t.descriptor;
             let base_path = &t.base_path;
             let vector_mode = t.vector_mode;
@@ -421,6 +426,7 @@ impl NetidxTable {
                     };
                     let s = subscriber.durable_subscribe(p);
                     s.updates(true, updates.clone());
+                    s.state_updates(true, state_updates.clone());
                     by_id.insert(
                         s.id(),
                         Subscription { sub: s, row: row.clone(), col: id as u32 },
@@ -494,6 +500,7 @@ async fn netidx_main(
     cfg: Config,
     auth: Auth,
     mut updates: mpsc::Receiver<Batch>,
+    mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     to_gui: mpsc::UnboundedSender<ToGui>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
@@ -519,6 +526,17 @@ async fn netidx_main(
             b = updates.next() => if let Some(mut batch) = b {
                 for (id, v) in batch.drain(..) {
                     changed.insert(id, v);
+                }
+            },
+            s = state_updates.next() => if let Some((id, st)) = s {
+                match st {
+                    DvState::Subscribed => (),
+                    DvState::Unsubscribed => {
+                        changed.insert(id, Value::String(Chars::from("#SUB")));
+                    }
+                    DvState::FatalError(_) => {
+                        changed.insert(id, Value::String(Chars::from("#ERR")));
+                    }
                 }
             },
             m = from_gui.next() => match m {
@@ -547,18 +565,20 @@ fn run_netidx(
     cfg: Config,
     auth: Auth,
     updates: mpsc::Receiver<Batch>,
+    state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     to_gui: mpsc::UnboundedSender<ToGui>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(netidx_main(cfg, auth, updates, to_gui, from_gui));
+        rt.block_on(netidx_main(cfg, auth, updates, state_updates, to_gui, from_gui));
     });
 }
 
 fn run_gui(
     app: &Application,
     updates: mpsc::Sender<Batch>,
+    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
     tx_to_gui: mpsc::UnboundedSender<ToGui>,
     mut to_gui: mpsc::UnboundedReceiver<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
@@ -630,6 +650,7 @@ fn run_gui(
                         path,
                         table,
                         updates.clone(),
+                        state_updates.clone(),
                         tx_to_gui.clone(),
                         from_gui.clone(),
                     );
@@ -648,12 +669,20 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         .expect("failed to initialize GTK application");
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
+        let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
         let (tx_to_gui, rx_to_gui) = mpsc::unbounded();
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
-        run_netidx(cfg.clone(), auth.clone(), rx_updates, tx_to_gui.clone(), rx_from_gui);
-        run_gui(app, tx_updates, tx_to_gui, rx_to_gui, tx_from_gui)
+        run_netidx(
+            cfg.clone(),
+            auth.clone(),
+            rx_updates,
+            rx_state_updates,
+            tx_to_gui.clone(),
+            rx_from_gui,
+        );
+        run_gui(app, tx_updates, tx_state_updates, tx_to_gui, rx_to_gui, tx_from_gui)
     });
     application.run(&[]);
 }
