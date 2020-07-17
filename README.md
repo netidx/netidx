@@ -80,14 +80,38 @@ it's advised to stick to primitives and express structure with
 muliple published values in a hierarchy, since this makes your
 system more discoverable, and is also quite efficient.
 
+# Browser
+
 In the case where you publish values in a regular structure you can
-use netidx browser to view them together as a table.
+use netidx browser to visualize part of your tree as a table.
 
-[netidx-browser]: netidx-browser.webm
+![netidx-browser](netidx-browser.gif)
 
-In many environments it would be completely nuts to build a system
-like this without security, whereas in others it's not necessary
-at all. To handle both of these cases netidx includes optional
+A row in the table is made of a root node with a child for each column.
+If a subtree consists of row nodes that share the same columns most of the time
+then it can be drawn as a table in the browser. e.g.
+
+```
+/bench/0/0
+/bench/0/1
+/bench/0/2
+```
+
+is one row, the next row is
+
+```
+/bench/1/0
+/bench/1/1
+/bench/1/2
+```
+
+Since these two rows both have columns 0, 1, and 2, they would be drawn
+by the browser as two rows 0, and 1, each with three columns 0, 1, and 2.
+
+# Security
+
+Many environments require strong security, whereas in others it may
+not be necessary. To handle both of these cases netidx includes optional
 support for kerberos v5 (a.k.a. ms active directory). If enabled,
 all components will do mutual authentication between the resolver,
 subscriber, and publisher as well as encryption of all data on the
