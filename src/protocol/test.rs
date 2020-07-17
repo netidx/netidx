@@ -24,10 +24,13 @@ fn path() -> impl Strategy<Value = Path> {
 
 mod resolver {
     use super::*;
-    use crate::protocol::resolver::v1::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret, ServerAuthWrite,
-        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+    use crate::{
+        pack::Z64,
+        protocol::resolver::v1::{
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromRead, FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret,
+            ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
+        },
     };
     use fxhash::FxBuildHasher;
     use proptest::{collection, option};
@@ -91,7 +94,11 @@ mod resolver {
     }
 
     fn to_read() -> impl Strategy<Value = ToRead> {
-        prop_oneof![path().prop_map(ToRead::Resolve), path().prop_map(ToRead::List)]
+        prop_oneof![
+            path().prop_map(ToRead::Resolve),
+            path().prop_map(ToRead::List),
+            path().prop_map(ToRead::Table),
+        ]
     }
 
     fn krb5_spns(
@@ -131,12 +138,24 @@ mod resolver {
             })
     }
 
+    fn table() -> impl Strategy<Value = Table> {
+        (
+            collection::vec(path(), (0, 1000)),
+            collection::vec((path(), any::<u64>().prop_map(Z64)), (0, 1000)),
+        )
+            .prop_map(|(rows, cols)| Table {
+                rows: Pooled::orphan(rows),
+                cols: Pooled::orphan(cols),
+            })
+    }
+
     fn from_read() -> impl Strategy<Value = FromRead> {
         prop_oneof![
             resolved().prop_map(FromRead::Resolved),
             collection::vec(path(), (0, 1000))
                 .prop_map(|v| FromRead::List(Pooled::orphan(v))),
             referral().prop_map(FromRead::Referral),
+            table().prop_map(FromRead::Table),
             Just(FromRead::Denied),
             chars().prop_map(FromRead::Error)
         ]
