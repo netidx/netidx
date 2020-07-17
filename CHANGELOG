@@ -1,3 +1,8 @@
+* 0.3.0:
+  - basic netidx browser added to tools, more is planned for it
+  - protocol not compatible with previous versions
+  - subscriber Val::last and Dval::last are no longer async
+
 * 0.2.0:
   - trim tokio features to the required set
   - config in dns is removed due to limitations

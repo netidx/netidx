@@ -1,4 +1,4 @@
-use crate::{chars::Chars, pack::Pack, path::Path, utils::pack};
+use crate::{chars::Chars, pack::Pack, path::Path, pool::Pooled, utils::pack};
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use std::fmt::Debug;
@@ -26,8 +26,8 @@ mod resolver {
     use super::*;
     use crate::protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret,
-        ServerAuthWrite, ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret, ServerAuthWrite,
+        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
     };
     use fxhash::FxBuildHasher;
     use proptest::{collection, option};
@@ -94,18 +94,20 @@ mod resolver {
         prop_oneof![path().prop_map(ToRead::Resolve), path().prop_map(ToRead::List)]
     }
 
-    fn krb5_spns() -> impl Strategy<Value = HashMap<SocketAddr, Chars, FxBuildHasher>> {
+    fn krb5_spns(
+    ) -> impl Strategy<Value = Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>> {
         collection::hash_map(any::<SocketAddr>(), chars(), (0, 100)).prop_map(|h| {
             let mut hm =
                 HashMap::with_capacity_and_hasher(h.len(), FxBuildHasher::default());
             hm.extend(h.into_iter());
-            hm
+            Pooled::orphan(hm)
         })
     }
 
     fn resolved() -> impl Strategy<Value = Resolved> {
         let resolver = any::<SocketAddr>();
-        let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10));
+        let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10))
+            .prop_map(Pooled::orphan);
         let timestamp = any::<u64>();
         let permissions = any::<u32>();
         (krb5_spns(), resolver, addrs, timestamp, permissions).prop_map(
@@ -124,7 +126,7 @@ mod resolver {
             .prop_map(|(path, ttl, addrs, krb5_spns)| Referral {
                 path,
                 ttl,
-                addrs,
+                addrs: Pooled::orphan(addrs),
                 krb5_spns,
             })
     }
@@ -132,7 +134,8 @@ mod resolver {
     fn from_read() -> impl Strategy<Value = FromRead> {
         prop_oneof![
             resolved().prop_map(FromRead::Resolved),
-            collection::vec(path(), (0, 1000)).prop_map(FromRead::List),
+            collection::vec(path(), (0, 1000))
+                .prop_map(|v| FromRead::List(Pooled::orphan(v))),
             referral().prop_map(FromRead::Referral),
             Just(FromRead::Denied),
             chars().prop_map(FromRead::Error)

@@ -32,13 +32,13 @@ mod resolver {
                 assert_eq!(r.addrs.len(), 1);
                 assert_eq!(r.addrs[0].0, paddr);
             }
-            assert_eq!(&*r.list(p("/")).await.unwrap(), &*vec![p("/app"), p("/foo")]);
+            assert_eq!(&**r.list(p("/")).await.unwrap(), &*vec![p("/app"), p("/foo")]);
             assert_eq!(
-                &*r.list(p("/foo")).await.unwrap(),
+                &**r.list(p("/foo")).await.unwrap(),
                 &*vec![p("/foo/bar"), p("/foo/baz")]
             );
             assert_eq!(
-                &*r.list(p("/app")).await.unwrap(),
+                &**r.list(p("/app")).await.unwrap(),
                 &*vec![p("/app/v0"), p("/app/v1")]
             );
             drop(server)
@@ -110,20 +110,20 @@ mod resolver {
     async fn check_list(r: &ResolverRead) {
         let mut l = r.list(p("/")).await.unwrap();
         l.sort();
-        assert_eq!(&l, &[p("/app"), p("/tmp")]);
+        assert_eq!(&*l, &[p("/app"), p("/tmp")]);
         let mut l = r.list(p("/tmp")).await.unwrap();
         l.sort();
-        assert_eq!(&l, &[p("/tmp/x"), p("/tmp/y"), p("/tmp/z")]);
+        assert_eq!(&*l, &[p("/tmp/x"), p("/tmp/y"), p("/tmp/z")]);
         let mut l = r.list(p("/app")).await.unwrap();
         l.sort();
-        assert_eq!(&l, &[p("/app/huge0"), p("/app/huge1")]);
+        assert_eq!(&*l, &[p("/app/huge0"), p("/app/huge1")]);
         let mut l = r.list(p("/app/huge0")).await.unwrap();
         l.sort();
-        assert_eq!(&l, &[p("/app/huge0/x"), p("/app/huge0/y"), p("/app/huge0/z")]);
+        assert_eq!(&*l, &[p("/app/huge0/x"), p("/app/huge0/y"), p("/app/huge0/z")]);
         let mut l = r.list(p("/app/huge1")).await.unwrap();
         l.sort();
         assert_eq!(
-            &l,
+            &*l,
             &[
                 p("/app/huge1/sub"),
                 p("/app/huge1/x"),
@@ -134,7 +134,7 @@ mod resolver {
         let mut l = r.list(p("/app/huge1/sub")).await.unwrap();
         l.sort();
         assert_eq!(
-            &l,
+            &*l,
             &[p("/app/huge1/sub/x"), p("/app/huge1/sub/y"), p("/app/huge1/sub/z")]
         );
     }
@@ -312,7 +312,7 @@ mod publisher {
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
-            assert_eq!(q.last().await, Some(Value::True));
+            assert_eq!(q.last(), Value::True);
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);

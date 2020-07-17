@@ -61,7 +61,7 @@
 //! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
 //! let path = Path::from("/hw/washu-chan/cpu-temp");
 //! let temp = subscriber.subscribe_one(path, None).await?;
-//! println!("washu-chan cpu temp is: {:?}", temp.last().await);
+//! println!("washu-chan cpu temp is: {:?}", temp.last());
 //!
 //! let (tx, mut rx) = mpsc::channel(10);
 //! temp.updates(false, tx);

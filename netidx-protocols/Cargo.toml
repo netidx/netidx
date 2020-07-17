@@ -1,10 +1,10 @@
 [package]
 name = "netidx-protocols"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-netidx = {path = ".."}
+netidx = "0.3"
 serde = "1"
 serde_derive = "1"
