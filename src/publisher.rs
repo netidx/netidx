@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::v1::Value;
+pub use crate::protocol::publisher::v1::{Id, Value};
 use crate::{
     auth::Permissions,
     channel::Channel,
@@ -6,7 +6,7 @@ use crate::{
     os::{self, Krb5Ctx, ServerCtx},
     path::Path,
     pool::{Pool, Pooled},
-    protocol::publisher::{self, v1::Id},
+    protocol::publisher,
     resolver::{Auth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };

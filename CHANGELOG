@@ -1,3 +1,6 @@
+* 0.3.1:
+  - make publisher::Id public again, sorry!
+
 * 0.3.0:
   - basic netidx browser added to tools, more is planned for it
   - protocol not compatible with previous versions
