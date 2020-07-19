@@ -168,6 +168,18 @@ impl Val {
         inner.current = v;
     }
 
+    /// `update` the current value only if the new value is different
+    /// from the existing one. Otherwise exactly the same as update.
+    pub fn update_changed(&self, v: Value) {
+        let mut inner = self.0.locked.lock();
+        if v != inner.current {
+            for q in inner.subscribed.values() {
+                q.push(ToClientMsg::Val(self.0.id, v.clone()))
+            }
+            inner.current = v;
+        }
+    }
+
     /// Register `tx` to receive writes. You can register multiple
     /// channels, and you can register the same channel on multiple
     /// `Val` objects. If no channels are registered to receive writes
@@ -196,6 +208,11 @@ impl Val {
                 pb.on_write_chans.remove(&c);
             }
         }
+    }
+
+    /// Get a copy of the current value
+    pub fn current(&self) -> Value {
+        self.0.locked.lock().current.clone()
     }
 
     /// Get the unique `Id` of this `Val`
