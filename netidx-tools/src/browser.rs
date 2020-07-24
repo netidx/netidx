@@ -1,8 +1,15 @@
-use futures::{channel::mpsc, prelude::*, select_biased};
+use anyhow::Result;
+use futures::{
+    channel::{mpsc, oneshot},
+    future::{join_all, pending},
+    prelude::*,
+    select_biased,
+};
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{
     self, clone,
+    object::WeakRef,
     signal::Inhibit,
     source::{Continue, PRIORITY_LOW},
 };
@@ -13,15 +20,16 @@ use gtk::{
     StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
     TreeViewColumnSizing,
 };
-use log::error;
+use log::{error, info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
     path::Path,
     pool::Pooled,
-    resolver::{Auth, Table},
+    resolver,
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
+use netidx_protocols::view;
 use std::{
     cell::RefCell,
     cmp::{min, Ordering},
@@ -37,14 +45,24 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    Table(Subscriber, Path, Table),
-    Refresh(Option<Vec<(SubId, Value)>>),
+    View(view::View),
+    Update(Arc<Vec<(SubId, Value)>>),
 }
 
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
-    Refreshed,
+    Updated,
+}
+
+#[derive(Clone)]
+struct WidgetCtx {
+    subscriber: Subscriber,
+    resolver: resolver::ResolverRead,
+    updates: mpsc::Sender<Batch>,
+    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
+    to_gui: mpsc::UnboundedSender<ToGui>,
+    from_gui: mpsc::UnboundedSender<FromGui>,
 }
 
 struct Subscription {
@@ -53,13 +71,8 @@ struct Subscription {
     col: u32,
 }
 
-struct NetidxTableInner {
-    subscriber: Subscriber,
-    updates: mpsc::Sender<Batch>,
-    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
-    from_gui: mpsc::UnboundedSender<FromGui>,
-    root: GtkBox,
+struct TableInner {
+    ctx: WidgetCtx,
     view: TreeView,
     style: StyleContext,
     selected_path: Label,
@@ -68,7 +81,7 @@ struct NetidxTableInner {
     subscribed: HashMap<String, HashSet<u32>>,
     focus_column: Option<TreeViewColumn>,
     focus_row: Option<String>,
-    descriptor: Table,
+    descriptor: resolver::Table,
     vector_mode: bool,
     base_path: Path,
     sort_column: Option<u32>,
@@ -76,23 +89,24 @@ struct NetidxTableInner {
 }
 
 #[derive(Clone)]
-struct NetidxTable(Rc<RefCell<NetidxTableInner>>);
+struct Table(Rc<RefCell<TableInner>>, GtkBox);
 
-struct NetidxTableWeak(Weak<RefCell<NetidxTableInner>>);
+struct TableWeak(Weak<RefCell<TableInner>>, WeakRef<GtkBox>);
 
-impl clone::Downgrade for NetidxTable {
-    type Weak = NetidxTableWeak;
+impl clone::Downgrade for Table {
+    type Weak = TableWeak;
 
     fn downgrade(&self) -> Self::Weak {
-        NetidxTableWeak(Rc::downgrade(&self.0))
+        TableWeak(Rc::downgrade(&self.0), self.1.downgrade())
     }
 }
 
-impl clone::Upgrade for NetidxTableWeak {
-    type Strong = NetidxTable;
+impl clone::Upgrade for TableWeak {
+    type Strong = Table;
 
     fn upgrade(&self) -> Option<Self::Strong> {
-        Weak::upgrade(&self.0).map(NetidxTable)
+        Weak::upgrade(&self.0)
+            .and_then(|rc| self.1.upgrade().and_then(move |r| Table(rc, r)))
     }
 }
 
@@ -128,16 +142,8 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-impl NetidxTable {
-    fn new(
-        subscriber: Subscriber,
-        base_path: Path,
-        mut descriptor: Table,
-        updates: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
-        state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
-        to_gui: mpsc::UnboundedSender<ToGui>,
-        from_gui: mpsc::UnboundedSender<FromGui>,
-    ) -> NetidxTable {
+impl Table {
+    fn new(ctx: WidgetCtx, base_path: Path, mut descriptor: resolver::Table) -> Table {
         let view = TreeView::new();
         let tablewin = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         let root = GtkBox::new(Orientation::Vertical, 5);
@@ -173,27 +179,26 @@ impl NetidxTable {
         }
         let style = view.get_style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
-        let t = NetidxTable(Rc::new(RefCell::new(NetidxTableInner {
-            subscriber,
+        let t = Table(
+            Rc::new(RefCell::new(TableInner {
+                ctx,
+                view,
+                selected_path,
+                store,
+                descriptor,
+                vector_mode,
+                base_path,
+                state_updates,
+                style,
+                by_id: HashMap::new(),
+                subscribed: HashMap::new(),
+                focus_column: None,
+                focus_row: None,
+                sort_column: None,
+                sort_temp_disabled: false,
+            })),
             root,
-            view,
-            selected_path,
-            store,
-            descriptor,
-            vector_mode,
-            base_path,
-            to_gui,
-            from_gui,
-            updates,
-            state_updates,
-            style,
-            by_id: HashMap::new(),
-            subscribed: HashMap::new(),
-            focus_column: None,
-            focus_row: None,
-            sort_column: None,
-            sort_temp_disabled: false,
-        })));
+        );
         t.view().append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -238,7 +243,7 @@ impl NetidxTable {
                     t.store().set_unsorted();
                 }
             }
-            let _ = t.0.borrow().to_gui.unbounded_send(ToGui::Refresh(None));
+            let _ = t.0.borrow().ctx.to_gui.unbounded_send(ToGui::Refresh(None));
         }));
         t.view().set_fixed_height_mode(true);
         t.view().set_model(Some(&t.store()));
@@ -249,7 +254,7 @@ impl NetidxTable {
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         tablewin.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
-                let _ = t.0.borrow().to_gui.unbounded_send(ToGui::Refresh(None));
+                let _ = t.0.borrow().ctx.to_gui.unbounded_send(ToGui::Refresh(None));
             }));
         });
         t
@@ -271,7 +276,6 @@ impl NetidxTable {
                 let bg =
                     StyleContextExt::get_property(&inner.style, "background-color", st);
                 let bg = bg.get::<RGBA>().unwrap();
-                //let bg = inner.style.get_background_color(st);
                 cr.set_property_cell_background_rgba(bg.as_ref());
                 cr.set_property_foreground_rgba(Some(&fg));
             }
@@ -287,7 +291,7 @@ impl NetidxTable {
             let base_path = self.0.borrow().base_path.clone();
             let path = Path::dirname(&base_path).unwrap_or("/");
             let m = FromGui::Navigate(Path::from(String::from(path)));
-            let _ = self.0.borrow_mut().from_gui.unbounded_send(m);
+            let _ = self.0.borrow_mut().ctx.from_gui.unbounded_send(m);
         }
         if key.get_keyval() == keys::constants::Escape {
             // unset the focus
@@ -306,7 +310,7 @@ impl NetidxTable {
             let row_name = t.store.get_value(&row, 0);
             if let Ok(Some(row_name)) = row_name.get::<&str>() {
                 let path = t.base_path.append(row_name);
-                let _ = t.from_gui.unbounded_send(FromGui::Navigate(path));
+                let _ = t.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
             }
         }
     }
@@ -369,7 +373,7 @@ impl NetidxTable {
             let by_id = &mut t.by_id;
             let store = &t.store;
             let subscribed = &mut t.subscribed;
-            let subscriber = &t.subscriber;
+            let subscriber = &t.ctx.subscriber;
             let updates = &t.updates;
             let state_updates = &t.state_updates;
             let descriptor = &t.descriptor;
@@ -384,6 +388,7 @@ impl NetidxTable {
                 }
                 Some((s, e)) => (s, e),
             };
+            // CR estokes: adjust based on the number of rows actually visible
             for _ in 0..50 {
                 start.prev();
                 end.next();
@@ -479,8 +484,8 @@ impl NetidxTable {
         self.0.borrow_mut().sort_temp_disabled = false;
     }
 
-    fn root(&self) -> GtkBox {
-        self.0.borrow().root.clone()
+    fn root(&self) -> &GtkBox {
+        &self.1
     }
 
     fn view(&self) -> TreeView {
@@ -490,18 +495,114 @@ impl NetidxTable {
     fn store(&self) -> ListStore {
         self.0.borrow().store.clone()
     }
+
+    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+        let (tx, rx) = oneshot::channel();
+    }
+}
+
+struct Container {
+    spec: view::Container,
+    root: GtkBox,
+    children: Vec<Widget>,
+}
+
+impl Container {
+    async fn new(ctx: &WidgetCtx, spec: &view::Container) -> Result<Container> {
+        let dir = match spec.direction {
+            Direction::Horizontal => Orientation::Horizontal,
+            Direction::Vertical => Orientation::Vertical,
+        };
+        let root = GtkBox::new(dir, 5);
+        let mut children = Vec::new();
+        for s in spec.children.iter() {
+            let w = Widget::new(ctx, s).await?;
+            if let Some(r) = w.root() {
+                root.add(r);
+            }
+            children.push(w);
+        }
+        Container { spec: spec.clone(), root, children }
+    }
+
+    async fn update(&self, updates: Arc<Vec<(SubId, Value)>>) {
+        join_all(self.children.iter().map(|c| c.update(updates.clone()))).await;
+    }
+}
+
+enum Widget {
+    Table(Table),
+    Container(Container),
+}
+
+impl Widget {
+    async fn new(ctx: &WidgetCtx, spec: &view::Widget) -> Result<Widget> {
+        match spec {
+            view::Widget::Table(view::Source::Constant(_)) => todo!(),
+            view::Widget::Table(view::Source::Variable(_)) => todo!(),
+            view::Widget::Table(view::Source::Load(base_path)) => {
+                let spec = resolver.table(base_path.clone()).await?;
+                Ok(Widget::Table(Table::new(ctx.clone(), base_path, spec)))
+            }
+            view::Widget::Display(_) => todo!(),
+            view::Widget::Action(_) => todo!(),
+            view::Widget::Button(_) => todo!(),
+            view::Widget::Toggle(_) => todo!(),
+            view::Widget::ComboBox(_) => todo!(),
+            view::Widget::Radio(_) => todo!(),
+            view::Widget::Entry(_) => todo!(),
+            view::Widget::Container(s) => {
+                Widget::Container(Container::new(ctx, s).await?)
+            }
+        }
+    }
+
+    fn root(&self) -> Option<&dyn WidgetExt> {
+        match self {
+            Widget::Table(t) => Some(t.root()),
+            Widget::Container(t) => Some(&t.root),
+        }
+    }
+
+    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+        match self {
+            Widget::Table(t) => t.update(changed).await,
+            Widget::Container(c) => c.update(changed).await,
+        }
+    }
+}
+
+struct View {
+    spec: view::View,
+    root: Widget,
+}
+
+impl View {
+    fn new(ctx: &WidgetCtx, spec: view::View) -> Option<View> {
+        let root = Widget::new(&spec);
+        View { spec, root }
+    }
+
+    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+        self.root.update(changed).await;
+    }
 }
 
 async fn netidx_main(
-    cfg: Config,
-    auth: Auth,
+    subscriber: Subscriber,
     mut updates: mpsc::Receiver<Batch>,
     mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     to_gui: mpsc::UnboundedSender<ToGui>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
-    let subscriber = Subscriber::new(cfg, auth).expect("failed to create subscriber");
-    let resolver = subscriber.resolver();
+    async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
+        match rx_view {
+            None => pending().await,
+            Some(rx_view) => rx_view.next().await,
+        }
+    }
+    let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
+    let mut dv_view: Option<Dval> = None;
     let mut changed = HashMap::new();
     let mut refresh = time::interval(Duration::from_secs(1)).fuse();
     let mut refreshing = false;
@@ -535,19 +636,39 @@ async fn netidx_main(
                     }
                 }
             },
+            m = read_view(&mut rx_view) => match m {
+                None => {
+                    rx_view = None;
+                    dv_view = None;
+                },
+                Some(mut batch) => if let Some(view) = batch.pop() {
+                    match view {
+                        Value::String(s) => match serde_json::from_str::<view::View>(&*s) {
+                            Err(e) => warn!("error parsing view definition {}", e),
+                            Ok(v) => match to_gui.unbounded_send(ToGui::View(v)) {
+                                Err(_) => break,
+                                Ok(()) => info!("updated gui view")
+                            }
+                        }
+                        v => warn!("unexpected type of view definition {}", v),
+                    }
+                }
+            },
             m = from_gui.next() => match m {
                 None => break,
                 Some(FromGui::Refreshed) => { refreshing = false; },
-                Some(FromGui::Navigate(path)) => {
-                    let table = match resolver.table(path.clone()).await {
-                        Ok(table) => table,
-                        Err(e) => {
-                            error!("can't load path {}", e);
-                            continue
-                        }
+                Some(FromGui::Navigate(base_path)) => {
+                    let view_path = base_path.append(".view");
+                    let s = subscriber.durable_subscribe(view_path);
+                    let (tx, rx) = mpsc::channel(2);
+                    s.updates(tx, true);
+                    rx_view = Some(rx);
+                    dv_view = Some(s);
+                    let default = view::View {
+                        scripts: vec![],
+                        root: view::Widget::Table(view::Source::Load(base_path))
                     };
-                    let m = ToGui::Table(subscriber.clone(), path, table);
-                    match to_gui.unbounded_send(m) {
+                    match to_gui.unbounded_send(ToGui::View(default)) {
                         Err(_) => break,
                         Ok(()) => ()
                     }
@@ -588,7 +709,7 @@ fn run_gui(
     window.show_all();
     window.connect_destroy(move |_| process::exit(0));
     main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
-        let mut current: Option<NetidxTable> = None;
+        let mut current: Option<Table> = None;
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Refresh(mut batch) => {
@@ -633,7 +754,7 @@ fn run_gui(
                         cur.view().set_model(None::<&ListStore>);
                     }
                     window.set_title(&format!("Netidx Browser {}", path));
-                    let cur = NetidxTable::new(
+                    let cur = Table::new(
                         subscriber,
                         path,
                         table,

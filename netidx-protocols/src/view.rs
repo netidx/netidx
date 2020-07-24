@@ -29,49 +29,70 @@ pub enum Direction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Action {
+    pub source: Source,
+    pub sink: Sink
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Button {
+    pub enabled: Source,
+    pub label: Source,
+    pub source: Source,
+    pub sink: Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Toggle {
+    pub enabled: Source,
+    pub source: Source,
+    pub sink: Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComboBox {
+    pub enabled: Source,
+    pub choices: Source,
+    pub source: Source,
+    pub sink: Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Radio {
+    pub enabled: Source,
+    pub choices: Source,
+    pub value: Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    pub enabled: Source,
+    pub lines: Source,
+    pub source: Source,
+    pub sink: Sink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Container {
+    pub direction: Direction,
+    pub hpct: f32,
+    pub vpct: f32,
+    pub keybinds: Vec<Keybind>,
+    pub variables: HashMap<String, Value>,
+    pub children: Vec<Widget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
     Table(Source),
     Display(Source),
-    Action {
-        source: Source,
-        sink: Sink
-    },
-    Button {
-        enabled: Source,
-        label: Source,
-        source: Source,
-        sink: Sink,
-    },
-    Toggle {
-        enabled: Source,
-        source: Source,
-        sink: Sink,
-    },
-    ComboBox {
-        enabled: Source,
-        choices: Source,
-        source: Source,
-        sink: Sink,
-    },
-    Radio {
-        enabled: Source,
-        choices: Source,
-        value: Sink,
-    },
-    Entry {
-        enabled: Source,
-        lines: Source,
-        source: Source,
-        sink: Sink,
-    },
-    Container {
-        direction: Direction,
-        hpct: f32,
-        vpct: f32,
-        keybinds: Vec<Keybind>,
-        variables: HashMap<String, Value>,
-        children: Vec<Widget>,
-    }
+    Action(Action),
+    Button(Button),
+    Toggle(Toggle),
+    ComboBox(ComboBox),
+    Radio(Radio),
+    Entry(Entry),
+    Container(Container),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
