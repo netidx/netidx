@@ -35,7 +35,9 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{min, Ordering},
     collections::{HashMap, HashSet},
-    mem, process,
+    mem,
+    ops::Drop,
+    process,
     rc::{Rc, Weak},
     result, thread,
     time::Duration,
@@ -88,6 +90,12 @@ struct TableInner {
     base_path: Path,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
+}
+
+impl Drop for TableInner {
+    fn drop(&self) {
+        self.view.set_model(None::<&ListStore>)
+    }
 }
 
 #[derive(Clone)]
@@ -588,16 +596,19 @@ impl View {
         View { spec, root }
     }
 
+    async fn root(&self) -> &dyn WidgetExt {
+        self.root.root()
+    }
+
     async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
         self.root.update(changed).await;
     }
 }
 
 async fn netidx_main(
-    subscriber: Subscriber,
+    ctx: WidgetCtx,
     mut updates: mpsc::Receiver<Batch>,
     mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
@@ -648,7 +659,7 @@ async fn netidx_main(
                     match view {
                         Value::String(s) => match serde_json::from_str::<view::View>(&*s) {
                             Err(e) => warn!("error parsing view definition {}", e),
-                            Ok(v) => match to_gui.unbounded_send(ToGui::View(v)) {
+                            Ok(v) => to_gui.unbounded_send(ToGui::View(v)) {
                                 Err(_) => break,
                                 Ok(()) => info!("updated gui view")
                             }
@@ -682,26 +693,21 @@ async fn netidx_main(
 }
 
 fn run_netidx(
-    cfg: Config,
-    auth: Auth,
+    ctx: WidgetCtx,
     updates: mpsc::Receiver<Batch>,
     state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
 ) {
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(netidx_main(cfg, auth, updates, state_updates, to_gui, from_gui));
+        rt.block_on(netidx_main(ctx, updates, state_updates, from_gui));
     });
 }
 
 fn run_gui(
+    ctx: WidgetCtx,
     app: &Application,
-    updates: mpsc::Sender<Batch>,
-    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
-    tx_to_gui: mpsc::UnboundedSender<ToGui>,
     mut to_gui: mpsc::UnboundedReceiver<ToGui>,
-    from_gui: mpsc::UnboundedSender<FromGui>,
 ) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
@@ -712,64 +718,27 @@ fn run_gui(
     window.show_all();
     window.connect_destroy(move |_| process::exit(0));
     main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
-        let mut current: Option<Table> = None;
+        let mut current: Option<View> = None;
         while let Some(m) = to_gui.next().await {
             match m {
-                ToGui::Refresh(mut batch) => {
-                    if let (None, Some(_)) = (&batch, &*refreshing.borrow()) {
-                        continue;
+                ToGui::Update(batch) => {
+                    if let Some(root) = &current {
+                        root.update(batch).await;
+                        let _: result::Result<_, _> =
+                            ctx.from_gui.unbounded_send(FromGui::Updated);
                     }
-                    let sav = batch
-                        .as_ref()
-                        .and_then(|_| current.as_ref().and_then(|t| t.disable_sort()));
-                    *refreshing.borrow_mut() = Some(idle_add({
-                        let current = current.clone();
-                        let from_gui = from_gui.clone();
-                        let refreshing = refreshing.clone();
-                        move || {
-                            if let Some(t) = &current {
-                                if let Some(batch) = &mut batch {
-                                    for _ in 0..min(batch.len(), 10000) {
-                                        let (id, v) = batch.pop().unwrap();
-                                        let (r, c) = match t.0.borrow().by_id.get(&id) {
-                                            None => continue,
-                                            Some(sub) => (sub.row.clone(), sub.col),
-                                        };
-                                        let s = &format!("{}", v).to_value();
-                                        t.store().set_value(&r, c, s);
-                                    }
-                                    if batch.len() > 0 {
-                                        return Continue(true);
-                                    }
-                                    t.enable_sort(sav);
-                                    let _ = from_gui.unbounded_send(FromGui::Refreshed);
-                                }
-                                t.update_subscriptions();
-                            }
-                            *refreshing.borrow_mut() = None;
-                            Continue(false)
-                        }
-                    }));
                 }
-                ToGui::Table(subscriber, path, table) => {
+                ToGui::View(view) => {
                     if let Some(cur) = current.take() {
-                        window.remove(&cur.root());
-                        cur.view().set_model(None::<&ListStore>);
+                        window.remove(cur.root());
                     }
                     window.set_title(&format!("Netidx Browser {}", path));
-                    let cur = Table::new(
-                        subscriber,
-                        path,
-                        table,
-                        updates.clone(),
-                        state_updates.clone(),
-                        tx_to_gui.clone(),
-                        from_gui.clone(),
-                    );
-                    window.add(&cur.0.borrow().root);
+                    let cur = View::new(&ctx, view);
+                    window.add(cur.root());
                     window.show_all();
                     current = Some(cur);
-                    let _ = tx_to_gui.unbounded_send(ToGui::Refresh(None));
+                    let m = ToGui::Update(Arc::new(IndexMap::new()));
+                    let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                 }
             }
         }
@@ -786,15 +755,17 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
-        run_netidx(
-            cfg.clone(),
-            auth.clone(),
-            rx_updates,
-            rx_state_updates,
-            tx_to_gui.clone(),
-            rx_from_gui,
-        );
-        run_gui(app, tx_updates, tx_state_updates, tx_to_gui, rx_to_gui, tx_from_gui)
+        let subscriber = Subscriber::new(cfg, auth).unwrap();
+        let ctx = WidgetCtx {
+            subscriber,
+            resolver: subscriber.resolver(),
+            updates: tx_updates,
+            state_updates: tx_state_updates,
+            to_gui: tx_to_gui,
+            from_gui: tx_from_gui,
+        };
+        run_netidx(ctx.clone(), rx_updates, rx_state_updates, rx_from_gui);
+        run_gui(ctx, app, rx_to_gui)
     });
     application.run(&[]);
 }
