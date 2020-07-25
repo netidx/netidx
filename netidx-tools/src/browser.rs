@@ -20,6 +20,7 @@ use gtk::{
     StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
     TreeViewColumnSizing,
 };
+use indexmap::IndexMap;
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
@@ -31,12 +32,12 @@ use netidx::{
 };
 use netidx_protocols::view;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     cmp::{min, Ordering},
     collections::{HashMap, HashSet},
     mem, process,
     rc::{Rc, Weak},
-    thread,
+    result, thread,
     time::Duration,
 };
 use tokio::{runtime::Runtime, time};
@@ -46,7 +47,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 #[derive(Debug, Clone)]
 enum ToGui {
     View(view::View),
-    Update(Arc<Vec<(SubId, Value)>>),
+    Update(Arc<IndexMap<SubId, Value>>),
 }
 
 #[derive(Debug, Clone)]
@@ -73,31 +74,32 @@ struct Subscription {
 
 struct TableInner {
     ctx: WidgetCtx,
+    root: GtkBox,
     view: TreeView,
     style: StyleContext,
     selected_path: Label,
     store: ListStore,
-    by_id: HashMap<SubId, Subscription>,
-    subscribed: HashMap<String, HashSet<u32>>,
-    focus_column: Option<TreeViewColumn>,
-    focus_row: Option<String>,
+    by_id: RefCell<HashMap<SubId, Subscription>>,
+    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
+    focus_column: RefCell<Option<TreeViewColumn>>,
+    focus_row: RefCell<Option<String>>,
     descriptor: resolver::Table,
     vector_mode: bool,
     base_path: Path,
-    sort_column: Option<u32>,
-    sort_temp_disabled: bool,
+    sort_column: Cell<Option<u32>>,
+    sort_temp_disabled: Cell<bool>,
 }
 
 #[derive(Clone)]
-struct Table(Rc<RefCell<TableInner>>, GtkBox);
+struct Table(Rc<TableInner>);
 
-struct TableWeak(Weak<RefCell<TableInner>>, WeakRef<GtkBox>);
+struct TableWeak(Weak<TableInner>);
 
 impl clone::Downgrade for Table {
     type Weak = TableWeak;
 
     fn downgrade(&self) -> Self::Weak {
-        TableWeak(Rc::downgrade(&self.0), self.1.downgrade())
+        TableWeak(Rc::downgrade(&self.0))
     }
 }
 
@@ -105,8 +107,7 @@ impl clone::Upgrade for TableWeak {
     type Strong = Table;
 
     fn upgrade(&self) -> Option<Self::Strong> {
-        Weak::upgrade(&self.0)
-            .and_then(|rc| self.1.upgrade().and_then(move |r| Table(rc, r)))
+        Weak::upgrade(&self.0).map(Table)
     }
 }
 
@@ -179,26 +180,24 @@ impl Table {
         }
         let style = view.get_style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
-        let t = Table(
-            Rc::new(RefCell::new(TableInner {
-                ctx,
-                view,
-                selected_path,
-                store,
-                descriptor,
-                vector_mode,
-                base_path,
-                state_updates,
-                style,
-                by_id: HashMap::new(),
-                subscribed: HashMap::new(),
-                focus_column: None,
-                focus_row: None,
-                sort_column: None,
-                sort_temp_disabled: false,
-            })),
+        let t = Table(Rc::new(TableInner {
+            ctx,
             root,
-        );
+            view,
+            selected_path,
+            store,
+            descriptor,
+            vector_mode,
+            base_path,
+            state_updates,
+            style,
+            by_id: RefCell::new(HashMap::new()),
+            subscribed: RefCell::new(HashMap::new()),
+            focus_column: RefCell::new(None),
+            focus_row: RefCell::new(None),
+            sort_column: Cell::new(None),
+            sort_temp_disabled: Cell::new(false),
+        }));
         t.view().append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -223,7 +222,7 @@ impl Table {
             column.set_title(&if vector_mode {
                 Path::from("value")
             } else {
-                t.0.borrow().descriptor.cols[col].0.clone()
+                t.0.descriptor.cols[col].0.clone()
             });
             t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
                 compare_row(id, m, r0, r1)
@@ -233,20 +232,23 @@ impl Table {
             t.view().append_column(&column);
         }
         t.store().connect_sort_column_changed(clone!(@weak t => move |_| {
-            if t.0.borrow().sort_temp_disabled {
+            if t.0.sort_temp_disabled.get() {
                 return
             }
-            match get_sort_column(&t.store()) {
-                Some(col) => { t.0.borrow_mut().sort_column = Some(col); }
+            match get_sort_column(t.store()) {
+                Some(col) => { *t.0.sort_column.borrow_mut() = Some(col); }
                 None => {
-                    t.0.borrow_mut().sort_column = None;
+                    *t.0.sort_column.borrow_mut() = None;
                     t.store().set_unsorted();
                 }
             }
-            let _ = t.0.borrow().ctx.to_gui.unbounded_send(ToGui::Refresh(None));
+            idle_add(clone!(@weak t => move || {
+                t.update_subscriptions();
+                Continue(false)
+            }));
         }));
         t.view().set_fixed_height_mode(true);
-        t.view().set_model(Some(&t.store()));
+        t.view().set_model(Some(t.store()));
         t.view()
             .connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
         t.view().connect_key_press_event(clone!(
@@ -254,27 +256,26 @@ impl Table {
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         tablewin.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
-                let _ = t.0.borrow().ctx.to_gui.unbounded_send(ToGui::Refresh(None));
+                idle_add(clone!(@weak t => move || t.update_subscriptions()));
             }));
         });
         t
     }
 
     fn render_cell(&self, id: i32, c: &TreeViewColumn, cr: &CellRenderer, i: &TreeIter) {
-        let inner = self.0.borrow();
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
-        let rn_v = inner.store.get_value(i, 0);
+        let rn_v = self.store().get_value(i, 0);
         let rn = rn_v.get::<&str>();
-        cr.set_property_text(match inner.store.get_value(i, id).get::<&str>() {
-            Ok(it) => it,
+        cr.set_property_text(match self.store().get_value(i, id).get::<&str>() {
+            Ok(v) => v,
             _ => return,
         });
-        match (&inner.focus_column, &inner.focus_row, rn) {
+        match (&*self.0.focus_column.borrow(), &*self.0.focus_row.borrow(), rn) {
             (Some(fc), Some(fr), Ok(Some(rn))) if fc == c && fr.as_str() == rn => {
                 let st = StateFlags::SELECTED;
-                let fg = inner.style.get_color(st);
+                let fg = self.0.style.get_color(st);
                 let bg =
-                    StyleContextExt::get_property(&inner.style, "background-color", st);
+                    StyleContextExt::get_property(&self.0.style, "background-color", st);
                 let bg = bg.get::<RGBA>().unwrap();
                 cr.set_property_cell_background_rgba(bg.as_ref());
                 cr.set_property_foreground_rgba(Some(&fg));
@@ -288,175 +289,154 @@ impl Table {
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
         if key.get_keyval() == keys::constants::BackSpace {
-            let base_path = self.0.borrow().base_path.clone();
-            let path = Path::dirname(&base_path).unwrap_or("/");
+            let path = Path::dirname(&self.0.base_path).unwrap_or("/");
             let m = FromGui::Navigate(Path::from(String::from(path)));
-            let _ = self.0.borrow_mut().ctx.from_gui.unbounded_send(m);
+            let _: result::Result<_, _> = self.0.ctx.from_gui.unbounded_send(m);
         }
         if key.get_keyval() == keys::constants::Escape {
             // unset the focus
             self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
-            self.0.borrow_mut().focus_column = None;
-            self.0.borrow_mut().focus_row = None;
-            self.0.borrow().selected_path.set_label("");
+            *self.0.focus_column.borrow_mut() = None;
+            *self.0.focus_row.borrow_mut() = None;
+            self.0.selected_path.set_label("");
         }
         Inhibit(false)
     }
 
     fn row_activated(&self, path: &TreePath) {
-        let mut inner = self.0.borrow_mut();
-        let t = &mut *inner;
-        if let Some(row) = t.store.get_iter(&path) {
-            let row_name = t.store.get_value(&row, 0);
+        if let Some(row) = self.store().get_iter(&path) {
+            let row_name = self.store().get_value(&row, 0);
             if let Ok(Some(row_name)) = row_name.get::<&str>() {
-                let path = t.base_path.append(row_name);
-                let _ = t.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
+                let path = self.0.base_path.append(row_name);
+                let _: result::Result<_, _> =
+                    self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
             }
         }
     }
 
     fn cursor_changed(&self) {
-        let (store, view, mut start, end) = {
-            let mut inner = self.0.borrow_mut();
-            let t = &mut *inner;
-            let (p, c) = t.view.get_cursor();
-            let row_name = match p {
+        let (p, c) = self.view().get_cursor();
+        let row_name = match p {
+            None => None,
+            Some(p) => match self.store().get_iter(&p) {
                 None => None,
-                Some(p) => match t.store.get_iter(&p) {
-                    None => None,
-                    Some(i) => Some(t.store.get_value(&i, 0)),
-                },
-            };
-            let path = match row_name {
+                Some(i) => Some(self.store().get_value(&i, 0)),
+            },
+        };
+        let path = match row_name {
+            None => Path::from(""),
+            Some(row_name) => match row_name.get::<&str>().ok().flatten() {
                 None => Path::from(""),
-                Some(row_name) => match row_name.get::<&str>().ok().flatten() {
-                    None => Path::from(""),
-                    Some(row_name) => {
-                        t.focus_column = c.clone();
-                        t.focus_row = Some(String::from(row_name));
-                        let col_name = if t.vector_mode {
-                            None
-                        } else if t.view.get_column(0) == c {
-                            None
-                        } else {
-                            c.as_ref().and_then(|c| c.get_title())
-                        };
-                        match col_name {
-                            None => t.base_path.append(row_name),
-                            Some(col_name) => {
-                                t.base_path.append(row_name).append(col_name.as_str())
-                            }
+                Some(row_name) => {
+                    *self.0.focus_column.borrow_mut() = c.clone();
+                    *self.0.focus_row.borrow_mut() = Some(String::from(row_name));
+                    let col_name = if self.0.vector_mode {
+                        None
+                    } else if self.view().get_column(0) == c {
+                        None
+                    } else {
+                        c.as_ref().and_then(|c| c.get_title())
+                    };
+                    match col_name {
+                        None => self.0.base_path.append(row_name),
+                        Some(col_name) => {
+                            self.0.base_path.append(row_name).append(col_name.as_str())
                         }
                     }
-                },
-            };
-            t.selected_path.set_label(&*path);
-            let (start, end) = match t.view.get_visible_range() {
-                None => return,
-                Some((s, e)) => (s, e),
-            };
-            (t.store.clone(), t.view.clone(), start, end)
+                }
+            },
         };
-        view.columns_autosize();
+        self.0.selected_path.set_label(&*path);
+        let (start, end) = match self.view().get_visible_range() {
+            None => return,
+            Some((s, e)) => (s, e),
+        };
+        self.view().columns_autosize();
         while start <= end {
-            if let Some(i) = store.get_iter(&start) {
-                store.row_changed(&start, &i);
+            if let Some(i) = self.store().get_iter(&start) {
+                self.store().row_changed(&start, &i);
             }
             start.next();
         }
     }
 
     fn update_subscriptions(&self) {
-        {
-            let mut inner = self.0.borrow_mut();
-            let t = &mut *inner;
-            let by_id = &mut t.by_id;
-            let store = &t.store;
-            let subscribed = &mut t.subscribed;
-            let subscriber = &t.ctx.subscriber;
-            let updates = &t.updates;
-            let state_updates = &t.state_updates;
-            let descriptor = &t.descriptor;
-            let base_path = &t.base_path;
-            let vector_mode = t.vector_mode;
-            let sort_column = t.sort_column;
-            let ncols = if t.vector_mode { 1 } else { t.descriptor.cols.len() };
-            let (mut start, mut end) = match t.view.get_visible_range() {
-                None => {
-                    let _ = t.to_gui.unbounded_send(ToGui::Refresh(None));
-                    return;
-                }
-                Some((s, e)) => (s, e),
-            };
-            // CR estokes: adjust based on the number of rows actually visible
-            for _ in 0..50 {
-                start.prev();
-                end.next();
+        let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
+        let (mut start, mut end) = match self.view().get_visible_range() {
+            Some((s, e)) => (s, e),
+            None => {
+                idle_add(clone!(@weak self => move || {
+                    self.update_subscriptions();
+                    Continue(false)
+                }));
+                return;
             }
-            // unsubscribe invisible rows
-            by_id.retain(|_, v| match store.get_path(&v.row) {
-                None => false,
-                Some(p) => {
-                    let visible =
-                        (p >= start && p <= end) || (Some(v.col) == sort_column);
-                    if !visible {
-                        let row_name_v = store.get_value(&v.row, 0);
-                        if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                            if let Some(set) = subscribed.get_mut(row_name) {
-                                set.remove(&v.col);
-                                if set.is_empty() {
-                                    subscribed.remove(row_name);
-                                }
+        };
+        for _ in 0..50 {
+            start.prev();
+            end.next();
+        }
+        // unsubscribe invisible rows
+        self.0.by_id.borrow_mut().retain(|_, v| match self.store().get_path(&v.row) {
+            None => false,
+            Some(p) => {
+                let visible = (p >= start && p <= end) || (Some(v.col) == sort_column);
+                if !visible {
+                    let row_name_v = self.store().get_value(&v.row, 0);
+                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                        let mut subscribed = self.0.subscribed.borrow_mut();
+                        if let Some(set) = subscribed.get_mut(row_name) {
+                            set.remove(&v.col);
+                            if set.is_empty() {
+                                subscribed.remove(row_name);
                             }
                         }
                     }
-                    visible
                 }
-            });
-            let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
-                if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
-                    subscribed
-                        .entry(row_name.into())
-                        .or_insert_with(HashSet::new)
-                        .insert(id);
-                    let p = base_path.append(row_name);
-                    let p = if vector_mode {
-                        p
-                    } else {
-                        p.append(&descriptor.cols[(id - 1) as usize].0)
-                    };
-                    let s = subscriber.durable_subscribe(p);
-                    s.updates(true, updates.clone());
-                    s.state_updates(true, state_updates.clone());
-                    by_id.insert(
-                        s.id(),
-                        Subscription { _sub: s, row: row.clone(), col: id as u32 },
-                    );
-                }
-            };
-            // subscribe to all the visible rows
-            while start < end {
-                if let Some(row) = store.get_iter(&start) {
-                    let row_name_v = store.get_value(&row, 0);
-                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                        for col in 0..ncols {
-                            maybe_subscribe_col(&row, row_name, (col + 1) as u32);
-                        }
+                visible
+            }
+        });
+        let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
+            let subscribed = self.0.subscribed.borrow_mut();
+            if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
+                subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
+                let p = self.0.base_path.append(row_name);
+                let p = if self.0.vector_mode {
+                    p
+                } else {
+                    p.append(&self.0.descriptor.cols[(id - 1) as usize].0)
+                };
+                let s = self.0.ctx.subscriber.durable_subscribe(p);
+                s.updates(true, self.0.ctx.updates.clone());
+                s.state_updates(true, self.0.ctx.state_updates.clone());
+                self.0.by_id.borrow_mut().insert(
+                    s.id(),
+                    Subscription { _sub: s, row: row.clone(), col: id as u32 },
+                );
+            }
+        };
+        // subscribe to all the visible rows
+        while start < end {
+            if let Some(row) = self.store().get_iter(&start) {
+                let row_name_v = self.store().get_value(&row, 0);
+                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                    for col in 0..ncols {
+                        maybe_subscribe_col(&row, row_name, (col + 1) as u32);
                     }
                 }
-                start.next();
             }
-            // subscribe to all rows in the sort column
-            if let Some(id) = sort_column {
-                if let Some(row) = store.get_iter_first() {
-                    loop {
-                        let row_name_v = store.get_value(&row, 0);
-                        if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
-                            maybe_subscribe_col(&row, row_name, id);
-                        }
-                        if !store.iter_next(&row) {
-                            break;
-                        }
+            start.next();
+        }
+        // subscribe to all rows in the sort column
+        if let Some(id) = self.0.sort_column.get() {
+            if let Some(row) = self.store().get_iter_first() {
+                loop {
+                    let row_name_v = self.store().get_value(&row, 0);
+                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                        maybe_subscribe_col(&row, row_name, id);
+                    }
+                    if !self.store().iter_next(&row) {
+                        break;
                     }
                 }
             }
@@ -465,39 +445,64 @@ impl Table {
     }
 
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
-        self.0.borrow_mut().sort_temp_disabled = true;
+        self.0.sort_temp_disabled.set(true);
         let col = self.store().get_sort_column_id();
         self.view().freeze_child_notify();
         self.store().set_unsorted();
-        self.0.borrow_mut().sort_temp_disabled = false;
+        self.0.sort_temp_disabled.set(false);
         col
     }
 
     fn enable_sort(&self, col: Option<(SortColumn, SortType)>) {
-        self.0.borrow_mut().sort_temp_disabled = true;
+        self.0.sort_temp_disabled.set(true);
         if let Some((col, dir)) = col {
-            if self.0.borrow().sort_column.is_some() {
+            if self.0.sort_column.borrow().is_some() {
                 self.store().set_sort_column_id(col, dir);
             }
         }
-        self.view().thaw_child_notify();
-        self.0.borrow_mut().sort_temp_disabled = false;
+        self.0.sort_temp_disabled.set(false);
     }
 
     fn root(&self) -> &GtkBox {
         &self.1
     }
 
-    fn view(&self) -> TreeView {
-        self.0.borrow().view.clone()
+    fn view(&self) -> &TreeView {
+        &self.0.view
     }
 
-    fn store(&self) -> ListStore {
-        self.0.borrow().store.clone()
+    fn store(&self) -> &ListStore {
+        &self.0.store
     }
 
-    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+    async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
         let (tx, rx) = oneshot::channel();
+        self.disable_sort();
+        idle_add({
+            let t = self.clone();
+            let mut i = 0;
+            move || {
+                let mut n = 0;
+                while n < 10000 && i < changed.len() {
+                    let (id, v) = changed.get_index(i).unwrap();
+                    if let Some(sub) = t.0.by_id.borrow().get(id) {
+                        let s = &format!("{}", v).to_value();
+                        t.store().set_value(&sub.row, sub.col, s);
+                    };
+                    i += 1;
+                    n += 1;
+                }
+                if i < changed.len() {
+                    Continue(true)
+                } else {
+                    let _: result::Result<_> = tx.send(());
+                    Continue(false)
+                }
+            }
+        });
+        rx.await;
+        self.enable_sort();
+        self.update_subscriptions();
     }
 }
 
@@ -525,7 +530,7 @@ impl Container {
         Container { spec: spec.clone(), root, children }
     }
 
-    async fn update(&self, updates: Arc<Vec<(SubId, Value)>>) {
+    async fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
         join_all(self.children.iter().map(|c| c.update(updates.clone()))).await;
     }
 }
@@ -564,7 +569,7 @@ impl Widget {
         }
     }
 
-    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+    async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
         match self {
             Widget::Table(t) => t.update(changed).await,
             Widget::Container(c) => c.update(changed).await,
@@ -583,7 +588,7 @@ impl View {
         View { spec, root }
     }
 
-    async fn update(&self, changed: Arc<Vec<(SubId, Value)>>) {
+    async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
         self.root.update(changed).await;
     }
 }
@@ -603,7 +608,7 @@ async fn netidx_main(
     }
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut dv_view: Option<Dval> = None;
-    let mut changed = HashMap::new();
+    let mut changed = IndexMap::new();
     let mut refresh = time::interval(Duration::from_secs(1)).fuse();
     let mut refreshing = false;
     loop {
@@ -611,10 +616,8 @@ async fn netidx_main(
             _ = refresh.next() => {
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
-                    let b = mem::replace(&mut changed, HashMap::new());
-                    let b = b.into_iter().collect::<Vec<_>>();
-                    let m = ToGui::Refresh(Some(b));
-                    match to_gui.unbounded_send(m) {
+                    let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
+                    match to_gui.unbounded_send(ToGui::Refresh(Some(b))) {
                         Ok(()) => (),
                         Err(e) => break
                     }
@@ -656,7 +659,7 @@ async fn netidx_main(
             },
             m = from_gui.next() => match m {
                 None => break,
-                Some(FromGui::Refreshed) => { refreshing = false; },
+                Some(FromGui::Updated) => { refreshing = false; },
                 Some(FromGui::Navigate(base_path)) => {
                     let view_path = base_path.append(".view");
                     let s = subscriber.durable_subscribe(view_path);

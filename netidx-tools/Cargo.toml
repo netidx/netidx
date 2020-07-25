@@ -42,6 +42,7 @@ env_logger = "0.7"
 base64 = "0.12"
 Boa = "0.9"
 parking_lot = "0.10"
+indexmap = "1"
 gtk = { version = "0.9", features = ["v3_24"], optional = true }
 gio = { version = "0.9", optional = true }
 glib = { version = "0.10", optional = true }
