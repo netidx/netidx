@@ -7,6 +7,6 @@ description = "Various protocols build on top of netidx"
 license = "MIT"
 
 [dependencies]
-netidx = "0.3"
+netidx = { path = ".." }
 serde = "1"
 serde_derive = "1"

@@ -18,7 +18,7 @@ use gtk::{
     Box as GtkBox, CellRenderer, CellRendererText, Label, ListStore, Orientation,
     PackType, ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags,
     StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
-    TreeViewColumnSizing,
+    TreeViewColumnSizing, Widget as GtkWidget,
 };
 use indexmap::IndexMap;
 use log::{error, info, warn};
@@ -27,7 +27,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    resolver,
+    resolver::{self, Auth},
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view;
@@ -43,6 +43,7 @@ use std::{
     sync::Arc,
     thread,
     time::Duration,
+    pin::Pin,
 };
 use tokio::{runtime::Runtime, time};
 
@@ -50,7 +51,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View(view::View),
+    View(Path, view::View),
     Update(Arc<IndexMap<SubId, Value>>),
 }
 
@@ -95,7 +96,7 @@ struct TableInner {
 }
 
 impl Drop for TableInner {
-    fn drop(&self) {
+    fn drop(&mut self) {
         self.view.set_model(None::<&ListStore>)
     }
 }
@@ -245,13 +246,13 @@ impl Table {
                 return
             }
             match get_sort_column(t.store()) {
-                Some(col) => { *t.0.sort_column.borrow_mut() = Some(col); }
+                Some(col) => { t.0.sort_column.set(Some(col)); }
                 None => {
-                    *t.0.sort_column.borrow_mut() = None;
+                    t.0.sort_column.set(None);
                     t.store().set_unsorted();
                 }
             }
-            idle_add(clone!(@weak t => move || {
+            idle_add(clone!(@weak t => @default-return Continue(false), move || {
                 t.update_subscriptions();
                 Continue(false)
             }));
@@ -265,7 +266,10 @@ impl Table {
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         tablewin.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
-                idle_add(clone!(@weak t => move || t.update_subscriptions()));
+                idle_add(clone!(@weak t => @default-return Continue(false), move || {
+                    t.update_subscriptions();
+                    Continue(false)
+                }));
             }));
         });
         t
@@ -356,7 +360,7 @@ impl Table {
             },
         };
         self.0.selected_path.set_label(&*path);
-        let (start, end) = match self.view().get_visible_range() {
+        let (mut start, end) = match self.view().get_visible_range() {
             None => return,
             Some((s, e)) => (s, e),
         };
@@ -375,8 +379,8 @@ impl Table {
             Some((s, e)) => (s, e),
             None => {
                 let t = self;
-                idle_add(clone!(@weak t => move || {
-                    self.update_subscriptions();
+                idle_add(clone!(@weak t => @default-return Continue(false), move || {
+                    t.update_subscriptions();
                     Continue(false)
                 }));
                 return;
@@ -390,7 +394,8 @@ impl Table {
         self.0.by_id.borrow_mut().retain(|_, v| match self.store().get_path(&v.row) {
             None => false,
             Some(p) => {
-                let visible = (p >= start && p <= end) || (Some(v.col) == sort_column);
+                let visible =
+                    (p >= start && p <= end) || (Some(v.col) == self.0.sort_column.get());
                 if !visible {
                     let row_name_v = self.store().get_value(&v.row, 0);
                     if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
@@ -407,7 +412,7 @@ impl Table {
             }
         });
         let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
-            let subscribed = self.0.subscribed.borrow_mut();
+            let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
                 let p = self.0.base_path.append(row_name);
@@ -466,15 +471,15 @@ impl Table {
     fn enable_sort(&self, col: Option<(SortColumn, SortType)>) {
         self.0.sort_temp_disabled.set(true);
         if let Some((col, dir)) = col {
-            if self.0.sort_column.borrow().is_some() {
+            if self.0.sort_column.get().is_some() {
                 self.store().set_sort_column_id(col, dir);
             }
         }
         self.0.sort_temp_disabled.set(false);
     }
 
-    fn root(&self) -> &GtkBox {
-        &self.1
+    fn root(&self) -> &GtkWidget {
+        self.0.root.upcast_ref()
     }
 
     fn view(&self) -> &TreeView {
@@ -487,7 +492,8 @@ impl Table {
 
     async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
         let (tx, rx) = oneshot::channel();
-        self.disable_sort();
+        let mut tx = Some(tx);
+        let sctx = self.disable_sort();
         idle_add({
             let t = self.clone();
             let mut i = 0;
@@ -505,13 +511,15 @@ impl Table {
                 if i < changed.len() {
                     Continue(true)
                 } else {
-                    let _: result::Result<_> = tx.send(());
+                    if let Some(tx) = tx.take() {
+                        let _: result::Result<_, _> = tx.send(());
+                    }
                     Continue(false)
                 }
             }
         });
         rx.await;
-        self.enable_sort();
+        self.enable_sort(sctx);
         self.update_subscriptions();
     }
 }
@@ -523,7 +531,7 @@ struct Container {
 }
 
 impl Container {
-    async fn new(ctx: &WidgetCtx, spec: &view::Container) -> Result<Container> {
+    async fn new(ctx: WidgetCtx, spec: view::Container) -> Result<Container> {
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -531,17 +539,21 @@ impl Container {
         let root = GtkBox::new(dir, 5);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(ctx, s).await?;
+            let w = Widget::new(ctx.clone(), s.clone()).await?;
             if let Some(r) = w.root() {
                 root.add(r);
             }
             children.push(w);
         }
-        Container { spec: spec.clone(), root, children }
+        Ok(Container { spec, root, children })
     }
 
     async fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
         join_all(self.children.iter().map(|c| c.update(updates.clone()))).await;
+    }
+
+    fn root(&self) -> &GtkWidget {
+        self.root.upcast_ref()
     }
 }
 
@@ -551,39 +563,49 @@ enum Widget {
 }
 
 impl Widget {
-    async fn new(ctx: &WidgetCtx, spec: &view::Widget) -> Result<Widget> {
-        match spec {
-            view::Widget::Table(view::Source::Constant(_)) => todo!(),
-            view::Widget::Table(view::Source::Variable(_)) => todo!(),
-            view::Widget::Table(view::Source::Load(base_path)) => {
-                let spec = resolver.table(base_path.clone()).await?;
-                Ok(Widget::Table(Table::new(ctx.clone(), base_path, spec)))
+    fn new(
+        ctx: WidgetCtx,
+        spec: view::Widget,
+    ) -> Pin<Box<dyn Future<Output = Result<Widget>>>> {
+        Box::pin(async move {
+            match spec {
+                view::Widget::Table(view::Source::Constant(_)) => todo!(),
+                view::Widget::Table(view::Source::Variable(_)) => todo!(),
+                view::Widget::Table(view::Source::Load(base_path)) => {
+                    let spec = ctx.resolver.table(base_path.clone()).await?;
+                    Ok(Widget::Table(Table::new(ctx.clone(), base_path.clone(), spec)))
+                }
+                view::Widget::Display(_) => todo!(),
+                view::Widget::Action(_) => todo!(),
+                view::Widget::Button(_) => todo!(),
+                view::Widget::Toggle(_) => todo!(),
+                view::Widget::ComboBox(_) => todo!(),
+                view::Widget::Radio(_) => todo!(),
+                view::Widget::Entry(_) => todo!(),
+                view::Widget::Container(s) => {
+                    Ok(Widget::Container(Container::new(ctx, s).await?))
+                }
             }
-            view::Widget::Display(_) => todo!(),
-            view::Widget::Action(_) => todo!(),
-            view::Widget::Button(_) => todo!(),
-            view::Widget::Toggle(_) => todo!(),
-            view::Widget::ComboBox(_) => todo!(),
-            view::Widget::Radio(_) => todo!(),
-            view::Widget::Entry(_) => todo!(),
-            view::Widget::Container(s) => {
-                Widget::Container(Container::new(ctx, s).await?)
-            }
-        }
+        })
     }
 
-    fn root(&self) -> Option<&dyn WidgetExt> {
+    fn root(&self) -> Option<&GtkWidget> {
         match self {
             Widget::Table(t) => Some(t.root()),
-            Widget::Container(t) => Some(&t.root),
+            Widget::Container(t) => Some(&t.root()),
         }
     }
 
-    async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
-        match self {
-            Widget::Table(t) => t.update(changed).await,
-            Widget::Container(c) => c.update(changed).await,
-        }
+    fn update<'a>(
+        &'a self,
+        changed: Arc<IndexMap<SubId, Value>>,
+    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            match self {
+                Widget::Table(t) => t.update(changed).await,
+                Widget::Container(c) => c.update(changed).await,
+            }
+        })
     }
 }
 
@@ -593,12 +615,12 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: &WidgetCtx, spec: view::View) -> Option<View> {
-        let root = Widget::new(&spec);
-        View { spec, root }
+    async fn new(ctx: WidgetCtx, spec: view::View) -> Result<View> {
+        let root = Widget::new(ctx, spec.root.clone()).await?;
+        Ok(View { spec, root })
     }
 
-    async fn root(&self) -> &dyn WidgetExt {
+    fn root(&self) -> Option<&GtkWidget> {
         self.root.root()
     }
 
@@ -619,6 +641,7 @@ async fn netidx_main(
             Some(rx_view) => rx_view.next().await,
         }
     }
+    let mut view_path: Option<Path> = None;
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut dv_view: Option<Dval> = None;
     let mut changed = IndexMap::new();
@@ -630,7 +653,7 @@ async fn netidx_main(
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
                     let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
-                    match to_gui.unbounded_send(ToGui::Refresh(Some(b))) {
+                    match ctx.to_gui.unbounded_send(ToGui::Update(b)) {
                         Ok(()) => (),
                         Err(e) => break
                     }
@@ -652,18 +675,24 @@ async fn netidx_main(
                     }
                 }
             },
-            m = read_view(&mut rx_view) => match m {
+            m = read_view(&mut rx_view).fuse() => match m {
                 None => {
+                    view_path = None;
                     rx_view = None;
                     dv_view = None;
                 },
-                Some(mut batch) => if let Some(view) = batch.pop() {
+                Some(mut batch) => if let Some((_, view)) = batch.pop() {
                     match view {
                         Value::String(s) => match serde_json::from_str::<view::View>(&*s) {
                             Err(e) => warn!("error parsing view definition {}", e),
-                            Ok(v) => match to_gui.unbounded_send(ToGui::View(v)) {
-                                Err(_) => break,
-                                Ok(()) => info!("updated gui view")
+                            Ok(v) => {
+                                if let Some(path) = &view_path {
+                                    let m = ToGui::View(path.clone(), v);
+                                    match ctx.to_gui.unbounded_send(m) {
+                                        Err(_) => break,
+                                        Ok(()) => info!("updated gui view")
+                                    }
+                                }
                             }
                         }
                         v => warn!("unexpected type of view definition {}", v),
@@ -674,17 +703,17 @@ async fn netidx_main(
                 None => break,
                 Some(FromGui::Updated) => { refreshing = false; },
                 Some(FromGui::Navigate(base_path)) => {
-                    let view_path = base_path.append(".view");
-                    let s = subscriber.durable_subscribe(view_path);
+                    let s = ctx.subscriber.durable_subscribe(base_path.append(".view"));
                     let (tx, rx) = mpsc::channel(2);
-                    s.updates(tx, true);
+                    s.updates(true, tx);
+                    view_path = Some(base_path.clone());
                     rx_view = Some(rx);
                     dv_view = Some(s);
                     let default = view::View {
                         scripts: vec![],
-                        root: view::Widget::Table(view::Source::Load(base_path))
+                        root: view::Widget::Table(view::Source::Load(base_path.clone()))
                     };
-                    match to_gui.unbounded_send(ToGui::View(default)) {
+                    match ctx.to_gui.unbounded_send(ToGui::View(base_path, default)) {
                         Err(_) => break,
                         Ok(()) => ()
                     }
@@ -714,7 +743,6 @@ fn run_gui(
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let refreshing = Rc::new(RefCell::new(None));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
@@ -730,18 +758,24 @@ fn run_gui(
                             ctx.from_gui.unbounded_send(FromGui::Updated);
                     }
                 }
-                ToGui::View(view) => {
-                    if let Some(cur) = current.take() {
-                        window.remove(cur.root());
+                ToGui::View(path, view) => match View::new(ctx.clone(), view).await {
+                    Err(e) => error!("failed to create view {}, {}", path, e),
+                    Ok(cur) => {
+                        if let Some(root) = cur.root() {
+                            if let Some(cur) = current.take() {
+                                if let Some(r) = cur.root() {
+                                    window.remove(r);
+                                }
+                            }
+                            window.set_title(&format!("Netidx Browser {}", path));
+                            window.add(root);
+                            window.show_all();
+                            current = Some(cur);
+                            let m = ToGui::Update(Arc::new(IndexMap::new()));
+                            let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
+                        }
                     }
-                    window.set_title(&format!("Netidx Browser {}", path));
-                    let cur = View::new(&ctx, view);
-                    window.add(cur.root());
-                    window.show_all();
-                    current = Some(cur);
-                    let m = ToGui::Update(Arc::new(IndexMap::new()));
-                    let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
-                }
+                },
             }
         }
     })
@@ -757,10 +791,11 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
-        let subscriber = Subscriber::new(cfg, auth).unwrap();
+        let subscriber = Subscriber::new(cfg.clone(), auth.clone()).unwrap();
+        let resolver = subscriber.resolver();
         let ctx = WidgetCtx {
             subscriber,
-            resolver: subscriber.resolver(),
+            resolver,
             updates: tx_updates,
             state_updates: tx_state_updates,
             to_gui: tx_to_gui,
