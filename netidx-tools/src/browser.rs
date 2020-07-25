@@ -39,7 +39,9 @@ use std::{
     ops::Drop,
     process,
     rc::{Rc, Weak},
-    result, thread,
+    result,
+    sync::Arc,
+    thread,
     time::Duration,
 };
 use tokio::{runtime::Runtime, time};
@@ -197,7 +199,6 @@ impl Table {
             descriptor,
             vector_mode,
             base_path,
-            state_updates,
             style,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
@@ -373,7 +374,8 @@ impl Table {
         let (mut start, mut end) = match self.view().get_visible_range() {
             Some((s, e)) => (s, e),
             None => {
-                idle_add(clone!(@weak self => move || {
+                let t = self;
+                idle_add(clone!(@weak t => move || {
                     self.update_subscriptions();
                     Continue(false)
                 }));
@@ -523,8 +525,8 @@ struct Container {
 impl Container {
     async fn new(ctx: &WidgetCtx, spec: &view::Container) -> Result<Container> {
         let dir = match spec.direction {
-            Direction::Horizontal => Orientation::Horizontal,
-            Direction::Vertical => Orientation::Vertical,
+            view::Direction::Horizontal => Orientation::Horizontal,
+            view::Direction::Vertical => Orientation::Vertical,
         };
         let root = GtkBox::new(dir, 5);
         let mut children = Vec::new();
@@ -659,7 +661,7 @@ async fn netidx_main(
                     match view {
                         Value::String(s) => match serde_json::from_str::<view::View>(&*s) {
                             Err(e) => warn!("error parsing view definition {}", e),
-                            Ok(v) => to_gui.unbounded_send(ToGui::View(v)) {
+                            Ok(v) => match to_gui.unbounded_send(ToGui::View(v)) {
                                 Err(_) => break,
                                 Ok(()) => info!("updated gui view")
                             }
