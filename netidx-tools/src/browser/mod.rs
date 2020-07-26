@@ -1,4 +1,3 @@
-use anyhow::Result;
 use futures::{
     channel::{mpsc, oneshot},
     future::{join_all, pending},
@@ -9,7 +8,6 @@ use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{
     self, clone,
-    object::WeakRef,
     signal::Inhibit,
     source::{Continue, PRIORITY_LOW},
 };
@@ -21,7 +19,7 @@ use gtk::{
     TreeViewColumnSizing, Widget as GtkWidget,
 };
 use indexmap::IndexMap;
-use log::{error, info, warn};
+use log::{info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -33,7 +31,7 @@ use netidx::{
 use netidx_protocols::view as protocol_view;
 use std::{
     cell::{Cell, RefCell},
-    cmp::{min, Ordering},
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     mem,
     ops::Drop,
@@ -412,7 +410,7 @@ impl Table {
                 visible
             }
         });
-        let mut maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
+        let maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
             let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
@@ -519,7 +517,7 @@ impl Table {
                 }
             }
         });
-        rx.await;
+        let _: result::Result<_, _> = rx.await;
         self.enable_sort(sctx);
         self.update_subscriptions();
     }
@@ -635,7 +633,7 @@ async fn netidx_main(
     }
     let mut view_path: Option<Path> = None;
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
-    let mut dv_view: Option<Dval> = None;
+    let mut _dv_view: Option<Dval> = None;
     let mut changed = IndexMap::new();
     let mut refresh = time::interval(Duration::from_secs(1)).fuse();
     let mut refreshing = false;
@@ -671,7 +669,7 @@ async fn netidx_main(
                 None => {
                     view_path = None;
                     rx_view = None;
-                    dv_view = None;
+                    _dv_view = None;
                 },
                 Some(mut batch) => if let Some((_, view)) = batch.pop() {
                     match view {
@@ -718,7 +716,7 @@ async fn netidx_main(
                                     s.updates(true, tx);
                                     view_path = Some(base_path.clone());
                                     rx_view = Some(rx);
-                                    dv_view = Some(s);
+                                    _dv_view = Some(s);
                                 }
                             }
                         }
