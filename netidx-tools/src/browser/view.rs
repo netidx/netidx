@@ -5,9 +5,10 @@ use netidx::{
     resolver::{self, ResolverRead},
     subscriber::Value,
 };
-pub(super) use netidx_protocols::view;
-use std::{boxed::Box, pin::Pin};
+pub(super) use netidx_protocols::view::{self, *};
+use std::{boxed::Box, pin::Pin, collections::HashMap};
 
+#[derive(Debug, Clone)]
 pub(super) struct Container {
     pub direction: view::Direction,
     pub hpct: f32,
@@ -17,6 +18,7 @@ pub(super) struct Container {
     pub children: Vec<Widget>,
 }
 
+#[derive(Debug, Clone)]
 pub(super) enum Widget {
     Table(Path, resolver::Table),
     StaticTable(view::Source),
@@ -44,7 +46,8 @@ impl Widget {
                     Ok(Widget::StaticTable(s))
                 }
                 view::Widget::Table(view::Source::Load(path)) => {
-                    Ok(Widget::Table(path, resolver.table(path.clone()).await?))
+                    let spec = resolver.table(path.clone()).await?;
+                    Ok(Widget::Table(path, spec))
                 }
                 view::Widget::Label(s) => Ok(Widget::Label(s)),
                 view::Widget::Action(a) => Ok(Widget::Action(a)),
@@ -60,20 +63,21 @@ impl Widget {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
-                    Ok(Container {
+                    Ok(Widget::Container(Container {
                         direction: c.direction,
                         hpct: c.hpct,
                         vpct: c.vpct,
                         keybinds: c.keybinds,
                         variables: c.variables,
                         children
-                    })
+                    }))
                 }
             }
         })
     }
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct View {
     pub(super) scripts: Vec<Source>,
     pub(super) root: Widget,

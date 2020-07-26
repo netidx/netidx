@@ -570,7 +570,7 @@ impl Widget {
             view::Widget::Table(base_path, spec) => {
                 Widget::Table(Table::new(ctx.clone(), base_path, spec))
             }
-            view::Widget::Display(_) => todo!(),
+            view::Widget::Label(_) => todo!(),
             view::Widget::Action(_) => todo!(),
             view::Widget::Button(_) => todo!(),
             view::Widget::Toggle(_) => todo!(),
@@ -607,9 +607,9 @@ struct View {
 }
 
 impl View {
-    async fn new(ctx: WidgetCtx, spec: view::View) -> Result<View> {
-        let root = Widget::new(ctx, spec.root.clone()).await?;
-        Ok(View { spec, root })
+    fn new(ctx: WidgetCtx, spec: view::View) -> View {
+        let root = Widget::new(ctx, spec.root.clone());
+        View { spec, root }
     }
 
     fn root(&self) -> Option<&GtkWidget> {
@@ -700,19 +700,28 @@ async fn netidx_main(
                 None => break,
                 Some(FromGui::Updated) => { refreshing = false; },
                 Some(FromGui::Navigate(base_path)) => {
-                    let s = ctx.subscriber.durable_subscribe(base_path.append(".view"));
-                    let (tx, rx) = mpsc::channel(2);
-                    s.updates(true, tx);
-                    view_path = Some(base_path.clone());
-                    rx_view = Some(rx);
-                    dv_view = Some(s);
-                    let default = view::View {
-                        scripts: vec![],
-                        root: view::Widget::Table(view::Source::Load(base_path.clone()))
-                    };
-                    match ctx.to_gui.unbounded_send(ToGui::View(base_path, default)) {
-                        Err(_) => break,
-                        Ok(()) => ()
+                    match ctx.resolver.table(base_path.clone()).await {
+                        Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
+                        Ok(spec) => {
+                            let default = view::View {
+                                scripts: vec![],
+                                root: view::Widget::Table(base_path.clone(), spec)
+                            };
+                            let m = ToGui::View(base_path.clone(), default);
+                            match ctx.to_gui.unbounded_send(m) {
+                                Err(_) => break,
+                                Ok(()) => {
+                                    let s = ctx
+                                        .subscriber
+                                        .durable_subscribe(base_path.append(".view"));
+                                    let (tx, rx) = mpsc::channel(2);
+                                    s.updates(true, tx);
+                                    view_path = Some(base_path.clone());
+                                    rx_view = Some(rx);
+                                    dv_view = Some(s);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -755,24 +764,22 @@ fn run_gui(
                             ctx.from_gui.unbounded_send(FromGui::Updated);
                     }
                 }
-                ToGui::View(path, view) => match View::new(ctx.clone(), view).await {
-                    Err(e) => error!("failed to create view {}, {}", path, e),
-                    Ok(cur) => {
-                        if let Some(root) = cur.root() {
-                            if let Some(cur) = current.take() {
-                                if let Some(r) = cur.root() {
-                                    window.remove(r);
-                                }
+                ToGui::View(path, view) => {
+                    let cur = View::new(ctx.clone(), view);
+                    if let Some(root) = cur.root() {
+                        if let Some(cur) = current.take() {
+                            if let Some(r) = cur.root() {
+                                window.remove(r);
                             }
-                            window.set_title(&format!("Netidx Browser {}", path));
-                            window.add(root);
-                            window.show_all();
-                            current = Some(cur);
-                            let m = ToGui::Update(Arc::new(IndexMap::new()));
-                            let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                         }
+                        window.set_title(&format!("Netidx Browser {}", path));
+                        window.add(root);
+                        window.show_all();
+                        current = Some(cur);
+                        let m = ToGui::Update(Arc::new(IndexMap::new()));
+                        let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                     }
-                },
+                }
             }
         }
     })
