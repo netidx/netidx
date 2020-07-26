@@ -25,7 +25,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    resolver::{self, Auth},
+    resolver::{self, Auth, ResolverRead},
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view as protocol_view;
@@ -39,6 +39,7 @@ use std::{
     process,
     rc::{Rc, Weak},
     result,
+    sync::mpsc as smpsc,
     sync::Arc,
     thread,
     time::Duration,
@@ -63,7 +64,7 @@ enum FromGui {
 #[derive(Clone)]
 struct WidgetCtx {
     subscriber: Subscriber,
-    resolver: resolver::ResolverRead,
+    resolver: ResolverRead,
     updates: mpsc::Sender<Batch>,
     state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
     to_gui: mpsc::UnboundedSender<ToGui>,
@@ -620,10 +621,13 @@ impl View {
 }
 
 async fn netidx_main(
-    ctx: WidgetCtx,
+    cfg: Config,
+    auth: Auth,
     mut updates: mpsc::Receiver<Batch>,
     mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
+    to_gui: mpsc::UnboundedSender<ToGui>,
+    to_init: smpsc::Sender<(Subscriber, ResolverRead)>,
 ) {
     async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
         match rx_view {
@@ -631,6 +635,9 @@ async fn netidx_main(
             Some(rx_view) => rx_view.next().await,
         }
     }
+    let subscriber = Subscriber::new(cfg, auth).unwrap();
+    let resolver = subscriber.resolver();
+    let _: result::Result<_, _> = to_init.send((subscriber.clone(), resolver.clone()));
     let mut view_path: Option<Path> = None;
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut _dv_view: Option<Dval> = None;
@@ -643,7 +650,7 @@ async fn netidx_main(
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
                     let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
-                    match ctx.to_gui.unbounded_send(ToGui::Update(b)) {
+                    match to_gui.unbounded_send(ToGui::Update(b)) {
                         Ok(()) => (),
                         Err(e) => break
                     }
@@ -677,11 +684,11 @@ async fn netidx_main(
                             match serde_json::from_str::<protocol_view::View>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
                                 Ok(v) => if let Some(path) = &view_path {
-                                    match view::View::new(&ctx.resolver, v).await {
+                                    match view::View::new(&resolver, v).await {
                                         Err(e) => warn!("failed to raeify view {}", e),
                                         Ok(v) => {
                                             let m = ToGui::View(path.clone(), v);
-                                            match ctx.to_gui.unbounded_send(m) {
+                                            match to_gui.unbounded_send(m) {
                                                 Err(_) => break,
                                                 Ok(()) => info!("updated gui view")
                                             }
@@ -698,7 +705,7 @@ async fn netidx_main(
                 None => break,
                 Some(FromGui::Updated) => { refreshing = false; },
                 Some(FromGui::Navigate(base_path)) => {
-                    match ctx.resolver.table(base_path.clone()).await {
+                    match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
                         Ok(spec) => {
                             let default = view::View {
@@ -706,11 +713,10 @@ async fn netidx_main(
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View(base_path.clone(), default);
-                            match ctx.to_gui.unbounded_send(m) {
+                            match to_gui.unbounded_send(m) {
                                 Err(_) => break,
                                 Ok(()) => {
-                                    let s = ctx
-                                        .subscriber
+                                    let s = subscriber
                                         .durable_subscribe(base_path.append(".view"));
                                     let (tx, rx) = mpsc::channel(2);
                                     s.updates(true, tx);
@@ -728,15 +734,19 @@ async fn netidx_main(
 }
 
 fn run_netidx(
-    ctx: WidgetCtx,
+    cfg: Config,
+    auth: Auth,
     updates: mpsc::Receiver<Batch>,
     state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
-) {
+    to_gui: mpsc::UnboundedSender<ToGui>,
+) -> (Subscriber, ResolverRead) {
+    let (tx, rx) = smpsc::channel();
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(netidx_main(ctx, updates, state_updates, from_gui));
+        rt.block_on(netidx_main(cfg, auth, updates, state_updates, from_gui, to_gui, tx));
     });
+    rx.recv().unwrap()
 }
 
 fn run_gui(
@@ -793,8 +803,14 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
-        let subscriber = Subscriber::new(cfg.clone(), auth.clone()).unwrap();
-        let resolver = subscriber.resolver();
+        let (subscriber, resolver) = run_netidx(
+            cfg.clone(),
+            auth.clone(),
+            rx_updates,
+            rx_state_updates,
+            rx_from_gui,
+            tx_to_gui.clone(),
+        );
         let ctx = WidgetCtx {
             subscriber,
             resolver,
@@ -803,7 +819,6 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
         };
-        run_netidx(ctx.clone(), rx_updates, rx_state_updates, rx_from_gui);
         run_gui(ctx, app, rx_to_gui)
     });
     application.run(&[]);
