@@ -30,22 +30,23 @@ use netidx::{
     resolver::{self, Auth},
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
-use netidx_protocols::view;
+use netidx_protocols::view as protocol_view;
 use std::{
     cell::{Cell, RefCell},
     cmp::{min, Ordering},
     collections::{HashMap, HashSet},
     mem,
     ops::Drop,
+    pin::Pin,
     process,
     rc::{Rc, Weak},
     result,
     sync::Arc,
     thread,
     time::Duration,
-    pin::Pin,
 };
 use tokio::{runtime::Runtime, time};
+mod view;
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
@@ -531,7 +532,7 @@ struct Container {
 }
 
 impl Container {
-    async fn new(ctx: WidgetCtx, spec: view::Container) -> Result<Container> {
+    fn new(ctx: WidgetCtx, spec: view::Container) -> Container {
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -539,13 +540,13 @@ impl Container {
         let root = GtkBox::new(dir, 5);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(ctx.clone(), s.clone()).await?;
+            let w = Widget::new(ctx.clone(), s.clone());
             if let Some(r) = w.root() {
                 root.add(r);
             }
             children.push(w);
         }
-        Ok(Container { spec, root, children })
+        Container { spec, root, children }
     }
 
     async fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
@@ -563,36 +564,27 @@ enum Widget {
 }
 
 impl Widget {
-    fn new(
-        ctx: WidgetCtx,
-        spec: view::Widget,
-    ) -> Pin<Box<dyn Future<Output = Result<Widget>>>> {
-        Box::pin(async move {
-            match spec {
-                view::Widget::Table(view::Source::Constant(_)) => todo!(),
-                view::Widget::Table(view::Source::Variable(_)) => todo!(),
-                view::Widget::Table(view::Source::Load(base_path)) => {
-                    let spec = ctx.resolver.table(base_path.clone()).await?;
-                    Ok(Widget::Table(Table::new(ctx.clone(), base_path.clone(), spec)))
-                }
-                view::Widget::Display(_) => todo!(),
-                view::Widget::Action(_) => todo!(),
-                view::Widget::Button(_) => todo!(),
-                view::Widget::Toggle(_) => todo!(),
-                view::Widget::ComboBox(_) => todo!(),
-                view::Widget::Radio(_) => todo!(),
-                view::Widget::Entry(_) => todo!(),
-                view::Widget::Container(s) => {
-                    Ok(Widget::Container(Container::new(ctx, s).await?))
-                }
+    fn new(ctx: WidgetCtx, spec: view::Widget) -> Widget {
+        match spec {
+            view::Widget::StaticTable(_) => todo!(),
+            view::Widget::Table(base_path, spec) => {
+                Widget::Table(Table::new(ctx.clone(), base_path, spec))
             }
-        })
+            view::Widget::Display(_) => todo!(),
+            view::Widget::Action(_) => todo!(),
+            view::Widget::Button(_) => todo!(),
+            view::Widget::Toggle(_) => todo!(),
+            view::Widget::ComboBox(_) => todo!(),
+            view::Widget::Radio(_) => todo!(),
+            view::Widget::Entry(_) => todo!(),
+            view::Widget::Container(s) => Widget::Container(Container::new(ctx, s)),
+        }
     }
 
     fn root(&self) -> Option<&GtkWidget> {
         match self {
             Widget::Table(t) => Some(t.root()),
-            Widget::Container(t) => Some(&t.root()),
+            Widget::Container(t) => Some(t.root()),
         }
     }
 
@@ -683,14 +675,19 @@ async fn netidx_main(
                 },
                 Some(mut batch) => if let Some((_, view)) = batch.pop() {
                     match view {
-                        Value::String(s) => match serde_json::from_str::<view::View>(&*s) {
-                            Err(e) => warn!("error parsing view definition {}", e),
-                            Ok(v) => {
-                                if let Some(path) = &view_path {
-                                    let m = ToGui::View(path.clone(), v);
-                                    match ctx.to_gui.unbounded_send(m) {
-                                        Err(_) => break,
-                                        Ok(()) => info!("updated gui view")
+                        Value::String(s) => {
+                            match serde_json::from_str::<protocol_view::View>(&*s) {
+                                Err(e) => warn!("error parsing view definition {}", e),
+                                Ok(v) => if let Some(path) = &view_path {
+                                    match view::View::new(&ctx.resolver, v).await {
+                                        Err(e) => warn!("failed to raeify view {}", e),
+                                        Ok(v) => {
+                                            let m = ToGui::View(path.clone(), v);
+                                            match ctx.to_gui.unbounded_send(m) {
+                                                Err(_) => break,
+                                                Ok(()) => info!("updated gui view")
+                                            }
+                                        }
                                     }
                                 }
                             }

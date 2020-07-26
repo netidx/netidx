@@ -85,7 +85,7 @@ pub struct Container {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
     Table(Source),
-    Display(Source),
+    Label(Source),
     Action(Action),
     Button(Button),
     Toggle(Toggle),
