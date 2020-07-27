@@ -299,27 +299,21 @@ impl Table {
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
-        dbg!(key.get_keyval());
         if key.get_keyval() == keys::constants::BackSpace {
             // drill up
             let path = Path::dirname(&self.0.base_path).unwrap_or("/");
-            println!("tbl drill up {}", path);
             let m = FromGui::Navigate(Path::from(String::from(path)));
             let _: result::Result<_, _> = self.0.ctx.from_gui.unbounded_send(m);
         }
         if key.get_keyval() == keys::constants::Return {
             // drill down
             if let Some(row_name) = &*self.0.focus_row.borrow() {
-                if !self.0.vector_mode {
-                    let path = self.0.base_path.append(row_name);
-                    println!("tbl drill down {}", path);
-                    let _: result::Result<_, _> =
-                        self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
-                }
+                let path = self.0.base_path.append(row_name);
+                let _: result::Result<_, _> =
+                    self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
             }
         }
         if key.get_keyval() == keys::constants::Escape {
-            println!("tbl unselect");
             // unset the focus
             self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
             *self.0.focus_column.borrow_mut() = None;
@@ -380,11 +374,15 @@ impl Table {
         let (mut start, mut end) = match self.view().get_visible_range() {
             Some((s, e)) => (s, e),
             None => {
-                let t = self;
-                idle_add(clone!(@weak t => @default-return Continue(false), move || {
-                    t.update_subscriptions();
-                    Continue(false)
-                }));
+                if self.0.descriptor.rows.len() > 0 {
+                    let t = self;
+                    idle_add(
+                        clone!(@weak t => @default-return Continue(false), move || {
+                            t.update_subscriptions();
+                            Continue(false)
+                        }),
+                    );
+                }
                 return;
             }
         };
@@ -548,13 +546,10 @@ impl Container {
             children.push(w);
         }
         root.connect_key_press_event(clone!(@strong ctx, @strong spec => move |_, k| {
-            dbg!(k);
             let target = {
                 if k.get_keyval() == keys::constants::BackSpace {
-                    println!("container drill up");
                     &spec.drill_up_target
                 } else if k.get_keyval() == keys::constants::Return {
-                    println!("container drill down");
                     &spec.drill_down_target
                 } else {
                     &None
