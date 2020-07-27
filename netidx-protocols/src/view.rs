@@ -12,7 +12,6 @@ pub enum Source {
 pub enum Sink {
     Store(Path),
     Variable(String),
-    Function(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +83,6 @@ pub struct Child {
 pub struct Container {
     pub direction: Direction,
     pub keybinds: Vec<Keybind>,
-    pub variables: HashMap<String, Value>,
     pub drill_down_target: Option<Path>,
     pub drill_up_target: Option<Path>,
     pub children: Vec<Child>,
@@ -105,6 +103,6 @@ pub enum Widget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
-    pub scripts: Vec<Source>,
+    pub variables: HashMap<String, Value>,
     pub root: Widget,
 }

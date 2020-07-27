@@ -20,7 +20,6 @@ pub(super) struct Child {
 pub(super) struct Container {
     pub direction: view::Direction,
     pub keybinds: Vec<view::Keybind>,
-    pub variables: HashMap<String, Value>,
     pub drill_down_target: Option<Path>,
     pub drill_up_target: Option<Path>,
     pub children: Vec<Child>,
@@ -69,14 +68,8 @@ impl Widget {
                         let expand = c.expand;
                         let padding = c.padding;
                         let fill = c.fill;
-                        Widget::new(resolver, c.widget).map(move |w| {
-                            Ok(Child {
-                                expand,
-                                fill,
-                                padding,
-                                widget: w?,
-                            })
-                        })
+                        Widget::new(resolver, c.widget)
+                            .map(move |w| Ok(Child { expand, fill, padding, widget: w? }))
                     }))
                     .await
                     .into_iter()
@@ -84,7 +77,6 @@ impl Widget {
                     Ok(Widget::Container(Container {
                         direction: c.direction,
                         keybinds: c.keybinds,
-                        variables: c.variables,
                         drill_down_target: c.drill_down_target,
                         drill_up_target: c.drill_up_target,
                         children,
@@ -97,12 +89,15 @@ impl Widget {
 
 #[derive(Debug, Clone)]
 pub(super) struct View {
-    pub(super) scripts: Vec<Source>,
+    pub(super) variables: HashMap<String, Value>,
     pub(super) root: Widget,
 }
 
 impl View {
     pub(super) async fn new(resolver: &ResolverRead, view: view::View) -> Result<Self> {
-        Ok(View { scripts: view.scripts, root: Widget::new(resolver, view.root).await? })
+        Ok(View {
+            variables: view.variables,
+            root: Widget::new(resolver, view.root).await?,
+        })
     }
 }

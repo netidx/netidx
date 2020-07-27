@@ -9,10 +9,7 @@ use futures::{
 use gdk::keys;
 use gio::prelude::*;
 use glib::{self, clone, signal::Inhibit, source::PRIORITY_LOW};
-use gtk::{
-    prelude::*, Application, ApplicationWindow, Box as GtkBox, Orientation,
-    Widget as GtkWidget,
-};
+use gtk::{self, prelude::*, Application, ApplicationWindow, Orientation};
 use indexmap::IndexMap;
 use log::{info, warn};
 use netidx::{
@@ -25,16 +22,18 @@ use netidx::{
 };
 use netidx_protocols::view as protocol_view;
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     mem,
     pin::Pin,
     process,
+    rc::{Rc, Weak},
     result,
     sync::mpsc as smpsc,
     sync::Arc,
     thread,
     time::Duration,
 };
-use table::Table;
 use tokio::{runtime::Runtime, time};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
@@ -51,7 +50,7 @@ enum FromGui {
     Updated,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct WidgetCtx {
     subscriber: Subscriber,
     resolver: ResolverRead,
@@ -61,22 +60,107 @@ struct WidgetCtx {
     from_gui: mpsc::UnboundedSender<FromGui>,
 }
 
+#[derive(Debug, Clone)]
+enum Source {
+    Constant(Value),
+    Load(Dval),
+    Variable(String, Value),
+}
+
+impl Source {
+    fn new(
+        ctx: &WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Source,
+    ) -> Self {
+        match spec {
+            view::Source::Constant(v) => Source::Constant(v),
+            view::Source::Load(path) => {
+                Source::Load(ctx.subscriber.durable_subscribe(path))
+            }
+            view::Source::Variable(name) => {
+                let v = variables.get(&name).cloned().unwrap_or(Value::Null);
+                Source::Variable(name, v)
+            }
+        }
+    }
+
+    fn current(&self) -> Value {
+        match self {
+            Source::Constant(v) => v.clone(),
+            Source::Variable(_, v) => v.clone(),
+            Source::Load(dv) => match dv.last() {
+                None => Value::String(Chars::from("#SUB")),
+                Some(v) => v.clone(),
+            },
+        }
+    }
+}
+
+struct Label {
+    label: gtk::Label,
+    source: Source,
+}
+
+impl Label {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Source,
+    ) -> Label {
+        let source = Source::new(&ctx, variables, spec);
+        let label = gtk::Label::new(Some(&format!("{}", source.current())));
+        Label { source, label }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.label.upcast_ref()
+    }
+
+    fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
+        match &self.source {
+            Source::Constant(_) | Source::Variable(_, _) => (),
+            Source::Load(dv) => {
+                if let Some(v) = updates.get(&dv.id()) {
+                    self.label.set_label(&format!("{}", v));
+                }
+            }
+        }
+    }
+
+    fn update_vars(&mut self, changed: &HashMap<String, Value>) {
+        match &mut self.source {
+            Source::Load(_) | Source::Constant(_) => (),
+            Source::Variable(name, cur) => {
+                if let Some(new) = changed.get(name) {
+                    self.label.set_label(&format!("{}", new));
+                    *cur = new.clone();
+                }
+            }
+        }
+    }
+}
+
 struct Container {
     spec: view::Container,
-    root: GtkBox,
+    root: gtk::Box,
     children: Vec<Widget>,
 }
 
 impl Container {
-    fn new(ctx: WidgetCtx, spec: view::Container) -> Container {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Container,
+    ) -> Container {
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
         };
-        let root = GtkBox::new(dir, 0);
+        let root = gtk::Box::new(dir, 0);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(ctx.clone(), s.widget.clone());
+            let w = Widget::new(ctx.clone(), variables, s.widget.clone());
             if let Some(r) = w.root() {
                 root.pack_start(r, s.expand, s.fill, s.padding as u32);
             }
@@ -104,41 +188,65 @@ impl Container {
         Container { spec, root, children }
     }
 
-    async fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
-        join_all(self.children.iter().map(|c| c.update(updates.clone()))).await;
+    async fn update(
+        &self,
+        updates: Arc<IndexMap<SubId, Value>>,
+    ) -> HashMap<String, Value> {
+        join_all(self.children.iter().map(|c| c.update(updates.clone())))
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<HashMap<_, _>>()
     }
 
-    fn root(&self) -> &GtkWidget {
+    fn update_vars(
+        &mut self,
+        changed: &HashMap<String, Value>,
+    ) -> HashMap<String, Value> {
+        self.children.iter_mut().map(|c| c.update_vars(changed)).flatten().collect()
+    }
+
+    fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
     }
 }
 
 enum Widget {
-    Table(Table),
+    Table(table::Table),
+    Label(Label),
     Container(Container),
 }
 
 impl Widget {
-    fn new(ctx: WidgetCtx, spec: view::Widget) -> Widget {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Widget,
+    ) -> Widget {
         match spec {
             view::Widget::StaticTable(_) => todo!(),
             view::Widget::Table(base_path, spec) => {
-                Widget::Table(Table::new(ctx.clone(), base_path, spec))
+                Widget::Table(table::Table::new(ctx.clone(), base_path, spec))
             }
-            view::Widget::Label(_) => todo!(),
+            view::Widget::Label(spec) => {
+                Widget::Label(Label::new(ctx.clone(), variables, spec))
+            }
             view::Widget::Action(_) => todo!(),
             view::Widget::Button(_) => todo!(),
             view::Widget::Toggle(_) => todo!(),
             view::Widget::ComboBox(_) => todo!(),
             view::Widget::Radio(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
-            view::Widget::Container(s) => Widget::Container(Container::new(ctx, s)),
+            view::Widget::Container(s) => {
+                Widget::Container(Container::new(ctx, variables, s))
+            }
         }
     }
 
-    fn root(&self) -> Option<&GtkWidget> {
+    fn root(&self) -> Option<&gtk::Widget> {
         match self {
             Widget::Table(t) => Some(t.root()),
+            Widget::Label(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
         }
     }
@@ -146,33 +254,60 @@ impl Widget {
     fn update<'a>(
         &'a self,
         changed: Arc<IndexMap<SubId, Value>>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = HashMap<String, Value>> + 'a>> {
         Box::pin(async move {
             match self {
-                Widget::Table(t) => t.update(changed).await,
+                Widget::Table(t) => {
+                    t.update(changed).await;
+                    HashMap::new()
+                }
+                Widget::Label(t) => {
+                    t.update(changed);
+                    HashMap::new()
+                }
                 Widget::Container(c) => c.update(changed).await,
             }
         })
     }
+
+    fn update_vars(
+        &mut self,
+        changed: &HashMap<String, Value>,
+    ) -> HashMap<String, Value> {
+        match self {
+            Widget::Table(_) => HashMap::new(),
+            Widget::Label(t) => {
+                t.update_vars(changed);
+                HashMap::new()
+            }
+            Widget::Container(t) => t.update_vars(changed),
+        }
+    }
 }
 
-struct View {
-    spec: view::View,
-    root: Widget,
-}
+struct View(Widget);
 
 impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
-        let root = Widget::new(ctx, spec.root.clone());
-        View { spec, root }
+        View(Widget::new(ctx, &spec.variables, spec.root.clone()))
     }
 
-    fn root(&self) -> Option<&GtkWidget> {
-        self.root.root()
+    fn root(&self) -> Option<&gtk::Widget> {
+        self.0.root()
     }
 
-    async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
-        self.root.update(changed).await;
+    async fn update(&mut self, changed: Arc<IndexMap<SubId, Value>>) {
+        let vars = self.0.update(changed).await;
+        if vars.len() > 0 {
+            self.update_vars(&vars);
+        }
+    }
+
+    fn update_vars(&mut self, changed: &HashMap<String, Value>) {
+        let vars = self.0.update_vars(changed);
+        if vars.len() > 0 {
+            self.update_vars(&vars);
+        }
     }
 }
 
@@ -265,7 +400,7 @@ async fn netidx_main(
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
                         Ok(spec) => {
                             let default = view::View {
-                                scripts: vec![],
+                                variables: HashMap::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View(base_path.clone(), default);
@@ -322,7 +457,7 @@ fn run_gui(
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Update(batch) => {
-                    if let Some(root) = &current {
+                    if let Some(root) = &mut current {
                         root.update(batch).await;
                         let _: result::Result<_, _> =
                             ctx.from_gui.unbounded_send(FromGui::Updated);
