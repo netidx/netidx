@@ -299,33 +299,34 @@ impl Table {
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
+        dbg!(key.get_keyval());
         if key.get_keyval() == keys::constants::BackSpace {
             // drill up
             let path = Path::dirname(&self.0.base_path).unwrap_or("/");
+            println!("tbl drill up {}", path);
             let m = FromGui::Navigate(Path::from(String::from(path)));
             let _: result::Result<_, _> = self.0.ctx.from_gui.unbounded_send(m);
-            Inhibit(true)
-        } else if key.get_keyval() == keys::constants::Return {
+        }
+        if key.get_keyval() == keys::constants::Return {
             // drill down
-            if let Some((m, row)) = self.view().get_selection().get_selected() {
-                let row_name = m.get_value(&row, 0);
-                if let Ok(Some(row_name)) = row_name.get::<&str>() {
+            if let Some(row_name) = &*self.0.focus_row.borrow() {
+                if !self.0.vector_mode {
                     let path = self.0.base_path.append(row_name);
+                    println!("tbl drill down {}", path);
                     let _: result::Result<_, _> =
                         self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
                 }
             }
-            Inhibit(true)
-        } else if key.get_keyval() == keys::constants::Escape {
+        }
+        if key.get_keyval() == keys::constants::Escape {
+            println!("tbl unselect");
             // unset the focus
             self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
             *self.0.focus_column.borrow_mut() = None;
             *self.0.focus_row.borrow_mut() = None;
             self.0.selected_path.set_label("");
-            Inhibit(true)
-        } else {
-            Inhibit(false)
         }
+        Inhibit(false)
     }
 
     fn cursor_changed(&self) {
@@ -547,10 +548,13 @@ impl Container {
             children.push(w);
         }
         root.connect_key_press_event(clone!(@strong ctx, @strong spec => move |_, k| {
+            dbg!(k);
             let target = {
                 if k.get_keyval() == keys::constants::BackSpace {
+                    println!("container drill up");
                     &spec.drill_up_target
                 } else if k.get_keyval() == keys::constants::Return {
+                    println!("container drill down");
                     &spec.drill_down_target
                 } else {
                     &None
