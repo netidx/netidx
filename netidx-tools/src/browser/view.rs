@@ -6,16 +6,24 @@ use netidx::{
     subscriber::Value,
 };
 pub(super) use netidx_protocols::view::{self, *};
-use std::{boxed::Box, pin::Pin, collections::HashMap};
+use std::{boxed::Box, collections::HashMap, pin::Pin};
+
+#[derive(Debug, Clone)]
+pub(super) struct Child {
+    pub expand: bool,
+    pub fill: bool,
+    pub padding: u64,
+    pub widget: Widget,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct Container {
     pub direction: view::Direction,
-    pub hpct: f32,
-    pub vpct: f32,
     pub keybinds: Vec<view::Keybind>,
     pub variables: HashMap<String, Value>,
-    pub children: Vec<Widget>,
+    pub drill_down_target: Option<Path>,
+    pub drill_up_target: Option<Path>,
+    pub children: Vec<Child>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,19 +65,29 @@ impl Widget {
                 view::Widget::Radio(r) => Ok(Widget::Radio(r)),
                 view::Widget::Entry(e) => Ok(Widget::Entry(e)),
                 view::Widget::Container(c) => {
-                    let children = join_all(
-                        c.children.into_iter().map(|c| Widget::new(resolver, c)),
-                    )
+                    let children = join_all(c.children.into_iter().map(|c| {
+                        let expand = c.expand;
+                        let padding = c.padding;
+                        let fill = c.fill;
+                        Widget::new(resolver, c.widget).map(move |w| {
+                            Ok(Child {
+                                expand,
+                                fill,
+                                padding,
+                                widget: w?,
+                            })
+                        })
+                    }))
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
                     Ok(Widget::Container(Container {
                         direction: c.direction,
-                        hpct: c.hpct,
-                        vpct: c.vpct,
                         keybinds: c.keybinds,
                         variables: c.variables,
-                        children
+                        drill_down_target: c.drill_down_target,
+                        drill_up_target: c.drill_up_target,
+                        children,
                     }))
                 }
             }

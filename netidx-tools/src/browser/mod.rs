@@ -259,8 +259,6 @@ impl Table {
         }));
         t.view().set_fixed_height_mode(true);
         t.view().set_model(Some(t.store()));
-        t.view()
-            .connect_row_activated(clone!(@weak t => move |_, p, _| t.row_activated(p)));
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
@@ -302,28 +300,31 @@ impl Table {
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
         if key.get_keyval() == keys::constants::BackSpace {
+            // drill up
             let path = Path::dirname(&self.0.base_path).unwrap_or("/");
             let m = FromGui::Navigate(Path::from(String::from(path)));
             let _: result::Result<_, _> = self.0.ctx.from_gui.unbounded_send(m);
-        }
-        if key.get_keyval() == keys::constants::Escape {
+            Inhibit(true)
+        } else if key.get_keyval() == keys::constants::Return {
+            // drill down
+            if let Some((m, row)) = self.view().get_selection().get_selected() {
+                let row_name = m.get_value(&row, 0);
+                if let Ok(Some(row_name)) = row_name.get::<&str>() {
+                    let path = self.0.base_path.append(row_name);
+                    let _: result::Result<_, _> =
+                        self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
+                }
+            }
+            Inhibit(true)
+        } else if key.get_keyval() == keys::constants::Escape {
             // unset the focus
             self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
             *self.0.focus_column.borrow_mut() = None;
             *self.0.focus_row.borrow_mut() = None;
             self.0.selected_path.set_label("");
-        }
-        Inhibit(false)
-    }
-
-    fn row_activated(&self, path: &TreePath) {
-        if let Some(row) = self.store().get_iter(&path) {
-            let row_name = self.store().get_value(&row, 0);
-            if let Ok(Some(row_name)) = row_name.get::<&str>() {
-                let path = self.0.base_path.append(row_name);
-                let _: result::Result<_, _> =
-                    self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
-            }
+            Inhibit(true)
+        } else {
+            Inhibit(false)
         }
     }
 
@@ -536,15 +537,34 @@ impl Container {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
         };
-        let root = GtkBox::new(dir, 5);
+        let root = GtkBox::new(dir, 0);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(ctx.clone(), s.clone());
+            let w = Widget::new(ctx.clone(), s.widget.clone());
             if let Some(r) = w.root() {
-                root.add(r);
+                root.pack_start(r, s.expand, s.fill, s.padding as u32);
             }
             children.push(w);
         }
+        root.connect_key_press_event(clone!(@strong ctx, @strong spec => move |_, k| {
+            let target = {
+                if k.get_keyval() == keys::constants::BackSpace {
+                    &spec.drill_up_target
+                } else if k.get_keyval() == keys::constants::Return {
+                    &spec.drill_down_target
+                } else {
+                    &None
+                }
+            };
+            match target {
+                None => Inhibit(false),
+                Some(target) => {
+                    let m = FromGui::Navigate(target.clone());
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                    Inhibit(true)
+                }
+            }
+        }));
         Container { spec, root, children }
     }
 

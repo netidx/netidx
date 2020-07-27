@@ -73,13 +73,21 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Child {
+    pub expand: bool,
+    pub fill: bool,
+    pub padding: u64,
+    pub widget: Widget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Container {
     pub direction: Direction,
-    pub hpct: f32,
-    pub vpct: f32,
     pub keybinds: Vec<Keybind>,
     pub variables: HashMap<String, Value>,
-    pub children: Vec<Widget>,
+    pub drill_down_target: Option<Path>,
+    pub drill_up_target: Option<Path>,
+    pub children: Vec<Child>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
