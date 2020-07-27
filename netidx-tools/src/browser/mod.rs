@@ -109,16 +109,10 @@ impl Label {
     fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        spec: view::Label,
+        spec: view::Source,
     ) -> Label {
-        let source = Source::new(&ctx, variables, spec.source);
+        let source = Source::new(&ctx, variables, spec);
         let label = gtk::Label::new(Some(&format!("{}", source.current())));
-        label.set_justify(match spec.justification {
-            view::Justification::Left => gtk::Justification::Left,
-            view::Justification::Right => gtk::Justification::Right,
-            view::Justification::Center => gtk::Justification::Center,
-            view::Justification::Fill => gtk::Justification::Fill,
-        });
         Label { source, label }
     }
 
@@ -162,6 +156,15 @@ impl Container {
         variables: &HashMap<String, Value>,
         spec: view::Container,
     ) -> Container {
+        fn align_to_gtk(a: view::Align) -> gtk::Align {
+            match a {
+                view::Align::Fill => gtk::Align::Fill,
+                view::Align::Start => gtk::Align::Start,
+                view::Align::End => gtk::Align::End,
+                view::Align::Center => gtk::Align::Center,
+                view::Align::Baseline => gtk::Align::Baseline,
+            }
+        }
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -172,6 +175,12 @@ impl Container {
             let w = Widget::new(ctx.clone(), variables, s.widget.clone());
             if let Some(r) = w.root() {
                 root.pack_start(r, s.expand, s.fill, s.padding as u32);
+                if let Some(halign) = s.halign {
+                    r.set_halign(align_to_gtk(halign));
+                }
+                if let Some(valign) = s.valign {
+                    r.set_valign(align_to_gtk(valign));
+                }
             }
             children.push(w);
         }

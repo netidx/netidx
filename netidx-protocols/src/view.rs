@@ -71,11 +71,22 @@ pub struct Entry {
     pub sink: Sink,
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum Align {
+    Fill,
+    Start,
+    End,
+    Center,
+    Baseline,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Child {
     pub expand: bool,
     pub fill: bool,
     pub padding: u64,
+    pub halign: Option<Align>,
+    pub valign: Option<Align>,
     pub widget: Widget,
 }
 
@@ -89,23 +100,9 @@ pub struct Container {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Justification {
-    Left,
-    Right,
-    Center,
-    Fill
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Label {
-    pub source: Source,
-    pub justification: Justification,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
     Table(Source),
-    Label(Label),
+    Label(Source),
     Action(Action),
     Button(Button),
     Toggle(Toggle),

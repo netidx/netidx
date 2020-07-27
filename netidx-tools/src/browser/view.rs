@@ -13,6 +13,8 @@ pub(super) struct Child {
     pub expand: bool,
     pub fill: bool,
     pub padding: u64,
+    pub halign: Option<view::Align>,
+    pub valign: Option<view::Align>,
     pub widget: Widget,
 }
 
@@ -29,7 +31,7 @@ pub(super) struct Container {
 pub(super) enum Widget {
     Table(Path, resolver::Table),
     StaticTable(view::Source),
-    Label(view::Label),
+    Label(view::Source),
     Action(view::Action),
     Button(view::Button),
     Toggle(view::Toggle),
@@ -68,8 +70,18 @@ impl Widget {
                         let expand = c.expand;
                         let padding = c.padding;
                         let fill = c.fill;
-                        Widget::new(resolver, c.widget)
-                            .map(move |w| Ok(Child { expand, fill, padding, widget: w? }))
+                        let halign = c.halign;
+                        let valign = c.valign;
+                        Widget::new(resolver, c.widget).map(move |w| {
+                            Ok(Child {
+                                expand,
+                                fill,
+                                padding,
+                                halign,
+                                valign,
+                                widget: w?,
+                            })
+                        })
                     }))
                     .await
                     .into_iter()
