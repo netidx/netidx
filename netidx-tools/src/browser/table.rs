@@ -450,8 +450,8 @@ impl Table {
 
     pub(super) fn update(
         &self,
-        waits: Vec<oneshot::Receiver<()>>,
-        changed: Arc<IndexMap<SubId, Value>>,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        changed: &Arc<IndexMap<SubId, Value>>,
     ) {
         let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
@@ -459,6 +459,7 @@ impl Table {
         let sctx = self.disable_sort();
         idle_add({
             let t = self.clone();
+            let changed = changed.clone();
             let mut i = 0;
             move || {
                 let mut n = 0;

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use futures::{future::join_all, prelude::*};
+use futures::{prelude::Future, future::{join_all, FutureExt}};
 use netidx::{
     path::Path,
     resolver::{self, ResolverRead},

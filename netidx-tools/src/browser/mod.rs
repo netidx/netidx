@@ -1,10 +1,11 @@
 mod table;
 mod view;
 use futures::{
-    channel::mpsc,
-    future::{join_all, pending},
-    prelude::*,
+    channel::{mpsc, oneshot},
+    future::{join_all, pending, FusedFuture, FutureExt},
+    prelude::{Future, Stream},
     select_biased,
+    stream::{FusedStream, StreamExt},
 };
 use gdk::keys;
 use gio::prelude::*;
@@ -29,7 +30,7 @@ use std::{
     process,
     rc::{Rc, Weak},
     result,
-    sync::mpsc as smpsc,
+    sync::{mpsc as smpsc, Arc},
     thread,
     time::Duration,
 };
@@ -40,7 +41,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 #[derive(Debug, Clone)]
 enum ToGui {
     View(Path, view::View),
-    Update(IndexMap<SubId, Value>),
+    Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
 }
 
@@ -91,15 +92,15 @@ impl Source {
     fn current(&self) -> Value {
         match self {
             Source::Constant(v) => v.clone(),
-            Source::Variable(_, v) => v.clone(),
+            Source::Variable(_, v) => v.borrow().clone(),
             Source::Load(dv) => match dv.last() {
                 None => Value::String(Chars::from("#SUB")),
-                Some(v) => v.borrow().clone(),
+                Some(v) => v.clone(),
             },
         }
     }
 
-    fn update(&self, changed: &IndexMap<SubId, Value>) -> Option<Value> {
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) -> Option<Value> {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
@@ -108,7 +109,7 @@ impl Source {
 
     fn update_var(&self, name: &str, value: &Value) -> bool {
         match self {
-            Source::Load(_) | Source::Constant(_) => None,
+            Source::Load(_) | Source::Constant(_) => false,
             Source::Variable(our_name, cur) => {
                 if name == our_name {
                     *cur.borrow_mut() = value.clone();
@@ -121,6 +122,7 @@ impl Source {
     }
 }
 
+#[derive(Clone)]
 enum Sink {
     Store(Dval),
     Variable(String),
@@ -169,7 +171,7 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    fn update(&self, changed: &IndexMap<SubId, Value>) {
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.source.update(changed) {
             self.label.set_label(&format!("{}", new));
         }
@@ -205,7 +207,7 @@ impl Button {
             Value::False | Value::Null => false,
             _ => true,
         });
-        button.set_label(format!("{}", label.current()));
+        button.set_label(&format!("{}", label.current()));
         button.connect_clicked(
             clone!(@strong ctx, @strong source, @strong sink => move |_| {
                 sink.set(&ctx, source.current());
@@ -218,27 +220,27 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    async fn update(&self, changed: &IndexMap<SubId, Value>) {
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.enabled.update(changed) {
-            button.set_sensitive(match enabled.current() {
+            self.button.set_sensitive(match new {
                 Value::False | Value::Null => false,
                 _ => true,
             });
         }
         if let Some(new) = self.label.update(changed) {
-            button.set_label(&format!("{}", new));
+            self.button.set_label(&format!("{}", new));
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) {
-        if self.enabled.update_vars(name, value) {
-            button.set_sensitive(match value {
+        if self.enabled.update_var(name, value) {
+            self.button.set_sensitive(match value {
                 Value::False | Value::Null => false,
                 _ => true,
             });
         }
-        if self.label.update_vars(name, value) {
-            button.set_label(&format!("{}", value));
+        if self.label.update_var(name, value) {
+            self.button.set_label(&format!("{}", value));
         }
         self.source.update_var(name, value);
     }
@@ -306,10 +308,10 @@ impl Container {
         Container { spec, root, children }
     }
 
-    async fn update(
+    fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        updates: &IndexMap<SubId, Value>,
+        updates: &Arc<IndexMap<SubId, Value>>,
     ) {
         for c in &self.children {
             c.update(waits, updates);
@@ -374,7 +376,7 @@ impl Widget {
     fn update<'a, 'b: 'a>(
         &'a self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        changed: &'b IndexMap<SubId, Value>,
+        changed: &'b Arc<IndexMap<SubId, Value>>,
     ) {
         match self {
             Widget::Table(t) => t.update(waits, changed),
@@ -405,8 +407,12 @@ impl View {
         self.0.root()
     }
 
-    fn update(&mut self, changed: &IndexMap<SubId, Value>) {
-        self.0.update(changed);
+    fn update(
+        &self,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        changed: &Arc<IndexMap<SubId, Value>>,
+    ) {
+        self.0.update(waits, changed);
     }
 
     fn update_var(&self, name: &str, value: &Value) {
@@ -443,7 +449,7 @@ async fn netidx_main(
             _ = refresh.next() => {
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
-                    let b = mem::replace(&mut changed, IndexMap::new());
+                    let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
                     match to_gui.unbounded_send(ToGui::Update(b)) {
                         Ok(()) => (),
                         Err(e) => break
@@ -562,7 +568,7 @@ fn run_gui(
             match m {
                 ToGui::Update(batch) => {
                     if let Some(root) = &current {
-                        root.update(&mut waits, batch);
+                        root.update(&mut waits, &batch);
                         for r in waits.drain(..) {
                             let _: result::Result<_, _> = r.await;
                         }
@@ -582,7 +588,7 @@ fn run_gui(
                         window.add(root);
                         window.show_all();
                         current = Some(cur);
-                        let m = ToGui::Update(IndexMap::new());
+                        let m = ToGui::Update(Arc::new(IndexMap::new()));
                         let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                     }
                 }
