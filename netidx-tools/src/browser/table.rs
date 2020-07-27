@@ -448,9 +448,14 @@ impl Table {
         &self.0.store
     }
 
-    pub(super) async fn update(&self, changed: Arc<IndexMap<SubId, Value>>) {
+    pub(super) fn update(
+        &self,
+        waits: Vec<oneshot::Receiver<()>>,
+        changed: Arc<IndexMap<SubId, Value>>,
+    ) {
         let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
+        waits.push(rx);
         let sctx = self.disable_sort();
         idle_add({
             let t = self.clone();
@@ -472,12 +477,11 @@ impl Table {
                     if let Some(tx) = tx.take() {
                         let _: result::Result<_, _> = tx.send(());
                     }
+                    t.enable_sort(sctx);
+                    t.update_subscriptions();
                     Continue(false)
                 }
             }
         });
-        let _: result::Result<_, _> = rx.await;
-        self.enable_sort(sctx);
-        self.update_subscriptions();
     }
 }

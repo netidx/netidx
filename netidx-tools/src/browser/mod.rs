@@ -306,19 +306,20 @@ impl Container {
         Container { spec, root, children }
     }
 
-    async fn update(&self, updates: &IndexMap<SubId, Value>) -> HashMap<String, Value> {
-        join_all(self.children.iter().map(|c| c.update(updates.clone())))
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<HashMap<_, _>>()
+    async fn update(
+        &self,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        updates: &IndexMap<SubId, Value>,
+    ) {
+        for c in &self.children {
+            c.update(waits, updates);
+        }
     }
 
-    fn update_vars(
-        &mut self,
-        changed: &HashMap<String, Value>,
-    ) -> HashMap<String, Value> {
-        self.children.iter_mut().map(|c| c.update_vars(changed)).flatten().collect()
+    fn update_var(&self, name: &str, value: &Value) {
+        for c in &self.children {
+            c.update_var(name, value);
+        }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -372,42 +373,23 @@ impl Widget {
 
     fn update<'a, 'b: 'a>(
         &'a self,
+        waits: &mut Vec<oneshot::Receiver<()>>,
         changed: &'b IndexMap<SubId, Value>,
-    ) -> Pin<Box<dyn Future<Output = HashMap<String, Value>> + 'a>> {
-        Box::pin(async move {
-            match self {
-                Widget::Table(t) => {
-                    t.update(changed).await;
-                    HashMap::new()
-                }
-                Widget::Label(t) => {
-                    t.update(changed);
-                    HashMap::new()
-                }
-                Widget::Button(t) => {
-                    t.update(changed);
-                    HashMap::new()
-                }
-                Widget::Container(c) => c.update(changed).await,
-            }
-        })
+    ) {
+        match self {
+            Widget::Table(t) => t.update(waits, changed),
+            Widget::Label(t) => t.update(changed),
+            Widget::Button(t) => t.update(changed),
+            Widget::Container(c) => c.update(waits, changed),
+        }
     }
 
-    fn update_vars(
-        &mut self,
-        changed: &HashMap<String, Value>,
-    ) -> HashMap<String, Value> {
+    fn update_var(&self, name: &str, value: &Value) {
         match self {
-            Widget::Table(_) => HashMap::new(),
-            Widget::Label(t) => {
-                t.update_vars(changed);
-                HashMap::new()
-            }
-            Widget::Button(t) => {
-                t.update_vars(changed);
-                HashMap::new()
-            }
-            Widget::Container(t) => t.update_vars(changed),
+            Widget::Table(_) => (),
+            Widget::Label(t) => t.update_var(name, value),
+            Widget::Button(t) => t.update_var(name, value),
+            Widget::Container(t) => t.update_var(name, value),
         }
     }
 }
@@ -423,18 +405,12 @@ impl View {
         self.0.root()
     }
 
-    async fn update(&mut self, changed: &IndexMap<SubId, Value>) {
-        let vars = self.0.update(changed).await;
-        if vars.len() > 0 {
-            self.update_vars(&vars);
-        }
+    fn update(&mut self, changed: &IndexMap<SubId, Value>) {
+        self.0.update(changed);
     }
 
-    fn update_vars(&mut self, changed: &HashMap<String, Value>) {
-        let vars = self.0.update_vars(changed);
-        if vars.len() > 0 {
-            self.update_vars(&vars);
-        }
+    fn update_var(&self, name: &str, value: &Value) {
+        self.0.update_var(name, value)
     }
 }
 
