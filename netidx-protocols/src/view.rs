@@ -89,9 +89,23 @@ pub struct Container {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Justification {
+    Left,
+    Right,
+    Center,
+    Fill
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Label {
+    pub source: Source,
+    pub justification: Justification,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
     Table(Source),
-    Label(Source),
+    Label(Label),
     Action(Action),
     Button(Button),
     Toggle(Toggle),

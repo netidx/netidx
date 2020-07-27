@@ -29,7 +29,7 @@ pub(super) struct Container {
 pub(super) enum Widget {
     Table(Path, resolver::Table),
     StaticTable(view::Source),
-    Label(view::Source),
+    Label(view::Label),
     Action(view::Action),
     Button(view::Button),
     Toggle(view::Toggle),

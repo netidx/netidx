@@ -76,7 +76,10 @@ impl Source {
         match spec {
             view::Source::Constant(v) => Source::Constant(v),
             view::Source::Load(path) => {
-                Source::Load(ctx.subscriber.durable_subscribe(path))
+                let dv = ctx.subscriber.durable_subscribe(path);
+                dv.updates(true, ctx.updates.clone());
+                dv.state_updates(true, ctx.state_updates.clone());
+                Source::Load(dv)
             }
             view::Source::Variable(name) => {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
@@ -106,10 +109,16 @@ impl Label {
     fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        spec: view::Source,
+        spec: view::Label,
     ) -> Label {
-        let source = Source::new(&ctx, variables, spec);
+        let source = Source::new(&ctx, variables, spec.source);
         let label = gtk::Label::new(Some(&format!("{}", source.current())));
+        label.set_justify(match spec.justification {
+            view::Justification::Left => gtk::Justification::Left,
+            view::Justification::Right => gtk::Justification::Right,
+            view::Justification::Center => gtk::Justification::Center,
+            view::Justification::Fill => gtk::Justification::Fill,
+        });
         Label { source, label }
     }
 
