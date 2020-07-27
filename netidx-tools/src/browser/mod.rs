@@ -30,7 +30,6 @@ use std::{
     rc::{Rc, Weak},
     result,
     sync::mpsc as smpsc,
-    sync::Arc,
     thread,
     time::Duration,
 };
@@ -41,7 +40,8 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 #[derive(Debug, Clone)]
 enum ToGui {
     View(Path, view::View),
-    Update(Arc<IndexMap<SubId, Value>>),
+    Update(IndexMap<SubId, Value>),
+    UpdateVar(String, Value),
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ struct WidgetCtx {
 enum Source {
     Constant(Value),
     Load(Dval),
-    Variable(String, Value),
+    Variable(String, Rc<RefCell<Value>>),
 }
 
 impl Source {
@@ -83,7 +83,7 @@ impl Source {
             }
             view::Source::Variable(name) => {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
-                Source::Variable(name, v)
+                Source::Variable(name, Rc::new(RefCell::new(v)))
             }
         }
     }
@@ -94,8 +94,57 @@ impl Source {
             Source::Variable(_, v) => v.clone(),
             Source::Load(dv) => match dv.last() {
                 None => Value::String(Chars::from("#SUB")),
-                Some(v) => v.clone(),
+                Some(v) => v.borrow().clone(),
             },
+        }
+    }
+
+    fn update(&self, changed: &IndexMap<SubId, Value>) -> Option<Value> {
+        match self {
+            Source::Constant(_) | Source::Variable(_, _) => None,
+            Source::Load(dv) => changed.get(&dv.id()).cloned(),
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) -> bool {
+        match self {
+            Source::Load(_) | Source::Constant(_) => None,
+            Source::Variable(our_name, cur) => {
+                if name == our_name {
+                    *cur.borrow_mut() = value.clone();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+enum Sink {
+    Store(Dval),
+    Variable(String),
+}
+
+impl Sink {
+    fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
+        match spec {
+            view::Sink::Variable(name) => Sink::Variable(name),
+            view::Sink::Store(path) => {
+                Sink::Store(ctx.subscriber.durable_subscribe(path))
+            }
+        }
+    }
+
+    fn set(&self, ctx: &WidgetCtx, v: Value) {
+        match self {
+            Sink::Store(dv) => {
+                dv.write(v);
+            }
+            Sink::Variable(name) => {
+                let _: result::Result<_, _> =
+                    ctx.to_gui.unbounded_send(ToGui::UpdateVar(name.clone(), v));
+            }
         }
     }
 }
@@ -120,27 +169,78 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    fn update(&self, updates: Arc<IndexMap<SubId, Value>>) {
-        match &self.source {
-            Source::Constant(_) | Source::Variable(_, _) => (),
-            Source::Load(dv) => {
-                if let Some(v) = updates.get(&dv.id()) {
-                    self.label.set_label(&format!("{}", v));
-                }
-            }
+    fn update(&self, changed: &IndexMap<SubId, Value>) {
+        if let Some(new) = self.source.update(changed) {
+            self.label.set_label(&format!("{}", new));
         }
     }
 
-    fn update_vars(&mut self, changed: &HashMap<String, Value>) {
-        match &mut self.source {
-            Source::Load(_) | Source::Constant(_) => (),
-            Source::Variable(name, cur) => {
-                if let Some(new) = changed.get(name) {
-                    self.label.set_label(&format!("{}", new));
-                    *cur = new.clone();
-                }
-            }
+    fn update_var(&self, name: &str, value: &Value) {
+        if self.source.update_var(name, value) {
+            self.label.set_label(&format!("{}", value));
         }
+    }
+}
+
+struct Button {
+    enabled: Source,
+    label: Source,
+    source: Source,
+    sink: Sink,
+    button: gtk::Button,
+}
+
+impl Button {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Button,
+    ) -> Self {
+        let button = gtk::Button::new();
+        let enabled = Source::new(&ctx, variables, spec.enabled);
+        let label = Source::new(&ctx, variables, spec.label);
+        let source = Source::new(&ctx, variables, spec.source);
+        let sink = Sink::new(&ctx, spec.sink);
+        button.set_sensitive(match enabled.current() {
+            Value::False | Value::Null => false,
+            _ => true,
+        });
+        button.set_label(format!("{}", label.current()));
+        button.connect_clicked(
+            clone!(@strong ctx, @strong source, @strong sink => move |_| {
+                sink.set(&ctx, source.current());
+            }),
+        );
+        Button { enabled, label, source, sink, button }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.button.upcast_ref()
+    }
+
+    async fn update(&self, changed: &IndexMap<SubId, Value>) {
+        if let Some(new) = self.enabled.update(changed) {
+            button.set_sensitive(match enabled.current() {
+                Value::False | Value::Null => false,
+                _ => true,
+            });
+        }
+        if let Some(new) = self.label.update(changed) {
+            button.set_label(&format!("{}", new));
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        if self.enabled.update_vars(name, value) {
+            button.set_sensitive(match value {
+                Value::False | Value::Null => false,
+                _ => true,
+            });
+        }
+        if self.label.update_vars(name, value) {
+            button.set_label(&format!("{}", value));
+        }
+        self.source.update_var(name, value);
     }
 }
 
@@ -206,10 +306,7 @@ impl Container {
         Container { spec, root, children }
     }
 
-    async fn update(
-        &self,
-        updates: Arc<IndexMap<SubId, Value>>,
-    ) -> HashMap<String, Value> {
+    async fn update(&self, updates: &IndexMap<SubId, Value>) -> HashMap<String, Value> {
         join_all(self.children.iter().map(|c| c.update(updates.clone())))
             .await
             .into_iter()
@@ -232,6 +329,7 @@ impl Container {
 enum Widget {
     Table(table::Table),
     Label(Label),
+    Button(Button),
     Container(Container),
 }
 
@@ -250,7 +348,9 @@ impl Widget {
                 Widget::Label(Label::new(ctx.clone(), variables, spec))
             }
             view::Widget::Action(_) => todo!(),
-            view::Widget::Button(_) => todo!(),
+            view::Widget::Button(spec) => {
+                Widget::Button(Button::new(ctx.clone(), variables, spec))
+            }
             view::Widget::Toggle(_) => todo!(),
             view::Widget::ComboBox(_) => todo!(),
             view::Widget::Radio(_) => todo!(),
@@ -265,13 +365,14 @@ impl Widget {
         match self {
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
+            Widget::Button(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
         }
     }
 
-    fn update<'a>(
+    fn update<'a, 'b: 'a>(
         &'a self,
-        changed: Arc<IndexMap<SubId, Value>>,
+        changed: &'b IndexMap<SubId, Value>,
     ) -> Pin<Box<dyn Future<Output = HashMap<String, Value>> + 'a>> {
         Box::pin(async move {
             match self {
@@ -280,6 +381,10 @@ impl Widget {
                     HashMap::new()
                 }
                 Widget::Label(t) => {
+                    t.update(changed);
+                    HashMap::new()
+                }
+                Widget::Button(t) => {
                     t.update(changed);
                     HashMap::new()
                 }
@@ -295,6 +400,10 @@ impl Widget {
         match self {
             Widget::Table(_) => HashMap::new(),
             Widget::Label(t) => {
+                t.update_vars(changed);
+                HashMap::new()
+            }
+            Widget::Button(t) => {
                 t.update_vars(changed);
                 HashMap::new()
             }
@@ -314,7 +423,7 @@ impl View {
         self.0.root()
     }
 
-    async fn update(&mut self, changed: Arc<IndexMap<SubId, Value>>) {
+    async fn update(&mut self, changed: &IndexMap<SubId, Value>) {
         let vars = self.0.update(changed).await;
         if vars.len() > 0 {
             self.update_vars(&vars);
@@ -358,7 +467,7 @@ async fn netidx_main(
             _ = refresh.next() => {
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
-                    let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
+                    let b = mem::replace(&mut changed, IndexMap::new());
                     match to_gui.unbounded_send(ToGui::Update(b)) {
                         Ok(()) => (),
                         Err(e) => break
@@ -493,7 +602,7 @@ fn run_gui(
                         window.add(root);
                         window.show_all();
                         current = Some(cur);
-                        let m = ToGui::Update(Arc::new(IndexMap::new()));
+                        let m = ToGui::Update(IndexMap::new());
                         let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                     }
                 }
