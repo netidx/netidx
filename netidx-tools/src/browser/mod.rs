@@ -557,11 +557,15 @@ fn run_gui(
     window.connect_destroy(move |_| process::exit(0));
     main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
         let mut current: Option<View> = None;
+        let mut waits = Vec::new();
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Update(batch) => {
-                    if let Some(root) = &mut current {
-                        root.update(batch).await;
+                    if let Some(root) = &current {
+                        root.update(&mut waits, batch);
+                        for r in waits.drain(..) {
+                            let _: result::Result<_, _> = r.await;
+                        }
                         let _: result::Result<_, _> =
                             ctx.from_gui.unbounded_send(FromGui::Updated);
                     }
@@ -580,6 +584,11 @@ fn run_gui(
                         current = Some(cur);
                         let m = ToGui::Update(IndexMap::new());
                         let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
+                    }
+                }
+                ToGui::UpdateVar(name, value) => {
+                    if let Some(root) = &current {
+                        root.update_var(&name, &value);
                     }
                 }
             }
