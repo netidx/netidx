@@ -4,10 +4,10 @@ use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, signal::Inhibit, source::Continue};
 use gtk::{
-    idle_add, prelude::*, Adjustment, Align, Box as GtkBox, CellRenderer,
-    CellRendererText, Label, ListStore, Orientation, PackType, ScrolledWindow,
-    SelectionMode, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
-    TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing, Widget as GtkWidget,
+    idle_add, prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
+    ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
+    TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    Widget as GtkWidget,
 };
 use indexmap::IndexMap;
 use netidx::{
@@ -33,7 +33,7 @@ struct Subscription {
 
 struct TableInner {
     ctx: WidgetCtx,
-    root: GtkBox,
+    root: ScrolledWindow,
     view: TreeView,
     style: StyleContext,
     selected_path: Label,
@@ -113,20 +113,11 @@ impl Table {
         ctx: WidgetCtx,
         base_path: Path,
         mut descriptor: resolver::Table,
+        selected_path: Label,
     ) -> Table {
         let view = TreeView::new();
-        let tablewin = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
-        let root = GtkBox::new(Orientation::Vertical, 5);
-        let selected_path = Label::new(None);
-        selected_path.set_halign(Align::Start);
-        selected_path.set_margin_start(5);
-        tablewin.add(&view);
-        root.add(&tablewin);
-        root.set_child_packing(&tablewin, true, true, 1, PackType::Start);
-        root.set_child_packing(&selected_path, false, false, 1, PackType::End);
-        root.add(&selected_path);
-        selected_path.set_selectable(true);
-        selected_path.set_single_line_mode(true);
+        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        root.add(&view);
         let nrows = descriptor.rows.len();
         descriptor.rows.sort();
         descriptor.cols.sort_by_key(|(p, _)| p.clone());
@@ -220,7 +211,7 @@ impl Table {
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
-        tablewin.get_vadjustment().map(|va| {
+        t.0.root.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
                 idle_add(clone!(@weak t => @default-return Continue(false), move || {
                     t.update_subscriptions();

@@ -2,10 +2,9 @@ mod table;
 mod view;
 use futures::{
     channel::{mpsc, oneshot},
-    future::{join_all, pending, FusedFuture, FutureExt},
-    prelude::{Future, Stream},
+    future::{pending, FutureExt},
     select_biased,
-    stream::{FusedStream, StreamExt},
+    stream::StreamExt,
 };
 use gdk::keys;
 use gio::prelude::*;
@@ -26,9 +25,8 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     mem,
-    pin::Pin,
     process,
-    rc::{Rc, Weak},
+    rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},
     thread,
@@ -161,9 +159,16 @@ impl Label {
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
         spec: view::Source,
+        selected_path: gtk::Label
     ) -> Label {
-        let source = Source::new(&ctx, variables, spec);
+        let source = Source::new(&ctx, variables, spec.clone());
         let label = gtk::Label::new(Some(&format!("{}", source.current())));
+        label.set_selectable(true);
+        label.set_single_line_mode(true);
+        label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(&format!("{:?}", spec));
+            Inhibit(false)
+        }));
         Label { source, label }
     }
 
@@ -188,7 +193,6 @@ struct Button {
     enabled: Source,
     label: Source,
     source: Source,
-    sink: Sink,
     button: gtk::Button,
 }
 
@@ -197,23 +201,36 @@ impl Button {
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
         spec: view::Button,
+        selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Source::new(&ctx, variables, spec.enabled);
-        let label = Source::new(&ctx, variables, spec.label);
-        let source = Source::new(&ctx, variables, spec.source);
-        let sink = Sink::new(&ctx, spec.sink);
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let label = Source::new(&ctx, variables, spec.label.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
         button.set_sensitive(match enabled.current() {
             Value::False | Value::Null => false,
             _ => true,
         });
         button.set_label(&format!("{}", label.current()));
-        button.connect_clicked(
-            clone!(@strong ctx, @strong source, @strong sink => move |_| {
-                sink.set(&ctx, source.current());
-            }),
-        );
-        Button { enabled, label, source, sink, button }
+        button.connect_clicked(clone!(@strong ctx,
+               @strong source,
+               @strong sink,
+               @strong selected_path,
+               @strong spec =>
+        move |_| {
+            sink.set(&ctx, source.current());
+            selected_path.set_label(
+                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+            );
+        }));
+        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(
+                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+            );
+            Inhibit(false)
+        }));
+        Button { enabled, label, source, button }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -247,7 +264,6 @@ impl Button {
 }
 
 struct Container {
-    spec: view::Container,
     root: gtk::Box,
     children: Vec<Widget>,
 }
@@ -257,6 +273,7 @@ impl Container {
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
         spec: view::Container,
+        selected_path: gtk::Label,
     ) -> Container {
         fn align_to_gtk(a: view::Align) -> gtk::Align {
             match a {
@@ -274,7 +291,12 @@ impl Container {
         let root = gtk::Box::new(dir, 0);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(ctx.clone(), variables, s.widget.clone());
+            let w = Widget::new(
+                ctx.clone(),
+                variables,
+                s.widget.clone(),
+                selected_path.clone(),
+            );
             if let Some(r) = w.root() {
                 root.pack_start(r, s.expand, s.fill, s.padding as u32);
                 if let Some(halign) = s.halign {
@@ -305,7 +327,7 @@ impl Container {
                 }
             }
         }));
-        Container { spec, root, children }
+        Container { root, children }
     }
 
     fn update(
@@ -341,25 +363,29 @@ impl Widget {
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
         spec: view::Widget,
+        selected_path: gtk::Label,
     ) -> Widget {
         match spec {
             view::Widget::StaticTable(_) => todo!(),
-            view::Widget::Table(base_path, spec) => {
-                Widget::Table(table::Table::new(ctx.clone(), base_path, spec))
-            }
+            view::Widget::Table(base_path, spec) => Widget::Table(table::Table::new(
+                ctx.clone(),
+                base_path,
+                spec,
+                selected_path,
+            )),
             view::Widget::Label(spec) => {
-                Widget::Label(Label::new(ctx.clone(), variables, spec))
+                Widget::Label(Label::new(ctx.clone(), variables, spec, selected_path))
             }
             view::Widget::Action(_) => todo!(),
             view::Widget::Button(spec) => {
-                Widget::Button(Button::new(ctx.clone(), variables, spec))
+                Widget::Button(Button::new(ctx.clone(), variables, spec, selected_path))
             }
             view::Widget::Toggle(_) => todo!(),
             view::Widget::ComboBox(_) => todo!(),
             view::Widget::Radio(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
             view::Widget::Container(s) => {
-                Widget::Container(Container::new(ctx, variables, s))
+                Widget::Container(Container::new(ctx, variables, s, selected_path))
             }
         }
     }
@@ -396,15 +422,32 @@ impl Widget {
     }
 }
 
-struct View(Widget);
+struct View {
+    root: gtk::Box,
+    widget: Widget,
+}
 
 impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
-        View(Widget::new(ctx, &spec.variables, spec.root.clone()))
+        let selected_path = gtk::Label::new(None);
+        selected_path.set_halign(gtk::Align::Start);
+        selected_path.set_margin_start(5);
+        selected_path.set_selectable(true);
+        selected_path.set_single_line_mode(true);
+        let widget =
+            Widget::new(ctx, &spec.variables, spec.root.clone(), selected_path.clone());
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        if let Some(wroot) = widget.root() {
+            root.add(wroot);
+            root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
+        }
+        root.add(&selected_path);
+        root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
+        View { root, widget }
     }
 
-    fn root(&self) -> Option<&gtk::Widget> {
-        self.0.root()
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
     }
 
     fn update(
@@ -412,11 +455,11 @@ impl View {
         waits: &mut Vec<oneshot::Receiver<()>>,
         changed: &Arc<IndexMap<SubId, Value>>,
     ) {
-        self.0.update(waits, changed);
+        self.widget.update(waits, changed);
     }
 
     fn update_var(&self, name: &str, value: &Value) {
-        self.0.update_var(name, value)
+        self.widget.update_var(name, value)
     }
 }
 
@@ -578,19 +621,15 @@ fn run_gui(
                 }
                 ToGui::View(path, view) => {
                     let cur = View::new(ctx.clone(), view);
-                    if let Some(root) = cur.root() {
-                        if let Some(cur) = current.take() {
-                            if let Some(r) = cur.root() {
-                                window.remove(r);
-                            }
-                        }
-                        window.set_title(&format!("Netidx Browser {}", path));
-                        window.add(root);
-                        window.show_all();
-                        current = Some(cur);
-                        let m = ToGui::Update(Arc::new(IndexMap::new()));
-                        let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
+                    if let Some(cur) = current.take() {
+                        window.remove(cur.root());
                     }
+                    window.set_title(&format!("Netidx Browser {}", path));
+                    window.add(cur.root());
+                    window.show_all();
+                    current = Some(cur);
+                    let m = ToGui::Update(Arc::new(IndexMap::new()));
+                    let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                 }
                 ToGui::UpdateVar(name, value) => {
                     if let Some(root) = &current {
