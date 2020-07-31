@@ -235,6 +235,14 @@ impl Button {
             );
             Inhibit(false)
         }));
+        button.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(
+                    &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                );
+                Inhibit(false)
+            })
+        );
         Button { enabled, label, source, button }
     }
 
