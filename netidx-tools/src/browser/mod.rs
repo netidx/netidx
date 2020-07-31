@@ -24,8 +24,7 @@ use netidx_protocols::view as protocol_view;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    mem,
-    process,
+    mem, process,
     rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},
@@ -159,12 +158,18 @@ impl Label {
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
         spec: view::Source,
-        selected_path: gtk::Label
+        selected_path: gtk::Label,
     ) -> Label {
         let source = Source::new(&ctx, variables, spec.clone());
         let label = gtk::Label::new(Some(&format!("{}", source.current())));
         label.set_selectable(true);
         label.set_single_line_mode(true);
+        label.connect_button_press_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(&format!("{:?}", spec));
+                Inhibit(false)
+            }),
+        );
         label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("{:?}", spec));
             Inhibit(false)
@@ -323,7 +328,7 @@ impl Container {
                 Some(target) => {
                     let m = FromGui::Navigate(target.clone());
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                    Inhibit(true)
+                    Inhibit(false)
                 }
             }
         }));
