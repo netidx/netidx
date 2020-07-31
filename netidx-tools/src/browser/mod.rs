@@ -22,7 +22,7 @@ use netidx::{
 };
 use netidx_protocols::view as protocol_view;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     mem, process,
     rc::Rc,
@@ -218,16 +218,9 @@ impl Button {
             _ => true,
         });
         button.set_label(&format!("{}", label.current()));
-        button.connect_clicked(clone!(@strong ctx,
-               @strong source,
-               @strong sink,
-               @strong selected_path,
-               @strong spec =>
+        button.connect_clicked(clone!(@strong ctx, @strong source, @strong sink =>
         move |_| {
             sink.set(&ctx, source.current());
-            selected_path.set_label(
-                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
-            );
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
@@ -241,7 +234,7 @@ impl Button {
                     &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
                 );
                 Inhibit(false)
-            })
+            }),
         );
         Button { enabled, label, source, button }
     }
@@ -273,6 +266,96 @@ impl Button {
             self.button.set_label(&format!("{}", value));
         }
         self.source.update_var(name, value);
+    }
+}
+
+struct Toggle {
+    enabled: Source,
+    source: Source,
+    we_set: Rc<Cell<bool>>,
+    switch: gtk::Switch,
+}
+
+impl Toggle {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Toggle,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let switch = gtk::Switch::new();
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        let we_set = Rc::new(Cell::new(false));
+        switch.set_sensitive(match enabled.current() {
+            Value::False | Value::Null => false,
+            _ => true,
+        });
+        switch.set_state(match source.current() {
+            Value::True => true,
+            _ => false
+        });
+        switch.connect_state_set(clone!(@strong ctx, @strong sink, @strong we_set =>
+        move |_, state| {
+            if !we_set.get() {
+                sink.set(&ctx, if state { Value::True } else { Value::False });
+            }
+            Inhibit(true)
+        }));
+        switch.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(
+                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+            );
+            Inhibit(false)
+        }));
+        switch.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(
+                    &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                );
+                Inhibit(false)
+            }),
+        );
+        Toggle { enabled, source, switch, we_set }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.switch.upcast_ref()
+    }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some(new) = self.enabled.update(changed) {
+            self.switch.set_sensitive(match new {
+                Value::False | Value::Null => false,
+                _ => true
+            });
+        }
+        if let Some(new) = self.source.update(changed) {
+            self.we_set.set(true);
+            self.switch.set_state(match new {
+                Value::True => true,
+                _ => false
+            });
+            self.we_set.set(false);
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        if self.enabled.update_var(name, value) {
+            self.switch.set_sensitive(match value {
+                Value::False | Value::Null => false,
+                _ => true
+            });
+        }
+        if self.source.update_var(name, value) {
+            self.we_set.set(true);
+            self.switch.set_state(match value {
+                Value::True => true,
+                _ => false
+            });
+            self.we_set.set(false);
+        }
     }
 }
 
@@ -368,6 +451,7 @@ enum Widget {
     Table(table::Table),
     Label(Label),
     Button(Button),
+    Toggle(Toggle),
     Container(Container),
 }
 
@@ -393,7 +477,9 @@ impl Widget {
             view::Widget::Button(spec) => {
                 Widget::Button(Button::new(ctx.clone(), variables, spec, selected_path))
             }
-            view::Widget::Toggle(_) => todo!(),
+            view::Widget::Toggle(spec) => {
+                Widget::Toggle(Toggle::new(ctx.clone(), variables, spec, selected_path))
+            }
             view::Widget::ComboBox(_) => todo!(),
             view::Widget::Radio(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
@@ -408,6 +494,7 @@ impl Widget {
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
             Widget::Button(t) => Some(t.root()),
+            Widget::Toggle(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
         }
     }
@@ -421,6 +508,7 @@ impl Widget {
             Widget::Table(t) => t.update(waits, changed),
             Widget::Label(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
+            Widget::Toggle(t) => t.update(changed),
             Widget::Container(c) => c.update(waits, changed),
         }
     }
@@ -430,6 +518,7 @@ impl Widget {
             Widget::Table(_) => (),
             Widget::Label(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
+            Widget::Toggle(t) => t.update_var(name, value),
             Widget::Container(t) => t.update_var(name, value),
         }
     }
