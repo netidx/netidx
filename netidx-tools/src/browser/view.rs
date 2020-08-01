@@ -1,8 +1,5 @@
 use anyhow::Result;
-use futures::{
-    future::{join_all, FutureExt},
-    prelude::Future,
-};
+use futures::{future::join_all, prelude::Future};
 use netidx::{
     path::Path,
     resolver::{self, ResolverRead},
@@ -34,8 +31,8 @@ impl Child {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GridChild {
+#[derive(Debug, Clone)]
+pub(super) struct GridChild {
     pub halign: Option<Align>,
     pub valign: Option<Align>,
     pub widget: Widget,

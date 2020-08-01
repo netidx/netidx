@@ -496,10 +496,10 @@ impl Grid {
         let root = gtk::Grid::new();
         let children = spec
             .into_iter()
-            .enumerated()
+            .enumerate()
             .map(|(j, row)| {
                 row.into_iter()
-                    .enumerated()
+                    .enumerate()
                     .map(|(i, spec)| {
                         let w = Widget::new(
                             ctx.clone(),
@@ -508,7 +508,7 @@ impl Grid {
                             selected_path.clone(),
                         );
                         if let Some(r) = w.root() {
-                            root.attach(&w, i, j, 1, 1);
+                            root.attach(r, i as i32, j as i32, 1, 1);
                             if let Some(halign) = spec.halign {
                                 r.set_halign(align_to_gtk(halign));
                             }
@@ -516,6 +516,7 @@ impl Grid {
                                 r.set_valign(align_to_gtk(valign));
                             }
                         }
+                        w
                     })
                     .collect::<Vec<_>>()
             })
@@ -529,7 +530,7 @@ impl Grid {
         updates: &Arc<IndexMap<SubId, Value>>,
     ) {
         for row in &self.children {
-            for child in &row {
+            for child in row {
                 child.update(waits, updates);
             }
         }
@@ -537,7 +538,7 @@ impl Grid {
 
     fn update_var(&self, name: &str, value: &Value) {
         for row in &self.children {
-            for child in &row {
+            for child in row {
                 child.update_var(name, value);
             }
         }
