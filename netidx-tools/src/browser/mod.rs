@@ -269,6 +269,13 @@ impl Button {
     }
 }
 
+fn val_to_toggle(v: &Value) -> bool {
+    match v {
+        Value::False | Value::Null => false,
+        _ => true
+    }
+}
+
 struct Toggle {
     enabled: Source,
     source: Source,
@@ -292,14 +299,20 @@ impl Toggle {
             Value::False | Value::Null => false,
             _ => true,
         });
-        switch.set_state(match source.current() {
-            Value::True => true,
-            _ => false
-        });
-        switch.connect_state_set(clone!(@strong ctx, @strong sink, @strong we_set =>
-        move |_, state| {
+        switch.set_active(val_to_toggle(&source.current()));
+        switch.set_state(val_to_toggle(&source.current()));
+        switch.connect_state_set(clone!(
+        @strong ctx, @strong sink, @strong we_set, @strong source =>
+        move |switch, state| {
             if !we_set.get() {
                 sink.set(&ctx, if state { Value::True } else { Value::False });
+                idle_add(clone!(@strong source, @strong switch, @strong we_set => move || {
+                    we_set.set(true);
+                    switch.set_active(val_to_toggle(&source.current()));
+                    switch.set_state(val_to_toggle(&source.current()));
+                    we_set.set(false);
+                    Continue(false)
+                }));
             }
             Inhibit(true)
         }));
@@ -326,34 +339,24 @@ impl Toggle {
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.enabled.update(changed) {
-            self.switch.set_sensitive(match new {
-                Value::False | Value::Null => false,
-                _ => true
-            });
+            self.switch.set_sensitive(val_to_toggle(&new));
         }
         if let Some(new) = self.source.update(changed) {
             self.we_set.set(true);
-            self.switch.set_state(match new {
-                Value::True => true,
-                _ => false
-            });
+            self.switch.set_active(val_to_toggle(&new));
+            self.switch.set_state(val_to_toggle(&new));
             self.we_set.set(false);
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) {
         if self.enabled.update_var(name, value) {
-            self.switch.set_sensitive(match value {
-                Value::False | Value::Null => false,
-                _ => true
-            });
+            self.switch.set_sensitive(val_to_toggle(value));
         }
         if self.source.update_var(name, value) {
             self.we_set.set(true);
-            self.switch.set_state(match value {
-                Value::True => true,
-                _ => false
-            });
+            self.switch.set_active(val_to_toggle(value));
+            self.switch.set_state(val_to_toggle(value));
             self.we_set.set(false);
         }
     }
