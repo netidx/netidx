@@ -392,6 +392,16 @@ impl Action {
     }
 }
 
+fn align_to_gtk(a: view::Align) -> gtk::Align {
+    match a {
+        view::Align::Fill => gtk::Align::Fill,
+        view::Align::Start => gtk::Align::Start,
+        view::Align::End => gtk::Align::End,
+        view::Align::Center => gtk::Align::Center,
+        view::Align::Baseline => gtk::Align::Baseline,
+    }
+}
+
 struct Container {
     root: gtk::Box,
     children: Vec<Widget>,
@@ -404,15 +414,6 @@ impl Container {
         spec: view::Container,
         selected_path: gtk::Label,
     ) -> Container {
-        fn align_to_gtk(a: view::Align) -> gtk::Align {
-            match a {
-                view::Align::Fill => gtk::Align::Fill,
-                view::Align::Start => gtk::Align::Start,
-                view::Align::End => gtk::Align::End,
-                view::Align::Center => gtk::Align::Center,
-                view::Align::Baseline => gtk::Align::Baseline,
-            }
-        }
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -480,6 +481,73 @@ impl Container {
     }
 }
 
+struct Grid {
+    root: gtk::Grid,
+    children: Vec<Vec<Widget>>,
+}
+
+impl Grid {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: Vec<Vec<view::GridChild>>,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let root = gtk::Grid::new();
+        let children = spec
+            .into_iter()
+            .enumerated()
+            .map(|(j, row)| {
+                row.into_iter()
+                    .enumerated()
+                    .map(|(i, spec)| {
+                        let w = Widget::new(
+                            ctx.clone(),
+                            variables,
+                            spec.widget.clone(),
+                            selected_path.clone(),
+                        );
+                        if let Some(r) = w.root() {
+                            root.attach(&w, i, j, 1, 1);
+                            if let Some(halign) = spec.halign {
+                                r.set_halign(align_to_gtk(halign));
+                            }
+                            if let Some(valign) = spec.valign {
+                                r.set_valign(align_to_gtk(valign));
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        Grid { root, children }
+    }
+
+    fn update(
+        &self,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        updates: &Arc<IndexMap<SubId, Value>>,
+    ) {
+        for row in &self.children {
+            for child in &row {
+                child.update(waits, updates);
+            }
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        for row in &self.children {
+            for child in &row {
+                child.update_var(name, value);
+            }
+        }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
+
 enum Widget {
     Table(table::Table),
     Label(Label),
@@ -487,6 +555,7 @@ enum Widget {
     Button(Button),
     Toggle(Toggle),
     Container(Container),
+    Grid(Grid),
 }
 
 impl Widget {
@@ -509,7 +578,7 @@ impl Widget {
             }
             view::Widget::Action(spec) => {
                 Widget::Action(Action::new(ctx.clone(), variables, spec))
-            },
+            }
             view::Widget::Button(spec) => {
                 Widget::Button(Button::new(ctx.clone(), variables, spec, selected_path))
             }
@@ -522,6 +591,9 @@ impl Widget {
             view::Widget::Container(s) => {
                 Widget::Container(Container::new(ctx, variables, s, selected_path))
             }
+            view::Widget::Grid(spec) => {
+                Widget::Grid(Grid::new(ctx, variables, spec, selected_path))
+            }
         }
     }
 
@@ -533,6 +605,7 @@ impl Widget {
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
+            Widget::Grid(t) => Some(t.root()),
         }
     }
 
@@ -547,7 +620,8 @@ impl Widget {
             Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
-            Widget::Container(c) => c.update(waits, changed),
+            Widget::Container(t) => t.update(waits, changed),
+            Widget::Grid(t) => t.update(waits, changed),
         }
     }
 
@@ -559,6 +633,7 @@ impl Widget {
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
             Widget::Container(t) => t.update_var(name, value),
+            Widget::Grid(t) => t.update_var(name, value),
         }
     }
 }

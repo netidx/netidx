@@ -91,6 +91,13 @@ pub struct Child {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridChild {
+    pub halign: Option<Align>,
+    pub valign: Option<Align>,
+    pub widget: Widget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Container {
     pub direction: Direction,
     pub keybinds: Vec<Keybind>,
@@ -110,6 +117,7 @@ pub enum Widget {
     Radio(Radio),
     Entry(Entry),
     Container(Container),
+    Grid(Vec<Vec<GridChild>>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +125,3 @@ pub struct View {
     pub variables: HashMap<String, Value>,
     pub root: Widget,
 }
-
-
-
-

@@ -1,5 +1,8 @@
 use anyhow::Result;
-use futures::{prelude::Future, future::{join_all, FutureExt}};
+use futures::{
+    future::{join_all, FutureExt},
+    prelude::Future,
+};
 use netidx::{
     path::Path,
     resolver::{self, ResolverRead},
@@ -16,6 +19,36 @@ pub(super) struct Child {
     pub halign: Option<view::Align>,
     pub valign: Option<view::Align>,
     pub widget: Widget,
+}
+
+impl Child {
+    async fn new(resolver: &ResolverRead, c: view::Child) -> Result<Self> {
+        Ok(Child {
+            expand: c.expand,
+            fill: c.fill,
+            padding: c.padding,
+            halign: c.halign,
+            valign: c.valign,
+            widget: Widget::new(resolver, c.widget).await?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridChild {
+    pub halign: Option<Align>,
+    pub valign: Option<Align>,
+    pub widget: Widget,
+}
+
+impl GridChild {
+    async fn new(resolver: &ResolverRead, c: view::GridChild) -> Result<Self> {
+        Ok(GridChild {
+            halign: c.halign,
+            valign: c.valign,
+            widget: Widget::new(resolver, c.widget).await?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +72,7 @@ pub(super) enum Widget {
     Radio(view::Radio),
     Entry(view::Entry),
     Container(Container),
+    Grid(Vec<Vec<GridChild>>),
 }
 
 impl Widget {
@@ -66,26 +100,11 @@ impl Widget {
                 view::Widget::Radio(r) => Ok(Widget::Radio(r)),
                 view::Widget::Entry(e) => Ok(Widget::Entry(e)),
                 view::Widget::Container(c) => {
-                    let children = join_all(c.children.into_iter().map(|c| {
-                        let expand = c.expand;
-                        let padding = c.padding;
-                        let fill = c.fill;
-                        let halign = c.halign;
-                        let valign = c.valign;
-                        Widget::new(resolver, c.widget).map(move |w| {
-                            Ok(Child {
-                                expand,
-                                fill,
-                                padding,
-                                halign,
-                                valign,
-                                widget: w?,
-                            })
-                        })
-                    }))
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>()?;
+                    let children =
+                        join_all(c.children.into_iter().map(|c| Child::new(resolver, c)))
+                            .await
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?;
                     Ok(Widget::Container(Container {
                         direction: c.direction,
                         keybinds: c.keybinds,
@@ -93,6 +112,18 @@ impl Widget {
                         drill_up_target: c.drill_up_target,
                         children,
                     }))
+                }
+                view::Widget::Grid(c) => {
+                    let children = join_all(c.into_iter().map(|c| async {
+                        join_all(c.into_iter().map(|c| GridChild::new(resolver, c)))
+                            .await
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()
+                    }))
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+                    Ok(Widget::Grid(children))
                 }
             }
         })
