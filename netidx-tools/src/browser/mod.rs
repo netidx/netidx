@@ -272,7 +272,7 @@ impl Button {
 fn val_to_toggle(v: &Value) -> bool {
     match v {
         Value::False | Value::Null => false,
-        _ => true
+        _ => true,
     }
 }
 
@@ -358,6 +358,36 @@ impl Toggle {
             self.switch.set_active(val_to_toggle(value));
             self.switch.set_state(val_to_toggle(value));
             self.we_set.set(false);
+        }
+    }
+}
+
+struct Action {
+    source: Source,
+    sink: Sink,
+    ctx: WidgetCtx,
+}
+
+impl Action {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Action,
+    ) -> Self {
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        Action { source, sink, ctx }
+    }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some(new) = self.source.update(changed) {
+            self.sink.set(&self.ctx, new);
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        if self.source.update_var(name, value) {
+            self.sink.set(&self.ctx, value.clone())
         }
     }
 }
@@ -453,6 +483,7 @@ impl Container {
 enum Widget {
     Table(table::Table),
     Label(Label),
+    Action(Action),
     Button(Button),
     Toggle(Toggle),
     Container(Container),
@@ -476,7 +507,9 @@ impl Widget {
             view::Widget::Label(spec) => {
                 Widget::Label(Label::new(ctx.clone(), variables, spec, selected_path))
             }
-            view::Widget::Action(_) => todo!(),
+            view::Widget::Action(spec) => {
+                Widget::Action(Action::new(ctx.clone(), variables, spec))
+            },
             view::Widget::Button(spec) => {
                 Widget::Button(Button::new(ctx.clone(), variables, spec, selected_path))
             }
@@ -496,6 +529,7 @@ impl Widget {
         match self {
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
+            Widget::Action(_) => None,
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
@@ -510,6 +544,7 @@ impl Widget {
         match self {
             Widget::Table(t) => t.update(waits, changed),
             Widget::Label(t) => t.update(changed),
+            Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
             Widget::Container(c) => c.update(waits, changed),
@@ -520,6 +555,7 @@ impl Widget {
         match self {
             Widget::Table(_) => (),
             Widget::Label(t) => t.update_var(name, value),
+            Widget::Action(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
             Widget::Container(t) => t.update_var(name, value),
