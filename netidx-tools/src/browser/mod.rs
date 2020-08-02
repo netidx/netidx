@@ -1,6 +1,8 @@
+mod button;
 mod combobox;
 mod container;
 mod grid;
+mod label;
 mod table;
 mod toggle;
 mod view;
@@ -13,7 +15,7 @@ use futures::{
 };
 use gdk::{self, prelude::*};
 use gio::prelude::*;
-use glib::{self, clone, signal::Inhibit, source::PRIORITY_LOW};
+use glib::{self, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
@@ -169,118 +171,6 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
     }
 }
 
-struct Label {
-    label: gtk::Label,
-    source: Source,
-}
-
-impl Label {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
-        spec: view::Source,
-        selected_path: gtk::Label,
-    ) -> Label {
-        let source = Source::new(&ctx, variables, spec.clone());
-        let label = gtk::Label::new(Some(&format!("{}", source.current())));
-        label.set_selectable(true);
-        label.set_single_line_mode(true);
-        label.connect_button_press_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("{:?}", spec));
-                Inhibit(false)
-            }),
-        );
-        label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("{:?}", spec));
-            Inhibit(false)
-        }));
-        Label { source, label }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.label.upcast_ref()
-    }
-
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.source.update(changed) {
-            self.label.set_label(&format!("{}", new));
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if self.source.update_var(name, value) {
-            self.label.set_label(&format!("{}", value));
-        }
-    }
-}
-
-struct Button {
-    enabled: Source,
-    label: Source,
-    source: Source,
-    button: gtk::Button,
-}
-
-impl Button {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
-        spec: view::Button,
-        selected_path: gtk::Label,
-    ) -> Self {
-        let button = gtk::Button::new();
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let label = Source::new(&ctx, variables, spec.label.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
-        button.set_sensitive(val_to_bool(&enabled.current()));
-        button.set_label(&format!("{}", label.current()));
-        button.connect_clicked(clone!(@strong ctx, @strong source, @strong sink =>
-        move |_| {
-            sink.set(&ctx, source.current());
-        }));
-        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(
-                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
-            );
-            Inhibit(false)
-        }));
-        button.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(
-                    &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
-                );
-                Inhibit(false)
-            }),
-        );
-        Button { enabled, label, source, button }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.button.upcast_ref()
-    }
-
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.enabled.update(changed) {
-            self.button.set_sensitive(val_to_bool(&new));
-        }
-        if let Some(new) = self.label.update(changed) {
-            self.button.set_label(&format!("{}", new));
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if self.enabled.update_var(name, value) {
-            self.button.set_sensitive(val_to_bool(value));
-        }
-        if self.label.update_var(name, value) {
-            self.button.set_label(&format!("{}", value));
-        }
-        self.source.update_var(name, value);
-    }
-}
-
 struct Action {
     source: Source,
     sink: Sink,
@@ -313,9 +203,9 @@ impl Action {
 
 enum Widget {
     Table(table::Table),
-    Label(Label),
+    Label(label::Label),
     Action(Action),
-    Button(Button),
+    Button(button::Button),
     Toggle(toggle::Toggle),
     ComboBox(combobox::ComboBox),
     Container(container::Container),
@@ -337,15 +227,21 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::Label(spec) => {
-                Widget::Label(Label::new(ctx.clone(), variables, spec, selected_path))
-            }
+            view::Widget::Label(spec) => Widget::Label(label::Label::new(
+                ctx.clone(),
+                variables,
+                spec,
+                selected_path,
+            )),
             view::Widget::Action(spec) => {
                 Widget::Action(Action::new(ctx.clone(), variables, spec))
             }
-            view::Widget::Button(spec) => {
-                Widget::Button(Button::new(ctx.clone(), variables, spec, selected_path))
-            }
+            view::Widget::Button(spec) => Widget::Button(button::Button::new(
+                ctx.clone(),
+                variables,
+                spec,
+                selected_path,
+            )),
             view::Widget::Toggle(spec) => Widget::Toggle(toggle::Toggle::new(
                 ctx.clone(),
                 variables,
