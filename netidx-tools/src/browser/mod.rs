@@ -1,6 +1,7 @@
-mod table;
 mod combobox;
+mod container;
 mod grid;
+mod table;
 mod view;
 use anyhow::Result;
 use futures::{
@@ -9,10 +10,10 @@ use futures::{
     select_biased,
     stream::StreamExt,
 };
-use gdk::{self, keys, prelude::*};
+use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, clone, signal::Inhibit, source::PRIORITY_LOW};
-use gtk::{self, prelude::*, Application, ApplicationWindow, Orientation, Adjustment};
+use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
 use netidx::{
@@ -392,85 +393,6 @@ impl Action {
     }
 }
 
-struct Container {
-    root: gtk::Box,
-    children: Vec<Widget>,
-}
-
-impl Container {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
-        spec: view::Container,
-        selected_path: gtk::Label,
-    ) -> Container {
-        let dir = match spec.direction {
-            view::Direction::Horizontal => Orientation::Horizontal,
-            view::Direction::Vertical => Orientation::Vertical,
-        };
-        let root = gtk::Box::new(dir, 0);
-        let mut children = Vec::new();
-        for s in spec.children.iter() {
-            let w = Widget::new(
-                ctx.clone(),
-                variables,
-                s.widget.clone(),
-                selected_path.clone(),
-            );
-            if let Some(r) = w.root() {
-                root.pack_start(r, s.expand, s.fill, s.padding as u32);
-                if let Some(halign) = s.halign {
-                    r.set_halign(align_to_gtk(halign));
-                }
-                if let Some(valign) = s.valign {
-                    r.set_valign(align_to_gtk(valign));
-                }
-            }
-            children.push(w);
-        }
-        root.connect_key_press_event(clone!(@strong ctx, @strong spec => move |_, k| {
-            let target = {
-                if k.get_keyval() == keys::constants::BackSpace {
-                    &spec.drill_up_target
-                } else if k.get_keyval() == keys::constants::Return {
-                    &spec.drill_down_target
-                } else {
-                    &None
-                }
-            };
-            match target {
-                None => Inhibit(false),
-                Some(target) => {
-                    let m = FromGui::Navigate(target.clone());
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                    Inhibit(false)
-                }
-            }
-        }));
-        Container { root, children }
-    }
-
-    fn update(
-        &self,
-        waits: &mut Vec<oneshot::Receiver<()>>,
-        updates: &Arc<IndexMap<SubId, Value>>,
-    ) {
-        for c in &self.children {
-            c.update(waits, updates);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        for c in &self.children {
-            c.update_var(name, value);
-        }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-}
-
 enum Widget {
     Table(table::Table),
     Label(Label),
@@ -478,7 +400,7 @@ enum Widget {
     Button(Button),
     Toggle(Toggle),
     ComboBox(combobox::ComboBox),
-    Container(Container),
+    Container(container::Container),
     Grid(grid::Grid),
 }
 
@@ -517,9 +439,12 @@ impl Widget {
             )),
             view::Widget::Radio(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
-            view::Widget::Container(s) => {
-                Widget::Container(Container::new(ctx, variables, s, selected_path))
-            }
+            view::Widget::Container(s) => Widget::Container(container::Container::new(
+                ctx,
+                variables,
+                s,
+                selected_path,
+            )),
             view::Widget::Grid(spec) => {
                 Widget::Grid(grid::Grid::new(ctx, variables, spec, selected_path))
             }
