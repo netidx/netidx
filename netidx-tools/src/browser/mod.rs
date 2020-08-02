@@ -791,7 +791,7 @@ impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
-        selected_path.set_margin_start(5);
+        selected_path.set_margin_start(0);
         selected_path.set_selectable(true);
         selected_path.set_single_line_mode(true);
         let selected_path_window =
