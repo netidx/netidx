@@ -58,6 +58,15 @@ pub(super) struct Container {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct Grid {
+    pub homogeneous_columns: bool,
+    pub homogeneous_rows: bool,
+    pub column_spacing: u32,
+    pub row_spacing: u32,
+    pub children: Vec<Vec<GridChild>>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) enum Widget {
     Table(Path, resolver::Table),
     StaticTable(view::Source),
@@ -69,7 +78,7 @@ pub(super) enum Widget {
     Radio(view::Radio),
     Entry(view::Entry),
     Container(Container),
-    Grid(Vec<Vec<GridChild>>),
+    Grid(Grid),
 }
 
 impl Widget {
@@ -111,7 +120,7 @@ impl Widget {
                     }))
                 }
                 view::Widget::Grid(c) => {
-                    let children = join_all(c.into_iter().map(|c| async {
+                    let children = join_all(c.children.into_iter().map(|c| async {
                         join_all(c.into_iter().map(|c| GridChild::new(resolver, c)))
                             .await
                             .into_iter()
@@ -120,7 +129,13 @@ impl Widget {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
-                    Ok(Widget::Grid(children))
+                    Ok(Widget::Grid(Grid {
+                        homogeneous_columns: c.homogeneous_columns,
+                        homogeneous_rows: c.homogeneous_rows,
+                        column_spacing: c.column_spacing,
+                        row_spacing: c.row_spacing,
+                        children
+                    }))
                 }
             }
         })

@@ -107,6 +107,15 @@ pub struct Container {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grid {
+    pub homogeneous_columns: bool,
+    pub homogeneous_rows: bool,
+    pub column_spacing: u32,
+    pub row_spacing: u32,
+    pub children: Vec<Vec<GridChild>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
     Table(Source),
     Label(Source),
@@ -117,7 +126,7 @@ pub enum Widget {
     Radio(Radio),
     Entry(Entry),
     Container(Container),
-    Grid(Vec<Vec<GridChild>>),
+    Grid(Grid),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -490,11 +490,16 @@ impl Grid {
     fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        spec: Vec<Vec<view::GridChild>>,
+        spec: view::Grid,
         selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Grid::new();
+        root.set_column_homogeneous(spec.homogeneous_columns);
+        root.set_row_homogeneous(spec.homogeneous_rows);
+        root.set_column_spacing(spec.column_spacing);
+        root.set_row_spacing(spec.row_spacing);
         let children = spec
+            .children
             .into_iter()
             .enumerate()
             .map(|(j, row)| {
