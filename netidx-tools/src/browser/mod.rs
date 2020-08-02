@@ -1,5 +1,6 @@
 mod table;
 mod view;
+use anyhow::Result;
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -568,7 +569,9 @@ impl ComboBox {
         let we_set = Rc::new(Cell::new(false));
         combo.set_sensitive(val_to_bool(&enabled.current()));
         ComboBox::update_choices(&combo, &choices.current());
+        we_set.set(true);
         ComboBox::update_active(&combo, &source.current());
+        we_set.set(false);
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             dbg!();
             selected_path.set_label(
@@ -818,6 +821,15 @@ impl View {
     }
 }
 
+macro_rules! break_err {
+    ($e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(_) => break,
+        }
+    };
+}
+
 async fn netidx_main(
     cfg: Config,
     auth: Auth,
@@ -841,29 +853,36 @@ async fn netidx_main(
     let mut _dv_view: Option<Dval> = None;
     let mut changed = IndexMap::new();
     let mut refreshing = false;
+    fn refresh(
+        refreshing: &mut bool,
+        changed: &mut IndexMap<SubId, Value>,
+        to_gui: &mpsc::UnboundedSender<ToGui>,
+    ) -> Result<()> {
+        if !*refreshing && changed.len() > 0 {
+            *refreshing = true;
+            let b = Arc::new(mem::replace(changed, IndexMap::new()));
+            to_gui.unbounded_send(ToGui::Update(b))?
+        }
+        Ok(())
+    }
     loop {
         select_biased! {
             b = updates.next() => if let Some(mut batch) = b {
                 for (id, v) in batch.drain(..) {
                     changed.insert(id, v);
                 }
-                if !refreshing && changed.len() > 0 {
-                    refreshing = true;
-                    let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
-                    match to_gui.unbounded_send(ToGui::Update(b)) {
-                        Ok(()) => (),
-                        Err(e) => break
-                    }
-                }
+                break_err!(refresh(&mut refreshing, &mut changed, &to_gui))
             },
             s = state_updates.next() => if let Some((id, st)) = s {
                 match st {
                     DvState::Subscribed => (),
                     DvState::Unsubscribed => {
                         changed.insert(id, Value::String(Chars::from("#SUB")));
+                        break_err!(refresh(&mut refreshing, &mut changed, &to_gui))
                     }
                     DvState::FatalError(_) => {
                         changed.insert(id, Value::String(Chars::from("#ERR")));
+                        break_err!(refresh(&mut refreshing, &mut changed, &to_gui))
                     }
                 }
             },
@@ -898,7 +917,10 @@ async fn netidx_main(
             },
             m = from_gui.next() => match m {
                 None => break,
-                Some(FromGui::Updated) => { refreshing = false; },
+                Some(FromGui::Updated) => {
+                    refreshing = false;
+                    break_err!(refresh(&mut refreshing, &mut changed, &to_gui))
+                },
                 Some(FromGui::Navigate(base_path)) => {
                     match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
