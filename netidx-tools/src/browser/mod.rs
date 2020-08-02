@@ -7,10 +7,10 @@ use futures::{
     select_biased,
     stream::StreamExt,
 };
-use gdk::keys;
+use gdk::{self, keys, prelude::*};
 use gio::prelude::*;
 use glib::{self, clone, signal::Inhibit, source::PRIORITY_LOW};
-use gtk::{self, prelude::*, Application, ApplicationWindow, Orientation};
+use gtk::{self, prelude::*, Application, ApplicationWindow, Orientation, Adjustment};
 use indexmap::IndexMap;
 use log::{info, warn};
 use netidx::{
@@ -543,6 +543,7 @@ impl Grid {
 }
 
 struct ComboBox {
+    root: gtk::EventBox,
     combo: gtk::ComboBoxText,
     enabled: Source,
     choices: Source,
@@ -562,18 +563,9 @@ impl ComboBox {
         } else {
             gtk::ComboBoxText::new()
         };
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let choices = Source::new(&ctx, variables, spec.choices.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
-        let we_set = Rc::new(Cell::new(false));
-        combo.set_sensitive(val_to_bool(&enabled.current()));
-        ComboBox::update_choices(&combo, &choices.current());
-        we_set.set(true);
-        ComboBox::update_active(&combo, &source.current());
-        we_set.set(false);
+        let root = gtk::EventBox::new();
+        root.add(&combo);
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            dbg!();
             selected_path.set_label(
                 &format!(
                     "source: {:?}, sink: {:?}, choices: {:?}",
@@ -582,9 +574,8 @@ impl ComboBox {
             );
             Inhibit(false)
         }));
-        combo.connect_enter_notify_event(
+        root.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
-                dbg!();
                 selected_path.set_label(
                     &format!(
                         "source: {:?}, sink: {:?}, choices: {:?}",
@@ -594,6 +585,16 @@ impl ComboBox {
                 Inhibit(false)
             }),
         );
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let choices = Source::new(&ctx, variables, spec.choices.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        let we_set = Rc::new(Cell::new(false));
+        combo.set_sensitive(val_to_bool(&enabled.current()));
+        ComboBox::update_choices(&combo, &choices.current(), &source.current());
+        we_set.set(true);
+        ComboBox::update_active(&combo, &source.current());
+        we_set.set(false);
         combo.connect_changed(clone!(
             @strong we_set, @strong sink, @strong ctx, @strong source => move |combo| {
             if !we_set.get() {
@@ -612,7 +613,7 @@ impl ComboBox {
                 );
             }
         }));
-        ComboBox { combo, enabled, choices, source, we_set }
+        ComboBox { root, combo, enabled, choices, source, we_set }
     }
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Value) {
@@ -621,7 +622,7 @@ impl ComboBox {
         }
     }
 
-    fn update_choices(combo: &gtk::ComboBoxText, choices: &Value) {
+    fn update_choices(combo: &gtk::ComboBoxText, choices: &Value, source: &Value) {
         let choices = match choices {
             Value::String(s) => {
                 match serde_json::from_str::<Vec<(Value, String)>>(&**s) {
@@ -646,6 +647,7 @@ impl ComboBox {
                 combo.append(Some(id.as_str()), val.as_str());
             }
         }
+        ComboBox::update_active(combo, source)
     }
 
     fn update(&self, updates: &Arc<IndexMap<SubId, Value>>) {
@@ -653,11 +655,11 @@ impl ComboBox {
         if let Some(new) = self.enabled.update(updates) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.choices.update(updates) {
-            ComboBox::update_choices(&self.combo, &new);
-        }
         if let Some(new) = self.source.update(updates) {
             ComboBox::update_active(&self.combo, &new);
+        }
+        if let Some(new) = self.choices.update(updates) {
+            ComboBox::update_choices(&self.combo, &new, &self.source.current());
         }
         self.we_set.set(false);
     }
@@ -667,17 +669,17 @@ impl ComboBox {
         if self.enabled.update_var(name, value) {
             self.combo.set_sensitive(val_to_bool(value));
         }
-        if self.choices.update_var(name, value) {
-            ComboBox::update_choices(&self.combo, value);
-        }
         if self.source.update_var(name, value) {
             ComboBox::update_active(&self.combo, value);
+        }
+        if self.choices.update_var(name, value) {
+            ComboBox::update_choices(&self.combo, value, &self.source.current());
         }
         self.we_set.set(false);
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.combo.upcast_ref()
+        self.root.upcast_ref()
     }
 }
 
@@ -792,6 +794,9 @@ impl View {
         selected_path.set_margin_start(5);
         selected_path.set_selectable(true);
         selected_path.set_single_line_mode(true);
+        let selected_path_window =
+            gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        selected_path_window.add(&selected_path);
         let widget =
             Widget::new(ctx, &spec.variables, spec.root.clone(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -799,7 +804,7 @@ impl View {
             root.add(wroot);
             root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
         }
-        root.add(&selected_path);
+        root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         View { root, widget }
     }
