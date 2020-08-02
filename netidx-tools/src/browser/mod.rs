@@ -148,6 +148,23 @@ impl Sink {
     }
 }
 
+fn val_to_bool(v: &Value) -> bool {
+    match v {
+        Value::False | Value::Null => false,
+        _ => true,
+    }
+}
+
+fn align_to_gtk(a: view::Align) -> gtk::Align {
+    match a {
+        view::Align::Fill => gtk::Align::Fill,
+        view::Align::Start => gtk::Align::Start,
+        view::Align::End => gtk::Align::End,
+        view::Align::Center => gtk::Align::Center,
+        view::Align::Baseline => gtk::Align::Baseline,
+    }
+}
+
 struct Label {
     label: gtk::Label,
     source: Source,
@@ -213,10 +230,7 @@ impl Button {
         let label = Source::new(&ctx, variables, spec.label.clone());
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
-        button.set_sensitive(match enabled.current() {
-            Value::False | Value::Null => false,
-            _ => true,
-        });
+        button.set_sensitive(val_to_bool(&enabled.current()));
         button.set_label(&format!("{}", label.current()));
         button.connect_clicked(clone!(@strong ctx, @strong source, @strong sink =>
         move |_| {
@@ -245,10 +259,7 @@ impl Button {
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.enabled.update(changed) {
-            self.button.set_sensitive(match new {
-                Value::False | Value::Null => false,
-                _ => true,
-            });
+            self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.label.update(changed) {
             self.button.set_label(&format!("{}", new));
@@ -257,22 +268,12 @@ impl Button {
 
     fn update_var(&self, name: &str, value: &Value) {
         if self.enabled.update_var(name, value) {
-            self.button.set_sensitive(match value {
-                Value::False | Value::Null => false,
-                _ => true,
-            });
+            self.button.set_sensitive(val_to_bool(value));
         }
         if self.label.update_var(name, value) {
             self.button.set_label(&format!("{}", value));
         }
         self.source.update_var(name, value);
-    }
-}
-
-fn val_to_toggle(v: &Value) -> bool {
-    match v {
-        Value::False | Value::Null => false,
-        _ => true,
     }
 }
 
@@ -295,12 +296,9 @@ impl Toggle {
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
-        switch.set_sensitive(match enabled.current() {
-            Value::False | Value::Null => false,
-            _ => true,
-        });
-        switch.set_active(val_to_toggle(&source.current()));
-        switch.set_state(val_to_toggle(&source.current()));
+        switch.set_sensitive(val_to_bool(&enabled.current()));
+        switch.set_active(val_to_bool(&source.current()));
+        switch.set_state(val_to_bool(&source.current()));
         switch.connect_state_set(clone!(
         @strong ctx, @strong sink, @strong we_set, @strong source =>
         move |switch, state| {
@@ -308,8 +306,8 @@ impl Toggle {
                 sink.set(&ctx, if state { Value::True } else { Value::False });
                 idle_add(clone!(@strong source, @strong switch, @strong we_set => move || {
                     we_set.set(true);
-                    switch.set_active(val_to_toggle(&source.current()));
-                    switch.set_state(val_to_toggle(&source.current()));
+                    switch.set_active(val_to_bool(&source.current()));
+                    switch.set_state(val_to_bool(&source.current()));
                     we_set.set(false);
                     Continue(false)
                 }));
@@ -339,24 +337,24 @@ impl Toggle {
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.enabled.update(changed) {
-            self.switch.set_sensitive(val_to_toggle(&new));
+            self.switch.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.source.update(changed) {
             self.we_set.set(true);
-            self.switch.set_active(val_to_toggle(&new));
-            self.switch.set_state(val_to_toggle(&new));
+            self.switch.set_active(val_to_bool(&new));
+            self.switch.set_state(val_to_bool(&new));
             self.we_set.set(false);
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) {
         if self.enabled.update_var(name, value) {
-            self.switch.set_sensitive(val_to_toggle(value));
+            self.switch.set_sensitive(val_to_bool(value));
         }
         if self.source.update_var(name, value) {
             self.we_set.set(true);
-            self.switch.set_active(val_to_toggle(value));
-            self.switch.set_state(val_to_toggle(value));
+            self.switch.set_active(val_to_bool(value));
+            self.switch.set_state(val_to_bool(value));
             self.we_set.set(false);
         }
     }
@@ -389,16 +387,6 @@ impl Action {
         if self.source.update_var(name, value) {
             self.sink.set(&self.ctx, value.clone())
         }
-    }
-}
-
-fn align_to_gtk(a: view::Align) -> gtk::Align {
-    match a {
-        view::Align::Fill => gtk::Align::Fill,
-        view::Align::Start => gtk::Align::Start,
-        view::Align::End => gtk::Align::End,
-        view::Align::Center => gtk::Align::Center,
-        view::Align::Baseline => gtk::Align::Baseline,
     }
 }
 
@@ -551,6 +539,112 @@ impl Grid {
 
     fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
+    }
+}
+
+struct ComboBox {
+    combo: gtk::ComboBoxText,
+    enabled: Source,
+    choices: Source,
+    source: Source,
+    we_set: Rc<Cell<bool>>,
+}
+
+impl ComboBox {
+    fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::ComboBox,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let combo = if spec.has_entry {
+            gtk::ComboBoxText::with_entry()
+        } else {
+            gtk::ComboBoxText::new()
+        };
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let choices = Source::new(&ctx, variables, spec.choices.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        let we_set = Rc::new(Cell::new(false));
+        combo.set_sensitive(val_to_bool(&enabled.current()));
+        ComboBox::update_choices(&combo, &choices.current());
+        ComboBox::update_active(&combo, &source.current());
+        combo.connect_changed(
+            clone!(@strong we_set, @strong sink, @strong ctx => move |combo| {
+                if !we_set.get() {
+                    if let Some(id) = combo.get_active_id() {
+                        if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
+                            sink.set(&ctx, idv);
+                        }
+                    }
+                }
+            }),
+        );
+        ComboBox { combo, enabled, choices, source, we_set }
+    }
+
+    fn update_active(combo: &gtk::ComboBoxText, source: &Value) {
+        if let Ok(current) = serde_json::to_string(source) {
+            combo.set_active_id(Some(current));
+        }
+    }
+
+    fn update_choices(combo: &gtk::ComboBoxText, choices: &Value) {
+        let choices = match choices {
+            Value::String(s) => {
+                match serde_json::from_str::<Vec<(Value, String)>>(&**s) {
+                    Ok(choices) => choices,
+                    Err(e) => {
+                        warn!(
+                            "failed to parse combo choices, source {:?}, {}",
+                            choices, e
+                        );
+                        vec![]
+                    }
+                }
+            }
+            v => {
+                warn!("combo choices wrong type, expected json string not {:?}", v);
+                vec![]
+            }
+        };
+        combo.remove_all();
+        for (id, val) in choices {
+            combo.append(Some(serde_json::to_string(id).unwrap()), val.as_str())
+        }
+    }
+
+    fn update(
+        &self,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        updates: &Arc<IndexMap<SubId, Value>>,
+    ) {
+        self.we_set.set(true);
+        if let Some(new) = self.enabled.update(waits, updates) {
+            combo.set_sensitive(val_to_bool(&new));
+        }
+        if let Some(new) = self.choices.update(waits, updates) {
+            ComboBox::update_choices(&self.combo, &new);
+        }
+        if let Some(new) = self.source.update(waits, updates) {
+            ComboBox::update_active(&self.combo, &new);
+        }
+        self.we_set.set(false);
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        self.we_set.set(true);
+        if self.enabled.update_var(name, value) {
+            combo.set_sensitive(val_to_bool(value));
+        }
+        if self.choices.update_var(name, value) {
+            ComboBox::update_choices(&self.combo, value);
+        }
+        if self.source.update_var(name, value) {
+            ComboBox::update_active(&self.combo, value);
+        }
+        self.we_set.set(false);
     }
 }
 

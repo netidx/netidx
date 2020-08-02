@@ -50,6 +50,7 @@ pub struct Toggle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComboBox {
+    pub has_entry: bool,
     pub enabled: Source,
     pub choices: Source,
     pub source: Source,
