@@ -570,6 +570,26 @@ impl ComboBox {
         combo.set_sensitive(val_to_bool(&enabled.current()));
         ComboBox::update_choices(&combo, &choices.current());
         ComboBox::update_active(&combo, &source.current());
+        combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(
+                &format!(
+                    "source: {:?}, sink: {:?}, choices: {:?}",
+                    spec.source, spec.sink, spec.choices
+                )
+            );
+            Inhibit(false)
+        }));
+        combo.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(
+                    &format!(
+                        "source: {:?}, sink: {:?}, choices: {:?}",
+                        spec.source, spec.sink, spec.choices
+                    )
+                );
+                Inhibit(false)
+            }),
+        );
         combo.connect_changed(
             clone!(@strong we_set, @strong sink, @strong ctx => move |combo| {
                 if !we_set.get() {
@@ -586,7 +606,7 @@ impl ComboBox {
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Value) {
         if let Ok(current) = serde_json::to_string(source) {
-            combo.set_active_id(Some(current));
+            combo.set_active_id(Some(current.as_str()));
         }
     }
 
@@ -611,23 +631,21 @@ impl ComboBox {
         };
         combo.remove_all();
         for (id, val) in choices {
-            combo.append(Some(serde_json::to_string(id).unwrap()), val.as_str())
+            if let Ok(id) = serde_json::to_string(&id) {
+                combo.append(Some(id.as_str()), val.as_str());
+            }
         }
     }
 
-    fn update(
-        &self,
-        waits: &mut Vec<oneshot::Receiver<()>>,
-        updates: &Arc<IndexMap<SubId, Value>>,
-    ) {
+    fn update(&self, updates: &Arc<IndexMap<SubId, Value>>) {
         self.we_set.set(true);
-        if let Some(new) = self.enabled.update(waits, updates) {
-            combo.set_sensitive(val_to_bool(&new));
+        if let Some(new) = self.enabled.update(updates) {
+            self.combo.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.choices.update(waits, updates) {
+        if let Some(new) = self.choices.update(updates) {
             ComboBox::update_choices(&self.combo, &new);
         }
-        if let Some(new) = self.source.update(waits, updates) {
+        if let Some(new) = self.source.update(updates) {
             ComboBox::update_active(&self.combo, &new);
         }
         self.we_set.set(false);
@@ -636,7 +654,7 @@ impl ComboBox {
     fn update_var(&self, name: &str, value: &Value) {
         self.we_set.set(true);
         if self.enabled.update_var(name, value) {
-            combo.set_sensitive(val_to_bool(value));
+            self.combo.set_sensitive(val_to_bool(value));
         }
         if self.choices.update_var(name, value) {
             ComboBox::update_choices(&self.combo, value);
@@ -646,6 +664,10 @@ impl ComboBox {
         }
         self.we_set.set(false);
     }
+
+    fn root(&self) -> &gtk::Widget {
+        self.combo.upcast_ref()
+    }
 }
 
 enum Widget {
@@ -654,6 +676,7 @@ enum Widget {
     Action(Action),
     Button(Button),
     Toggle(Toggle),
+    ComboBox(ComboBox),
     Container(Container),
     Grid(Grid),
 }
@@ -685,7 +708,12 @@ impl Widget {
             view::Widget::Toggle(spec) => {
                 Widget::Toggle(Toggle::new(ctx.clone(), variables, spec, selected_path))
             }
-            view::Widget::ComboBox(_) => todo!(),
+            view::Widget::ComboBox(spec) => Widget::ComboBox(ComboBox::new(
+                ctx.clone(),
+                variables,
+                spec,
+                selected_path,
+            )),
             view::Widget::Radio(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
             view::Widget::Container(s) => {
@@ -704,6 +732,7 @@ impl Widget {
             Widget::Action(_) => None,
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
+            Widget::ComboBox(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
         }
@@ -720,6 +749,7 @@ impl Widget {
             Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
+            Widget::ComboBox(t) => t.update(changed),
             Widget::Container(t) => t.update(waits, changed),
             Widget::Grid(t) => t.update(waits, changed),
         }
@@ -732,6 +762,7 @@ impl Widget {
             Widget::Action(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
+            Widget::ComboBox(t) => t.update_var(name, value),
             Widget::Container(t) => t.update_var(name, value),
             Widget::Grid(t) => t.update_var(name, value),
         }
