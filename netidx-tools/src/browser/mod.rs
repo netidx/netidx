@@ -29,9 +29,8 @@ use std::{
     result,
     sync::{mpsc as smpsc, Arc},
     thread,
-    time::Duration,
 };
-use tokio::{runtime::Runtime, time};
+use tokio::runtime::Runtime;
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
@@ -571,6 +570,7 @@ impl ComboBox {
         ComboBox::update_choices(&combo, &choices.current());
         ComboBox::update_active(&combo, &source.current());
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            dbg!();
             selected_path.set_label(
                 &format!(
                     "source: {:?}, sink: {:?}, choices: {:?}",
@@ -581,6 +581,7 @@ impl ComboBox {
         }));
         combo.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
+                dbg!();
                 selected_path.set_label(
                     &format!(
                         "source: {:?}, sink: {:?}, choices: {:?}",
@@ -590,17 +591,24 @@ impl ComboBox {
                 Inhibit(false)
             }),
         );
-        combo.connect_changed(
-            clone!(@strong we_set, @strong sink, @strong ctx => move |combo| {
-                if !we_set.get() {
-                    if let Some(id) = combo.get_active_id() {
-                        if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                            sink.set(&ctx, idv);
-                        }
+        combo.connect_changed(clone!(
+            @strong we_set, @strong sink, @strong ctx, @strong source => move |combo| {
+            if !we_set.get() {
+                if let Some(id) = combo.get_active_id() {
+                    if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
+                        sink.set(&ctx, idv);
                     }
                 }
-            }),
-        );
+                idle_add(clone!(
+                    @strong source, @strong combo, @strong we_set => move || {
+                        we_set.set(true);
+                        ComboBox::update_active(&combo, &source.current());
+                        we_set.set(false);
+                        Continue(false)
+                    })
+                );
+            }
+        }));
         ComboBox { combo, enabled, choices, source, we_set }
     }
 
@@ -832,11 +840,13 @@ async fn netidx_main(
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut _dv_view: Option<Dval> = None;
     let mut changed = IndexMap::new();
-    let mut refresh = time::interval(Duration::from_secs(1)).fuse();
     let mut refreshing = false;
     loop {
         select_biased! {
-            _ = refresh.next() => {
+            b = updates.next() => if let Some(mut batch) = b {
+                for (id, v) in batch.drain(..) {
+                    changed.insert(id, v);
+                }
                 if !refreshing && changed.len() > 0 {
                     refreshing = true;
                     let b = Arc::new(mem::replace(&mut changed, IndexMap::new()));
@@ -844,11 +854,6 @@ async fn netidx_main(
                         Ok(()) => (),
                         Err(e) => break
                     }
-                }
-            },
-            b = updates.next() => if let Some(mut batch) = b {
-                for (id, v) in batch.drain(..) {
-                    changed.insert(id, v);
                 }
             },
             s = state_updates.next() => if let Some((id, st)) = s {
