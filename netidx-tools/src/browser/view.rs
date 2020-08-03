@@ -6,7 +6,7 @@ use netidx::{
     subscriber::Value,
 };
 pub(super) use netidx_protocols::view::{self, *};
-use std::{boxed::Box, collections::HashMap, pin::Pin};
+use std::{boxed::Box as MemBox, collections::HashMap, pin::Pin};
 
 #[derive(Debug, Clone)]
 pub(super) struct BoxChild {
@@ -19,7 +19,7 @@ pub(super) struct BoxChild {
 }
 
 impl BoxChild {
-    async fn new(resolver: &ResolverRead, c: view::Child) -> Result<Self> {
+    async fn new(resolver: &ResolverRead, c: view::BoxChild) -> Result<Self> {
         Ok(BoxChild {
             expand: c.expand,
             fill: c.fill,
@@ -81,8 +81,8 @@ impl Widget {
     fn new<'a>(
         resolver: &'a ResolverRead,
         widget: view::Widget,
-    ) -> Pin<Box<dyn Future<Output = Result<Self>> + 'a>> {
-        Box::pin(async move {
+    ) -> Pin<MemBox<dyn Future<Output = Result<Self>> + 'a>> {
+        MemBox::pin(async move {
             match widget {
                 view::Widget::Table(s @ view::Source::Constant(_)) => {
                     Ok(Widget::StaticTable(s))

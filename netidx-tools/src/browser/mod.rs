@@ -1,7 +1,7 @@
-mod widgets;
 mod containers;
 mod table;
 mod view;
+mod widgets;
 use anyhow::Result;
 use futures::{
     channel::{mpsc, oneshot},
@@ -250,7 +250,6 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::RadioGroup(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
             view::Widget::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, variables, s, selected_path))

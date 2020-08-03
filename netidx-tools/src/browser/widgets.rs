@@ -1,11 +1,12 @@
 use super::{val_to_bool, WidgetCtx, Source, Sink};
 use crate::browser::view;
+use log::warn;
 use glib::clone;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, rc::Rc, cell::Cell};
 
 pub(super) struct Button {
     enabled: Source,

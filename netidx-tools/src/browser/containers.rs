@@ -1,12 +1,11 @@
-use super::{align_to_gtk, Widget, WidgetCtx, FromGui};
+use super::{align_to_gtk, Widget, WidgetCtx};
 use crate::browser::view;
 use futures::channel::oneshot;
-use glib::clone;
-use gdk::{self, prelude::*, keys};
+use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use std::{collections::HashMap, sync::Arc, result};
+use std::{collections::HashMap, sync::Arc};
 
 pub(super) struct Box {
     root: gtk::Box,
@@ -17,9 +16,9 @@ impl Box {
     pub(super) fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        spec: view::Container,
+        spec: view::Box,
         selected_path: gtk::Label,
-    ) -> Container {
+    ) -> Self {
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -44,26 +43,7 @@ impl Box {
             }
             children.push(w);
         }
-        root.connect_key_press_event(clone!(@strong ctx, @strong spec => move |_, k| {
-            let target = {
-                if k.get_keyval() == keys::constants::BackSpace {
-                    &spec.drill_up_target
-                } else if k.get_keyval() == keys::constants::Return {
-                    &spec.drill_down_target
-                } else {
-                    &None
-                }
-            };
-            match target {
-                None => Inhibit(false),
-                Some(target) => {
-                    let m = FromGui::Navigate(target.clone());
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                    Inhibit(false)
-                }
-            }
-        }));
-        Container { root, children }
+        Box { root, children }
     }
 
     pub(super) fn update(
