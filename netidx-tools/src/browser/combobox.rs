@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(super) struct ComboBox {
+    ctx: WidgetCtx,
     root: gtk::EventBox,
     combo: Rc<RefCell<gtk::ComboBoxText>>,
     has_entry: Source,
@@ -28,15 +29,17 @@ pub(super) struct ComboBox {
 
 impl ComboBox {
     fn create_combo(
+        ctx: &WidgetCtx,
         spec: &view::ComboBox,
         selected_path: &gtk::Label,
         has_entry: &Value,
+        enabled: &Source,
         choices: &Source,
         source: &Source,
         sink: &Sink,
         we_set: &Rc<Cell<bool>>,
     ) -> gtk::ComboBoxText {
-        let combo = if val_to_bool(&spec.has_entry.current()) {
+        let combo = if val_to_bool(&has_entry) {
             gtk::ComboBoxText::with_entry()
         } else {
             gtk::ComboBoxText::new()
@@ -89,10 +92,12 @@ impl ComboBox {
         let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         let root = gtk::EventBox::new();
-        let combo = create_combo(
+        let combo = ComboBox::create_combo(
+            &ctx,
             &spec,
             &selected_path,
             &has_entry.current(),
+            &enabled,
             &choices,
             &source,
             &sink,
@@ -111,6 +116,7 @@ impl ComboBox {
             }),
         );
         ComboBox {
+            ctx,
             root,
             combo: Rc::new(RefCell::new(combo)),
             has_entry,
@@ -159,10 +165,12 @@ impl ComboBox {
     }
 
     fn recreate_combo(&self, has_entry: &Value) {
-        let combo = create_combo(
+        let combo = ComboBox::create_combo(
+            &self.ctx,
             &self.spec,
             &self.selected_path,
-            &new,
+            has_entry,
+            &self.enabled,
             &self.choices,
             &self.source,
             &self.sink,
@@ -180,17 +188,21 @@ impl ComboBox {
                 self.source.update(updates);
                 self.choices.update(updates);
                 self.recreate_combo(&new)
-            },
+            }
             None => {
                 self.we_set.set(true);
                 if let Some(new) = self.enabled.update(updates) {
-                    self.combo.set_sensitive(val_to_bool(&new));
+                    self.combo.borrow().set_sensitive(val_to_bool(&new));
                 }
                 if let Some(new) = self.source.update(updates) {
-                    ComboBox::update_active(&self.combo, &new);
+                    ComboBox::update_active(&*self.combo.borrow(), &new);
                 }
                 if let Some(new) = self.choices.update(updates) {
-                    ComboBox::update_choices(&self.combo, &new, &self.source.current());
+                    ComboBox::update_choices(
+                        &*self.combo.borrow(),
+                        &new,
+                        &self.source.current(),
+                    );
                 }
                 self.we_set.set(false);
             }
@@ -206,13 +218,17 @@ impl ComboBox {
         } else {
             self.we_set.set(true);
             if self.enabled.update_var(name, value) {
-                self.combo.set_sensitive(val_to_bool(value));
+                self.combo.borrow().set_sensitive(val_to_bool(value));
             }
             if self.source.update_var(name, value) {
-                ComboBox::update_active(&self.combo, value);
+                ComboBox::update_active(&*self.combo.borrow(), value);
             }
             if self.choices.update_var(name, value) {
-                ComboBox::update_choices(&self.combo, value, &self.source.current());
+                ComboBox::update_choices(
+                    &*self.combo.borrow(),
+                    value,
+                    &self.source.current(),
+                );
             }
             self.we_set.set(false);
         }
