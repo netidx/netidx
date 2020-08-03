@@ -346,7 +346,7 @@ impl Toggle {
 pub(super) struct Entry {
     entry: gtk::Entry,
     enabled: Source,
-    password: Source,
+    visible: Source,
     source: Source,
 }
 
@@ -358,12 +358,12 @@ impl Entry {
         selected_path: gtk::Label,
     ) -> Self {
         let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let password = Source::new(&ctx, variables, spec.password.clone());
+        let visible = Source::new(&ctx, variables, spec.password.clone());
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let entry = gtk::Entry::new();
         entry.set_sensitive(val_to_bool(&enabled.current()));
-        entry.set_visibility(val_to_bool(&password.current()));
+        entry.set_visibility(val_to_bool(&visible.current()));
         match source.current() {
             Value::String(s) => entry.set_text(&*s),
             v => entry.set_text(&format!("{}", v)),
@@ -397,7 +397,7 @@ impl Entry {
             Inhibit(false)
         }));
         // CR estokes: give the user an indication that it's out of sync
-        Entry { entry, enabled, password, source }
+        Entry { entry, enabled, visible, source }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -408,7 +408,7 @@ impl Entry {
         if let Some(new) = self.enabled.update(changed) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.password.update(changed) {
+        if let Some(new) = self.visible.update(changed) {
             self.entry.set_visibility(val_to_bool(&new));
         }
         if let Some(new) = self.source.update(changed) {
@@ -423,7 +423,7 @@ impl Entry {
         if self.enabled.update_var(name, value) {
             self.entry.set_sensitive(val_to_bool(value));
         }
-        if self.password.update_var(name, value) {
+        if self.visible.update_var(name, value) {
             self.entry.set_visibility(val_to_bool(value));
         }
         if self.source.update_var(name, value) {
