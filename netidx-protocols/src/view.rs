@@ -49,15 +49,7 @@ pub struct Toggle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectorButton {
-    pub enabled: Source,
-    pub choices: Source,
-    pub source: Source,
-    pub sink: Sink,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RadioGroup {
+pub struct Selector {
     pub enabled: Source,
     pub choices: Source,
     pub source: Source,
@@ -82,7 +74,7 @@ pub enum Align {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Child {
+pub struct BoxChild {
     pub expand: bool,
     pub fill: bool,
     pub padding: u64,
@@ -99,12 +91,9 @@ pub struct GridChild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Container {
+pub struct Box {
     pub direction: Direction,
-    pub keybinds: Vec<Keybind>,
-    pub drill_down_target: Option<Path>,
-    pub drill_up_target: Option<Path>,
-    pub children: Vec<Child>,
+    pub children: Vec<BoxChild>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,15 +112,15 @@ pub enum Widget {
     Action(Action),
     Button(Button),
     Toggle(Toggle),
-    SelectorButton(SelectorButton),
-    RadioGroup(RadioGroup),
+    Selector(Selector),
     Entry(Entry),
-    Container(Container),
+    Box(Box),
     Grid(Grid),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
     pub variables: HashMap<String, Value>,
+    pub keybinds: Vec<Keybind>,
     pub root: Widget,
 }

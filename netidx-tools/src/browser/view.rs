@@ -9,7 +9,7 @@ pub(super) use netidx_protocols::view::{self, *};
 use std::{boxed::Box, collections::HashMap, pin::Pin};
 
 #[derive(Debug, Clone)]
-pub(super) struct Child {
+pub(super) struct BoxChild {
     pub expand: bool,
     pub fill: bool,
     pub padding: u64,
@@ -18,9 +18,9 @@ pub(super) struct Child {
     pub widget: Widget,
 }
 
-impl Child {
+impl BoxChild {
     async fn new(resolver: &ResolverRead, c: view::Child) -> Result<Self> {
-        Ok(Child {
+        Ok(BoxChild {
             expand: c.expand,
             fill: c.fill,
             padding: c.padding,
@@ -49,12 +49,9 @@ impl GridChild {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Container {
+pub(super) struct Box {
     pub direction: view::Direction,
-    pub keybinds: Vec<view::Keybind>,
-    pub drill_down_target: Option<Path>,
-    pub drill_up_target: Option<Path>,
-    pub children: Vec<Child>,
+    pub children: Vec<BoxChild>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +71,9 @@ pub(super) enum Widget {
     Action(view::Action),
     Button(view::Button),
     Toggle(view::Toggle),
-    SelectorButton(view::SelectorButton),
-    RadioGroup(view::RadioGroup),
+    Selector(view::Selector),
     Entry(view::Entry),
-    Container(Container),
+    Box(Box),
     Grid(Grid),
 }
 
@@ -102,22 +98,16 @@ impl Widget {
                 view::Widget::Action(a) => Ok(Widget::Action(a)),
                 view::Widget::Button(b) => Ok(Widget::Button(b)),
                 view::Widget::Toggle(t) => Ok(Widget::Toggle(t)),
-                view::Widget::SelectorButton(c) => Ok(Widget::SelectorButton(c)),
-                view::Widget::RadioGroup(r) => Ok(Widget::RadioGroup(r)),
+                view::Widget::Selector(c) => Ok(Widget::Selector(c)),
                 view::Widget::Entry(e) => Ok(Widget::Entry(e)),
-                view::Widget::Container(c) => {
-                    let children =
-                        join_all(c.children.into_iter().map(|c| Child::new(resolver, c)))
-                            .await
-                            .into_iter()
-                            .collect::<Result<Vec<_>>>()?;
-                    Ok(Widget::Container(Container {
-                        direction: c.direction,
-                        keybinds: c.keybinds,
-                        drill_down_target: c.drill_down_target,
-                        drill_up_target: c.drill_up_target,
-                        children,
-                    }))
+                view::Widget::Box(c) => {
+                    let children = join_all(
+                        c.children.into_iter().map(|c| BoxChild::new(resolver, c)),
+                    )
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+                    Ok(Widget::Box(Box { direction: c.direction, children }))
                 }
                 view::Widget::Grid(c) => {
                     let children = join_all(c.children.into_iter().map(|c| async {
@@ -134,7 +124,7 @@ impl Widget {
                         homogeneous_rows: c.homogeneous_rows,
                         column_spacing: c.column_spacing,
                         row_spacing: c.row_spacing,
-                        children
+                        children,
                     }))
                 }
             }

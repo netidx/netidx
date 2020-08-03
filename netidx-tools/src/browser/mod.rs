@@ -1,10 +1,6 @@
-mod button;
-mod container;
-mod grid;
-mod label;
-mod selector_button;
+mod widgets;
+mod containers;
 mod table;
-mod toggle;
 mod view;
 use anyhow::Result;
 use futures::{
@@ -203,13 +199,13 @@ impl Action {
 
 enum Widget {
     Table(table::Table),
-    Label(label::Label),
+    Label(widgets::Label),
     Action(Action),
-    Button(button::Button),
-    Toggle(toggle::Toggle),
-    SelectorButton(selector_button::SelectorButton),
-    Container(container::Container),
-    Grid(grid::Grid),
+    Button(widgets::Button),
+    Toggle(widgets::Toggle),
+    Selector(widgets::Selector),
+    Box(containers::Box),
+    Grid(containers::Grid),
 }
 
 impl Widget {
@@ -227,7 +223,7 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::Label(spec) => Widget::Label(label::Label::new(
+            view::Widget::Label(spec) => Widget::Label(widgets::Label::new(
                 ctx.clone(),
                 variables,
                 spec,
@@ -236,36 +232,31 @@ impl Widget {
             view::Widget::Action(spec) => {
                 Widget::Action(Action::new(ctx.clone(), variables, spec))
             }
-            view::Widget::Button(spec) => Widget::Button(button::Button::new(
+            view::Widget::Button(spec) => Widget::Button(widgets::Button::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Toggle(spec) => Widget::Toggle(toggle::Toggle::new(
+            view::Widget::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::SelectorButton(spec) => {
-                Widget::SelectorButton(selector_button::SelectorButton::new(
-                    ctx.clone(),
-                    variables,
-                    spec,
-                    selected_path,
-                ))
-            }
+            view::Widget::Selector(spec) => Widget::Selector(widgets::Selector::new(
+                ctx.clone(),
+                variables,
+                spec,
+                selected_path,
+            )),
             view::Widget::RadioGroup(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
-            view::Widget::Container(s) => Widget::Container(container::Container::new(
-                ctx,
-                variables,
-                s,
-                selected_path,
-            )),
+            view::Widget::Box(s) => {
+                Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
+            }
             view::Widget::Grid(spec) => {
-                Widget::Grid(grid::Grid::new(ctx, variables, spec, selected_path))
+                Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
             }
         }
     }
@@ -277,8 +268,8 @@ impl Widget {
             Widget::Action(_) => None,
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
-            Widget::SelectorButton(t) => Some(t.root()),
-            Widget::Container(t) => Some(t.root()),
+            Widget::Selector(t) => Some(t.root()),
+            Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
         }
     }
@@ -294,8 +285,8 @@ impl Widget {
             Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
-            Widget::SelectorButton(t) => t.update(changed),
-            Widget::Container(t) => t.update(waits, changed),
+            Widget::Selector(t) => t.update(changed),
+            Widget::Box(t) => t.update(waits, changed),
             Widget::Grid(t) => t.update(waits, changed),
         }
     }
@@ -307,8 +298,8 @@ impl Widget {
             Widget::Action(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
-            Widget::SelectorButton(t) => t.update_var(name, value),
-            Widget::Container(t) => t.update_var(name, value),
+            Widget::Selector(t) => t.update_var(name, value),
+            Widget::Box(t) => t.update_var(name, value),
             Widget::Grid(t) => t.update_var(name, value),
         }
     }
