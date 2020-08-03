@@ -59,7 +59,7 @@ pub struct Selector {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub enabled: Source,
-    pub lines: Source,
+    pub password: Source,
     pub source: Source,
     pub sink: Sink,
 }

@@ -204,6 +204,7 @@ enum Widget {
     Button(widgets::Button),
     Toggle(widgets::Toggle),
     Selector(widgets::Selector),
+    Entry(widgets::Entry),
     Box(containers::Box),
     Grid(containers::Grid),
 }
@@ -250,7 +251,12 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::Entry(_) => todo!(),
+            view::Widget::Entry(spec) => Widget::Entry(widgets::Entry::new(
+                ctx.clone(),
+                variables,
+                spec,
+                selected_path,
+            )),
             view::Widget::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
             }
@@ -268,6 +274,7 @@ impl Widget {
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
             Widget::Selector(t) => Some(t.root()),
+            Widget::Entry(t) => Some(t.root()),
             Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
         }
@@ -285,6 +292,7 @@ impl Widget {
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
             Widget::Selector(t) => t.update(changed),
+            Widget::Entry(t) => t.update(changed),
             Widget::Box(t) => t.update(waits, changed),
             Widget::Grid(t) => t.update(waits, changed),
         }
@@ -298,6 +306,7 @@ impl Widget {
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
             Widget::Selector(t) => t.update_var(name, value),
+            Widget::Entry(t) => t.update_var(name, value),
             Widget::Box(t) => t.update_var(name, value),
             Widget::Grid(t) => t.update_var(name, value),
         }

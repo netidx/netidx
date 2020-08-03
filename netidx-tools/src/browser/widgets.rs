@@ -1,12 +1,15 @@
-use super::{val_to_bool, WidgetCtx, Source, Sink};
+use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::browser::view;
-use log::warn;
-use glib::clone;
 use gdk::{self, prelude::*};
+use glib::clone;
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
-use netidx::subscriber::{SubId, Value};
-use std::{collections::HashMap, sync::Arc, rc::Rc, cell::Cell};
+use log::warn;
+use netidx::{
+    chars::Chars,
+    subscriber::{SubId, Value},
+};
+use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) struct Button {
     enabled: Source,
@@ -336,6 +339,98 @@ impl Toggle {
             self.switch.set_active(val_to_bool(value));
             self.switch.set_state(val_to_bool(value));
             self.we_set.set(false);
+        }
+    }
+}
+
+pub(super) struct Entry {
+    entry: gtk::Entry,
+    enabled: Source,
+    password: Source,
+    source: Source,
+}
+
+impl Entry {
+    pub(super) fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Entry,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let password = Source::new(&ctx, variables, spec.password.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        let entry = gtk::Entry::new();
+        entry.set_sensitive(val_to_bool(&enabled.current()));
+        entry.set_visibility(val_to_bool(&password.current()));
+        match source.current() {
+            Value::String(s) => entry.set_text(&*s),
+            v => entry.set_text(&format!("{}", v)),
+        }
+        fn submit(ctx: &WidgetCtx, source: &Source, sink: &Sink, entry: &gtk::Entry) {
+            sink.set(&ctx, Value::String(Chars::from(String::from(entry.get_text()))));
+            idle_add(clone!(@strong source, @strong entry => move || {
+                match source.current() {
+                    Value::String(s) => entry.set_text(&*s),
+                    v => entry.set_text(&format!("{}", v)),
+                }
+                Continue(false)
+            }));
+        }
+        entry.connect_activate(
+            clone!(@strong source, @strong ctx, @strong sink => move |entry| {
+                submit(&ctx, &source, &sink, entry)
+            }),
+        );
+        entry.connect_focus_out_event(
+            clone!(@strong source, @strong ctx, @strong sink => move |w, _| {
+                let entry = w.downcast_ref::<gtk::Entry>().unwrap();
+                submit(&ctx, &source, &sink, entry);
+                Inhibit(false)
+            }),
+        );
+        entry.connect_focus(clone!(@strong spec, @strong selected_path => move |_, _| {
+            selected_path.set_label(
+                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+            );
+            Inhibit(false)
+        }));
+        // CR estokes: give the user an indication that it's out of sync
+        Entry { entry, enabled, password, source }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.entry.upcast_ref()
+    }
+
+    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some(new) = self.enabled.update(changed) {
+            self.entry.set_sensitive(val_to_bool(&new));
+        }
+        if let Some(new) = self.password.update(changed) {
+            self.entry.set_visibility(val_to_bool(&new));
+        }
+        if let Some(new) = self.source.update(changed) {
+            match new {
+                Value::String(s) => self.entry.set_text(&*s),
+                v => self.entry.set_text(&format!("{}", v)),
+            }
+        }
+    }
+
+    pub(super) fn update_var(&self, name: &str, value: &Value) {
+        if self.enabled.update_var(name, value) {
+            self.entry.set_sensitive(val_to_bool(value));
+        }
+        if self.password.update_var(name, value) {
+            self.entry.set_visibility(val_to_bool(value));
+        }
+        if self.source.update_var(name, value) {
+            match value {
+                Value::String(s) => self.entry.set_text(&**s),
+                v => self.entry.set_text(&format!("{}", v)),
+            }
         }
     }
 }
