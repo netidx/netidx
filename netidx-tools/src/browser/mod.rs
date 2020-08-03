@@ -1,8 +1,8 @@
 mod button;
-mod combobox;
 mod container;
 mod grid;
 mod label;
+mod selector_button;
 mod table;
 mod toggle;
 mod view;
@@ -207,7 +207,7 @@ enum Widget {
     Action(Action),
     Button(button::Button),
     Toggle(toggle::Toggle),
-    ComboBox(combobox::ComboBox),
+    SelectorButton(selector_button::SelectorButton),
     Container(container::Container),
     Grid(grid::Grid),
 }
@@ -248,13 +248,15 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::ComboBox(spec) => Widget::ComboBox(combobox::ComboBox::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::Widget::Radio(_) => todo!(),
+            view::Widget::SelectorButton(spec) => {
+                Widget::SelectorButton(selector_button::SelectorButton::new(
+                    ctx.clone(),
+                    variables,
+                    spec,
+                    selected_path,
+                ))
+            }
+            view::Widget::RadioGroup(_) => todo!(),
             view::Widget::Entry(_) => todo!(),
             view::Widget::Container(s) => Widget::Container(container::Container::new(
                 ctx,
@@ -275,7 +277,7 @@ impl Widget {
             Widget::Action(_) => None,
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
-            Widget::ComboBox(t) => Some(t.root()),
+            Widget::SelectorButton(t) => Some(t.root()),
             Widget::Container(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
         }
@@ -292,7 +294,7 @@ impl Widget {
             Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
-            Widget::ComboBox(t) => t.update(changed),
+            Widget::SelectorButton(t) => t.update(changed),
             Widget::Container(t) => t.update(waits, changed),
             Widget::Grid(t) => t.update(waits, changed),
         }
@@ -305,7 +307,7 @@ impl Widget {
             Widget::Action(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
-            Widget::ComboBox(t) => t.update_var(name, value),
+            Widget::SelectorButton(t) => t.update_var(name, value),
             Widget::Container(t) => t.update_var(name, value),
             Widget::Grid(t) => t.update_var(name, value),
         }

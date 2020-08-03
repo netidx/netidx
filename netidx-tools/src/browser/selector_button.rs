@@ -8,7 +8,7 @@ use log::warn;
 use netidx::subscriber::{SubId, Value};
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
-pub(super) struct ComboBox {
+pub(super) struct SelectorButton {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
     enabled: Source,
@@ -17,18 +17,14 @@ pub(super) struct ComboBox {
     we_set: Rc<Cell<bool>>,
 }
 
-impl ComboBox {
+impl SelectorButton {
     pub(super) fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        spec: view::ComboBox,
+        spec: view::SelectorButton,
         selected_path: gtk::Label,
     ) -> Self {
-        let combo = if spec.has_entry {
-            gtk::ComboBoxText::with_entry()
-        } else {
-            gtk::ComboBoxText::new()
-        };
+        let combo = gtk::ComboBoxText::new();
         let root = gtk::EventBox::new();
         root.add(&combo);
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
@@ -57,9 +53,9 @@ impl ComboBox {
         let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         combo.set_sensitive(val_to_bool(&enabled.current()));
-        ComboBox::update_choices(&combo, &choices.current(), &source.current());
+        SelectorButton::update_choices(&combo, &choices.current(), &source.current());
         we_set.set(true);
-        ComboBox::update_active(&combo, &source.current());
+        SelectorButton::update_active(&combo, &source.current());
         we_set.set(false);
         combo.connect_changed(clone!(
             @strong we_set, @strong sink, @strong ctx, @strong source => move |combo| {
@@ -72,14 +68,14 @@ impl ComboBox {
                 idle_add(clone!(
                     @strong source, @strong combo, @strong we_set => move || {
                         we_set.set(true);
-                        ComboBox::update_active(&combo, &source.current());
+                        SelectorButton::update_active(&combo, &source.current());
                         we_set.set(false);
                         Continue(false)
                     })
                 );
             }
         }));
-        ComboBox { root, combo, enabled, choices, source, we_set }
+        SelectorButton { root, combo, enabled, choices, source, we_set }
     }
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Value) {
@@ -113,7 +109,7 @@ impl ComboBox {
                 combo.append(Some(id.as_str()), val.as_str());
             }
         }
-        ComboBox::update_active(combo, source)
+        SelectorButton::update_active(combo, source)
     }
 
     pub(super) fn update(&self, updates: &Arc<IndexMap<SubId, Value>>) {
@@ -122,10 +118,10 @@ impl ComboBox {
             self.combo.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.source.update(updates) {
-            ComboBox::update_active(&self.combo, &new);
+            SelectorButton::update_active(&self.combo, &new);
         }
         if let Some(new) = self.choices.update(updates) {
-            ComboBox::update_choices(&self.combo, &new, &self.source.current());
+            SelectorButton::update_choices(&self.combo, &new, &self.source.current());
         }
         self.we_set.set(false);
     }
@@ -136,10 +132,10 @@ impl ComboBox {
             self.combo.set_sensitive(val_to_bool(value));
         }
         if self.source.update_var(name, value) {
-            ComboBox::update_active(&self.combo, value);
+            SelectorButton::update_active(&self.combo, value);
         }
         if self.choices.update_var(name, value) {
-            ComboBox::update_choices(&self.combo, value, &self.source.current());
+            SelectorButton::update_choices(&self.combo, value, &self.source.current());
         }
         self.we_set.set(false);
     }

@@ -49,8 +49,7 @@ pub struct Toggle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComboBox {
-    pub has_entry: Source,
+pub struct SelectorButton {
     pub enabled: Source,
     pub choices: Source,
     pub source: Source,
@@ -58,10 +57,11 @@ pub struct ComboBox {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Radio {
+pub struct RadioGroup {
     pub enabled: Source,
     pub choices: Source,
-    pub value: Sink,
+    pub source: Source,
+    pub sink: Sink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,8 +123,8 @@ pub enum Widget {
     Action(Action),
     Button(Button),
     Toggle(Toggle),
-    ComboBox(ComboBox),
-    Radio(Radio),
+    SelectorButton(SelectorButton),
+    RadioGroup(RadioGroup),
     Entry(Entry),
     Container(Container),
     Grid(Grid),

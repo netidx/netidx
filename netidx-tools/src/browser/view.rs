@@ -74,8 +74,8 @@ pub(super) enum Widget {
     Action(view::Action),
     Button(view::Button),
     Toggle(view::Toggle),
-    ComboBox(view::ComboBox),
-    Radio(view::Radio),
+    SelectorButton(view::SelectorButton),
+    RadioGroup(view::RadioGroup),
     Entry(view::Entry),
     Container(Container),
     Grid(Grid),
@@ -102,8 +102,8 @@ impl Widget {
                 view::Widget::Action(a) => Ok(Widget::Action(a)),
                 view::Widget::Button(b) => Ok(Widget::Button(b)),
                 view::Widget::Toggle(t) => Ok(Widget::Toggle(t)),
-                view::Widget::ComboBox(c) => Ok(Widget::ComboBox(c)),
-                view::Widget::Radio(r) => Ok(Widget::Radio(r)),
+                view::Widget::SelectorButton(c) => Ok(Widget::SelectorButton(c)),
+                view::Widget::RadioGroup(r) => Ok(Widget::RadioGroup(r)),
                 view::Widget::Entry(e) => Ok(Widget::Entry(e)),
                 view::Widget::Container(c) => {
                     let children =
