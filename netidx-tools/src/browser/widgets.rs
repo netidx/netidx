@@ -358,7 +358,7 @@ impl Entry {
         selected_path: gtk::Label,
     ) -> Self {
         let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let visible = Source::new(&ctx, variables, spec.password.clone());
+        let visible = Source::new(&ctx, variables, spec.visible.clone());
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let entry = gtk::Entry::new();
