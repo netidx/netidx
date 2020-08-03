@@ -95,8 +95,6 @@ enum Sub {
         bind: BindCfg,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
-        #[structopt(long = "type", help = "data type (use help for a list)")]
-        typ: publisher::Typ,
         #[structopt(
             long = "timeout",
             help = "require subscribers to consume values before timeout (seconds)"
@@ -233,9 +231,9 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             resolver::run(cfg, cmd, auth)
         }
-        Sub::Publisher { bind, spn, typ, timeout } => {
+        Sub::Publisher { bind, spn, timeout } => {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
-            publisher::run(cfg, bind, typ, timeout, auth)
+            publisher::run(cfg, bind, timeout, auth)
         }
         Sub::Subscriber { paths } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);

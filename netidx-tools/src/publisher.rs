@@ -117,7 +117,7 @@ impl SValue {
             SValue::Bytes(_) => Some(Typ::Bytes),
             SValue::True => Some(Typ::Bool),
             SValue::False => Some(Typ::Bool),
-            SValue::Null => None
+            SValue::Null => None,
         }
     }
 }
@@ -186,17 +186,11 @@ pub(crate) fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
             },
             Typ::String => SValue::String(String::from(s)),
             Typ::Bytes => SValue::Bytes(base64::decode(s)?),
-        }
+        },
     })
 }
 
-pub(crate) fn run(
-    config: Config,
-    bcfg: BindCfg,
-    typ: Typ,
-    timeout: Option<u64>,
-    auth: Auth,
-) {
+pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Auth) {
     let mut rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
@@ -215,11 +209,18 @@ pub(crate) fn run(
                 }
                 BatchItem::EndBatch => {
                     for line in batch.drain(..) {
-                        let mut m = utils::splitn_escaped(&*line, 2, '\\', '|');
+                        let mut m = utils::splitn_escaped(&*line, 3, '\\', '|');
                         let path = try_cf!(
                             "missing path",
                             continue,
                             m.next().ok_or_else(|| anyhow!("missing path"))
+                        );
+                        let typ = try_cf!(
+                            "missing type",
+                            continue,
+                            m.next()
+                                .ok_or_else(|| anyhow!("missing type"))
+                                .and_then(|s| Ok(s.parse::<Typ>()?))
                         );
                         let val = {
                             let v = try_cf!(
