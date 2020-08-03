@@ -178,6 +178,7 @@ impl ComboBox {
         );
         self.root.remove(&*self.combo.borrow());
         self.root.add(&combo);
+        self.root.show_all();
         *self.combo.borrow_mut() = combo;
     }
 
