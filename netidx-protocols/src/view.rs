@@ -30,7 +30,8 @@ pub enum Direction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub source: Source,
-    pub sink: Sink
+    pub sink: Sink,
+    pub filter_map: Option<String>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,5 +123,6 @@ pub enum Widget {
 pub struct View {
     pub variables: HashMap<String, Value>,
     pub keybinds: Vec<Keybind>,
+    pub scripts: Vec<Source>,
     pub root: Widget,
 }

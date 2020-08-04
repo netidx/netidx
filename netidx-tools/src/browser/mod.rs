@@ -3,6 +3,7 @@ mod table;
 mod view;
 mod widgets;
 use anyhow::Result;
+use boa::{Interpreter, Realm};
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -14,7 +15,7 @@ use gio::prelude::*;
 use glib::{self, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
-use log::{info, warn};
+use log::{debug, info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -316,9 +317,27 @@ impl Widget {
 struct View {
     root: gtk::Box,
     widget: Widget,
+    spec: view::View,
+    scripts: Vec<Source>,
+    js: Interpreter,
 }
 
 impl View {
+    fn load_scripts(&mut self) {
+        for (i, script) in self.scripts.iter().enumerate() {
+            match script.current() {
+                Value::String(s) => match boa::forward_val(&mut self.js, &*s) {
+                    Ok(_) => (),
+                    Err(v) => warn!("script {:?} failed {}", self.spec.scripts[i], v),
+                },
+                _ => debug!(
+                    "skipping script {:?} value not a string (yet?)",
+                    self.spec.scripts[i]
+                ),
+            }
+        }
+    }
+
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
@@ -328,8 +347,12 @@ impl View {
         let selected_path_window =
             gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         selected_path_window.add(&selected_path);
-        let widget =
-            Widget::new(ctx, &spec.variables, spec.root.clone(), selected_path.clone());
+        let widget = Widget::new(
+            ctx.clone(),
+            &spec.variables,
+            spec.root.clone(),
+            selected_path.clone(),
+        );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -337,7 +360,17 @@ impl View {
         }
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
-        View { root, widget }
+        let variables = &spec.variables;
+        let scripts = spec
+            .scripts
+            .iter()
+            .cloned()
+            .map(|s| Source::new(&ctx, variables, s))
+            .collect::<Vec<_>>();
+        let js = Interpreter::new(Realm::create());
+        let mut t = View { root, widget, scripts, js, spec };
+        t.load_scripts();
+        t
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -345,14 +378,32 @@ impl View {
     }
 
     fn update(
-        &self,
+        &mut self,
         waits: &mut Vec<oneshot::Receiver<()>>,
         changed: &Arc<IndexMap<SubId, Value>>,
     ) {
+        let mut reload_scripts = false;
+        for script in &mut self.scripts {
+            if script.update(changed).is_some() {
+                reload_scripts = true;
+            }
+        }
+        if reload_scripts {
+            self.load_scripts()
+        }
         self.widget.update(waits, changed);
     }
 
-    fn update_var(&self, name: &str, value: &Value) {
+    fn update_var(&mut self, name: &str, value: &Value) {
+        let mut reload_scripts = false;
+        for script in &mut self.scripts {
+            if script.update_var(name, value) {
+                reload_scripts = true;
+            }
+        }
+        if reload_scripts {
+            self.load_scripts()
+        }
         self.widget.update_var(name, value)
     }
 }
@@ -463,6 +514,7 @@ async fn netidx_main(
                         Ok(spec) => {
                             let default = view::View {
                                 variables: HashMap::new(),
+                                scripts: Vec::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View(base_path.clone(), default);
@@ -520,7 +572,7 @@ fn run_gui(
         while let Some(m) = to_gui.next().await {
             match m {
                 ToGui::Update(batch) => {
-                    if let Some(root) = &current {
+                    if let Some(root) = &mut current {
                         root.update(&mut waits, &batch);
                         for r in waits.drain(..) {
                             let _: result::Result<_, _> = r.await;
@@ -542,7 +594,7 @@ fn run_gui(
                     let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
                 }
                 ToGui::UpdateVar(name, value) => {
-                    if let Some(root) = &current {
+                    if let Some(root) = &mut current {
                         root.update_var(&name, &value);
                     }
                 }
