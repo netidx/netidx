@@ -3,7 +3,7 @@ mod table;
 mod view;
 mod widgets;
 use anyhow::Result;
-use boa::{Interpreter, Realm};
+use boa::{builtins::value::Value as JsValue, Interpreter, Realm};
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -168,9 +168,30 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
     }
 }
 
+fn val_to_js(v: &Value) -> Option<JsValue> {
+    use boa::builtins::value::{bigint::BigInt, rcbigint::RcBigInt, rcstring::RcString};
+    match v {
+        Value::U32(u) | Value::V32(u) => Some(JsValue::Integer(u as i32)),
+        Value::I32(i) | Value::Z32(i) => Some(JsValue::Integer(i)),
+        Value::U64(u) | Value::Z64(u) => {
+            Some(JsValue::BigInt(RcBigInt::from(BigInt::from(u as i64))))
+        }
+        Value::I64(i) | Value::Z64(i) =>
+            Some(JsValue::BigInt(RcBigInt::from(BigInt::from(i)))),
+        Value::F32(f) => Some(JsValue::Rational(f as f64)),
+        Value::F64(f) => Some(JsValue::Rational(f)),
+        Value::String(c) => Some(JsValue::String(RcString::from(&*c))),
+        Value::Bytes(_) => None,
+        Value::True => Some(JsValue::Boolean(true)),
+        Value::False => Some(JsValue::Boolean(false)),
+        Value::Null => Some(JsValue::Null),
+    }
+}
+
 struct Action {
     source: Source,
     sink: Sink,
+    filter_map: Option<String>,
     ctx: WidgetCtx,
 }
 
@@ -182,10 +203,18 @@ impl Action {
     ) -> Self {
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
-        Action { source, sink, ctx }
+        let filter_map = spec.filter_map;
+        Action { source, sink, filter_map, ctx }
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn apply_filter_map(&mut self, js: &mut Interpreter, v: Value) -> Option<Value> {
+        match self.filter_map {
+            None => Some(v),
+            Some(code) => {}
+        }
+    }
+
+    fn update(&mut self, js: &mut Interpreter, changed: &Arc<IndexMap<SubId, Value>>) {
         if let Some(new) = self.source.update(changed) {
             self.sink.set(&self.ctx, new);
         }
