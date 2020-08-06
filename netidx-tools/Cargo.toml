@@ -40,7 +40,7 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.7"
 base64 = "0.12"
-Boa = "0.9"
+gluon = { version = "0.16", features = ["serialization"] }
 parking_lot = "0.10"
 indexmap = "1"
 gtk = { version = "0.9", features = ["v3_24"], optional = true }

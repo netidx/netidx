@@ -66,9 +66,7 @@ pub(super) struct Grid {
 #[derive(Debug, Clone)]
 pub(super) enum Widget {
     Table(Path, resolver::Table),
-    StaticTable(view::Source),
     Label(view::Source),
-    Action(view::Action),
     Button(view::Button),
     Toggle(view::Toggle),
     Selector(view::Selector),
@@ -84,18 +82,11 @@ impl Widget {
     ) -> Pin<MemBox<dyn Future<Output = Result<Self>> + 'a>> {
         MemBox::pin(async move {
             match widget {
-                view::Widget::Table(s @ view::Source::Constant(_)) => {
-                    Ok(Widget::StaticTable(s))
-                }
-                view::Widget::Table(s @ view::Source::Variable(_)) => {
-                    Ok(Widget::StaticTable(s))
-                }
-                view::Widget::Table(view::Source::Load(path)) => {
+                view::Widget::Table(path) => {
                     let spec = resolver.table(path.clone()).await?;
                     Ok(Widget::Table(path, spec))
                 }
                 view::Widget::Label(s) => Ok(Widget::Label(s)),
-                view::Widget::Action(a) => Ok(Widget::Action(a)),
                 view::Widget::Button(b) => Ok(Widget::Button(b)),
                 view::Widget::Toggle(t) => Ok(Widget::Toggle(t)),
                 view::Widget::Selector(c) => Ok(Widget::Selector(c)),

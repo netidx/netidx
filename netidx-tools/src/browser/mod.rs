@@ -3,7 +3,6 @@ mod table;
 mod view;
 mod widgets;
 use anyhow::Result;
-use boa::{builtins::value::Value as JsValue, Interpreter, Realm};
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -86,6 +85,7 @@ impl Source {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
+            view::Source::Map(_) | view::Source::Any(_) | view::Source::All(_) => todo!(),
         }
     }
 
@@ -135,6 +135,7 @@ impl Sink {
             view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
+            view::Sink::All(_) | view::Sink::Map(_) => todo!(),
         }
     }
 
@@ -168,69 +169,9 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
     }
 }
 
-fn val_to_js(v: &Value) -> Option<JsValue> {
-    use boa::builtins::value::{bigint::BigInt, rcbigint::RcBigInt, rcstring::RcString};
-    match v {
-        Value::U32(u) | Value::V32(u) => Some(JsValue::Integer(u as i32)),
-        Value::I32(i) | Value::Z32(i) => Some(JsValue::Integer(i)),
-        Value::U64(u) | Value::Z64(u) => {
-            Some(JsValue::BigInt(RcBigInt::from(BigInt::from(u as i64))))
-        }
-        Value::I64(i) | Value::Z64(i) =>
-            Some(JsValue::BigInt(RcBigInt::from(BigInt::from(i)))),
-        Value::F32(f) => Some(JsValue::Rational(f as f64)),
-        Value::F64(f) => Some(JsValue::Rational(f)),
-        Value::String(c) => Some(JsValue::String(RcString::from(&*c))),
-        Value::Bytes(_) => None,
-        Value::True => Some(JsValue::Boolean(true)),
-        Value::False => Some(JsValue::Boolean(false)),
-        Value::Null => Some(JsValue::Null),
-    }
-}
-
-struct Action {
-    source: Source,
-    sink: Sink,
-    filter_map: Option<String>,
-    ctx: WidgetCtx,
-}
-
-impl Action {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
-        spec: view::Action,
-    ) -> Self {
-        let source = Source::new(&ctx, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
-        let filter_map = spec.filter_map;
-        Action { source, sink, filter_map, ctx }
-    }
-
-    fn apply_filter_map(&mut self, js: &mut Interpreter, v: Value) -> Option<Value> {
-        match self.filter_map {
-            None => Some(v),
-            Some(code) => {}
-        }
-    }
-
-    fn update(&mut self, js: &mut Interpreter, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.source.update(changed) {
-            self.sink.set(&self.ctx, new);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if self.source.update_var(name, value) {
-            self.sink.set(&self.ctx, value.clone())
-        }
-    }
-}
-
 enum Widget {
     Table(table::Table),
     Label(widgets::Label),
-    Action(Action),
     Button(widgets::Button),
     Toggle(widgets::Toggle),
     Selector(widgets::Selector),
@@ -247,7 +188,6 @@ impl Widget {
         selected_path: gtk::Label,
     ) -> Widget {
         match spec {
-            view::Widget::StaticTable(_) => todo!(),
             view::Widget::Table(base_path, spec) => Widget::Table(table::Table::new(
                 ctx.clone(),
                 base_path,
@@ -260,9 +200,6 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::Action(spec) => {
-                Widget::Action(Action::new(ctx.clone(), variables, spec))
-            }
             view::Widget::Button(spec) => Widget::Button(widgets::Button::new(
                 ctx.clone(),
                 variables,
@@ -300,7 +237,6 @@ impl Widget {
         match self {
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
-            Widget::Action(_) => None,
             Widget::Button(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
             Widget::Selector(t) => Some(t.root()),
@@ -318,7 +254,6 @@ impl Widget {
         match self {
             Widget::Table(t) => t.update(waits, changed),
             Widget::Label(t) => t.update(changed),
-            Widget::Action(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
             Widget::Toggle(t) => t.update(changed),
             Widget::Selector(t) => t.update(changed),
@@ -332,7 +267,6 @@ impl Widget {
         match self {
             Widget::Table(_) => (),
             Widget::Label(t) => t.update_var(name, value),
-            Widget::Action(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
             Widget::Toggle(t) => t.update_var(name, value),
             Widget::Selector(t) => t.update_var(name, value),
@@ -348,25 +282,9 @@ struct View {
     widget: Widget,
     spec: view::View,
     scripts: Vec<Source>,
-    js: Interpreter,
 }
 
 impl View {
-    fn load_scripts(&mut self) {
-        for (i, script) in self.scripts.iter().enumerate() {
-            match script.current() {
-                Value::String(s) => match boa::forward_val(&mut self.js, &*s) {
-                    Ok(_) => (),
-                    Err(v) => warn!("script {:?} failed {}", self.spec.scripts[i], v),
-                },
-                _ => debug!(
-                    "skipping script {:?} value not a string (yet?)",
-                    self.spec.scripts[i]
-                ),
-            }
-        }
-    }
-
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
@@ -396,10 +314,7 @@ impl View {
             .cloned()
             .map(|s| Source::new(&ctx, variables, s))
             .collect::<Vec<_>>();
-        let js = Interpreter::new(Realm::create());
-        let mut t = View { root, widget, scripts, js, spec };
-        t.load_scripts();
-        t
+        View { root, widget, scripts, spec }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -417,9 +332,6 @@ impl View {
                 reload_scripts = true;
             }
         }
-        if reload_scripts {
-            self.load_scripts()
-        }
         self.widget.update(waits, changed);
     }
 
@@ -429,9 +341,6 @@ impl View {
             if script.update_var(name, value) {
                 reload_scripts = true;
             }
-        }
-        if reload_scripts {
-            self.load_scripts()
         }
         self.widget.update_var(name, value)
     }

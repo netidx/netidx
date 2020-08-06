@@ -1,10 +1,10 @@
 use netidx::{path::Path, publisher::Value};
-use std::collections::HashMap;
+use std::{boxed, collections::HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceMap {
     /// the source we are mapping from
-    from: Source,
+    from: boxed::Box<Source>,
     /// the name of the gluon 'Value -> Option Value' function that
     /// will be called each time the source produces a value. If the
     /// function returns None then no value will be produced by the
@@ -17,7 +17,7 @@ pub struct SourceMap {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SinkMap {
     /// the sink we are mapping to
-    to: Sink,
+    to: boxed::Box<Sink>,
     /// the name of the gluon 'Value -> Option Value' function that
     /// will be called each time the sink is set. If the function
     /// returns None, then the sink will not be set, otherwise the
@@ -135,7 +135,7 @@ pub struct Grid {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
-    Table(Source),
+    Table(Path),
     Label(Source),
     Button(Button),
     Toggle(Toggle),
