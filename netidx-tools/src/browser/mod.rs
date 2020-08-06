@@ -1,3 +1,4 @@
+mod script;
 mod containers;
 mod table;
 mod view;
@@ -9,6 +10,7 @@ use futures::{
     select_biased,
     stream::StreamExt,
 };
+use gluon::{new_vm, RootedThread};
 use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, source::PRIORITY_LOW};
@@ -544,6 +546,8 @@ fn run_gui(
 pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let application = Application::new(Some("org.netidx.browser"), Default::default())
         .expect("failed to initialize GTK application");
+    let vm = new_vm();
+    script::load_builtins(&*vm).expect("failed to compile builtins");
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
