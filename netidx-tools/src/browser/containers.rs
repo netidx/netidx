@@ -15,6 +15,7 @@ pub(super) struct Box {
 impl Box {
     pub(super) fn new(
         ctx: WidgetCtx,
+        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Box,
         selected_path: gtk::Label,
@@ -28,6 +29,7 @@ impl Box {
         for s in spec.children.iter() {
             let w = Widget::new(
                 ctx.clone(),
+                vm,
                 variables,
                 s.widget.clone(),
                 selected_path.clone(),
@@ -75,6 +77,7 @@ pub(super) struct Grid {
 impl Grid {
     pub(super) fn new(
         ctx: WidgetCtx,
+        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Grid,
         selected_path: gtk::Label,
@@ -94,6 +97,7 @@ impl Grid {
                     .map(|(i, spec)| {
                         let w = Widget::new(
                             ctx.clone(),
+                            vm,
                             variables,
                             spec.widget.clone(),
                             selected_path.clone(),

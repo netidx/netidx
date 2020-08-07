@@ -46,6 +46,5 @@ impl<'vm, 'value> api::Getable<'vm, 'value> for GluVal {
 }
 
 pub(super) fn load_builtins(thread: &Thread) -> Result<()> {
-    let gluval_src = dbg!(api::typ::make_source::<GluVal>(&thread)?);
-    thread.load_script("netidx", &gluval_src)
+    thread.load_script("netidx", &api::typ::make_source::<GluVal>(&thread)?)
 }

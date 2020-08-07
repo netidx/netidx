@@ -2,40 +2,24 @@ use netidx::{path::Path, publisher::Value};
 use std::{boxed, collections::HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceMap {
-    /// the source we are mapping from
-    from: boxed::Box<Source>,
-    /// the name of the gluon 'Value -> Option Value' function that
-    /// will be called each time the source produces a value. If the
-    /// function returns None then no value will be produced by the
-    /// source, otherwise the returned value will be produced. You
-    /// must define the function in one of the scripts imported by the
-    /// view.
-    function: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SinkMap {
-    /// the sink we are mapping to
-    to: boxed::Box<Sink>,
-    /// the name of the gluon 'Value -> Option Value' function that
-    /// will be called each time the sink is set. If the function
-    /// returns None, then the sink will not be set, otherwise the
-    /// returned value will be set.
-    function: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Source {
     Constant(Value),
     Load(Path),
     Variable(String),
     /// map the source through the specified gluon script
-    Map(SourceMap),
+    Map {
+        /// the source we are mapping from
+        from: boxed::Box<Source>,
+        /// the name of the gluon 'Value -> Option Value' function that
+        /// will be called each time the source produces a value. If the
+        /// function returns None then no value will be produced by the
+        /// source, otherwise the returned value will be produced. You
+        /// must define the function in one of the scripts imported by the
+        /// view.
+        function: String,
+    },
     /// the source produces a value when any of the sub sources produce a value
     Any(Vec<Source>),
-    /// the source produces a value when all of the sub sources produce the same value
-    All(Vec<Source>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +29,15 @@ pub enum Sink {
     /// sinked values are sent to all the specified sinks
     All(Vec<Sink>),
     /// sinked values are mapped through the specified gluon script
-    Map(SinkMap),
+    Map {
+        /// the sink we are mapping to
+        to: boxed::Box<Sink>,
+        /// the name of the gluon 'Value -> Option Value' function that
+        /// will be called each time the sink is set. If the function
+        /// returns None, then the sink will not be set, otherwise the
+        /// returned value will be set.
+        function: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +50,7 @@ pub struct Keybind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Direction {
     Horizontal,
-    Vertical
+    Vertical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +141,6 @@ pub enum Widget {
 pub struct View {
     pub variables: HashMap<String, Value>,
     pub keybinds: Vec<Keybind>,
-    pub scripts: Vec<Source>,
+    pub scripts: Vec<(String, String)>,
     pub root: Widget,
 }

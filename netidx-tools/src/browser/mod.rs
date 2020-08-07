@@ -1,5 +1,5 @@
-mod script;
 mod containers;
+mod script;
 mod table;
 mod view;
 mod widgets;
@@ -10,10 +10,10 @@ use futures::{
     select_biased,
     stream::StreamExt,
 };
-use gluon::{new_vm, RootedThread};
 use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, source::PRIORITY_LOW};
+use gluon::{new_vm, vm::api::function::FunctionRef, RootedThread};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
@@ -26,7 +26,9 @@ use netidx::{
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view as protocol_view;
+use once_cell::unsync::Lazy;
 use std::{
+    boxed,
     cell::RefCell,
     collections::HashMap,
     mem, process,
@@ -58,8 +60,24 @@ struct WidgetCtx {
     resolver: ResolverRead,
     updates: mpsc::Sender<Batch>,
     state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
+    to_gui: glib::Sender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
+}
+
+fn call_gluon_function(vm: &RootedThread, f: &str, v: Value) -> Option<Value> {
+    match vm.get_global::<FunctionRef<Fn(GluVal) -> Option<GluVal>>>(f) {
+        Err(e) => {
+            warn!("no such function {} matching type Value -> Option Value, {}", f, e);
+            None
+        }
+        Ok(code) => match code.call(GluVal(v)) {
+            Ok(gv) => gv.map(|v| v.0),
+            Err(e) => {
+                warn!("error calling function {}, {}", f, e);
+                None
+            }
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,11 +85,14 @@ enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
+    Any(Vec<SourceDesc>),
+    Map { vm: Rc<Lazy<RootedThread>>, from: boxed::Box<SourceDesc>, function: String },
 }
 
 impl Source {
     fn new(
         ctx: &WidgetCtx,
+        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Source,
     ) -> Self {
@@ -87,18 +108,26 @@ impl Source {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
-            view::Source::Map(_) | view::Source::Any(_) | view::Source::All(_) => todo!(),
+            view::Source::Any(srcs) => Source::Any(
+                srcs.into_iter().map(|spec| Source::new(ctx, variables, spec)).collect(),
+            ),
+            view::Source::Map { from, function } => Source::Map {
+                vm: vm.clone(),
+                from: boxed::Box::new(Source::new(ctx, variables, from)),
+                function,
+            },
         }
     }
 
-    fn current(&self) -> Value {
+    fn current(&self) -> Option<Value> {
         match self {
-            Source::Constant(v) => v.clone(),
+            Source::Constant(v) => Some(v.clone()),
+            Source::Load(dv) => dv.current(),
             Source::Variable(_, v) => v.borrow().clone(),
-            Source::Load(dv) => match dv.last() {
-                None => Value::String(Chars::from("#SUB")),
-                Some(v) => v.clone(),
-            },
+            Source::Any(srcs) => srcs.iter().find_map(|src| src.current(vm)),
+            Source::Map { vm, from, function } => {
+                from.current().map(|v| call_gluon_function(&**vm, function, v))
+            }
         }
     }
 
@@ -106,20 +135,32 @@ impl Source {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
+            Source::Any(srcs) => srcs.iter().find_map(|s| s.update(vm, changed)),
+            Source::Map { vm, from, function } => {
+                from.update(changed).and_then(|v| call_gluon_function(&**vm, function, v))
+            }
         }
     }
 
-    fn update_var(&self, name: &str, value: &Value) -> bool {
+    fn update_var(
+        &self,
+        name: &str,
+        value: &Value,
+    ) -> Option<Value> {
         match self {
-            Source::Load(_) | Source::Constant(_) => false,
+            Source::Load(_) | Source::Constant(_) => None,
             Source::Variable(our_name, cur) => {
                 if name == our_name {
                     *cur.borrow_mut() = value.clone();
-                    true
+                    Some(value.clone())
                 } else {
-                    false
+                    None
                 }
             }
+            Source::Any(srcs) => srcs.iter().find_map(|s| s.update_var(vm, name, value)),
+            Source::Map { vm, from, function } => from
+                .update_var(name, value)
+                .and_then(|v| call_gluon_function(&**vm, function, v)),
         }
     }
 }
@@ -128,16 +169,25 @@ impl Source {
 enum Sink {
     Store(Dval),
     Variable(String),
+    All(Vec<Sink>),
+    Map { vm: Rc<Lazy<RootedThread>>, to: boxed::Box<Source>, function: String },
 }
 
 impl Sink {
-    fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
+    fn new(ctx: &WidgetCtx, vm: &Rc<Lazy<RootedThread>>, spec: view::Sink) -> Self {
         match spec {
             view::Sink::Variable(name) => Sink::Variable(name),
             view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::All(_) | view::Sink::Map(_) => todo!(),
+            view::Sink::All(sinks) => {
+                Sink::All(sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect())
+            }
+            view::Sink::Map { to, function } => Sink::Map {
+                vm: vm.clone(),
+                to: boxed::Box::new(Sink::new(ctx, from)),
+                function,
+            },
         }
     }
 
@@ -148,7 +198,17 @@ impl Sink {
             }
             Sink::Variable(name) => {
                 let _: result::Result<_, _> =
-                    ctx.to_gui.unbounded_send(ToGui::UpdateVar(name.clone(), v));
+                    ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+            }
+            Sink::All(sinks) => {
+                for sink in sinks {
+                    sink.set(ctx, vm, v.clone())
+                }
+            }
+            Sink::Map { vm, to, function: f } => {
+                if let Some(v) = call_gluon_function(&**vm, f, v.clone()) {
+                    to.set(ctx, vm, v)
+                }
             }
         }
     }
@@ -185,6 +245,7 @@ enum Widget {
 impl Widget {
     fn new(
         ctx: WidgetCtx,
+        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Widget,
         selected_path: gtk::Label,
@@ -198,40 +259,49 @@ impl Widget {
             )),
             view::Widget::Label(spec) => Widget::Label(widgets::Label::new(
                 ctx.clone(),
+                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Button(spec) => Widget::Button(widgets::Button::new(
                 ctx.clone(),
+                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
                 ctx.clone(),
+                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Selector(spec) => Widget::Selector(widgets::Selector::new(
                 ctx.clone(),
+                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Entry(spec) => Widget::Entry(widgets::Entry::new(
                 ctx.clone(),
+                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Box(s) => {
-                Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
+                Widget::Box(containers::Box::new(ctx, vm, variables, s, selected_path))
             }
-            view::Widget::Grid(spec) => {
-                Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
-            }
+            view::Widget::Grid(spec) => Widget::Grid(containers::Grid::new(
+                ctx,
+                vm,
+                variables,
+                spec,
+                selected_path,
+            )),
         }
     }
 
@@ -284,10 +354,23 @@ struct View {
     widget: Widget,
     spec: view::View,
     scripts: Vec<Source>,
+    vm: Rc<Lazy<RootedThread>>,
 }
 
 impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
+        let scripts = spec.scripts.clone();
+        let vm = Rc::new(Lazy::new(move || {
+            let vm = new_vm();
+            script::load_builtins(&*vm);
+            for (module, script) in &scripts {
+                match vm.load_script(module, script) {
+                    Ok(()) => (),
+                    Err(e) => warn!("compile error module {}, {}", module, e),
+                }
+            }
+            vm
+        }));
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -298,6 +381,7 @@ impl View {
         selected_path_window.add(&selected_path);
         let widget = Widget::new(
             ctx.clone(),
+            &vm,
             &spec.variables,
             spec.root.clone(),
             selected_path.clone(),
@@ -310,13 +394,7 @@ impl View {
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         let variables = &spec.variables;
-        let scripts = spec
-            .scripts
-            .iter()
-            .cloned()
-            .map(|s| Source::new(&ctx, variables, s))
-            .collect::<Vec<_>>();
-        View { root, widget, scripts, spec }
+        View { root, widget, scripts, spec, vm }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -324,27 +402,15 @@ impl View {
     }
 
     fn update(
-        &mut self,
+        &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
         changed: &Arc<IndexMap<SubId, Value>>,
     ) {
-        let mut reload_scripts = false;
-        for script in &mut self.scripts {
-            if script.update(changed).is_some() {
-                reload_scripts = true;
-            }
-        }
-        self.widget.update(waits, changed);
+        self.widget.update(waits, &self.vm, changed);
     }
 
-    fn update_var(&mut self, name: &str, value: &Value) {
-        let mut reload_scripts = false;
-        for script in &mut self.scripts {
-            if script.update_var(name, value) {
-                reload_scripts = true;
-            }
-        }
-        self.widget.update_var(name, value)
+    fn update_var(&self, name: &str, value: &Value) {
+        self.widget.update_var(&self.vm, name, value)
     }
 }
 
@@ -363,7 +429,7 @@ async fn netidx_main(
     mut updates: mpsc::Receiver<Batch>,
     mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
+    to_gui: glib::Sender<ToGui>,
     to_init: smpsc::Sender<(Subscriber, ResolverRead)>,
 ) {
     async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
@@ -383,12 +449,12 @@ async fn netidx_main(
     fn refresh(
         refreshing: &mut bool,
         changed: &mut IndexMap<SubId, Value>,
-        to_gui: &mpsc::UnboundedSender<ToGui>,
+        to_gui: &glib::Sender<ToGui>,
     ) -> Result<()> {
         if !*refreshing && changed.len() > 0 {
             *refreshing = true;
             let b = Arc::new(mem::replace(changed, IndexMap::new()));
-            to_gui.unbounded_send(ToGui::Update(b))?
+            to_gui.send(ToGui::Update(b))?
         }
         Ok(())
     }
@@ -429,7 +495,7 @@ async fn netidx_main(
                                         Err(e) => warn!("failed to raeify view {}", e),
                                         Ok(v) => {
                                             let m = ToGui::View(path.clone(), v);
-                                            match to_gui.unbounded_send(m) {
+                                            match to_gui.send(m) {
                                                 Err(_) => break,
                                                 Ok(()) => info!("updated gui view")
                                             }
@@ -458,7 +524,7 @@ async fn netidx_main(
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View(base_path.clone(), default);
-                            match to_gui.unbounded_send(m) {
+                            match to_gui.send(m) {
                                 Err(_) => break,
                                 Ok(()) => {
                                     let s = subscriber
@@ -484,7 +550,7 @@ fn run_netidx(
     updates: mpsc::Receiver<Batch>,
     state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
-    to_gui: mpsc::UnboundedSender<ToGui>,
+    to_gui: glib::Sender<ToGui>,
 ) -> (Subscriber, ResolverRead) {
     let (tx, rx) = smpsc::channel();
     thread::spawn(move || {
@@ -494,11 +560,7 @@ fn run_netidx(
     rx.recv().unwrap()
 }
 
-fn run_gui(
-    ctx: WidgetCtx,
-    app: &Application,
-    mut to_gui: mpsc::UnboundedReceiver<ToGui>,
-) {
+fn run_gui(ctx: WidgetCtx, app: &Application, mut to_gui: glib::Receiver<ToGui>) {
     let main_context = glib::MainContext::default();
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
@@ -506,52 +568,57 @@ fn run_gui(
     window.set_default_size(800, 600);
     window.show_all();
     window.connect_destroy(move |_| process::exit(0));
-    main_context.spawn_local_with_priority(PRIORITY_LOW, async move {
-        let mut current: Option<View> = None;
-        let mut waits = Vec::new();
-        while let Some(m) = to_gui.next().await {
-            match m {
-                ToGui::Update(batch) => {
-                    if let Some(root) = &mut current {
-                        root.update(&mut waits, &batch);
-                        for r in waits.drain(..) {
-                            let _: result::Result<_, _> = r.await;
-                        }
+    let mut current: Option<View> = None;
+    to_gui.attach(None, move |m| {
+        match m {
+            ToGui::Update(batch) => {
+                if let Some(root) = &mut current {
+                    let mut waits = Vec::new();
+                    root.update(&mut waits, &batch);
+                    if waits.len() == 0 {
                         let _: result::Result<_, _> =
                             ctx.from_gui.unbounded_send(FromGui::Updated);
-                    }
-                }
-                ToGui::View(path, view) => {
-                    let cur = View::new(ctx.clone(), view);
-                    if let Some(cur) = current.take() {
-                        window.remove(cur.root());
-                    }
-                    window.set_title(&format!("Netidx Browser {}", path));
-                    window.add(cur.root());
-                    window.show_all();
-                    current = Some(cur);
-                    let m = ToGui::Update(Arc::new(IndexMap::new()));
-                    let _: result::Result<_, _> = ctx.to_gui.unbounded_send(m);
-                }
-                ToGui::UpdateVar(name, value) => {
-                    if let Some(root) = &mut current {
-                        root.update_var(&name, &value);
+                    } else {
+                        let from_gui = ctx.from_gui.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            for r in waits {
+                                let _: result::Result<_, _> = r.await;
+                            }
+                            let _: result::Result<_, _> =
+                                from_gui.unbounded_send(FromGui::Updated);
+                        });
                     }
                 }
             }
+            ToGui::View(path, view) => {
+                let cur = View::new(ctx.clone(), view);
+                if let Some(cur) = current.take() {
+                    window.remove(cur.root());
+                }
+                window.set_title(&format!("Netidx Browser {}", path));
+                window.add(cur.root());
+                window.show_all();
+                current = Some(cur);
+                let m = ToGui::Update(Arc::new(IndexMap::new()));
+                let _: result::Result<_, _> = ctx.to_gui.send(m);
+            }
+            ToGui::UpdateVar(name, value) => {
+                if let Some(root) = &mut current {
+                    root.update_var(&name, &value);
+                }
+            }
         }
-    })
+        Continue(true)
+    });
 }
 
 pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let application = Application::new(Some("org.netidx.browser"), Default::default())
         .expect("failed to initialize GTK application");
-    let vm = new_vm();
-    script::load_builtins(&*vm).expect("failed to compile builtins");
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
-        let (tx_to_gui, rx_to_gui) = mpsc::unbounded();
+        let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         // navigate to the initial location
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
