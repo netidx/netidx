@@ -33,11 +33,17 @@ impl Button {
         let label = Source::new(&ctx, vm, variables, spec.label.clone());
         let source = Source::new(&ctx, vm, variables, spec.source.clone());
         let sink = Sink::new(&ctx, vm, spec.sink.clone());
-        button.set_sensitive(val_to_bool(&enabled.current()));
-        button.set_label(&format!("{}", label.current()));
+        if let Some(v) = enabled.current() {
+            button.set_sensitive(val_to_bool(&v));
+        }
+        if let Some(v) = label.current() {
+            button.set_label(&format!("{}", v));
+        }
         button.connect_clicked(clone!(@strong ctx, @strong source, @strong sink =>
         move |_| {
-            sink.set(&ctx, source.current());
+            if let Some(v) = source.current() {
+                sink.set(&ctx, v);
+            }
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
@@ -94,7 +100,11 @@ impl Label {
         selected_path: gtk::Label,
     ) -> Label {
         let source = Source::new(&ctx, vm, variables, spec.clone());
-        let label = gtk::Label::new(Some(&format!("{}", source.current())));
+        let txt = match source.current() {
+            None => String::new(),
+            Some(v) => format!("{}", v)
+        };
+        let label = gtk::Label::new(Some(txt.as_str()));
         label.set_selectable(true);
         label.set_single_line_mode(true);
         label.connect_button_press_event(
@@ -172,8 +182,12 @@ impl Selector {
         let source = Source::new(&ctx, vm, variables, spec.source.clone());
         let sink = Sink::new(&ctx, vm, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
-        combo.set_sensitive(val_to_bool(&enabled.current()));
-        Selector::update_choices(&combo, &choices.current(), &source.current());
+        if let Some(v) = enabled.current() {
+            combo.set_sensitive(val_to_bool(&v));
+        }
+        if let Some(choices) = choices.current() {
+            Selector::update_choices(&combo, &choices, &source.current());
+        }
         we_set.set(true);
         Selector::update_active(&combo, &source.current());
         we_set.set(false);
@@ -243,9 +257,7 @@ impl Selector {
         if let Some(new) = self.enabled.update(updates) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(updates) {
-            Selector::update_active(&self.combo, &new);
-        }
+        Selector::update_active(&self.combo, &self.source.update(updates));
         if let Some(new) = self.choices.update(updates) {
             Selector::update_choices(&self.combo, &new, &self.source.current());
         }
@@ -257,9 +269,7 @@ impl Selector {
         if let Some(value) = self.enabled.update_var(name, value) {
             self.combo.set_sensitive(val_to_bool(&value));
         }
-        if let Some(value) = self.source.update_var(name, value) {
-            Selector::update_active(&self.combo, &value);
-        }
+        Selector::update_active(&self.combo, &self.source.update_var(name, value));
         if let Some(value) = self.choices.update_var(name, value) {
             Selector::update_choices(&self.combo, &value, &self.source.current());
         }

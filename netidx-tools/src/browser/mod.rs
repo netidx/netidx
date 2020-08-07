@@ -358,17 +358,17 @@ struct View {
 impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
         let scripts = spec.scripts.clone();
-        let vm = Rc::new(Lazy::new(move || {
+        let vm = Rc::new(Lazy::new(|| {
             let vm = new_vm();
             script::load_builtins(&*vm);
-            for (module, script) in &scripts {
-                match vm.load_script(module, script) {
-                    Ok(()) => (),
-                    Err(e) => warn!("compile error module {}, {}", module, e),
-                }
-            }
             vm
         }));
+        for (module, script) in &scripts {
+            match vm.load_script(module, script) {
+                Ok(()) => (),
+                Err(e) => warn!("compile error module {}, {}", module, e),
+            }
+        }
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -404,11 +404,11 @@ impl View {
         waits: &mut Vec<oneshot::Receiver<()>>,
         changed: &Arc<IndexMap<SubId, Value>>,
     ) {
-        self.widget.update(waits, &self.vm, changed);
+        self.widget.update(waits, changed);
     }
 
     fn update_var(&self, name: &str, value: &Value) {
-        self.widget.update_var(&self.vm, name, value)
+        self.widget.update_var(name, value)
     }
 }
 
