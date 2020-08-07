@@ -13,7 +13,11 @@ use futures::{
 use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, source::PRIORITY_LOW};
-use gluon::{new_vm, vm::api::function::{Function, FunctionRef}, RootedThread};
+use gluon::{
+    new_vm,
+    vm::api::function::{Function, FunctionRef},
+    RootedThread, ThreadExt,
+};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
@@ -66,13 +70,12 @@ struct WidgetCtx {
 
 fn call_gluon_function(vm: &RootedThread, f: &str, v: Value) -> Option<Value> {
     use script::GluVal as V;
-    
-    match vm.get_global::<FunctionRef<dyn Fn(V) -> Option<V>>>(f) {
+    match vm.get_global::<FunctionRef<fn(V) -> Option<V>>>(f) {
         Err(e) => {
             warn!("no such function {} matching type Value -> Option Value, {}", f, e);
             None
         }
-        Ok(mut code) => match Function::call(&mut code, script::GluVal(v)) {
+        Ok(mut code) => match code.call(script::GluVal(v)) {
             Ok(gv) => gv.map(|v| v.0),
             Err(e) => {
                 warn!("error calling function {}, {}", f, e);
@@ -111,11 +114,13 @@ impl Source {
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
             view::Source::Any(srcs) => Source::Any(
-                srcs.into_iter().map(|spec| Source::new(ctx, variables, spec)).collect(),
+                srcs.into_iter()
+                    .map(|spec| Source::new(ctx, vm, variables, spec))
+                    .collect(),
             ),
             view::Source::Map { from, function } => Source::Map {
                 vm: vm.clone(),
-                from: boxed::Box::new(Source::new(ctx, variables, from)),
+                from: boxed::Box::new(Source::new(ctx, vm, variables, (*from).clone())),
                 function,
             },
         }
@@ -124,11 +129,11 @@ impl Source {
     fn current(&self) -> Option<Value> {
         match self {
             Source::Constant(v) => Some(v.clone()),
-            Source::Load(dv) => dv.current(),
-            Source::Variable(_, v) => v.borrow().clone(),
+            Source::Load(dv) => dv.last(),
+            Source::Variable(_, v) => Some(v.borrow().clone()),
             Source::Any(srcs) => srcs.iter().find_map(|src| src.current()),
             Source::Map { vm, from, function } => {
-                from.current().map(|v| call_gluon_function(&**vm, function, v))
+                from.current().and_then(|v| call_gluon_function(&**vm, function, v))
             }
         }
     }
@@ -168,7 +173,7 @@ enum Sink {
     Store(Dval),
     Variable(String),
     All(Vec<Sink>),
-    Map { vm: Rc<Lazy<RootedThread>>, to: boxed::Box<Source>, function: String },
+    Map { vm: Rc<Lazy<RootedThread>>, to: boxed::Box<Sink>, function: String },
 }
 
 impl Sink {
@@ -178,12 +183,12 @@ impl Sink {
             view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::All(sinks) => {
-                Sink::All(sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect())
-            }
+            view::Sink::All(sinks) => Sink::All(
+                sinks.into_iter().map(|spec| Sink::new(ctx, vm, spec)).collect(),
+            ),
             view::Sink::Map { to, function } => Sink::Map {
                 vm: vm.clone(),
-                to: boxed::Box::new(Sink::new(ctx, to)),
+                to: boxed::Box::new(Sink::new(ctx, vm, (*to).clone())),
                 function,
             },
         }
@@ -205,7 +210,7 @@ impl Sink {
             }
             Sink::Map { vm, to, function: f } => {
                 if let Some(v) = call_gluon_function(&**vm, f, v.clone()) {
-                    to.set(ctx, vm, v)
+                    to.set(ctx, v)
                 }
             }
         }
@@ -351,20 +356,17 @@ struct View {
     root: gtk::Box,
     widget: Widget,
     spec: view::View,
-    scripts: Vec<Source>,
     vm: Rc<Lazy<RootedThread>>,
 }
 
 impl View {
     fn new(ctx: WidgetCtx, spec: view::View) -> View {
-        let scripts = spec.scripts.clone();
-        let vm = Rc::new(Lazy::new(|| {
-            let vm = new_vm();
-            script::load_builtins(&*vm);
-            vm
-        }));
-        for (module, script) in &scripts {
-            match vm.load_script(module, script) {
+        let vm = {
+            let f: fn() -> RootedThread = script::new;
+            Rc::new(Lazy::new(f))
+        };
+        for (module, script) in &spec.scripts {
+            match (***vm).load_script(module, script) {
                 Ok(()) => (),
                 Err(e) => warn!("compile error module {}, {}", module, e),
             }
@@ -392,7 +394,7 @@ impl View {
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         let variables = &spec.variables;
-        View { root, widget, scripts, spec, vm }
+        View { root, widget, spec, vm }
     }
 
     fn root(&self) -> &gtk::Widget {

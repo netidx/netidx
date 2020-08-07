@@ -48,3 +48,9 @@ impl<'vm, 'value> api::Getable<'vm, 'value> for GluVal {
 pub(super) fn load_builtins(thread: &Thread) -> Result<()> {
     thread.load_script("netidx", &api::typ::make_source::<GluVal>(&thread)?)
 }
+
+pub(super) fn new() -> RootedThread {
+    let vm = new_vm();
+    load_builtins(&*vm).expect("failed to load built in netidx type");
+    vm
+}
