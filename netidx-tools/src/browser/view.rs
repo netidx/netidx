@@ -127,7 +127,7 @@ impl Widget {
 pub(super) struct View {
     pub(super) variables: HashMap<String, Value>,
     pub(super) root: Widget,
-    pub(super) scripts: Vec<String>,
+    pub(super) scripts: Vec<(String, String)>,
 }
 
 impl View {

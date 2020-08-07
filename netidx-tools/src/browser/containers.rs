@@ -2,10 +2,12 @@ use super::{align_to_gtk, Widget, WidgetCtx};
 use crate::browser::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
+use gluon::RootedThread;
 use gtk::{self, prelude::*, Orientation};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use std::{collections::HashMap, sync::Arc};
+use once_cell::unsync::Lazy;
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) struct Box {
     root: gtk::Box,

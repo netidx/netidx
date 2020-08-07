@@ -13,7 +13,7 @@ use futures::{
 use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, source::PRIORITY_LOW};
-use gluon::{new_vm, vm::api::function::FunctionRef, RootedThread};
+use gluon::{new_vm, vm::api::function::{Function, FunctionRef}, RootedThread};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
@@ -65,12 +65,14 @@ struct WidgetCtx {
 }
 
 fn call_gluon_function(vm: &RootedThread, f: &str, v: Value) -> Option<Value> {
-    match vm.get_global::<FunctionRef<Fn(GluVal) -> Option<GluVal>>>(f) {
+    use script::GluVal as V;
+    
+    match vm.get_global::<FunctionRef<dyn Fn(V) -> Option<V>>>(f) {
         Err(e) => {
             warn!("no such function {} matching type Value -> Option Value, {}", f, e);
             None
         }
-        Ok(code) => match code.call(GluVal(v)) {
+        Ok(mut code) => match Function::call(&mut code, script::GluVal(v)) {
             Ok(gv) => gv.map(|v| v.0),
             Err(e) => {
                 warn!("error calling function {}, {}", f, e);
@@ -85,8 +87,8 @@ enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
-    Any(Vec<SourceDesc>),
-    Map { vm: Rc<Lazy<RootedThread>>, from: boxed::Box<SourceDesc>, function: String },
+    Any(Vec<Source>),
+    Map { vm: Rc<Lazy<RootedThread>>, from: boxed::Box<Source>, function: String },
 }
 
 impl Source {
@@ -124,7 +126,7 @@ impl Source {
             Source::Constant(v) => Some(v.clone()),
             Source::Load(dv) => dv.current(),
             Source::Variable(_, v) => v.borrow().clone(),
-            Source::Any(srcs) => srcs.iter().find_map(|src| src.current(vm)),
+            Source::Any(srcs) => srcs.iter().find_map(|src| src.current()),
             Source::Map { vm, from, function } => {
                 from.current().map(|v| call_gluon_function(&**vm, function, v))
             }
@@ -135,18 +137,14 @@ impl Source {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
-            Source::Any(srcs) => srcs.iter().find_map(|s| s.update(vm, changed)),
+            Source::Any(srcs) => srcs.iter().find_map(|s| s.update(changed)),
             Source::Map { vm, from, function } => {
                 from.update(changed).and_then(|v| call_gluon_function(&**vm, function, v))
             }
         }
     }
 
-    fn update_var(
-        &self,
-        name: &str,
-        value: &Value,
-    ) -> Option<Value> {
+    fn update_var(&self, name: &str, value: &Value) -> Option<Value> {
         match self {
             Source::Load(_) | Source::Constant(_) => None,
             Source::Variable(our_name, cur) => {
@@ -157,7 +155,7 @@ impl Source {
                     None
                 }
             }
-            Source::Any(srcs) => srcs.iter().find_map(|s| s.update_var(vm, name, value)),
+            Source::Any(srcs) => srcs.iter().find_map(|s| s.update_var(name, value)),
             Source::Map { vm, from, function } => from
                 .update_var(name, value)
                 .and_then(|v| call_gluon_function(&**vm, function, v)),
@@ -185,7 +183,7 @@ impl Sink {
             }
             view::Sink::Map { to, function } => Sink::Map {
                 vm: vm.clone(),
-                to: boxed::Box::new(Sink::new(ctx, from)),
+                to: boxed::Box::new(Sink::new(ctx, to)),
                 function,
             },
         }
@@ -202,7 +200,7 @@ impl Sink {
             }
             Sink::All(sinks) => {
                 for sink in sinks {
-                    sink.set(ctx, vm, v.clone())
+                    sink.set(ctx, v.clone())
                 }
             }
             Sink::Map { vm, to, function: f } => {

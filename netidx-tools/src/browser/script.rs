@@ -17,7 +17,7 @@ use gluon::{
 use netidx::subscriber::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct GluVal(Value);
+pub(super) struct GluVal(pub(super) Value);
 
 impl VmType for GluVal {
     type Type = Self;

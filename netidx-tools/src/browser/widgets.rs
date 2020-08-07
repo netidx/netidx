@@ -2,15 +2,15 @@ use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::browser::view;
 use gdk::{self, prelude::*};
 use glib::clone;
+use gluon::RootedThread;
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use log::warn;
-use once_cell::unsync::Lazy;
-use gluon::RootedThread;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
+use once_cell::unsync::Lazy;
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) struct Button {
@@ -70,10 +70,10 @@ impl Button {
     }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if self.enabled.update_var(name, value) {
-            self.button.set_sensitive(val_to_bool(value));
+        if let Some(value) = self.enabled.update_var(name, value) {
+            self.button.set_sensitive(val_to_bool(&value));
         }
-        if self.label.update_var(name, value) {
+        if let Some(value) = self.label.update_var(name, value) {
             self.button.set_label(&format!("{}", value));
         }
         self.source.update_var(name, value);
@@ -121,7 +121,7 @@ impl Label {
     }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if self.source.update_var(name, value) {
+        if let Some(value) = self.source.update_var(name, value) {
             self.label.set_label(&format!("{}", value));
         }
     }
@@ -198,13 +198,19 @@ impl Selector {
         Selector { root, combo, enabled, choices, source, we_set }
     }
 
-    fn update_active(combo: &gtk::ComboBoxText, source: &Value) {
-        if let Ok(current) = serde_json::to_string(source) {
-            combo.set_active_id(Some(current.as_str()));
+    fn update_active(combo: &gtk::ComboBoxText, source: &Option<Value>) {
+        if let Some(source) = source {
+            if let Ok(current) = serde_json::to_string(source) {
+                combo.set_active_id(Some(current.as_str()));
+            }
         }
     }
 
-    fn update_choices(combo: &gtk::ComboBoxText, choices: &Value, source: &Value) {
+    fn update_choices(
+        combo: &gtk::ComboBoxText,
+        choices: &Value,
+        source: &Option<Value>,
+    ) {
         let choices = match choices {
             Value::String(s) => {
                 match serde_json::from_str::<Vec<(Value, String)>>(&**s) {
@@ -248,14 +254,14 @@ impl Selector {
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
         self.we_set.set(true);
-        if self.enabled.update_var(name, value) {
-            self.combo.set_sensitive(val_to_bool(value));
+        if let Some(value) = self.enabled.update_var(name, value) {
+            self.combo.set_sensitive(val_to_bool(&value));
         }
-        if self.source.update_var(name, value) {
-            Selector::update_active(&self.combo, value);
+        if let Some(value) = self.source.update_var(name, value) {
+            Selector::update_active(&self.combo, &value);
         }
-        if self.choices.update_var(name, value) {
-            Selector::update_choices(&self.combo, value, &self.source.current());
+        if let Some(value) = self.choices.update_var(name, value) {
+            Selector::update_choices(&self.combo, &value, &self.source.current());
         }
         self.we_set.set(false);
     }
@@ -285,9 +291,14 @@ impl Toggle {
         let source = Source::new(&ctx, vm, variables, spec.source.clone());
         let sink = Sink::new(&ctx, vm, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
-        switch.set_sensitive(val_to_bool(&enabled.current()));
-        switch.set_active(val_to_bool(&source.current()));
-        switch.set_state(val_to_bool(&source.current()));
+        if let Some(v) = enabled.current() {
+            switch.set_sensitive(val_to_bool(&v));
+        }
+        if let Some(v) = source.current() {
+            let v = val_to_bool(&v);
+            switch.set_active(v);
+            switch.set_state(v);
+        }
         switch.connect_state_set(clone!(
         @strong ctx, @strong sink, @strong we_set, @strong source =>
         move |switch, state| {
@@ -295,8 +306,11 @@ impl Toggle {
                 sink.set(&ctx, if state { Value::True } else { Value::False });
                 idle_add(clone!(@strong source, @strong switch, @strong we_set => move || {
                     we_set.set(true);
-                    switch.set_active(val_to_bool(&source.current()));
-                    switch.set_state(val_to_bool(&source.current()));
+                    if let Some(v) = source.current() {
+                        let v = val_to_bool(&v);
+                        switch.set_active(v);
+                        switch.set_state(v);
+                    }
                     we_set.set(false);
                     Continue(false)
                 }));
@@ -337,13 +351,13 @@ impl Toggle {
     }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if self.enabled.update_var(name, value) {
-            self.switch.set_sensitive(val_to_bool(value));
+        if let Some(value) = self.enabled.update_var(name, value) {
+            self.switch.set_sensitive(val_to_bool(&value));
         }
-        if self.source.update_var(name, value) {
+        if let Some(value) = self.source.update_var(name, value) {
             self.we_set.set(true);
-            self.switch.set_active(val_to_bool(value));
-            self.switch.set_state(val_to_bool(value));
+            self.switch.set_active(val_to_bool(&value));
+            self.switch.set_state(val_to_bool(&value));
             self.we_set.set(false);
         }
     }
@@ -369,18 +383,24 @@ impl Entry {
         let source = Source::new(&ctx, vm, variables, spec.source.clone());
         let sink = Sink::new(&ctx, vm, spec.sink.clone());
         let entry = gtk::Entry::new();
-        entry.set_sensitive(val_to_bool(&enabled.current()));
-        entry.set_visibility(val_to_bool(&visible.current()));
+        if let Some(v) = enabled.current() {
+            entry.set_sensitive(val_to_bool(&v));
+        }
+        if let Some(v) = visible.current() {
+            entry.set_visibility(val_to_bool(&v));
+        }
         match source.current() {
-            Value::String(s) => entry.set_text(&*s),
-            v => entry.set_text(&format!("{}", v)),
+            None => entry.set_text(""),
+            Some(Value::String(s)) => entry.set_text(&*s),
+            Some(v) => entry.set_text(&format!("{}", v)),
         }
         fn submit(ctx: &WidgetCtx, source: &Source, sink: &Sink, entry: &gtk::Entry) {
             sink.set(&ctx, Value::String(Chars::from(String::from(entry.get_text()))));
             idle_add(clone!(@strong source, @strong entry => move || {
                 match source.current() {
-                    Value::String(s) => entry.set_text(&*s),
-                    v => entry.set_text(&format!("{}", v)),
+                    None => entry.set_text(""),
+                    Some(Value::String(s)) => entry.set_text(&*s),
+                    Some(v) => entry.set_text(&format!("{}", v)),
                 }
                 Continue(false)
             }));
@@ -427,15 +447,15 @@ impl Entry {
     }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if self.enabled.update_var(name, value) {
-            self.entry.set_sensitive(val_to_bool(value));
+        if let Some(value) = self.enabled.update_var(name, value) {
+            self.entry.set_sensitive(val_to_bool(&value));
         }
-        if self.visible.update_var(name, value) {
-            self.entry.set_visibility(val_to_bool(value));
+        if let Some(value) = self.visible.update_var(name, value) {
+            self.entry.set_visibility(val_to_bool(&value));
         }
-        if self.source.update_var(name, value) {
+        if let Some(value) = self.source.update_var(name, value) {
             match value {
-                Value::String(s) => self.entry.set_text(&**s),
+                Value::String(s) => self.entry.set_text(&*s),
                 v => self.entry.set_text(&format!("{}", v)),
             }
         }
