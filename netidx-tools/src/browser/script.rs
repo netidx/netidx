@@ -46,7 +46,7 @@ impl<'vm, 'value> api::Getable<'vm, 'value> for GluVal {
 }
 
 pub(super) fn load_builtins(thread: &Thread) -> Result<()> {
-    thread.load_script("netidx", &dbg!(api::typ::make_source::<GluVal>(&thread)?))
+    thread.load_script("netidx", &api::typ::make_source::<GluVal>(&thread)?)
 }
 
 pub(super) fn new() -> RootedThread {
