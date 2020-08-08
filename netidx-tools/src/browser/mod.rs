@@ -366,9 +366,17 @@ impl View {
             Rc::new(Lazy::new(f))
         };
         for (module, script) in &spec.scripts {
-            match (***vm).load_script(module, script) {
-                Ok(()) => (),
-                Err(e) => warn!("compile error module {}, {}", module, e),
+            match base64::decode(script) {
+                Err(e) => {
+                    warn!("failed to base64 decode the script module {}, {}", module, e)
+                }
+                Ok(octets) => match String::from_utf8(octets) {
+                    Err(e) => warn!("script module {} is not unicode {}", module, e),
+                    Ok(script) => match (***vm).load_script(module, script.as_str()) {
+                        Ok(()) => (),
+                        Err(e) => warn!("compile error module {}, {}", module, e),
+                    },
+                },
             }
         }
         let selected_path = gtk::Label::new(None);
