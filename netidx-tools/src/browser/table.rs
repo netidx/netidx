@@ -210,6 +210,15 @@ impl Table {
         t.view().set_model(Some(t.store()));
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
+        t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
+            if let Some(iter) = t.store().get_iter(&p) {
+                if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
+                    let path = t.0.base_path.append(row_name);
+                    let m = FromGui::Navigate(path);
+                    let _: result::Result<_, _> = t.0.ctx.from_gui.unbounded_send(m);
+                }
+            }
+        }));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
@@ -248,20 +257,6 @@ impl Table {
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
-        if key.get_keyval() == keys::constants::BackSpace {
-            // drill up
-            let path = Path::dirname(&self.0.base_path).unwrap_or("/");
-            let m = FromGui::Navigate(Path::from(String::from(path)));
-            let _: result::Result<_, _> = self.0.ctx.from_gui.unbounded_send(m);
-        }
-        if key.get_keyval() == keys::constants::Return {
-            // drill down
-            if let Some(row_name) = &*self.0.focus_row.borrow() {
-                let path = self.0.base_path.append(row_name);
-                let _: result::Result<_, _> =
-                    self.0.ctx.from_gui.unbounded_send(FromGui::Navigate(path));
-            }
-        }
         if key.get_keyval() == keys::constants::Escape {
             // unset the focus
             self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
