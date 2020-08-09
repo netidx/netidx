@@ -13,14 +13,10 @@ use futures::{
 use gdk::{self, prelude::*};
 use gio::prelude::*;
 use glib::{self, clone, source::PRIORITY_LOW};
-use gluon::{
-    new_vm,
-    vm::api::function::{Function, FunctionRef},
-    RootedThread, ThreadExt,
-};
+use gluon::{vm::api::function::FunctionRef, RootedThread, ThreadExt};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
-use log::{debug, info, warn};
+use log::{info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -364,16 +360,12 @@ fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
         };
         let target = glib::markup_escape_text(target);
         let lbl = gtk::Label::new(None);
-        if *target == **path {
-            lbl.set_text(&*name);
-        } else {
-            lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
-            lbl.connect_activate_link(clone!(@strong ctx => move |_, uri| {
-                let m = FromGui::Navigate(Path::from(String::from(uri)));
-                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                Inhibit(false)
-            }));
-        }
+        lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
+        lbl.connect_activate_link(clone!(@strong ctx => move |_, uri| {
+            let m = FromGui::Navigate(Path::from(String::from(uri)));
+            let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+            Inhibit(false)
+        }));
         root.add(&lbl);
     }
     root
@@ -382,8 +374,6 @@ fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
 struct View {
     root: gtk::Box,
     widget: Widget,
-    spec: view::View,
-    vm: Rc<Lazy<RootedThread>>,
 }
 
 impl View {
@@ -429,8 +419,7 @@ impl View {
         }
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
-        let variables = &spec.variables;
-        View { root, widget, spec, vm }
+        View { root, widget }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -596,8 +585,7 @@ fn run_netidx(
     rx.recv().unwrap()
 }
 
-fn run_gui(ctx: WidgetCtx, app: &Application, mut to_gui: glib::Receiver<ToGui>) {
-    let main_context = glib::MainContext::default();
+fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
     window.set_title("Netidx browser");

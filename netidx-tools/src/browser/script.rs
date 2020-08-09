@@ -1,16 +1,10 @@
 use gluon::{
-    base::types::{AppVec, ArcType, Type},
-    import, new_vm,
+    base::types::ArcType,
+    new_vm,
     vm::{
         self,
+        api::{self, ActiveThread, Getable, VmType},
         impl_getable_simple,
-        api::{
-            self,
-            generic::{A, L, R},
-            ActiveThread, FunctionRef, Getable, Hole, OpaqueRef, OpaqueValue, Pushable,
-            UserdataValue, ValueRef, VmType, IO,
-        },
-        ExternModule, Variants,
     },
     Result, RootedThread, Thread, ThreadExt,
 };
