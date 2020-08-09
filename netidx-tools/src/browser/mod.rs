@@ -12,7 +12,7 @@ use futures::{
 };
 use gdk::{self, prelude::*};
 use gio::prelude::*;
-use glib::{self, source::PRIORITY_LOW};
+use glib::{self, clone, source::PRIORITY_LOW};
 use gluon::{
     new_vm,
     vm::api::function::{Function, FunctionRef},
@@ -352,6 +352,33 @@ impl Widget {
     }
 }
 
+fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    for target in Path::dirnames(&path) {
+        let name = match Path::basename(target) {
+            None => " / ",
+            Some(name) => {
+                root.add(&gtk::Label::new(Some(" > ")));
+                name
+            }
+        };
+        let target = glib::markup_escape_text(target);
+        let lbl = gtk::Label::new(None);
+        if *target == **path {
+            lbl.set_text(&*name);
+        } else {
+            lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
+            lbl.connect_activate_link(clone!(@strong ctx => move |_, uri| {
+                let m = FromGui::Navigate(Path::from(String::from(uri)));
+                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                Inhibit(false)
+            }));
+        }
+        root.add(&lbl);
+    }
+    root
+}
+
 struct View {
     root: gtk::Box,
     widget: Widget,
@@ -360,7 +387,7 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: WidgetCtx, spec: view::View) -> View {
+    fn new(ctx: WidgetCtx, path: &Path, spec: view::View) -> View {
         let vm = {
             let f: fn() -> RootedThread = script::new;
             Rc::new(Lazy::new(f))
@@ -395,6 +422,7 @@ impl View {
             selected_path.clone(),
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        root.add(&make_crumbs(&ctx, path));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
             root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
@@ -599,7 +627,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, mut to_gui: glib::Receiver<ToGui>)
                 }
             }
             ToGui::View(path, view) => {
-                let cur = View::new(ctx.clone(), view);
+                let cur = View::new(ctx.clone(), &path, view);
                 if let Some(cur) = current.take() {
                     window.remove(cur.root());
                 }

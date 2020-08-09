@@ -169,22 +169,22 @@ fn is_escaped(s: &str, i: usize) -> bool {
         })
 }
 
-enum BaseNames<'a> {
+enum DirNames<'a> {
     Root(bool),
     Path { cur: &'a str, all: &'a str, base: usize },
 }
 
-impl<'a> Iterator for BaseNames<'a> {
+impl<'a> Iterator for DirNames<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            BaseNames::Root(false) => None,
-            BaseNames::Root(true) => {
-                *self = BaseNames::Root(false);
+            DirNames::Root(false) => None,
+            DirNames::Root(true) => {
+                *self = DirNames::Root(false);
                 Some("/")
             }
-            BaseNames::Path { ref mut cur, ref all, ref mut base } => {
+            DirNames::Path { ref mut cur, ref all, ref mut base } => {
                 if *base == all.len() {
                     None
                 } else {
@@ -329,7 +329,7 @@ impl Path {
         utils::split_escaped(s, ESC, SEP).skip(skip)
     }
 
-    /// Return an iterator over all the basenames in the path starting
+    /// Return an iterator over all the dirnames in the path starting
     /// from the root and ending with the entire path.
     ///
     /// # Examples
@@ -345,12 +345,12 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
     /// ```
-    pub fn basenames<T: AsRef<str> + ?Sized>(s: &T) -> impl Iterator<Item = &str> {
+    pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> impl Iterator<Item = &str> {
         let s = s.as_ref();
         if s == "/" {
-            BaseNames::Root(true)
+            DirNames::Root(true)
         } else {
-            BaseNames::Path { cur: s, all: s, base: 1 }
+            DirNames::Path { cur: s, all: s, base: 1 }
         }
     }
 

@@ -162,7 +162,7 @@ impl PMap {
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
-        Path::basenames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
+        Path::dirnames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
             None => p,
             Some(set) => {
                 let init = (p, Permissions::empty());
