@@ -403,6 +403,8 @@ impl View {
         selected_path.set_single_line_mode(true);
         let selected_path_window =
             gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        selected_path_window
+            .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
         let widget = Widget::new(
             ctx.clone(),
@@ -413,10 +415,12 @@ impl View {
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.add(&make_crumbs(&ctx, path));
+        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
             root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
         }
+        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         View { root, widget }
