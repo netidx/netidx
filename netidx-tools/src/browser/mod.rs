@@ -351,22 +351,26 @@ impl Widget {
 fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     for target in Path::dirnames(&path) {
+        let lbl = gtk::Label::new(None);
         let name = match Path::basename(target) {
-            None => " / ",
+            None => {
+                root.add(&lbl);
+                lbl.set_margin_start(10);
+                " / "
+            },
             Some(name) => {
                 root.add(&gtk::Label::new(Some(" > ")));
+                root.add(&lbl);
                 name
             }
         };
         let target = glib::markup_escape_text(target);
-        let lbl = gtk::Label::new(None);
         lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
         lbl.connect_activate_link(clone!(@strong ctx => move |_, uri| {
             let m = FromGui::Navigate(Path::from(String::from(uri)));
             let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
             Inhibit(false)
         }));
-        root.add(&lbl);
     }
     root
 }
