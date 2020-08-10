@@ -443,32 +443,32 @@ impl Table {
         let mut tx = Some(tx);
         waits.push(rx);
         let sctx = self.disable_sort();
-        idle_add({
-            let t = self.clone();
-            let changed = changed.clone();
-            let mut i = 0;
-            move || {
+        let mut i = 0;
+        let t = self;
+        idle_add(
+            clone!(@weak t, @strong changed => @default-return Continue(false), move || {
                 let mut n = 0;
-                while n < 10000 && i < changed.len() {
-                    let (id, v) = changed.get_index(i).unwrap();
-                    if let Some(sub) = t.0.by_id.borrow().get(id) {
-                        let s = &format!("{}", v).to_value();
-                        t.store().set_value(&sub.row, sub.col, s);
-                    };
-                    i += 1;
-                    n += 1;
-                }
-                if i < changed.len() {
-                    Continue(true)
-                } else {
-                    if let Some(tx) = tx.take() {
-                        let _: result::Result<_, _> = tx.send(());
+                    while n < 10000 && i < changed.len() {
+                        let (id, v) = changed.get_index(i).unwrap();
+                        if let Some(sub) = t.0.by_id.borrow().get(id) {
+                            let s = &format!("{}", v).to_value();
+                            t.store().set_value(&sub.row, sub.col, s);
+                        };
+                        i += 1;
+                        n += 1;
                     }
-                    t.enable_sort(sctx);
-                    t.update_subscriptions();
-                    Continue(false)
+                    if i < changed.len() {
+                        Continue(true)
+                    } else {
+                        if let Some(tx) = tx.take() {
+                            let _: result::Result<_, _> = tx.send(());
+                        }
+                        t.enable_sort(sctx);
+                        t.update_subscriptions();
+                        Continue(false)
+                    }
                 }
-            }
-        });
+            ),
+        );
     }
 }

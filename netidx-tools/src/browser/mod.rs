@@ -617,6 +617,7 @@ fn run_netidx(
             to_gui,
             tx,
         ));
+        println!("netidx loop terminated");
     });
     rx.recv().unwrap()
 }
