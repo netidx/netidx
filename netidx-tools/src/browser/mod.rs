@@ -26,7 +26,7 @@ use netidx::{
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view as protocol_view;
-use once_cell::unsync::Lazy;
+use once_cell::{sync::OnceCell, unsync::Lazy};
 use std::{
     boxed,
     cell::RefCell,
@@ -51,6 +51,7 @@ enum ToGui {
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
+    Render(Path, protocol_view::View),
     Updated,
 }
 
@@ -357,7 +358,7 @@ fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
                 root.add(&lbl);
                 lbl.set_margin_start(10);
                 " / "
-            },
+            }
             Some(name) => {
                 root.add(&gtk::Label::new(Some(" > ")));
                 root.add(&lbl);
@@ -459,6 +460,7 @@ macro_rules! break_err {
 async fn netidx_main(
     cfg: Config,
     auth: Auth,
+    subscriber: Arc<OnceCell<Subscriber>>,
     mut updates: mpsc::Receiver<Batch>,
     mut state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     mut from_gui: mpsc::UnboundedReceiver<FromGui>,
@@ -471,7 +473,8 @@ async fn netidx_main(
             Some(rx_view) => rx_view.next().await,
         }
     }
-    let subscriber = Subscriber::new(cfg, auth).unwrap();
+    let subscriber =
+        subscriber.get_or_init(move || Subscriber::new(cfg, auth).unwrap()).clone();
     let resolver = subscriber.resolver();
     let _: result::Result<_, _> = to_init.send((subscriber.clone(), resolver.clone()));
     let mut view_path: Option<Path> = None;
@@ -547,6 +550,21 @@ async fn netidx_main(
                     refreshing = false;
                     break_err!(refresh(&mut refreshing, &mut changed, &to_gui))
                 },
+                Some(FromGui::Render(base_path, view)) => {
+                    view_path = None;
+                    rx_view = None;
+                    _dv_view = None;
+                    match view::View::new(&resolver, view).await {
+                        Err(e) => warn!("failed to raeify view {}", e),
+                        Ok(v) => {
+                            let m = ToGui::View(base_path, v);
+                            match to_gui.send(m) {
+                                Err(_) => break,
+                                Ok(()) => info!("updated gui view (render)")
+                            }
+                        }
+                    }
+                },
                 Some(FromGui::Navigate(base_path)) => {
                     match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
@@ -580,6 +598,7 @@ async fn netidx_main(
 fn run_netidx(
     cfg: Config,
     auth: Auth,
+    subscriber: Arc<OnceCell<Subscriber>>,
     updates: mpsc::Receiver<Batch>,
     state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
@@ -588,7 +607,16 @@ fn run_netidx(
     let (tx, rx) = smpsc::channel();
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(netidx_main(cfg, auth, updates, state_updates, from_gui, to_gui, tx));
+        rt.block_on(netidx_main(
+            cfg,
+            auth,
+            subscriber,
+            updates,
+            state_updates,
+            from_gui,
+            to_gui,
+            tx,
+        ));
     });
     rx.recv().unwrap()
 }
@@ -599,7 +627,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
-    window.connect_destroy(move |_| process::exit(0));
     let mut current: Option<View> = None;
     to_gui.attach(None, move |m| {
         match m {
@@ -647,6 +674,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
 pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let application = Application::new(Some("org.netidx.browser"), Default::default())
         .expect("failed to initialize GTK application");
+    let subscriber = Arc::new(OnceCell::new());
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
@@ -657,6 +685,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (subscriber, resolver) = run_netidx(
             cfg.clone(),
             auth.clone(),
+            Arc::clone(&subscriber),
             rx_updates,
             rx_state_updates,
             rx_from_gui,
