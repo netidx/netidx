@@ -29,7 +29,7 @@ use netidx_protocols::view as protocol_view;
 use once_cell::{sync::OnceCell, unsync::Lazy};
 use std::{
     boxed,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     mem,
     rc::Rc,
@@ -461,7 +461,6 @@ macro_rules! break_err {
 
 #[derive(Debug)]
 struct StartNetidx {
-    id: u32,
     cfg: Config,
     auth: Auth,
     subscriber: Arc<OnceCell<Subscriber>>,
@@ -609,7 +608,7 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
     });
 }
 
-fn run_gui(id: u32, ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
+fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
     window.set_title("Netidx browser");
@@ -671,7 +670,6 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     let application = Application::new(Some("org.netidx.browser"), Default::default())
         .expect("failed to initialize GTK application");
     let subscriber = Arc::new(OnceCell::new());
-    let id = Cell::new(0);
     let (tx_tokio, rx_tokio) = mpsc::unbounded();
     run_tokio(rx_tokio);
     application.connect_activate(move |app| {
@@ -684,7 +682,6 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
         tx_tokio
             .unbounded_send(StartNetidx {
-                id: id.get(),
                 cfg: cfg.clone(),
                 auth: auth.clone(),
                 subscriber: Arc::clone(&subscriber),
@@ -704,8 +701,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
         };
-        run_gui(id.get(), ctx, app, rx_to_gui);
-        id.set(id.get() + 1)
+        run_gui(ctx, app, rx_to_gui);
     });
     application.run(&[]);
 }
