@@ -31,7 +31,7 @@ use std::{
     boxed,
     cell::RefCell,
     collections::HashMap,
-    mem,
+    mem, process,
     rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},
@@ -616,7 +616,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     window.show_all();
     window.connect_delete_event(clone!(@strong ctx, @weak app =>
     @default-return Inhibit(false), move |_, _| {
-        if app.get_windows().len() > 0 {
+        if app.get_windows().len() == 0 {
+            process::exit(0)
+        } else {
             let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
         }
         Inhibit(false)
