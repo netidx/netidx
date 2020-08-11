@@ -79,7 +79,7 @@ impl Widget {
     fn new<'a>(
         resolver: &'a ResolverRead,
         widget: view::Widget,
-    ) -> Pin<MemBox<dyn Future<Output = Result<Self>> + 'a>> {
+    ) -> Pin<MemBox<dyn Future<Output = Result<Self>> + 'a + Send>> {
         MemBox::pin(async move {
             match widget {
                 view::Widget::Table(path) => {
