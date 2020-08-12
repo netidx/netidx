@@ -1,28 +1,27 @@
 use super::FromGui;
-use netidx::{subscriber::Value, chars::Chars};
 use futures::channel::mpsc;
 use glib::clone;
 use gtk;
 use log::warn;
+use netidx::{chars::Chars, subscriber::Value};
 use netidx_protocols::view;
 use std::{cell::RefCell, rc::Rc, result};
 
-type OnChange = Rc<Fn(view::Widget, Option<(&gtk::Widget, &gtk::Widget)>)>;
+type OnChange = Rc<Fn(view::Widget)>;
 
 struct KindWrap {
-    kind: gtk::ComboBoxText,
-    widget: Rc<RefCell<Widget>>,
+    root: gtk::Box,
 }
 
 impl KindWrap {
     fn new(on_change: OnChange, spec: view::Widget) -> KindWrap {
         let kinds =
             ["Table", "Label", "Button", "Toggle", "Selector", "Entry", "Box", "Grid"];
-        let combo = gtk::ComboBoxText::new();
+        let kind = gtk::ComboBoxText::new();
         for k in &kinds {
-            combo.append_text(k);
+            kind.append_text(k);
         }
-        combo.set_active_id(Some(match spec {
+        kind.set_active_id(Some(match spec {
             view::Widget::Table(_) => "Table",
             view::Widget::Label(_) => "Label",
             view::Widget::Button(_) => "Button",
@@ -32,41 +31,44 @@ impl KindWrap {
             view::Widget::Box(_) => "Box",
             view::Widget::Grid(_) => "Grid",
         }));
-        let widget = Rc::new(RefCell::new(Widget::new(on_change.clone(), spec)));
-        combo.connect_changed({
-            let widget = Rc::clone(&widget);
-            move |combo| match &*combo.get_active_id() {
-                "Table" => {
-                    let spec = view::Widget::Table(Path::from("/"));
-                    let cur = widget.borrow().root().clone();
-                    *widget.borrow_mut() =
-                        Widget::Table(Table::new(on_change.clone(), spec.clone()));
-                    on_change(spec, Some((&cur, widget.borrow().root())));
-                }
-                "Label" => {
-                    let s = Value::String(Chars::from("static label"));
-                    let spec = view::Widget::Label(view::Source::Constant(v));
-                    let cur = widget.borrow().root().clone();
-                    *widget.borrow_mut() =
-                        Widget::Label()
-                },
-                "Button" => todo!(),
-                "Toggle" => todo!(),
-                "Selector" => todo!(),
-                "Entry" => todo!(),
-                "Box" => todo!(),
-                "Grid" => todo!(),
-                _ => unreachable!(),
+        let widget = RefCell::new(Widget::new(on_change.clone(), spec));
+        let root = gtk::Box::new(gtk::Orientation::Vertical);
+        root.add(&kind);
+        {
+            let wr = widget.borrow();
+            root.add(wr.root());
+        }
+        kind.connect_changed(clone!(@weak root => move |c| match &*c.get_active_id() {
+            "Table" => {
+                let spec = view::Widget::Table(Path::from("/"));
+                let mut wr = widget.borrow_mut();
+                root.remove(wr.root());
+                *wr = Widget::Table(Table::new(on_change.clone(), spec.clone()));
+                root.add(wr.root());
+                on_change(spec);
             }
-        });
-    }
-
-    fn combo(&self) -> &gtk::ComboBoxText {
-        &self.kind
+            "Label" => {
+                let s = Value::String(Chars::from("static label"));
+                let spec = view::Widget::Label(view::Source::Constant(v));
+                let mut wr = widget.borrow_mut();
+                root.remove(wr.root());
+                *wr = Widget::Label(on_change.clone(), spec);
+                root.add(wr.root());
+                on_change(spec);
+            }
+            "Button" => todo!(),
+            "Toggle" => todo!(),
+            "Selector" => todo!(),
+            "Entry" => todo!(),
+            "Box" => todo!(),
+            "Grid" => todo!(),
+            _ => unreachable!(),
+        }));
+        KindWrap { root }
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.widget.borrow().root()
+        self.root.upcast_ref()
     }
 }
 
@@ -235,40 +237,30 @@ impl Widget {
     }
 }
 
-struct Editor {
-    kind: gtk::ComboBoxText,
-    root: Rc<RefCell<Widget>>,
+pub(super) struct Editor {
+    root: KindWrap,
 }
 
 impl Editor {
-    fn new(
-        root: &gtk::Box,
+    pub(super) fn new(
         mut from_gui: mpsc::UnboundedSender<FromGui>,
         path: Path,
         spec: view::View,
     ) -> Editor {
         let spec = Rc::new(RefCell::new(spec));
         let on_change = Rc::new({
-            let spec = spec.clone();
+            let spec = Rc::clone(&spec);
             let root = root.clone();
-            move |s: view::Widget, w: Option<(&gtk::Widget, &gtk::Widget)>| {
+            move |s: view::Widget| {
                 *spec.borrow_mut().root = s;
                 let m = FromGui::Render(path.clone(), spec.borrow().clone());
                 let _: result::Result<_, _> = from_gui.unbounded_send(m);
-                if let Some((old, new)) = w {
-                    root.remove(old);
-                    root.add(new);
-                }
             }
         });
-        let w = Rc::new(RefCell::new(Widget::new(
-            on_change.clone(),
-            spec.borrow().root.clone(),
-        )));
-        let combo = kind_combo(&spec);
-        combo.connect_changed({});
-        root.add(&combo);
-        root.add(w.borrow().root());
-        Editor { kind: combo, root: w }
+        Editor { root: KindWrap::new(on_change, spec.borrow().root.clone()) }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root()
     }
 }

@@ -1,9 +1,11 @@
 mod containers;
+mod editor;
 mod script;
 mod table;
 mod view;
 mod widgets;
 use anyhow::Result;
+use editor::Editor;
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -43,7 +45,7 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View(Path, view::View),
+    View(Path, view::View, bool),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
     Terminate,
@@ -518,7 +520,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     match view::View::new(&resolver, view).await {
                         Err(e) => warn!("failed to raeify view {}", e),
                         Ok(v) => {
-                            let m = ToGui::View(base_path, v);
+                            let m = ToGui::View(base_path, v, true);
                             break_err!(ctx.to_gui.send(m));
                             info!("updated gui view (render)")
                         }
@@ -533,7 +535,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 scripts: Vec::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
-                            let m = ToGui::View(base_path.clone(), default);
+                            let m = ToGui::View(base_path.clone(), default, false);
                             break_err!(ctx.to_gui.send(m));
                             let s = subscriber
                                 .durable_subscribe(base_path.append(".view"));
@@ -611,19 +613,21 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal);
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical);
+    hbox.add(&sidebar);
+    hbox.add(&gtk::Seperator::new(gtk::Orientation::Vertical));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
     window.connect_delete_event(clone!(@strong ctx, @weak app =>
     @default-return Inhibit(false), move |_, _| {
-        if app.get_windows().len() == 0 {
-            process::exit(0)
-        } else {
-            let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
-        }
+        let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
         Inhibit(false)
     }));
+    window.add(&hbox);
     let mut current: Option<View> = None;
+    let mut editor: Option<Editor> = None;
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut current {
@@ -645,14 +649,23 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::View(path, view) => {
+        ToGui::View(path, view, rendered) => {
             let cur = View::new(ctx.clone(), &path, view);
             if let Some(cur) = current.take() {
-                window.remove(cur.root());
+                hbox.remove(cur.root());
+            }
+            if !rendered {
+                if let Some(editor) = editor.take() {
+                    sidebar.remove(editor.root());
+                }
+                let e = Editor::new(ctx.from_gui.clone(), path.clone(), view.clone());
+                sidebar.add(e.root());
+                sidebar.show_all();
+                editor = Some(e);
             }
             window.set_title(&format!("Netidx Browser {}", path));
-            window.add(cur.root());
-            window.show_all();
+            hbox.add(cur.root());
+            hbox.show_all();
             current = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
             let _: result::Result<_, _> = ctx.to_gui.send(m);
