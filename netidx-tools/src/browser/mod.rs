@@ -45,7 +45,12 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View(Path, view::View, bool),
+    View {
+        path: Path,
+        original: protocol_view::View,
+        raeified: view::View,
+        rendered: bool
+    },
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
     Terminate,
@@ -517,10 +522,15 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     view_path = None;
                     rx_view = None;
                     _dv_view = None;
-                    match view::View::new(&resolver, view).await {
+                    match view::View::new(&resolver, view.clone()).await {
                         Err(e) => warn!("failed to raeify view {}", e),
                         Ok(v) => {
-                            let m = ToGui::View(base_path, v, true);
+                            let m = ToGui::View {
+                                path: base_path,
+                                original: view,
+                                raeified: v,
+                                rendered: true
+                            };
                             break_err!(ctx.to_gui.send(m));
                             info!("updated gui view (render)")
                         }
@@ -530,12 +540,23 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
                         Ok(spec) => {
-                            let default = view::View {
+                            let default = protocol_view::View {
+                                variables: HashMap::new(),
+                                keybinds: Vec::new(),
+                                scripts: Vec::new(),
+                                root: protocol_view::Widget::Table(base_path.clone())
+                            };
+                            let raeified_default = view::View {
                                 variables: HashMap::new(),
                                 scripts: Vec::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
-                            let m = ToGui::View(base_path.clone(), default, false);
+                            let m = ToGui::View {
+                                path: base_path.clone(),
+                                original: default,
+                                raeified: raeified_default,
+                                rendered: false
+                            };
                             break_err!(ctx.to_gui.send(m));
                             let s = subscriber
                                 .durable_subscribe(base_path.append(".view"));
@@ -565,11 +586,16 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         Value::String(s) => {
                             match serde_json::from_str::<protocol_view::View>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
-                                Ok(v) => if let Some(path) = &view_path {
-                                    match view::View::new(&resolver, v).await {
+                                Ok(view) => if let Some(path) = &view_path {
+                                    match view::View::new(&resolver, view.clone()).await {
                                         Err(e) => warn!("failed to raeify view {}", e),
                                         Ok(v) => {
-                                            let m = ToGui::View(path.clone(), v);
+                                            let m = ToGui::View {
+                                                path: path.clone(),
+                                                original: view,
+                                                raeified: v,
+                                                rendered: false
+                                            };
                                             break_err!(ctx.to_gui.send(m));
                                             info!("updated gui view")
                                         }
@@ -613,10 +639,10 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let hbox = gtk::Box::new(gtk::Orientation::Horizontal);
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical);
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 5);
     hbox.add(&sidebar);
-    hbox.add(&gtk::Seperator::new(gtk::Orientation::Vertical));
+    hbox.add(&gtk::Separator::new(gtk::Orientation::Vertical));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.show_all();
@@ -649,8 +675,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::View(path, view, rendered) => {
-            let cur = View::new(ctx.clone(), &path, view);
+        ToGui::View { path, original, raeified, rendered } => {
+            let cur = View::new(ctx.clone(), &path, raeified);
             if let Some(cur) = current.take() {
                 hbox.remove(cur.root());
             }
@@ -658,7 +684,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 if let Some(editor) = editor.take() {
                     sidebar.remove(editor.root());
                 }
-                let e = Editor::new(ctx.from_gui.clone(), path.clone(), view.clone());
+                let e = Editor::new(ctx.from_gui.clone(), path.clone(), original);
                 sidebar.add(e.root());
                 sidebar.show_all();
                 editor = Some(e);
