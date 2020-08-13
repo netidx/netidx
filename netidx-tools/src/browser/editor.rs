@@ -80,7 +80,21 @@ impl KindWrap {
                     root.add(wr.root());
                     on_change(view::Widget::Toggle(spec));
                 },
-                Some(s) if &*s == "Selector" => todo!(),
+                Some(s) if &*s == "Selector" => {
+                    let choices = Chars::from(
+                        r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#
+                    );
+                    let spec = view::Selector {
+                        enabled: view::Source::Constant(Value::True),
+                        choices: view::Source::Constant(Value::String(choices)),
+                        source: view::Source::Load(Path::from("/somewhere")),
+                        sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    };
+                    root.remove(wr.root());
+                    *wr = Widget::Selector(Selector::new(on_change.clone(), spec.clone()));
+                    root.add(wr.root());
+                    on_change(view::Widget::Selector(spec));
+                },
                 Some(s) if &*s == "Entry" => todo!(),
                 Some(s) if &*s == "Box" => todo!(),
                 Some(s) if &*s == "Grid" => todo!(),
@@ -293,11 +307,62 @@ impl Toggle {
 }
 
 struct Selector {
-    parent: OnChange,
-    enabled: gtk::Entry,
-    choices: gtk::Entry,
-    source: gtk::Entry,
-    sink: gtk::Entry,
+    root: gtk::Grid
+}
+
+impl Selector {
+    fn new(on_change: OnChange, spec: view::Selector) -> Self {
+        let root = gtk::Grid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let send = Rc::new(clone!(@strong spec => move || {
+            on_change(view::Widget::Selector(spec.borrow().clone()))
+        }));
+        let (lbl, entry) = parse_entry(
+            "Enabled:",
+            &spec.borrow().enabled,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().enabled = s;
+                send();
+            }),
+        );
+        root.attach(&lbl, 0, 0, 1, 1);
+        root.attach(&entry, 1, 0, 1, 1);
+        let (lbl, entry) = parse_entry(
+            "Choices:",
+            &spec.borrow().choices,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().choices = s;
+                send();
+            }),
+        );
+        root.attach(&lbl, 0, 1, 1, 1);
+        root.attach(&entry, 1, 1, 1, 1);
+        let (lbl, entry) = parse_entry(
+            "Source:",
+            &spec.borrow().source,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().source = s;
+                send();
+            }),
+        );
+        root.attach(&lbl, 0, 2, 1, 1);
+        root.attach(&entry, 1, 2, 1, 1);
+        let (lbl, entry) = parse_entry(
+            "Sink:",
+            &spec.borrow().sink,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().sink = s;
+                send()
+            }),
+        );
+        root.attach(&lbl, 0, 3, 1, 1);
+        root.attach(&entry, 1, 3, 1, 1);
+        Selector { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
 }
 
 struct Entry {
@@ -345,7 +410,7 @@ impl Widget {
             view::Widget::Label(s) => Widget::Label(Label::new(on_change, s)),
             view::Widget::Button(s) => Widget::Button(Button::new(on_change, s)),
             view::Widget::Toggle(s) => Widget::Toggle(Toggle::new(on_change, s)),
-            view::Widget::Selector(_) => todo!(),
+            view::Widget::Selector(s) => Widget::Selector(Selector::new(on_change, s)),
             view::Widget::Entry(_) => todo!(),
             view::Widget::Box(_) => todo!(),
             view::Widget::Grid(_) => todo!(),
@@ -358,7 +423,7 @@ impl Widget {
             Widget::Label(w) => w.root(),
             Widget::Button(w) => w.root(),
             Widget::Toggle(w) => w.root(),
-            Widget::Selector(_) => todo!(),
+            Widget::Selector(w) => w.root(),
             Widget::Entry(_) => todo!(),
             Widget::Box(_) => todo!(),
             Widget::Grid(_) => todo!(),
