@@ -19,7 +19,7 @@ impl KindWrap {
             ["Table", "Label", "Button", "Toggle", "Selector", "Entry", "Box", "Grid"];
         let kind = gtk::ComboBoxText::new();
         for k in &kinds {
-            kind.append_text(k);
+            kind.append(Some(k), k);
         }
         kind.set_active_id(Some(match spec {
             view::Widget::Table(_) => "Table",
@@ -38,8 +38,9 @@ impl KindWrap {
             let wr = widget.borrow();
             root.add(wr.root());
         }
-        kind.connect_changed(clone!(@weak root => move |c| match c.get_active_id() {
+        kind.connect_changed(clone!(@weak root => move |c| match dbg!(c.get_active_id()) {
             Some(s) if &*s == "Table" => {
+                println!("kind changed to table");
                 let mut wr = widget.borrow_mut();
                 root.remove(wr.root());
                 *wr = Widget::Table(Table::new(on_change.clone(), Path::from("/")));
@@ -47,6 +48,7 @@ impl KindWrap {
                 on_change(view::Widget::Table(Path::from("/")));
             }
             Some(s) if &*s == "Label" => {
+                println!("kind changed to label");
                 let s = Value::String(Chars::from("static label"));
                 let spec = view::Source::Constant(s);
                 let mut wr = widget.borrow_mut();

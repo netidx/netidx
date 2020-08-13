@@ -691,6 +691,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             window.set_title(&format!("Netidx Browser {}", path));
             hbox.add(cur.root());
+            hbox.set_child_packing(cur.root(), true, true, 1, gtk::PackType::Start);
             hbox.show_all();
             current = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
