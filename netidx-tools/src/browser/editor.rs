@@ -41,19 +41,16 @@ impl KindWrap {
         }
         kind.connect_changed(clone!(@weak root => move |c| {
             let mut wr = widget.borrow_mut();
+            root.remove(wr.root());
             match c.get_active_id() {
                 Some(s) if &*s == "Table" => {
-                    root.remove(wr.root());
                     *wr = Widget::Table(Table::new(on_change.clone(), Path::from("/")));
-                    root.add(wr.root());
                     on_change(view::Widget::Table(Path::from("/")));
                 }
                 Some(s) if &*s == "Label" => {
                     let s = Value::String(Chars::from("static label"));
                     let spec = view::Source::Constant(s);
-                    root.remove(wr.root());
                     *wr = Widget::Label(Label::new(on_change.clone(), spec.clone()));
-                    root.add(wr.root());
                     on_change(view::Widget::Label(spec));
                 }
                 Some(s) if &*s == "Button" => {
@@ -64,9 +61,7 @@ impl KindWrap {
                         source: view::Source::Load(Path::from("/somewhere")),
                         sink: view::Sink::Store(Path::from("/somewhere/else")),
                     };
-                    root.remove(wr.root());
                     *wr = Widget::Button(Button::new(on_change.clone(), spec.clone()));
-                    root.add(wr.root());
                     on_change(view::Widget::Button(spec));
                 }
                 Some(s) if &*s == "Toggle" => {
@@ -75,9 +70,7 @@ impl KindWrap {
                         source: view::Source::Load(Path::from("/somewhere")),
                         sink: view::Sink::Store(Path::from("/somewhere/else")),
                     };
-                    root.remove(wr.root());
                     *wr = Widget::Toggle(Toggle::new(on_change.clone(), spec.clone()));
-                    root.add(wr.root());
                     on_change(view::Widget::Toggle(spec));
                 },
                 Some(s) if &*s == "Selector" => {
@@ -90,17 +83,25 @@ impl KindWrap {
                         source: view::Source::Load(Path::from("/somewhere")),
                         sink: view::Sink::Store(Path::from("/somewhere/else")),
                     };
-                    root.remove(wr.root());
                     *wr = Widget::Selector(Selector::new(on_change.clone(), spec.clone()));
-                    root.add(wr.root());
                     on_change(view::Widget::Selector(spec));
                 },
-                Some(s) if &*s == "Entry" => todo!(),
+                Some(s) if &*s == "Entry" => {
+                    let spec = view::Entry {
+                        enabled: view::Source::Constant(Value::True),
+                        visible: view::Source::Constant(Value::True),
+                        source: view::Source::Load(Path::from("/somewhere")),
+                        sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    };
+                    *wr = Widget::Entry(Entry::new(on_change.clone(), spec.clone()));
+                    on_change(view::Widget::Entry(spec));
+                },
                 Some(s) if &*s == "Box" => todo!(),
                 Some(s) if &*s == "Grid" => todo!(),
                 None => (), // CR estokes: hmmm
                 _ => unreachable!(),
-            }
+            };
+            root.add(wr.root());
         }));
         KindWrap { root }
     }
@@ -185,6 +186,23 @@ fn parse_entry<T: Serialize + DeserializeOwned + 'static, F: Fn(T) + 'static>(
     (label, entry)
 }
 
+struct TwoColGrid {
+    root: gtk::Grid,
+    row: i32,
+}
+
+impl TwoColGrid {
+    fn new() -> Self {
+        TwoColGrid { root: gtk::Grid::new(), row: 0 }
+    }
+
+    fn add<T: IsA<gtk::Widget>, U: IsA<gtk::Widget>>(&mut self, w: (T, U)) {
+        self.root.attach(&w.0, 0, self.row, 1, 1);
+        self.root.attach(&w.1, 1, self.row, 1, 1);
+        self.row += 1;
+    }
+}
+
 struct Label {
     root: gtk::Box,
 }
@@ -205,172 +223,199 @@ impl Label {
 }
 
 struct Button {
-    root: gtk::Grid,
+    root: TwoColGrid,
 }
 
 impl Button {
     fn new(on_change: OnChange, spec: view::Button) -> Self {
-        let root = gtk::Grid::new();
+        let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (lbl, entry) = parse_entry(
+        let send = Rc::new(clone!(@strong on_change, @strong spec => move || {
+            on_change(view::Widget::Button(spec.borrow().clone()))
+        }));
+        root.add(parse_entry(
             "Enabled:",
             &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
+            clone!(@strong send, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
-                on_change(view::Widget::Button(spec.borrow().clone()))
+                send();
             }),
-        );
-        root.attach(&lbl, 0, 0, 1, 1);
-        root.attach(&entry, 1, 0, 1, 1);
-        let (lbl, entry) = parse_entry(
+        ));
+        root.add(parse_entry(
             "Label:",
             &spec.borrow().label,
-            clone!(@strong on_change, @strong spec => move |s| {
+            clone!(@strong send, @strong spec => move |s| {
                 spec.borrow_mut().label = s;
-                on_change(view::Widget::Button(spec.borrow().clone()))
+                send()
             }),
-        );
-        root.attach(&lbl, 0, 1, 1, 1);
-        root.attach(&entry, 1, 1, 1, 1);
-        let (lbl, entry) = parse_entry(
-            "Source:",
-            &spec.borrow().source,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
-                on_change(view::Widget::Button(spec.borrow().clone()))
-            }),
-        );
-        root.attach(&lbl, 0, 2, 1, 1);
-        root.attach(&entry, 1, 2, 1, 1);
-        let (lbl, entry) = parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
-                on_change(view::Widget::Button(spec.borrow().clone()))
-            }),
-        );
-        root.attach(&lbl, 0, 3, 1, 1);
-        root.attach(&entry, 1, 3, 1, 1);
-        Button { root }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-}
-
-struct Toggle {
-    root: gtk::Grid,
-}
-
-impl Toggle {
-    fn new(on_change: OnChange, spec: view::Toggle) -> Self {
-        let root = gtk::Grid::new();
-        let spec = Rc::new(RefCell::new(spec));
-        let (lbl, entry) = parse_entry(
-            "Enabled:",
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change(view::Widget::Toggle(spec.borrow().clone()));
-            }),
-        );
-        root.attach(&lbl, 0, 0, 1, 1);
-        root.attach(&entry, 1, 0, 1, 1);
-        let (lbl, entry) = parse_entry(
-            "Source:",
-            &spec.borrow().source,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
-                on_change(view::Widget::Toggle(spec.borrow().clone()))
-            }),
-        );
-        root.attach(&lbl, 0, 1, 1, 1);
-        root.attach(&entry, 1, 1, 1, 1);
-        let (lbl, entry) = parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
-                on_change(view::Widget::Toggle(spec.borrow().clone()))
-            }),
-        );
-        root.attach(&lbl, 0, 2, 1, 1);
-        root.attach(&entry, 1, 2, 1, 1);
-        Toggle { root }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-}
-
-struct Selector {
-    root: gtk::Grid
-}
-
-impl Selector {
-    fn new(on_change: OnChange, spec: view::Selector) -> Self {
-        let root = gtk::Grid::new();
-        let spec = Rc::new(RefCell::new(spec));
-        let send = Rc::new(clone!(@strong spec => move || {
-            on_change(view::Widget::Selector(spec.borrow().clone()))
-        }));
-        let (lbl, entry) = parse_entry(
-            "Enabled:",
-            &spec.borrow().enabled,
-            clone!(@strong send, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                send();
-            }),
-        );
-        root.attach(&lbl, 0, 0, 1, 1);
-        root.attach(&entry, 1, 0, 1, 1);
-        let (lbl, entry) = parse_entry(
-            "Choices:",
-            &spec.borrow().choices,
-            clone!(@strong send, @strong spec => move |s| {
-                spec.borrow_mut().choices = s;
-                send();
-            }),
-        );
-        root.attach(&lbl, 0, 1, 1, 1);
-        root.attach(&entry, 1, 1, 1, 1);
-        let (lbl, entry) = parse_entry(
+        ));
+        root.add(parse_entry(
             "Source:",
             &spec.borrow().source,
             clone!(@strong send, @strong spec => move |s| {
                 spec.borrow_mut().source = s;
-                send();
+                send()
             }),
-        );
-        root.attach(&lbl, 0, 2, 1, 1);
-        root.attach(&entry, 1, 2, 1, 1);
-        let (lbl, entry) = parse_entry(
+        ));
+        root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
             clone!(@strong send, @strong spec => move |s| {
                 spec.borrow_mut().sink = s;
                 send()
             }),
-        );
-        root.attach(&lbl, 0, 3, 1, 1);
-        root.attach(&entry, 1, 3, 1, 1);
+        ));
+        Button { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root.upcast_ref()
+    }
+}
+
+struct Toggle {
+    root: TwoColGrid
+}
+
+impl Toggle {
+    fn new(on_change: OnChange, spec: view::Toggle) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let send = Rc::new(clone!(@strong on_change, @strong spec => move || {
+            on_change(view::Widget::Toggle(spec.borrow().clone()));
+        }));
+        root.add(parse_entry(
+            "Enabled:",
+            &spec.borrow().enabled,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().enabled = s;
+                send();
+            }),
+        ));
+        root.add(parse_entry(
+            "Source:",
+            &spec.borrow().source,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().source = s;
+                send();
+            }),
+        ));
+        root.add(parse_entry(
+            "Sink:",
+            &spec.borrow().sink,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().sink = s;
+                send();
+            }),
+        ));
+        Toggle { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root.upcast_ref()
+    }
+}
+
+struct Selector {
+    root: TwoColGrid,
+}
+
+impl Selector {
+    fn new(on_change: OnChange, spec: view::Selector) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let send = Rc::new(clone!(@strong spec => move || {
+            on_change(view::Widget::Selector(spec.borrow().clone()))
+        }));
+        root.add(parse_entry(
+            "Enabled:",
+            &spec.borrow().enabled,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().enabled = s;
+                send();
+            }),
+        ));
+        root.add(parse_entry(
+            "Choices:",
+            &spec.borrow().choices,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().choices = s;
+                send();
+            }),
+        ));
+        root.add(parse_entry(
+            "Source:",
+            &spec.borrow().source,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().source = s;
+                send();
+            }),
+        ));
+        root.add(parse_entry(
+            "Sink:",
+            &spec.borrow().sink,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().sink = s;
+                send()
+            }),
+        ));
         Selector { root }
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+        self.root.root.upcast_ref()
     }
 }
 
 struct Entry {
-    parent: OnChange,
-    enabled: gtk::Entry,
-    visible: gtk::Entry,
-    source: gtk::Entry,
-    sink: gtk::Entry,
+    root: TwoColGrid
+}
+
+impl Entry {
+    fn new(on_change: OnChange, spec: view::Entry) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let send = Rc::new(clone!(@strong spec => move || {
+            on_change(view::Widget::Entry(spec.borrow().clone()))
+        }));
+        root.add(parse_entry(
+            "Enabled:",
+            &spec.borrow().enabled,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().enabled = s;
+                send()
+            }),
+        ));
+        root.add(parse_entry(
+            "Visible:",
+            &spec.borrow().visible,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().visible = s;
+                send()
+            }),
+        ));
+        root.add(parse_entry(
+            "Source:",
+            &spec.borrow().source,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().source = s;
+                send()
+            }),
+        ));
+        root.add(parse_entry(
+            "Sink:",
+            &spec.borrow().sink,
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().sink = s;
+                send()
+            }),
+        ));
+        Entry { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root.upcast_ref()
+    }
 }
 
 struct Box {
@@ -411,7 +456,7 @@ impl Widget {
             view::Widget::Button(s) => Widget::Button(Button::new(on_change, s)),
             view::Widget::Toggle(s) => Widget::Toggle(Toggle::new(on_change, s)),
             view::Widget::Selector(s) => Widget::Selector(Selector::new(on_change, s)),
-            view::Widget::Entry(_) => todo!(),
+            view::Widget::Entry(s) => Widget::Entry(Entry::new(on_change, s)),
             view::Widget::Box(_) => todo!(),
             view::Widget::Grid(_) => todo!(),
         }
@@ -424,7 +469,7 @@ impl Widget {
             Widget::Button(w) => w.root(),
             Widget::Toggle(w) => w.root(),
             Widget::Selector(w) => w.root(),
-            Widget::Entry(_) => todo!(),
+            Widget::Entry(w) => w.root(),
             Widget::Box(_) => todo!(),
             Widget::Grid(_) => todo!(),
         }
