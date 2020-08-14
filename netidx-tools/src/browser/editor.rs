@@ -100,7 +100,14 @@ impl KindWrap {
                     *wr = Widget::Entry(Entry::new(on_change.clone(), spec.clone()));
                     on_change(view::Widget::Entry(spec));
                 },
-                Some(s) if &*s == "Box" => todo!(),
+                Some(s) if &*s == "Box" => {
+                    let spec = view::Box {
+                        direction: view::Direction::Vertical,
+                        children: Vec::new(),
+                    };
+                    *wr = Widget::Box(Box::new(on_change.clone(), spec.clone()));
+                    on_change(view::Widget::Box(spec));
+                },
                 Some(s) if &*s == "Grid" => todo!(),
                 None => (), // CR estokes: hmmm
                 _ => unreachable!(),
@@ -417,55 +424,33 @@ impl Entry {
 }
 
 struct BoxChild {
-    root: TwoColGrid
+    root: TwoColGrid,
 }
 
 impl BoxChild {
-    fn new(
-        on_change: OnChange,
-        i: Rc<Cell<usize>>,
-        children: Rc<RefCell<Vec<BoxChild>>>,
-        spec: Rc<RefCell<view::Box>>,
-    ) -> Self {
-        let c = if i.get() < spec.borrow().children.len() {
-            spec.borrow().children[i.get()].clone()
-        } else {
-            let c = view::BoxChild {
-                expand: false,
-                fill: false,
-                padding: 0,
-                halign: None,
-                valign: None,
-                widget: view::Widget::Lable(view::Source::Constant(Value::U64(42))),
-            };
-            spec.borrow_mut().push(c.clone());
-            i.set(spec.borrow().children.len() - 1);
-            on_change(view::Widget::Box(spec.borrow().clone()));
-            c
-        };
+    fn new(on_change: Rc<dyn Fn(view::BoxChild)>, spec: view::BoxChild) -> Self {
+        let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
         let send = Rc::new(clone!(@strong spec => move || {
-            on_change(view::Widget::Box(spec.borrow().clone()))
+            on_change(spec.borrow().clone())
         }));
         let expand = gtk::CheckButton::with_label("Expand:");
         root.attach(&expand, 0, 2, 1);
-        expand.connect_toggled(
-            clone!(@strong send, @strong spec, @strong i => move |cb| {
-                spec.borrow_mut().children[i.get()].expand = cb.get_active();
-                send();
-            }),
-        );
+        expand.connect_toggled(clone!(@strong send, @strong spec => move |cb| {
+            spec.borrow_mut().expand = cb.get_active();
+            send();
+        }));
         let fill = gtk::CheckButton::with_label("Fill:");
         root.attach(&fill, 0, 2, 1);
-        fill.connect_toggled(clone!(@strong send, @strong spec, @strong i => move |cb| {
-            spec.borrow_mut().children[i.get()].fill = cb.get_active();
+        fill.connect_toggled(clone!(@strong send, @strong spec => move |cb| {
+            spec.borrow_mut().fill = cb.get_active();
             send()
         }));
         root.add(parse_entry(
             "Padding:",
             &spec.borrow().children[i.get()].padding,
-            clone!(@strong send, @strong spec, @strong i => move |s| {
-                spec.borrow_mut().children[i.get()].padding = s;
+            clone!(@strong send, @strong spec => move |s| {
+                spec.borrow_mut().padding = s;
                 send()
             }),
         ));
@@ -499,29 +484,21 @@ impl BoxChild {
             halign.append(Some(a), a);
             valign.append(Some(a), a);
         }
-        halign.set_active_id(spec.borrow().children[i.get()].halign.map(align_to_str));
-        valign.set_active_id(spec.borrow().children[i.get()].valign.map(align_to_str));
-        halign.connect_changed(
-            clone!(@strong send, @strong spec, @strong i => move |c| {
-                spec.borrow_mut().children[i.get()].halign =
-                    c.get_active_id().map(align_from_str);
-                send()
-            }),
-        );
-        valign.connect_changed(
-            clone!(@strong send, @strong spec, @strong i => move |c| {
-                spec.borrow_mut().children[i.get()].valign =
-                    c.get_active_id().map(align_from_str);
-                send()
-            }),
-        );
-        let on_change =
-            Rc::new(clone!(@strong send, @strong spec, @strong i => move |w| {
-                spec.borrow_mut().children[i.get()].widget = w;
-                send();
-            }));
-        let widget =
-            KindWrap::new(on_change, spec.borrow().children[i.get()].widget.clone());
+        halign.set_active_id(spec.borrow().halign.map(align_to_str));
+        valign.set_active_id(spec.borrow().valign.map(align_to_str));
+        halign.connect_changed(clone!(@strong send, @strong spec => move |c| {
+            spec.borrow_mut().halign = c.get_active_id().map(align_from_str);
+            send()
+        }));
+        valign.connect_changed(clone!(@strong send, @strong spec => move |c| {
+            spec.borrow_mut().valign = c.get_active_id().map(align_from_str);
+            send()
+        }));
+        let on_change = Rc::new(clone!(@strong send, @strong spec, => move |w| {
+            spec.borrow_mut().widget = w;
+            send();
+        }));
+        let widget = KindWrap::new(on_change, spec.borrow().widget.clone());
         root.attach(&widget.root(), 0, 2, 2);
         BoxChild { root }
     }
@@ -563,10 +540,37 @@ impl Box {
             @weak root => move |_| {
                 let i = children.borrow().len();
                 let spec = view::BoxChild {
-
+                    expand: false,
+                    fill: false,
+                    padding: 0,
+                    halign: None,
+                    valign: None,
+                    widget: view::Widget::Label(view::Source::Constant(Value::U64(42))),
                 };
-                let child = BoxChild::new()
+                let on_change = Rc::new(
+                    clone!(@strong on_change, @strong spec => move |s| {
+                        spec.borrow_mut().children[i] = s;
+                        on_change(view::Widget::Box(spec.borrow().clone()));
+                    })
+                );
+                let child = BoxChild::new(on_change, spec);
+                root.add(child.root());
+                children.borrow_mut().push(child);
         }));
+        for (i, c) in spec.borrow().children.iter().enumerate() {
+            let on_change = Rc::new(clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().children[i] = s;
+                on_change(view::Widget::Box(spec.borrow().clone()));
+            }));
+            let c = BoxChild::new(on_change, c);
+            root.add(c.root());
+            children.borrow_mut().push(c);
+        }
+        Box { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
     }
 }
 
@@ -601,7 +605,7 @@ impl Widget {
             view::Widget::Toggle(s) => Widget::Toggle(Toggle::new(on_change, s)),
             view::Widget::Selector(s) => Widget::Selector(Selector::new(on_change, s)),
             view::Widget::Entry(s) => Widget::Entry(Entry::new(on_change, s)),
-            view::Widget::Box(_) => todo!(),
+            view::Widget::Box(s) => Widget::Box(Box::new(on_change, s)),
             view::Widget::Grid(_) => todo!(),
         }
     }
@@ -614,7 +618,7 @@ impl Widget {
             Widget::Toggle(w) => w.root(),
             Widget::Selector(w) => w.root(),
             Widget::Entry(w) => w.root(),
-            Widget::Box(_) => todo!(),
+            Widget::Box(w) => w.root(),
             Widget::Grid(_) => todo!(),
         }
     }
