@@ -1,6 +1,6 @@
 use super::FromGui;
 use futures::channel::mpsc;
-use glib::clone;
+use glib::{clone, GString};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -448,7 +448,7 @@ impl BoxChild {
         }));
         root.add(parse_entry(
             "Padding:",
-            &spec.borrow().children[i.get()].padding,
+            &spec.borrow().padding,
             clone!(@strong send, @strong spec => move |s| {
                 spec.borrow_mut().padding = s;
                 send()
@@ -464,8 +464,8 @@ impl BoxChild {
                 view::Align::Baseline => "Baseline",
             }
         }
-        fn align_from_str(a: &str) -> view::Align {
-            match a {
+        fn align_from_str(a: GString) -> view::Align {
+            match &*a {
                 "Fill" => view::Align::Fill,
                 "Start" => view::Align::Start,
                 "End" => view::Align::End,
@@ -494,13 +494,17 @@ impl BoxChild {
             spec.borrow_mut().valign = c.get_active_id().map(align_from_str);
             send()
         }));
-        let on_change = Rc::new(clone!(@strong send, @strong spec, => move |w| {
+        let on_change = Rc::new(clone!(@strong send, @strong spec => move |w| {
             spec.borrow_mut().widget = w;
             send();
         }));
         let widget = KindWrap::new(on_change, spec.borrow().widget.clone());
-        root.attach(&widget.root(), 0, 2, 2);
+        root.attach(widget.root(), 0, 2, 2);
         BoxChild { root }
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root.upcast_ref()
     }
 }
 
@@ -520,11 +524,11 @@ impl Box {
         match spec.borrow().direction {
             view::Direction::Horizontal => dircb.set_active_id(Some("Horizontal")),
             view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
-        }
+        };
         dircb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             let dir = match c.get_active_id() {
-                Some("Horizontal") => view::Direction::Horizontal,
-                Some("Vertical") => view::Direction::Vertical,
+                Some(s) if &*s == "Horizontal" => view::Direction::Horizontal,
+                Some(s) if &*s == "Vertical" => view::Direction::Vertical,
                 _ => view::Direction::Horizontal,
             };
             spec.borrow_mut().direction = dir;
@@ -539,7 +543,7 @@ impl Box {
             @strong children,
             @weak root => move |_| {
                 let i = children.borrow().len();
-                let spec = view::BoxChild {
+                let s = view::BoxChild {
                     expand: false,
                     fill: false,
                     padding: 0,
@@ -553,7 +557,7 @@ impl Box {
                         on_change(view::Widget::Box(spec.borrow().clone()));
                     })
                 );
-                let child = BoxChild::new(on_change, spec);
+                let child = BoxChild::new(on_change, s);
                 root.add(child.root());
                 children.borrow_mut().push(child);
         }));
@@ -562,7 +566,7 @@ impl Box {
                 spec.borrow_mut().children[i] = s;
                 on_change(view::Widget::Box(spec.borrow().clone()));
             }));
-            let c = BoxChild::new(on_change, c);
+            let c = BoxChild::new(on_change, c.clone());
             root.add(c.root());
             children.borrow_mut().push(c);
         }
