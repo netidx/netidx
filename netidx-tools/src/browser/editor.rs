@@ -6,7 +6,11 @@ use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
 use serde::{de::DeserializeOwned, Serialize};
-use std::{cell::RefCell, rc::Rc, result};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    result,
+};
 
 type OnChange = Rc<dyn Fn(view::Widget)>;
 
@@ -111,17 +115,6 @@ impl KindWrap {
     }
 }
 
-struct BoxChild {
-    expand: gtk::CheckButton,
-    fill: gtk::CheckButton,
-    padding: gtk::Entry,
-    halign: gtk::ComboBoxText,
-    valign: gtk::ComboBoxText,
-    kind: gtk::ComboBoxText,
-    delete: gtk::Button,
-    child: Widget,
-}
-
 struct GridChild {
     row: usize,
     col: usize,
@@ -201,6 +194,11 @@ impl TwoColGrid {
         self.root.attach(&w.1, 1, self.row, 1, 1);
         self.row += 1;
     }
+
+    fn attach<T: IsA<gtk::Widget>>(&mut self, w: &T, col: i32, cols: i32, rows: i32) {
+        self.root.attach(w, col, self.row, cols, rows);
+        self.row += 1;
+    }
 }
 
 struct Label {
@@ -274,7 +272,7 @@ impl Button {
 }
 
 struct Toggle {
-    root: TwoColGrid
+    root: TwoColGrid,
 }
 
 impl Toggle {
@@ -368,7 +366,7 @@ impl Selector {
 }
 
 struct Entry {
-    root: TwoColGrid
+    root: TwoColGrid,
 }
 
 impl Entry {
@@ -418,12 +416,165 @@ impl Entry {
     }
 }
 
+struct BoxChild {
+    expand: gtk::CheckButton,
+    fill: gtk::CheckButton,
+    padding: gtk::Entry,
+    halign: gtk::ComboBoxText,
+    valign: gtk::ComboBoxText,
+    kind: gtk::ComboBoxText,
+    delete: gtk::Button,
+    child: Widget,
+}
+
+impl BoxChild {
+    fn new(
+        on_change: OnChange,
+        i: Rc<Cell<usize>>,
+        children: Rc<RefCell<Vec<BoxChild>>>,
+        spec: Rc<RefCell<view::Box>>,
+    ) -> Self {
+        let c = if i.get() < spec.borrow().children.len() {
+            spec.borrow().children[i.get()].clone()
+        } else {
+            let c = view::BoxChild {
+                expand: false,
+                fill: false,
+                padding: 0,
+                halign: None,
+                valign: None,
+                widget: view::Widget::Lable(view::Source::Constant(Value::U64(42))),
+            };
+            spec.borrow_mut().push(c.clone());
+            i.set(spec.borrow().children.len() - 1);
+            on_change(view::Widget::Box(spec.borrow().clone()));
+            c
+        };
+        let mut root = TwoColGrid::new();
+        let send = Rc::new(clone!(@strong spec => move || {
+            on_change(view::Widget::Box(spec.borrow().clone()))
+        }));
+        let expand = gtk::CheckButton::with_label("Expand:");
+        root.attach(&expand, 0, 2, 1);
+        expand.connect_toggled(
+            clone!(@strong send, @strong spec, @strong i => move |cb| {
+                spec.borrow_mut().children[i.get()].expand = cb.get_active();
+                send();
+            }),
+        );
+        let fill = gtk::CheckButton::with_label("Fill:");
+        root.attach(&fill, 0, 2, 1);
+        fill.connect_toggled(clone!(@strong send, @strong spec, @strong i => move |cb| {
+            spec.borrow_mut().children[i.get()].fill = cb.get_active();
+            send()
+        }));
+        root.add(parse_entry(
+            "Padding:",
+            &spec.borrow().children[i.get()].padding,
+            clone!(@strong send, @strong spec, @strong i => move |s| {
+                spec.borrow_mut().children[i.get()].padding = s;
+                send()
+            }),
+        ));
+        let aligns = ["Fill", "Start", "End", "Center", "Baseline"];
+        fn align_to_str(a: view::Align) -> &'static str {
+            match a {
+                view::Align::Fill => "Fill",
+                view::Align::Start => "Start",
+                view::Align::End => "End",
+                view::Align::Center => "Center",
+                view::Align::Baseline => "Baseline",
+            }
+        }
+        fn align_from_str(a: &str) -> view::Align {
+            match a {
+                "Fill" => view::Align::Fill,
+                "Start" => view::Align::Start,
+                "End" => view::Align::End,
+                "Center" => view::Align::Center,
+                "Baseline" => view::Align::Baseline,
+                x => unreachable!(x),
+            }
+        }
+        let halign_lbl = gtk::Label::new(Some("Horizontal Alignment:"));
+        let halign = gtk::ComboBoxText::new();
+        let valign_lbl = gtk::Label::new(Some("Vertical Alignment:"));
+        let valign = gtk::ComboBoxText::new();
+        root.add((halign_lbl.clone(), halign.clone()));
+        root.add((valign_lbl.clone(), valign.clone()));
+        for a in &aligns {
+            halign.append(Some(a), a);
+            valign.append(Some(a), a);
+        }
+        halign.set_active_id(spec.borrow().children[i.get()].halign.map(align_to_str));
+        valign.set_active_id(spec.borrow().children[i.get()].valign.map(align_to_str));
+        halign.connect_changed(
+            clone!(@strong send, @strong spec, @strong i => move |c| {
+                spec.borrow_mut().children[i.get()].halign =
+                    c.get_active_id().map(align_from_str);
+                send()
+            }),
+        );
+        valign.connect_changed(
+            clone!(@strong send, @strong spec, @strong i => move |c| {
+                spec.borrow_mut().children[i.get()].valign =
+                    c.get_active_id().map(align_from_str);
+                send()
+            }),
+        );
+        let on_change =
+            Rc::new(clone!(@strong send, @strong spec, @strong i => move |w| {
+                spec.borrow_mut().children[i.get()].widget = w;
+                send();
+            }));
+        let widget =
+            KindWrap::new(on_change, spec.borrow().children[i.get()].widget.clone());
+        root.attach(&widget.root(), 0, 2, 2);
+        
+    }
+}
+
 struct Box {
-    parent: OnChange,
-    direction: gtk::ComboBoxText,
-    revealer: gtk::Revealer,
-    container: gtk::Box,
-    children: Vec<BoxChild>,
+    root: gtk::Box,
+}
+
+impl Box {
+    fn new(on_change: OnChange, spec: view::Box) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let spec = Rc::new(RefCell::new(spec));
+        let children = Rc::new(RefCell::new(Vec::new()));
+        let dircb = gtk::ComboBoxText::new();
+        root.add(&dircb);
+        dircb.append(Some("Horizontal"), "Horizontal");
+        dircb.append(Some("Vertical"), "Vertical");
+        match spec.borrow().direction {
+            view::Direction::Horizontal => dircb.set_active_id(Some("Horizontal")),
+            view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
+        }
+        dircb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+            let dir = match c.get_active_id() {
+                Some("Horizontal") => view::Direction::Horizontal,
+                Some("Vertical") => view::Direction::Vertical,
+                _ => view::Direction::Horizontal,
+            };
+            spec.borrow_mut().direction = dir;
+            on_change(view::Widget::Box(spec.borrow().clone()));
+        }));
+        let addbtn = gtk::Button::new();
+        root.add(&addbtn);
+        addbtn.set_label("+");
+        addbtn.connect_clicked(clone!(
+            @strong on_change,
+            @strong spec,
+            @strong children,
+            @weak root => move |_| {
+                let i = children.borrow().len();
+                let spec = view::BoxChild {
+
+                };
+                let child = BoxChild::new()
+        }));
+    }
 }
 
 struct Grid {
