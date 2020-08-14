@@ -424,29 +424,38 @@ impl Entry {
 }
 
 struct BoxChild {
-    root: TwoColGrid,
+    root: gtk::Box,
 }
 
 impl BoxChild {
     fn new(on_change: Rc<dyn Fn(view::BoxChild)>, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
-        let mut root = TwoColGrid::new();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let controls = gtk::Revealer::new();
+        let show_controls = gtk::ToggleButton::with_label(">");
+        show_controls.connect_toggled(clone!(@weak controls => move |t| {
+            controls.set_reveal_child(t.get_active());
+        }));
+        root.add(&show_controls);
+        root.add(&controls);
+        let mut cgrid = TwoColGrid::new();
+        controls.add(&cgrid.root);
         let send = Rc::new(clone!(@strong spec => move || {
             on_change(spec.borrow().clone())
         }));
         let expand = gtk::CheckButton::with_label("Expand:");
-        root.attach(&expand, 0, 2, 1);
+        cgrid.attach(&expand, 0, 2, 1);
         expand.connect_toggled(clone!(@strong send, @strong spec => move |cb| {
             spec.borrow_mut().expand = cb.get_active();
             send();
         }));
         let fill = gtk::CheckButton::with_label("Fill:");
-        root.attach(&fill, 0, 2, 1);
+        cgrid.attach(&fill, 0, 2, 1);
         fill.connect_toggled(clone!(@strong send, @strong spec => move |cb| {
             spec.borrow_mut().fill = cb.get_active();
             send()
         }));
-        root.add(parse_entry(
+        cgrid.add(parse_entry(
             "Padding:",
             &spec.borrow().padding,
             clone!(@strong send, @strong spec => move |s| {
@@ -478,8 +487,8 @@ impl BoxChild {
         let halign = gtk::ComboBoxText::new();
         let valign_lbl = gtk::Label::new(Some("Vertical Alignment:"));
         let valign = gtk::ComboBoxText::new();
-        root.add((halign_lbl.clone(), halign.clone()));
-        root.add((valign_lbl.clone(), valign.clone()));
+        cgrid.add((halign_lbl.clone(), halign.clone()));
+        cgrid.add((valign_lbl.clone(), valign.clone()));
         for a in &aligns {
             halign.append(Some(a), a);
             valign.append(Some(a), a);
@@ -499,26 +508,28 @@ impl BoxChild {
             send();
         }));
         let widget = KindWrap::new(on_change, spec.borrow().widget.clone());
-        root.attach(widget.root(), 0, 2, 2);
+        root.add(widget.root());
         BoxChild { root }
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.upcast_ref()
     }
 }
 
 struct Box {
-    root: gtk::Frame,
+    root: gtk::Box,
 }
 
 impl Box {
     fn new(on_change: OnChange, spec: view::Box) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let dir_add = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        root.add(&dir_add);
         let spec = Rc::new(RefCell::new(spec));
         let children = Rc::new(RefCell::new(Vec::new()));
         let dircb = gtk::ComboBoxText::new();
-        root.add(&dircb);
+        dir_add.add(&dircb);
         dircb.append(Some("Horizontal"), "Horizontal");
         dircb.append(Some("Vertical"), "Vertical");
         match spec.borrow().direction {
@@ -534,14 +545,23 @@ impl Box {
             spec.borrow_mut().direction = dir;
             on_change(view::Widget::Box(spec.borrow().clone()));
         }));
+        let croot = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let crev = gtk::Revealer::new();
+        root.add(&crev);
+        crev.add(&croot);
+        let reveal_children = gtk::ToggleButton::with_label(">");
+        reveal_children.connect_toggled(clone!(@weak crev => move |t| {
+            crev.set_reveal_child(t.get_active())
+        }));
+        dir_add.add(&reveal_children);
         let addbtn = gtk::Button::new();
-        root.add(&addbtn);
+        dir_add.add(&addbtn);
         addbtn.set_label("+");
         addbtn.connect_clicked(clone!(
             @strong on_change,
             @strong spec,
             @strong children,
-            @weak root => move |_| {
+            @weak croot => move |_| {
                 let i = children.borrow().len();
                 let s = view::BoxChild {
                     expand: false,
@@ -558,8 +578,11 @@ impl Box {
                     })
                 );
                 let child = BoxChild::new(on_change_chld, s.clone());
-                root.add(child.root());
-                root.show_all();
+                croot.add(child.root());
+                croot.set_child_packing(
+                    child.root(), false, false, 10, gtk::PackType::Start
+                );
+                croot.show_all();
                 children.borrow_mut().push(child);
                 spec.borrow_mut().children.push(s);
                 on_change(view::Widget::Box(spec.borrow().clone()));
@@ -570,13 +593,11 @@ impl Box {
                 on_change(view::Widget::Box(spec.borrow().clone()));
             }));
             let c = BoxChild::new(on_change, c.clone());
-            root.add(c.root());
+            croot.add(c.root());
+            croot.set_child_packing(c.root(), false, false, 10, gtk::PackType::Start);
             children.borrow_mut().push(c);
         }
-        let frame = gtk::Frame::new(None);
-        frame.add(&root);
-        frame.show_all();
-        Box { root: frame }
+        Box { root }
     }
 
     fn root(&self) -> &gtk::Widget {
