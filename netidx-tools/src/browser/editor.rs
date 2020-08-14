@@ -509,7 +509,7 @@ impl BoxChild {
 }
 
 struct Box {
-    root: gtk::Box,
+    root: gtk::Frame,
 }
 
 impl Box {
@@ -573,8 +573,10 @@ impl Box {
             root.add(c.root());
             children.borrow_mut().push(c);
         }
-        root.show_all();
-        Box { root }
+        let frame = gtk::Frame::new(None);
+        frame.add(&root);
+        frame.show_all();
+        Box { root: frame }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -633,7 +635,7 @@ impl Widget {
 }
 
 pub(super) struct Editor {
-    root: KindWrap,
+    root: gtk::ScrolledWindow,
 }
 
 impl Editor {
@@ -642,6 +644,8 @@ impl Editor {
         path: Path,
         spec: view::View,
     ) -> Editor {
+        let root =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         let spec = Rc::new(RefCell::new(spec));
         let on_change = Rc::new({
             let spec = Rc::clone(&spec);
@@ -651,11 +655,12 @@ impl Editor {
                 let _: result::Result<_, _> = from_gui.unbounded_send(m);
             }
         });
-        let root = spec.borrow().root.clone();
-        Editor { root: KindWrap::new(on_change, root) }
+        let w = KindWrap::new(on_change, spec.borrow().root.clone());
+        root.add(w.root());
+        Editor { root }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.root()
+        self.root.upcast_ref()
     }
 }

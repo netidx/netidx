@@ -639,19 +639,16 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    hbox.add(&sidebar);
-    hbox.add(&gtk::Separator::new(gtk::Orientation::Vertical));
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
+    window.add(&paned);
     window.show_all();
     window.connect_delete_event(clone!(@strong ctx, @weak app =>
     @default-return Inhibit(false), move |_, _| {
         let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
         Inhibit(false)
     }));
-    window.add(&hbox);
     let mut current: Option<View> = None;
     let mut editor: Option<Editor> = None;
     to_gui.attach(None, move |m| match m {
@@ -678,21 +675,20 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::View { path, original, raeified, rendered } => {
             let cur = View::new(ctx.clone(), &path, raeified);
             if let Some(cur) = current.take() {
-                hbox.remove(cur.root());
+                paned.remove(cur.root());
             }
             if !rendered {
                 if let Some(editor) = editor.take() {
-                    sidebar.remove(editor.root());
+                    paned.remove(editor.root());
                 }
                 let e = Editor::new(ctx.from_gui.clone(), path.clone(), original);
-                sidebar.add(e.root());
-                sidebar.show_all();
+                paned.add1(e.root());
+                paned.show_all();
                 editor = Some(e);
             }
             window.set_title(&format!("Netidx Browser {}", path));
-            hbox.add(cur.root());
-            hbox.set_child_packing(cur.root(), true, true, 1, gtk::PackType::Start);
-            hbox.show_all();
+            paned.pack2(cur.root(), true, true);
+            paned.show_all();
             current = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
             let _: result::Result<_, _> = ctx.to_gui.send(m);
