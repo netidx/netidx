@@ -551,15 +551,18 @@ impl Box {
                     valign: None,
                     widget: view::Widget::Label(view::Source::Constant(Value::U64(42))),
                 };
-                let on_change = Rc::new(
+                let on_change_chld = Rc::new(
                     clone!(@strong on_change, @strong spec => move |s| {
                         spec.borrow_mut().children[i] = s;
                         on_change(view::Widget::Box(spec.borrow().clone()));
                     })
                 );
-                let child = BoxChild::new(on_change, s);
+                let child = BoxChild::new(on_change_chld, s.clone());
                 root.add(child.root());
+                root.show_all();
                 children.borrow_mut().push(child);
+                spec.borrow_mut().children.push(s);
+                on_change(view::Widget::Box(spec.borrow().clone()));
         }));
         for (i, c) in spec.borrow().children.iter().enumerate() {
             let on_change = Rc::new(clone!(@strong on_change, @strong spec => move |s| {
@@ -570,6 +573,7 @@ impl Box {
             root.add(c.root());
             children.borrow_mut().push(c);
         }
+        root.show_all();
         Box { root }
     }
 
