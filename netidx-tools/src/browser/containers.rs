@@ -29,23 +29,34 @@ impl Box {
         let root = gtk::Box::new(dir, 0);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            let w = Widget::new(
-                ctx.clone(),
-                vm,
-                variables,
-                s.widget.clone(),
-                selected_path.clone(),
-            );
-            if let Some(r) = w.root() {
-                root.pack_start(r, s.expand, s.fill, s.padding as u32);
-                if let Some(halign) = s.halign {
-                    r.set_halign(align_to_gtk(halign));
+            match s {
+                view::BoxChild { expand, fill, padding, halign, valign, widget } => {
+                    let w = Widget::new(
+                        ctx.clone(),
+                        vm,
+                        variables,
+                        widget.clone(),
+                        selected_path.clone(),
+                    );
+                    if let Some(r) = w.root() {
+                        root.pack_start(r, expand, fill, padding as u32);
+                        if let Some(halign) = halign {
+                            r.set_halign(align_to_gtk(halign));
+                        }
+                        if let Some(valign) = valign {
+                            r.set_valign(align_to_gtk(valign));
+                        }
+                    }
+                    children.push(w);
                 }
-                if let Some(valign) = s.valign {
-                    r.set_valign(align_to_gtk(valign));
-                }
+                s => children.push(Widget::new(
+                    ctx.clone(),
+                    vm,
+                    variables,
+                    s.clone(),
+                    selected_path.clone(),
+                )),
             }
-            children.push(w);
         }
         Box { root, children }
     }
@@ -96,24 +107,33 @@ impl Grid {
             .map(|(j, row)| {
                 row.into_iter()
                     .enumerate()
-                    .map(|(i, spec)| {
-                        let w = Widget::new(
+                    .map(|(i, spec)| match spec {
+                        view::GridChild { halign, valign, widget } => {
+                            let w = Widget::new(
+                                ctx.clone(),
+                                vm,
+                                variables,
+                                widget.clone(),
+                                selected_path.clone(),
+                            );
+                            if let Some(r) = w.root() {
+                                root.attach(r, i as i32, j as i32, 1, 1);
+                                if let Some(halign) = spec.halign {
+                                    r.set_halign(align_to_gtk(halign));
+                                }
+                                if let Some(valign) = spec.valign {
+                                    r.set_valign(align_to_gtk(valign));
+                                }
+                            }
+                            w
+                        }
+                        widget => Widget::new(
                             ctx.clone(),
                             vm,
                             variables,
-                            spec.widget.clone(),
+                            widget.clone(),
                             selected_path.clone(),
-                        );
-                        if let Some(r) = w.root() {
-                            root.attach(r, i as i32, j as i32, 1, 1);
-                            if let Some(halign) = spec.halign {
-                                r.set_halign(align_to_gtk(halign));
-                            }
-                            if let Some(valign) = spec.valign {
-                                r.set_valign(align_to_gtk(valign));
-                            }
-                        }
-                        w
+                        ),
                     })
                     .collect::<Vec<_>>()
             })

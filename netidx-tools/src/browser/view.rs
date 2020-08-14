@@ -6,7 +6,7 @@ use netidx::{
     subscriber::Value,
 };
 pub(super) use netidx_protocols::view::{self, *};
-use std::{boxed::Box as MemBox, collections::HashMap, pin::Pin};
+use std::{boxed, collections::HashMap, pin::Pin};
 
 #[derive(Debug, Clone)]
 pub(super) struct BoxChild {
@@ -15,7 +15,7 @@ pub(super) struct BoxChild {
     pub padding: u64,
     pub halign: Option<view::Align>,
     pub valign: Option<view::Align>,
-    pub widget: Widget,
+    pub widget: boxed::Box<Widget>,
 }
 
 impl BoxChild {
@@ -26,7 +26,7 @@ impl BoxChild {
             padding: c.padding,
             halign: c.halign,
             valign: c.valign,
-            widget: Widget::new(resolver, c.widget).await?,
+            widget: boxed::Box::new(Widget::new(resolver, c.widget).await?),
         })
     }
 }
@@ -35,7 +35,7 @@ impl BoxChild {
 pub(super) struct GridChild {
     pub halign: Option<Align>,
     pub valign: Option<Align>,
-    pub widget: Widget,
+    pub widget: boxed::Box<Widget>,
 }
 
 impl GridChild {
@@ -43,7 +43,7 @@ impl GridChild {
         Ok(GridChild {
             halign: c.halign,
             valign: c.valign,
-            widget: Widget::new(resolver, c.widget).await?,
+            widget: boxed::Box::new(Widget::new(resolver, c.widget).await?),
         })
     }
 }
@@ -51,7 +51,7 @@ impl GridChild {
 #[derive(Debug, Clone)]
 pub(super) struct Box {
     pub direction: view::Direction,
-    pub children: Vec<BoxChild>,
+    pub children: Vec<Widget>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ pub(super) struct Grid {
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
-    pub children: Vec<Vec<GridChild>>,
+    pub children: Vec<Vec<Widget>>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,15 +72,17 @@ pub(super) enum Widget {
     Selector(view::Selector),
     Entry(view::Entry),
     Box(Box),
+    BoxChild(BoxChild),
     Grid(Grid),
+    GridChild(GridChild),
 }
 
 impl Widget {
     fn new<'a>(
         resolver: &'a ResolverRead,
         widget: view::Widget,
-    ) -> Pin<MemBox<dyn Future<Output = Result<Self>> + 'a + Send>> {
-        MemBox::pin(async move {
+    ) -> Pin<boxed::Box<dyn Future<Output = Result<Self>> + 'a + Send>> {
+        boxed::Box::pin(async move {
             match widget {
                 view::Widget::Table(path) => {
                     let spec = resolver.table(path.clone()).await?;
@@ -93,7 +95,7 @@ impl Widget {
                 view::Widget::Entry(e) => Ok(Widget::Entry(e)),
                 view::Widget::Box(c) => {
                     let children = join_all(
-                        c.children.into_iter().map(|c| BoxChild::new(resolver, c)),
+                        c.children.into_iter().map(|c| Widget::new(resolver, c)),
                     )
                     .await
                     .into_iter()
@@ -102,7 +104,7 @@ impl Widget {
                 }
                 view::Widget::Grid(c) => {
                     let children = join_all(c.children.into_iter().map(|c| async {
-                        join_all(c.into_iter().map(|c| GridChild::new(resolver, c)))
+                        join_all(c.into_iter().map(|c| Widget::new(resolver, c)))
                             .await
                             .into_iter()
                             .collect::<Result<Vec<_>>>()

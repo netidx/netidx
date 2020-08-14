@@ -1,7 +1,6 @@
 use netidx::{path::Path, publisher::Value};
 use std::{boxed, collections::HashMap};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Source {
     Constant(Value),
@@ -101,20 +100,20 @@ pub struct BoxChild {
     pub padding: u64,
     pub halign: Option<Align>,
     pub valign: Option<Align>,
-    pub widget: Widget,
+    pub widget: boxed::Box<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridChild {
     pub halign: Option<Align>,
     pub valign: Option<Align>,
-    pub widget: Widget,
+    pub widget: boxed::Box<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Box {
     pub direction: Direction,
-    pub children: Vec<BoxChild>,
+    pub children: Vec<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +122,7 @@ pub struct Grid {
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
-    pub children: Vec<Vec<GridChild>>,
+    pub children: Vec<Vec<Widget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +134,9 @@ pub enum Widget {
     Selector(Selector),
     Entry(Entry),
     Box(Box),
+    BoxChild(BoxChild),
     Grid(Grid),
+    GridChild(GridChild),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

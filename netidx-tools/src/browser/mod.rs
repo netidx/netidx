@@ -49,7 +49,7 @@ enum ToGui {
         path: Path,
         original: protocol_view::View,
         raeified: view::View,
-        rendered: bool
+        rendered: bool,
     },
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
@@ -304,6 +304,9 @@ impl Widget {
             view::Widget::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, vm, variables, s, selected_path))
             }
+            view::Widget::BoxChild { widget, .. } => {
+                Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
+            }
             view::Widget::Grid(spec) => Widget::Grid(containers::Grid::new(
                 ctx,
                 vm,
@@ -311,6 +314,9 @@ impl Widget {
                 spec,
                 selected_path,
             )),
+            view::Widget::GridChild { widget, .. } => {
+                Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
+            }
         }
     }
 
