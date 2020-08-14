@@ -417,14 +417,7 @@ impl Entry {
 }
 
 struct BoxChild {
-    expand: gtk::CheckButton,
-    fill: gtk::CheckButton,
-    padding: gtk::Entry,
-    halign: gtk::ComboBoxText,
-    valign: gtk::ComboBoxText,
-    kind: gtk::ComboBoxText,
-    delete: gtk::Button,
-    child: Widget,
+    root: TwoColGrid
 }
 
 impl BoxChild {
@@ -530,7 +523,7 @@ impl BoxChild {
         let widget =
             KindWrap::new(on_change, spec.borrow().children[i.get()].widget.clone());
         root.attach(&widget.root(), 0, 2, 2);
-        
+        BoxChild { root }
     }
 }
 
