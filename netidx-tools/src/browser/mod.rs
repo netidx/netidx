@@ -33,7 +33,7 @@ use std::{
     boxed,
     cell::RefCell,
     collections::HashMap,
-    mem, process,
+    mem,
     rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},

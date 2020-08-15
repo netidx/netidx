@@ -1,17 +1,16 @@
 use super::FromGui;
 use futures::channel::mpsc;
-use glib::{clone, GString, subclass::boxed::BoxedType, GBoxed};
+use glib::{clone, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
+    boxed,
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
     result,
-    boxed,
 };
 
 type OnChange = Rc<dyn Fn()>;
@@ -460,17 +459,17 @@ impl BoxChild {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+        self.root.root.upcast_ref()
     }
 }
 
 #[derive(Clone, Debug)]
-struct Box {
+struct BoxContainer {
     root: gtk::Box,
     spec: Rc<RefCell<view::Box>>,
 }
 
-impl Box {
+impl BoxContainer {
     fn insert(
         on_change: OnChange,
         store: &gtk::TreeStore,
@@ -495,7 +494,7 @@ impl Box {
             };
             on_change();
         }));
-        let t = Widget::Box(Box { root, spec });
+        let t = Widget::Box(BoxContainer { root, spec });
         let v = t.to_value();
         store.set_value(iter, 0, &"Box".to_value());
         store.set_value(iter, 1, &v);
@@ -519,7 +518,7 @@ enum Widget {
     Toggle(Toggle),
     Selector(Selector),
     Entry(Entry),
-    Box(Box),
+    Box(BoxContainer),
     BoxChild(BoxChild),
     Grid,
     GridChild,
@@ -539,7 +538,7 @@ impl Widget {
             view::Widget::Toggle(s) => Toggle::insert(on_change, store, iter, s),
             view::Widget::Selector(s) => Selector::insert(on_change, store, iter, s),
             view::Widget::Entry(s) => Entry::insert(on_change, store, iter, s),
-            view::Widget::Box(s) => Box::insert(on_change, store, iter, s),
+            view::Widget::Box(s) => BoxContainer::insert(on_change, store, iter, s),
             view::Widget::BoxChild(s) => BoxChild::insert(on_change, store, iter, s),
             view::Widget::Grid(_) => todo!(),
             view::Widget::GridChild(_) => todo!(),
@@ -596,7 +595,7 @@ static KINDS: [&'static str; 10] = [
 
 impl Editor {
     pub(super) fn new(
-        mut from_gui: mpsc::UnboundedSender<FromGui>,
+        from_gui: mpsc::UnboundedSender<FromGui>,
         path: Path,
         spec: view::View,
     ) -> Editor {
@@ -614,11 +613,11 @@ impl Editor {
             column.add_attribute(&cell, "text", 0);
             column
         });
-        let store = gtk::TreeStore::new([String::static_type(), Widget::static_type()]);
+        let store = gtk::TreeStore::new(&[String::static_type(), Widget::static_type()]);
         view.set_model(Some(&store));
         view.set_grid_lines(gtk::TreeViewGridLines::Both);
         let spec = Rc::new(RefCell::new(spec));
-        let on_change = Rc::new({
+        let on_change: OnChange = Rc::new({
             let spec = Rc::clone(&spec);
             let store = store.clone();
             move || {
@@ -630,7 +629,7 @@ impl Editor {
             }
         });
         Editor::build_tree(&on_change, &store, None, &spec.borrow().root);
-        let selected: Rc<RefCell<gtk::TreeIter>> = Rc::new(RefCell::new(None));
+        let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root.add(&reveal_properties);
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -653,7 +652,7 @@ impl Editor {
                         properties.remove(w.root());
                     }
                     let id = c.get_active_id();
-                    let spec = Editor::default_spec(id.map(|s| &*s));
+                    let spec = Editor::default_spec(id.as_ref().map(|s| &**s));
                     Widget::insert(on_change.clone(), &store, &iter, spec);
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
@@ -695,7 +694,7 @@ impl Editor {
                 let v = store.get_value(&iter, 0);
                 if let Ok(Some(id)) = v.get::<&str>() {
                     inhibit_change.set(true);
-                    kind.set_active_id(id);
+                    kind.set_active_id(Some(id));
                     inhibit_change.set(false);
                 }
                 let v = store.get_value(&iter, 1);
@@ -715,16 +714,16 @@ impl Editor {
         menu.append(&delete);
         new_sib.connect_activate(
             clone!(@strong on_change, @weak store, @strong selected => move |_| {
-                let iter = store.insert_after(None, &*selected.borrow());
+                let iter = store.insert_after(None, selected.borrow().as_ref());
                 let spec = Editor::default_spec(Some("Label"));
-                Widget::insert(on_change.clone(), store, &iter, spec);
+                Widget::insert(on_change.clone(), &store, &iter, spec);
             }),
         );
         new_child.connect_activate(
             clone!(@strong on_change, @weak store, @strong selected => move |_| {
-                let iter = store.insert_after(&*selected.borrow(), None);
+                let iter = store.insert_after(selected.borrow().as_ref(), None);
                 let spec = Editor::default_spec(Some("Label"));
-                Widget::insert(on_change.clone(), store, &iter, spec);
+                Widget::insert(on_change.clone(), &store, &iter, spec);
             }),
         );
         delete.connect_activate(clone!(
@@ -742,7 +741,10 @@ impl Editor {
                 gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
             if right_click {
                 menu.show_all();
-                menu.popup_at_pointer(Some(b.deref()))
+                menu.popup_at_pointer(Some(&*b));
+                Inhibit(true)
+            } else {
+                Inhibit(false)
             }
         });
         Editor { root }
@@ -820,6 +822,17 @@ impl Editor {
                     Editor::build_tree(on_change, store, Some(&iter), w);
                 }
             }
+            view::Widget::BoxChild(b) => {
+                Editor::build_tree(on_change, store, Some(&iter), &*b.widget)
+            }
+            view::Widget::Grid(_) => todo!(),
+            view::Widget::GridChild(_) => todo!(),
+            view::Widget::Table(_)
+            | view::Widget::Label(_)
+            | view::Widget::Button(_)
+            | view::Widget::Toggle(_)
+            | view::Widget::Selector(_)
+            | view::Widget::Entry(_) => (),
         }
     }
 
@@ -827,11 +840,11 @@ impl Editor {
         let v = store.get_value(root, 1);
         match v.get::<&Widget>() {
             Err(e) => {
-                let s = Chars::from(format!("tree error: {}", e));
+                let s = Value::String(Chars::from(format!("tree error: {}", e)));
                 view::Widget::Label(view::Source::Constant(s))
             }
             Ok(None) => {
-                let s = Chars::from("tree error: missing widget");
+                let s = Value::String(Chars::from("tree error: missing widget"));
                 view::Widget::Label(view::Source::Constant(s))
             }
             Ok(Some(w)) => match w.spec() {
@@ -850,12 +863,12 @@ impl Editor {
                 view::Widget::BoxChild(mut b) => match store.iter_children(Some(root)) {
                     None => view::Widget::BoxChild(b),
                     Some(iter) => {
-                        b.widget = Editor::build_spec(store, &iter);
+                        b.widget = boxed::Box::new(Editor::build_spec(store, &iter));
                         view::Widget::BoxChild(b)
                     }
                 },
-                view::Widget::Grid(g) => todo!(),
-                view::Widget::GridChild(g) => todo!(),
+                view::Widget::Grid(_) => todo!(),
+                view::Widget::GridChild(_) => todo!(),
                 w => w,
             },
         }

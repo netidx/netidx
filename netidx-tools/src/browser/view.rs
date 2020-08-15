@@ -102,6 +102,9 @@ impl Widget {
                     .collect::<Result<Vec<_>>>()?;
                     Ok(Widget::Box(Box { direction: c.direction, children }))
                 }
+                view::Widget::BoxChild(c) => {
+                    Ok(Widget::BoxChild(BoxChild::new(resolver, c).await?))
+                }
                 view::Widget::Grid(c) => {
                     let children = join_all(c.children.into_iter().map(|c| async {
                         join_all(c.into_iter().map(|c| Widget::new(resolver, c)))
@@ -119,6 +122,9 @@ impl Widget {
                         row_spacing: c.row_spacing,
                         children,
                     }))
+                }
+                view::Widget::GridChild(c) => {
+                    Ok(Widget::GridChild(GridChild::new(resolver, c).await?))
                 }
             }
         })
