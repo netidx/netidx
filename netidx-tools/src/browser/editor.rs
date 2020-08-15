@@ -616,16 +616,30 @@ impl Editor {
         });
         let store = gtk::TreeStore::new(&[String::static_type(), Widget::static_type()]);
         view.set_model(Some(&store));
+        view.set_reorderable(true);
         view.set_grid_lines(gtk::TreeViewGridLines::Both);
         let spec = Rc::new(RefCell::new(spec));
         let on_change: OnChange = Rc::new({
             let spec = Rc::clone(&spec);
             let store = store.clone();
+            let scheduled = Rc::new(Cell::new(false));
             move || {
-                if let Some(root) = store.get_iter_first() {
-                    spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                    let m = FromGui::Render(path.clone(), spec.borrow().clone());
-                    let _: result::Result<_, _> = from_gui.unbounded_send(m);
+                if !scheduled.get() {
+                    scheduled.set(true);
+                    gtk::idle_add(clone!(
+                        @strong spec,
+                        @strong store,
+                        @strong scheduled,
+                        @strong from_gui,
+                        @strong path => move || {
+                        if let Some(root) = store.get_iter_first() {
+                            spec.borrow_mut().root = Editor::build_spec(&store, &root);
+                            let m = FromGui::Render(path.clone(), spec.borrow().clone());
+                            let _: result::Result<_, _> = from_gui.unbounded_send(m);
+                        }
+                        scheduled.set(false);
+                        glib::Continue(false)
+                    }));
                 }
             }
         });
@@ -675,21 +689,17 @@ impl Editor {
         @weak properties,
         @strong inhibit_change => move |s| match s.get_selected() {
             None => {
-                if let Some(iter) = selected.borrow().clone() {
-                    let v = store.get_value(&iter, 1);
-                    if let Ok(Some(w)) = v.get::<&Widget>() {
-                        properties.remove(w.root());
-                    }
+                let children = properties.get_children();
+                if children.len() == 3 {
+                    properties.remove(&children[2]);
                 }
                 *selected.borrow_mut() = None;
                 reveal_properties.set_reveal_child(false);
             }
             Some((store, iter)) => {
-                if let Some(iter) = selected.borrow().clone() {
-                    let v = store.get_value(&iter, 1);
-                    if let Ok(Some(w)) = v.get::<&Widget>() {
-                        properties.remove(w.root());
-                    }
+                let children = properties.get_children();
+                if children.len() == 3 {
+                    properties.remove(&children[2]);
                 }
                 *selected.borrow_mut() = Some(iter.clone());
                 let v = store.get_value(&iter, 0);
@@ -713,27 +723,22 @@ impl Editor {
         menu.append(&new_sib);
         menu.append(&new_child);
         menu.append(&delete);
-        new_sib.connect_activate(
-            clone!(@strong on_change, @weak store, @strong selected => move |_| {
-                let iter = store.insert_after(None, selected.borrow().as_ref());
-                let spec = Editor::default_spec(Some("Label"));
-                Widget::insert(on_change.clone(), &store, &iter, spec);
-                on_change()
-            }),
-        );
-        new_child.connect_activate(
-            clone!(@strong on_change, @weak store, @strong selected => move |_| {
-                let iter = store.insert_after(selected.borrow().as_ref(), None);
-                let spec = Editor::default_spec(Some("Label"));
-                Widget::insert(on_change.clone(), &store, &iter, spec);
-                on_change()
-            }),
-        );
+        new_sib.connect_activate(clone!(
+            @strong on_change, @weak store, @strong selected  => move |_| {
+            let iter = store.insert_after(None, selected.borrow().as_ref());
+            let spec = Editor::default_spec(Some("Label"));
+            Widget::insert(on_change.clone(), &store, &iter, spec);
+            on_change();
+        }));
+        new_child.connect_activate(clone!(
+            @strong on_change, @weak store, @strong selected  => move |_| {
+            let iter = store.insert_after(selected.borrow().as_ref(), None);
+            let spec = Editor::default_spec(Some("Label"));
+            Widget::insert(on_change.clone(), &store, &iter, spec);
+            on_change();
+        }));
         delete.connect_activate(clone!(
-            @weak selection,
-            @strong on_change,
-            @weak store,
-            @strong selected => move |_| {
+            @weak selection, @strong on_change, @weak store, @strong selected => move |_| {
             let iter = selected.borrow().clone();
             if let Some(iter) = iter {
                 selection.unselect_iter(&iter);
@@ -752,6 +757,14 @@ impl Editor {
                 Inhibit(false)
             }
         });
+        store.connect_row_deleted(
+            clone!(@strong on_change, @strong selected => move |_, _| {
+                on_change();
+            }),
+        );
+        store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
+            on_change();
+        }));
         Editor { root }
     }
 
