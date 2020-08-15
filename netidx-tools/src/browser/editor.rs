@@ -602,6 +602,7 @@ impl Editor {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         root.add(&treewin);
         let view = gtk::TreeView::new();
         treewin.add(&view);
