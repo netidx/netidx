@@ -592,17 +592,20 @@ impl BoxChild {
 #[derive(Clone, Debug)]
 struct Box {
     root: gtk::Box,
+    spec: Rc<RefCell<view::Box>>,
 }
 
 impl Box {
-    fn new(on_change: OnChange, spec: view::Box) -> Self {
+    fn insert(
+        on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
+        spec: view::Box,
+    ) {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let dir_add = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        root.add(&dir_add);
         let spec = Rc::new(RefCell::new(spec));
-        let children = Rc::new(RefCell::new(Vec::new()));
         let dircb = gtk::ComboBoxText::new();
-        dir_add.add(&dircb);
+        root.add(&dircb);
         dircb.append(Some("Horizontal"), "Horizontal");
         dircb.append(Some("Vertical"), "Vertical");
         match spec.borrow().direction {
@@ -610,67 +613,20 @@ impl Box {
             view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
         };
         dircb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            let dir = match c.get_active_id() {
+            spec.borrow_mut().direction = match c.get_active_id() {
                 Some(s) if &*s == "Horizontal" => view::Direction::Horizontal,
                 Some(s) if &*s == "Vertical" => view::Direction::Vertical,
                 _ => view::Direction::Horizontal,
             };
-            spec.borrow_mut().direction = dir;
-            on_change(view::Widget::Box(spec.borrow().clone()));
+            on_change();
         }));
-        let croot = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let crev = gtk::Revealer::new();
-        root.add(&crev);
-        crev.add(&croot);
-        let reveal_children = gtk::ToggleButton::with_label(">");
-        reveal_children.connect_toggled(clone!(@weak crev => move |t| {
-            crev.set_reveal_child(t.get_active())
-        }));
-        dir_add.add(&reveal_children);
-        let addbtn = gtk::Button::new();
-        dir_add.add(&addbtn);
-        addbtn.set_label("+");
-        addbtn.connect_clicked(clone!(
-            @strong on_change,
-            @strong spec,
-            @strong children,
-            @weak croot => move |_| {
-                let i = children.borrow().len();
-                let s = view::BoxChild {
-                    expand: false,
-                    fill: false,
-                    padding: 0,
-                    halign: None,
-                    valign: None,
-                    widget: view::Widget::Label(view::Source::Constant(Value::U64(42))),
-                };
-                let on_change_chld = Rc::new(
-                    clone!(@strong on_change, @strong spec => move |s| {
-                        spec.borrow_mut().children[i] = s;
-                        on_change(view::Widget::Box(spec.borrow().clone()));
-                    })
-                );
-                let child = BoxChild::new(on_change_chld, s.clone());
-                croot.add(child.root());
-                croot.set_child_packing(
-                    child.root(), false, false, 10, gtk::PackType::Start
-                );
-                croot.show_all();
-                children.borrow_mut().push(child);
-                spec.borrow_mut().children.push(s);
-                on_change(view::Widget::Box(spec.borrow().clone()));
-        }));
-        for (i, c) in spec.borrow().children.iter().enumerate() {
-            let on_change = Rc::new(clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().children[i] = s;
-                on_change(view::Widget::Box(spec.borrow().clone()));
-            }));
-            let c = BoxChild::new(on_change, c.clone());
-            croot.add(c.root());
-            croot.set_child_packing(c.root(), false, false, 10, gtk::PackType::Start);
-            children.borrow_mut().push(c);
-        }
-        Box { root }
+        let t = Widget::Box(Box { root, spec });
+        let v = t.to_value();
+        store.set_value(iter, 1, &v);
+    }
+
+    fn spec(&self) -> view::Widget {
+        view::Widget::Box(self.spec.borrow().clone())
     }
 
     fn root(&self) -> &gtk::Widget {
