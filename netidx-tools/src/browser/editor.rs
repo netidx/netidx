@@ -734,7 +734,8 @@ impl Editor {
             @strong on_change,
             @weak store,
             @strong selected => move |_| {
-            if let Some(iter) = selected.borrow().clone() {
+            let iter = selected.borrow().clone();
+            if let Some(iter) = iter {
                 selection.unselect_iter(&iter);
                 store.remove(&iter);
             }
