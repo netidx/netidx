@@ -812,40 +812,83 @@ impl Editor {
         let selection = view.get_selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
-            @weak store,
-            @strong selected,
-            @weak kind,
-            @weak reveal_properties,
-            @weak properties
-            @strong inhibit_change => move |s| {
-            match s.get_selected() {
-                None => {
-                    *selected.borrow_mut() = None;
-                    reveal_properties.set_reveal_child(false);
-                }
-                Some((store, iter)) => {
-                    if let Some(iter) = selected.borrow().clone() {
-                        let v = store.get_value(&iter, 1);
-                        if let Ok(Some(w)) = v.get::<&Widget>() {
-                            properties.remove(w.root());
-                        }
-                    }
-                    *selected.borrow_mut() = Some(iter.clone());
-                    let v = store.get_value(&iter, 0);
-                    if let Ok(Some(id)) = v.get::<&str>() {
-                        inhibit_change.set(true);
-                        kind.set_active_id(id);
-                        inhibit_change.set(false);
-                    }
+        @weak store,
+        @strong selected,
+        @weak kind,
+        @weak reveal_properties,
+        @weak properties,
+        @strong inhibit_change => move |s| match s.get_selected() {
+            None => {
+                if let Some(iter) = selected.borrow().clone() {
                     let v = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = v.get::<&Widget>() {
-                        properties.add(w.root());
+                        properties.remove(w.root());
                     }
-                    properties.show_all();
-                    reveal_properties.set_reveal_child(true);
                 }
+                *selected.borrow_mut() = None;
+                reveal_properties.set_reveal_child(false);
+            }
+            Some((store, iter)) => {
+                if let Some(iter) = selected.borrow().clone() {
+                    let v = store.get_value(&iter, 1);
+                    if let Ok(Some(w)) = v.get::<&Widget>() {
+                        properties.remove(w.root());
+                    }
+                }
+                *selected.borrow_mut() = Some(iter.clone());
+                let v = store.get_value(&iter, 0);
+                if let Ok(Some(id)) = v.get::<&str>() {
+                    inhibit_change.set(true);
+                    kind.set_active_id(id);
+                    inhibit_change.set(false);
+                }
+                let v = store.get_value(&iter, 1);
+                if let Ok(Some(w)) = v.get::<&Widget>() {
+                    properties.add(w.root());
+                }
+                properties.show_all();
+                reveal_properties.set_reveal_child(true);
             }
         }));
+        let menu = gtk::Menu::new();
+        let new_sib = gtk::MenuItem::with_label("New Sibling");
+        let new_child = gtk::MenuItem::with_label("New Child");
+        let delete = gtk::MenuItem::with_label("Delete");
+        menu.append(&new_sib);
+        menu.append(&new_child);
+        menu.append(&delete);
+        new_sib.connect_activate(
+            clone!(@strong on_change, @weak store, @strong selected => move |_| {
+                let iter = store.insert_after(None, &*selected.borrow());
+                let spec = Editor::default_spec(Some("Label"));
+                Widget::insert(on_change.clone(), store, &iter, spec);
+            }),
+        );
+        new_child.connect_activate(
+            clone!(@strong on_change, @weak store, @strong selected => move |_| {
+                let iter = store.insert_after(&*selected.borrow(), None);
+                let spec = Editor::default_spec(Some("Label"));
+                Widget::insert(on_change.clone(), store, &iter, spec);
+            }),
+        );
+        delete.connect_activate(clone!(
+            @weak selection,
+            @strong on_change,
+            @weak store,
+            @strong selected => move |_| {
+            if let Some(iter) = selected.borrow().clone() {
+                selection.unselect_iter(&iter);
+                store.remove(&iter);
+            }
+        }));
+        view.connect_button_press_event(move |_, b| {
+            let right_click =
+                gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
+            if right_click {
+                menu.show_all();
+                menu.popup_at_pointer(Some(b.deref()))
+            }
+        });
         Editor { root }
     }
 
