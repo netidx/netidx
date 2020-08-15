@@ -623,7 +623,7 @@ impl Editor {
             let store = store.clone();
             move || {
                 if let Some(root) = store.get_iter_first() {
-                    spec.borrow_mut().root = dbg!(Editor::build_spec(&store, &root));
+                    spec.borrow_mut().root = Editor::build_spec(&store, &root);
                     let m = FromGui::Render(path.clone(), spec.borrow().clone());
                     let _: result::Result<_, _> = from_gui.unbounded_send(m);
                 }
@@ -738,6 +738,7 @@ impl Editor {
             if let Some(iter) = iter {
                 selection.unselect_iter(&iter);
                 store.remove(&iter);
+                on_change();
             }
         }));
         view.connect_button_press_event(move |_, b| {
