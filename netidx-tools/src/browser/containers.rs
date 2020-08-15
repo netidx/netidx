@@ -56,13 +56,20 @@ impl Box {
                     }
                     children.push(w);
                 }
-                s => children.push(Widget::new(
-                    ctx.clone(),
-                    vm,
-                    variables,
-                    s.clone(),
-                    selected_path.clone(),
-                )),
+                s => {
+                    let w =
+                        Widget::new(
+                            ctx.clone(),
+                            vm,
+                            variables,
+                            s.clone(),
+                            selected_path.clone(),
+                        );
+                    if let Some(r) = w.root() {
+                        root.add(r);
+                    }
+                    children.push(w);
+                }
             }
         }
         Box { root, children }
@@ -138,13 +145,19 @@ impl Grid {
                             }
                             w
                         }
-                        widget => Widget::new(
-                            ctx.clone(),
-                            vm,
-                            variables,
-                            widget.clone(),
-                            selected_path.clone(),
-                        ),
+                        widget => {
+                            let w = Widget::new(
+                                ctx.clone(),
+                                vm,
+                                variables,
+                                widget.clone(),
+                                selected_path.clone(),
+                            );
+                            if let Some(r) = w.root() {
+                                root.attach(r, i as i32, j as i32, 1, 1);
+                            }
+                            w
+                        }
                     })
                     .collect::<Vec<_>>()
             })
