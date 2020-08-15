@@ -718,6 +718,7 @@ impl Editor {
                 let iter = store.insert_after(None, selected.borrow().as_ref());
                 let spec = Editor::default_spec(Some("Label"));
                 Widget::insert(on_change.clone(), &store, &iter, spec);
+                on_change()
             }),
         );
         new_child.connect_activate(
@@ -725,6 +726,7 @@ impl Editor {
                 let iter = store.insert_after(selected.borrow().as_ref(), None);
                 let spec = Editor::default_spec(Some("Label"));
                 Widget::insert(on_change.clone(), &store, &iter, spec);
+                on_change()
             }),
         );
         delete.connect_activate(clone!(
