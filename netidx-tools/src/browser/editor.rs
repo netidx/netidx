@@ -725,6 +725,19 @@ pub(super) struct Editor {
     root: gtk::Box,
 }
 
+static KINDS: [&'static str; 10] = [
+    "Table",
+    "Label",
+    "Button",
+    "Toggle",
+    "Selector",
+    "Entry",
+    "Box",
+    "BoxChild",
+    "Grid",
+    "GridChild",
+];
+
 impl Editor {
     pub(super) fn new(
         mut from_gui: mpsc::UnboundedSender<FromGui>,
@@ -747,6 +760,7 @@ impl Editor {
         });
         let store = gtk::TreeStore::new([String::static_type(), Widget::static_type()]);
         view.set_model(Some(&store));
+        view.set_grid_lines(gtk::TreeViewGridLines::Both);
         let spec = Rc::new(RefCell::new(spec));
         let on_change = Rc::new({
             let spec = Rc::clone(&spec);
@@ -759,9 +773,138 @@ impl Editor {
                 }
             }
         });
-        let w = KindWrap::new(on_change, spec.borrow().root.clone());
-        root.add(w.root());
+        Editor::build_tree(&on_change, &store, None, &spec.borrow().root);
+        let selected: Rc<RefCell<gtk::TreeIter>> = Rc::new(RefCell::new(None));
+        let reveal_properties = gtk::Revealer::new();
+        root.add(&reveal_properties);
+        let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        reveal_properties.add(&properties);
+        let inhibit_change = Rc::new(Cell::new(false));
+        let kind = gtk::ComboBoxText::new();
+        for k in &KINDS {
+            kind.append(Some(k), k);
+        }
+        kind.connect_changed(clone!(
+            @strong on_change,
+            @strong store,
+            @strong selected,
+            @weak properties
+            @strong inhibit_change => move |c| {
+            if let Some(iter) = selected.borrow().clone() {
+                if !inhibit_change.get() {
+                    let wv = store.get_value(&iter, 1);
+                    if let Ok(Some(w)) = wv.get::<&Widget>() {
+                        properties.remove(w.root());
+                    }
+                    let id = c.get_active_id();
+                    let spec = Editor::default_spec(id.map(|s| &*s));
+                    Widget::insert(on_change.clone(), &store, &iter, spec);
+                    let wv = store.get_value(&iter, 1);
+                    if let Ok(Some(w)) = wv.get::<&Widget>() {
+                        properties.add(w.root());
+                    }
+                    on_change();
+                }
+            }
+        }));
+        properties.add(&kind);
+        properties.add(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let selection = view.get_selection();
+        selection.set_mode(gtk::SelectionMode::Single);
+        selection.connect_changed(clone!(
+            @weak store,
+            @strong selected,
+            @weak kind,
+            @weak reveal_properties,
+            @weak properties
+            @strong inhibit_change => move |s| {
+            match s.get_selected() {
+                None => {
+                    *selected.borrow_mut() = None;
+                    reveal_properties.set_reveal_child(false);
+                }
+                Some((store, iter)) => {
+                    if let Some(iter) = selected.borrow().clone() {
+                        let v = store.get_value(&iter, 1);
+                        if let Ok(Some(w)) = v.get::<&Widget>() {
+                            properties.remove(w.root());
+                        }
+                    }
+                    *selected.borrow_mut() = Some(iter.clone());
+                    let v = store.get_value(&iter, 0);
+                    if let Ok(Some(id)) = v.get::<&str>() {
+                        inhibit_change.set(true);
+                        kind.set_active_id(id);
+                        inhibit_change.set(false);
+                    }
+                    let v = store.get_value(&iter, 1);
+                    if let Ok(Some(w)) = v.get::<&Widget>() {
+                        properties.add(w.root());
+                    }
+                    properties.show_all();
+                    reveal_properties.set_reveal_child(true);
+                }
+            }
+        }));
         Editor { root }
+    }
+
+    fn default_spec(name: Option<&str>) -> view::Widget {
+        match name {
+            None => view::Widget::Table(Path::from("/")),
+            Some("Table") => view::Widget::Table(Path::from("/")),
+            Some("Label") => {
+                let s = Value::String(Chars::from("static label"));
+                view::Widget::Label(view::Source::Constant(s))
+            }
+            Some("Button") => {
+                let l = Chars::from("click me!");
+                view::Widget::Button(view::Button {
+                    enabled: view::Source::Constant(Value::True),
+                    label: view::Source::Constant(Value::String(l)),
+                    source: view::Source::Load(Path::from("/somewhere")),
+                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                })
+            }
+            Some("Toggle") => view::Widget::Toggle(view::Toggle {
+                enabled: view::Source::Constant(Value::True),
+                source: view::Source::Load(Path::from("/somewhere")),
+                sink: view::Sink::Store(Path::from("/somewhere/else")),
+            }),
+            Some("Selector") => {
+                let choices =
+                    Chars::from(r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#);
+                view::Widget::Selector(view::Selector {
+                    enabled: view::Source::Constant(Value::True),
+                    choices: view::Source::Constant(Value::String(choices)),
+                    source: view::Source::Load(Path::from("/somewhere")),
+                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                })
+            }
+            Some("Entry") => view::Widget::Entry(view::Entry {
+                enabled: view::Source::Constant(Value::True),
+                visible: view::Source::Constant(Value::True),
+                source: view::Source::Load(Path::from("/somewhere")),
+                sink: view::Sink::Store(Path::from("/somewhere/else")),
+            }),
+            Some("Box") => view::Widget::Box(view::Box {
+                direction: view::Direction::Vertical,
+                children: Vec::new(),
+            }),
+            Some("BoxChild") => view::Widget::BoxChild(view::BoxChild {
+                expand: false,
+                fill: false,
+                padding: 0,
+                halign: None,
+                valign: None,
+                widget: boxed::Box::new(view::Widget::Label(view::Source::Constant(
+                    Value::U64(42),
+                ))),
+            }),
+            Some("Grid") => todo!(),
+            Some("GridChild") => todo!(),
+            _ => unreachable!(),
+        }
     }
 
     fn build_tree(
