@@ -26,7 +26,7 @@ impl BoxChild {
             padding: c.padding,
             halign: c.halign,
             valign: c.valign,
-            widget: boxed::Box::new(Widget::new(resolver, c.widget).await?),
+            widget: boxed::Box::new(Widget::new(resolver, (&*c.widget).clone()).await?),
         })
     }
 }
@@ -43,7 +43,7 @@ impl GridChild {
         Ok(GridChild {
             halign: c.halign,
             valign: c.valign,
-            widget: boxed::Box::new(Widget::new(resolver, c.widget).await?),
+            widget: boxed::Box::new(Widget::new(resolver, (&*c.widget).clone()).await?),
         })
     }
 }

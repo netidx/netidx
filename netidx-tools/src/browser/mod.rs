@@ -304,7 +304,7 @@ impl Widget {
             view::Widget::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, vm, variables, s, selected_path))
             }
-            view::Widget::BoxChild { widget, .. } => {
+            view::Widget::BoxChild(view::BoxChild { widget, .. }) => {
                 Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
             }
             view::Widget::Grid(spec) => Widget::Grid(containers::Grid::new(
@@ -314,7 +314,7 @@ impl Widget {
                 spec,
                 selected_path,
             )),
-            view::Widget::GridChild { widget, .. } => {
+            view::Widget::GridChild(view::GridChild { widget, .. }) => {
                 Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
             }
         }

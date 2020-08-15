@@ -30,21 +30,28 @@ impl Box {
         let mut children = Vec::new();
         for s in spec.children.iter() {
             match s {
-                view::BoxChild { expand, fill, padding, halign, valign, widget } => {
+                view::Widget::BoxChild(view::BoxChild {
+                    expand,
+                    fill,
+                    padding,
+                    halign,
+                    valign,
+                    widget,
+                }) => {
                     let w = Widget::new(
                         ctx.clone(),
                         vm,
                         variables,
-                        widget.clone(),
+                        (&**widget).clone(),
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
-                        root.pack_start(r, expand, fill, padding as u32);
+                        root.pack_start(r, *expand, *fill, *padding as u32);
                         if let Some(halign) = halign {
-                            r.set_halign(align_to_gtk(halign));
+                            r.set_halign(align_to_gtk(*halign));
                         }
                         if let Some(valign) = valign {
-                            r.set_valign(align_to_gtk(valign));
+                            r.set_valign(align_to_gtk(*valign));
                         }
                     }
                     children.push(w);
@@ -108,20 +115,24 @@ impl Grid {
                 row.into_iter()
                     .enumerate()
                     .map(|(i, spec)| match spec {
-                        view::GridChild { halign, valign, widget } => {
+                        view::Widget::GridChild(view::GridChild {
+                            halign,
+                            valign,
+                            widget,
+                        }) => {
                             let w = Widget::new(
                                 ctx.clone(),
                                 vm,
                                 variables,
-                                widget.clone(),
+                                (&*widget).clone(),
                                 selected_path.clone(),
                             );
                             if let Some(r) = w.root() {
                                 root.attach(r, i as i32, j as i32, 1, 1);
-                                if let Some(halign) = spec.halign {
+                                if let Some(halign) = halign {
                                     r.set_halign(align_to_gtk(halign));
                                 }
-                                if let Some(valign) = spec.valign {
+                                if let Some(valign) = valign {
                                     r.set_valign(align_to_gtk(valign));
                                 }
                             }
