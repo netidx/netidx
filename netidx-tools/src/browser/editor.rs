@@ -1,4 +1,4 @@
-use super::FromGui;
+use super::{FromGui, ToGui};
 use futures::channel::mpsc;
 use glib::{clone, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
@@ -596,6 +596,7 @@ static KINDS: [&'static str; 10] = [
 impl Editor {
     pub(super) fn new(
         from_gui: mpsc::UnboundedSender<FromGui>,
+        to_gui: glib::Sender<ToGui>,
         path: Path,
         spec: view::View,
     ) -> Editor {
@@ -647,6 +648,7 @@ impl Editor {
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root.add(&reveal_properties);
+        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.add(&properties);
         let inhibit_change = Rc::new(Cell::new(false));
@@ -687,6 +689,7 @@ impl Editor {
         @weak kind,
         @weak reveal_properties,
         @weak properties,
+        @strong to_gui,
         @strong inhibit_change => move |s| match s.get_selected() {
             None => {
                 let children = properties.get_children();
@@ -694,6 +697,7 @@ impl Editor {
                     properties.remove(&children[2]);
                 }
                 *selected.borrow_mut() = None;
+                let _: result::Result<_, _> = to_gui.send(ToGui::Highlight(vec![]));
                 reveal_properties.set_reveal_child(false);
             }
             Some((store, iter)) => {
@@ -702,6 +706,10 @@ impl Editor {
                     properties.remove(&children[2]);
                 }
                 *selected.borrow_mut() = Some(iter.clone());
+                if let Some(path) = store.get_path(&iter) {
+                    let _: result::Result<_,_> =
+                        to_gui.send(ToGui::Highlight(path.get_indices()));
+                }
                 let v = store.get_value(&iter, 0);
                 if let Ok(Some(id)) = v.get::<&str>() {
                     inhibit_change.set(true);

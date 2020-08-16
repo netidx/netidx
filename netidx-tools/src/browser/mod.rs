@@ -51,6 +51,7 @@ enum ToGui {
         raeified: view::View,
         rendered: bool,
     },
+    Highlight(Vec<i32>),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
     Terminate,
@@ -362,6 +363,43 @@ impl Widget {
             Widget::Grid(t) => t.update_var(name, value),
         }
     }
+
+    fn set_highlight(&self, mut indices: impl Iterator<Item = i32>, highlight: bool) {
+        fn set<T: WidgetExt>(w: &T, h: bool) {
+            if h {
+                w.drag_highlight()
+            } else {
+                w.drag_unhighlight()
+            }
+        }
+        match indices.next() {
+            None => match self {
+                Widget::Table(w) => set(w.root(), highlight),
+                Widget::Label(w) => set(w.root(), highlight),
+                Widget::Button(w) => set(w.root(), highlight),
+                Widget::Toggle(w) => set(w.root(), highlight),
+                Widget::Selector(w) => set(w.root(), highlight),
+                Widget::Entry(w) => set(w.root(), highlight),
+                Widget::Box(w) => set(w.root(), highlight),
+                Widget::Grid(w) => set(w.root(), highlight),
+            },
+            Some(i) => match self {
+                Widget::Box(w) => {
+                    let i = i as usize;
+                    if i < w.children.len() {
+                        w.children[i].set_highlight(indices, highlight)
+                    }
+                }
+                Widget::Grid(_) => todo!(),
+                Widget::Table(_)
+                | Widget::Label(_)
+                | Widget::Button(_)
+                | Widget::Toggle(_)
+                | Widget::Selector(_)
+                | Widget::Entry(_) => (),
+            },
+        }
+    }
 }
 
 fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
@@ -645,10 +683,10 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    let mainbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
-    window.add(&paned);
+    window.add(&mainbox);
     window.show_all();
     window.connect_delete_event(clone!(@strong ctx, @weak app =>
     @default-return Inhibit(false), move |_, _| {
@@ -657,6 +695,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     }));
     let mut current: Option<View> = None;
     let mut editor: Option<Editor> = None;
+    let mut highlight: Option<Vec<i32>> = None;
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut current {
@@ -681,23 +720,41 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::View { path, original, raeified, rendered } => {
             let cur = View::new(ctx.clone(), &path, raeified);
             if let Some(cur) = current.take() {
-                paned.remove(cur.root());
+                mainbox.remove(cur.root());
             }
             if !rendered {
                 if let Some(editor) = editor.take() {
-                    paned.remove(editor.root());
+                    mainbox.remove(editor.root());
                 }
-                let e = Editor::new(ctx.from_gui.clone(), path.clone(), original);
-                paned.add1(e.root());
-                paned.show_all();
+                let e = Editor::new(
+                    ctx.from_gui.clone(),
+                    ctx.to_gui.clone(),
+                    path.clone(),
+                    original,
+                );
+                mainbox.pack_start(e.root(), false, false, 5);
+                mainbox.show_all();
                 editor = Some(e);
             }
             window.set_title(&format!("Netidx Browser {}", path));
-            paned.pack2(cur.root(), true, true);
-            paned.show_all();
+            mainbox.pack_end(cur.root(), true, true, 5);
+            mainbox.show_all();
+            if let Some(hl) = &highlight {
+                cur.widget.set_highlight(hl.iter().copied(), true);
+            }
             current = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
             let _: result::Result<_, _> = ctx.to_gui.send(m);
+            Continue(true)
+        }
+        ToGui::Highlight(path) => {
+            if let Some(cur) = &current {
+                if let Some(hl) = highlight.take() {
+                    cur.widget.set_highlight(hl.iter().copied(), false);
+                }
+                cur.widget.set_highlight(path.iter().copied(), true);
+                highlight = Some(path);
+            }
             Continue(true)
         }
         ToGui::UpdateVar(name, value) => {

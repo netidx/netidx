@@ -11,7 +11,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) struct Box {
     root: gtk::Box,
-    children: Vec<Widget>,
+    pub(super) children: Vec<Widget>,
 }
 
 impl Box {
