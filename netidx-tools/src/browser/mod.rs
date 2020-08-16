@@ -700,7 +700,7 @@ fn setup_css(screen: &gdk::Screen) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
-    let mainbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.add(&mainbox);
@@ -752,12 +752,12 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     path.clone(),
                     original,
                 );
-                mainbox.pack_start(e.root(), false, false, 5);
+                mainbox.add1(e.root());
                 mainbox.show_all();
                 editor = Some(e);
             }
             window.set_title(&format!("Netidx Browser {}", path));
-            mainbox.pack_end(cur.root(), true, true, 5);
+            mainbox.add2(cur.root());
             mainbox.show_all();
             cur.widget.set_highlight(highlight.iter().copied(), true);
             current = Some(cur);

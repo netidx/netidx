@@ -906,33 +906,27 @@ impl Editor {
         path: &mut Vec<WidgetPath>,
     ) {
         let v = store.get_value(start, 1);
-        let keep_idx = match v.get::<&Widget>() {
-            Err(_) => false,
-            Ok(None) => false,
+        match v.get::<&Widget>() {
+            Err(_) => (),
+            Ok(None) => (),
             Ok(Some(w)) => match w {
                 Widget::Table(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Label(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Button(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Toggle(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Selector(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Entry(_) => {
                     path.insert(0, WidgetPath::Leaf);
-                    false
                 }
                 Widget::Box(_) => {
                     if path.len() == 0 {
@@ -940,17 +934,14 @@ impl Editor {
                     } else {
                         path.insert(0, WidgetPath::Box(nchild));
                     }
-                    false
                 }
-                Widget::BoxChild(_) => true,
+                Widget::BoxChild(_) => (),
                 Widget::Grid => todo!(),
                 Widget::GridChild => todo!(),
             },
-        };
+        }
         if let Some(parent) = store.iter_parent(start) {
-            if keep_idx {
-                Editor::build_widget_path(store, &parent, nchild, path);
-            } else if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
+            if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
                 if let Some(i) = idx.last() {
                     Editor::build_widget_path(store, &parent, *i as usize, path);
                 }
