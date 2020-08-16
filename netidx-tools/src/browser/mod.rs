@@ -43,6 +43,13 @@ use tokio::{runtime::Runtime, task};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
+#[derive(Debug, Clone, Copy)]
+enum WidgetPath {
+    Leaf,
+    Box(usize),
+    Grid(usize, usize),
+}
+
 #[derive(Debug, Clone)]
 enum ToGui {
     View {
@@ -51,7 +58,7 @@ enum ToGui {
         raeified: view::View,
         rendered: bool,
     },
-    Highlight(Vec<i32>),
+    Highlight(Vec<WidgetPath>),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
     Terminate,
@@ -364,39 +371,34 @@ impl Widget {
         }
     }
 
-    fn set_highlight(&self, mut indices: impl Iterator<Item = i32>, highlight: bool) {
+    fn set_highlight(&self, mut path: impl Iterator<Item = WidgetPath>, h: bool) {
         fn set<T: WidgetExt>(w: &T, h: bool) {
+            let s = w.get_style_context();
             if h {
-                w.drag_highlight()
+                s.add_class("highlighted");
             } else {
-                w.drag_unhighlight()
+                s.remove_class("highlighted");
             }
         }
-        match indices.next() {
-            None => match self {
-                Widget::Table(w) => set(w.root(), highlight),
-                Widget::Label(w) => set(w.root(), highlight),
-                Widget::Button(w) => set(w.root(), highlight),
-                Widget::Toggle(w) => set(w.root(), highlight),
-                Widget::Selector(w) => set(w.root(), highlight),
-                Widget::Entry(w) => set(w.root(), highlight),
-                Widget::Box(w) => set(w.root(), highlight),
-                Widget::Grid(w) => set(w.root(), highlight),
-            },
-            Some(i) => match self {
-                Widget::Box(w) => {
-                    let i = i as usize;
+        match path.next() {
+            None => (),
+            Some(p) => match (p, self) {
+                (WidgetPath::Box(i), Widget::Box(w)) => {
                     if i < w.children.len() {
-                        w.children[i].set_highlight(indices, highlight)
+                        w.children[i].set_highlight(path, h)
                     }
                 }
-                Widget::Grid(_) => todo!(),
-                Widget::Table(_)
-                | Widget::Label(_)
-                | Widget::Button(_)
-                | Widget::Toggle(_)
-                | Widget::Selector(_)
-                | Widget::Entry(_) => (),
+                (WidgetPath::Grid(_, _), Widget::Grid(_)) => todo!(),
+                (WidgetPath::Box(_), _) => (),
+                (WidgetPath::Grid(_, _), _) => (),
+                (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Toggle(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Selector(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Entry(w)) => set(w.root(), h),
             },
         }
     }
@@ -680,6 +682,21 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
     });
 }
 
+fn setup_css(screen: &gdk::Screen) {
+    let style = gtk::CssProvider::new();
+    style
+        .load_from_data(
+            r#"*.highlighted {
+    border-width: 3px;
+    border-style: solid;
+    border-color: blue;
+}"#
+            .as_bytes(),
+        )
+        .unwrap();
+    gtk::StyleContext::add_provider_for_screen(screen, &style, 800);
+}
+
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
@@ -688,6 +705,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     window.set_default_size(800, 600);
     window.add(&mainbox);
     window.show_all();
+    if let Some(screen) = window.get_screen() {
+        setup_css(&screen);
+    }
     window.connect_delete_event(clone!(@strong ctx, @weak app =>
     @default-return Inhibit(false), move |_, _| {
         let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
@@ -695,7 +715,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     }));
     let mut current: Option<View> = None;
     let mut editor: Option<Editor> = None;
-    let mut highlight: Option<Vec<i32>> = None;
+    let mut highlight: Vec<WidgetPath> = vec![];
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut current {
@@ -739,21 +759,18 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             window.set_title(&format!("Netidx Browser {}", path));
             mainbox.pack_end(cur.root(), true, true, 5);
             mainbox.show_all();
-            if let Some(hl) = &highlight {
-                cur.widget.set_highlight(hl.iter().copied(), true);
-            }
+            cur.widget.set_highlight(highlight.iter().copied(), true);
             current = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
             let _: result::Result<_, _> = ctx.to_gui.send(m);
             Continue(true)
         }
         ToGui::Highlight(path) => {
+            dbg!(&path);
             if let Some(cur) = &current {
-                if let Some(hl) = highlight.take() {
-                    cur.widget.set_highlight(hl.iter().copied(), false);
-                }
-                cur.widget.set_highlight(path.iter().copied(), true);
-                highlight = Some(path);
+                cur.widget.set_highlight(highlight.iter().copied(), false);
+                highlight = path;
+                cur.widget.set_highlight(highlight.iter().copied(), true);
             }
             Continue(true)
         }

@@ -1,4 +1,4 @@
-use super::{FromGui, ToGui};
+use super::{FromGui, ToGui, WidgetPath};
 use futures::channel::mpsc;
 use glib::{clone, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
@@ -700,16 +700,15 @@ impl Editor {
                 let _: result::Result<_, _> = to_gui.send(ToGui::Highlight(vec![]));
                 reveal_properties.set_reveal_child(false);
             }
-            Some((store, iter)) => {
+            Some((_, iter)) => {
                 let children = properties.get_children();
                 if children.len() == 3 {
                     properties.remove(&children[2]);
                 }
                 *selected.borrow_mut() = Some(iter.clone());
-                if let Some(path) = store.get_path(&iter) {
-                    let _: result::Result<_,_> =
-                        to_gui.send(ToGui::Highlight(path.get_indices()));
-                }
+                let mut path = Vec::new();
+                Editor::build_widget_path(&store, &iter, 0, &mut path);
+                let _: result::Result<_,_> = to_gui.send(ToGui::Highlight(path));
                 let v = store.get_value(&iter, 0);
                 if let Ok(Some(id)) = v.get::<&str>() {
                     inhibit_change.set(true);
@@ -897,6 +896,65 @@ impl Editor {
                 view::Widget::GridChild(_) => todo!(),
                 w => w,
             },
+        }
+    }
+
+    fn build_widget_path(
+        store: &gtk::TreeStore,
+        start: &gtk::TreeIter,
+        nchild: usize,
+        path: &mut Vec<WidgetPath>,
+    ) {
+        let v = store.get_value(start, 1);
+        let keep_idx = match v.get::<&Widget>() {
+            Err(_) => false,
+            Ok(None) => false,
+            Ok(Some(w)) => match w {
+                Widget::Table(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Label(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Button(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Toggle(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Selector(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Entry(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                Widget::Box(_) => {
+                    if path.len() == 0 {
+                        path.insert(0, WidgetPath::Leaf);
+                    } else {
+                        path.insert(0, WidgetPath::Box(nchild));
+                    }
+                    false
+                }
+                Widget::BoxChild(_) => true,
+                Widget::Grid => todo!(),
+                Widget::GridChild => todo!(),
+            },
+        };
+        if let Some(parent) = store.iter_parent(start) {
+            if keep_idx {
+                Editor::build_widget_path(store, &parent, nchild, path);
+            } else if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
+                if let Some(i) = idx.last() {
+                    Editor::build_widget_path(store, &parent, *i as usize, path);
+                }
+            }
         }
     }
 
