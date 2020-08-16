@@ -648,7 +648,6 @@ impl Editor {
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root.add(&reveal_properties);
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.add(&properties);
         let inhibit_change = Rc::new(Cell::new(false));

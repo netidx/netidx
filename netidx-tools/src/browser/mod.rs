@@ -480,7 +480,6 @@ impl View {
             root.add(wroot);
             root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
         }
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         View { root, widget }
