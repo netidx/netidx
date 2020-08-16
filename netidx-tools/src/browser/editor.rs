@@ -906,8 +906,7 @@ impl Editor {
     ) {
         let v = store.get_value(start, 1);
         match v.get::<&Widget>() {
-            Err(_) => (),
-            Ok(None) => (),
+            Err(_) | Ok(None) => (),
             Ok(Some(w)) => match w {
                 Widget::Table(_) => {
                     path.insert(0, WidgetPath::Leaf);
@@ -934,7 +933,11 @@ impl Editor {
                         path.insert(0, WidgetPath::Box(nchild));
                     }
                 }
-                Widget::BoxChild(_) => (),
+                Widget::BoxChild(_) => {
+                    if path.len() == 0 {
+                        path.insert(0, WidgetPath::Leaf);
+                    }
+                }
                 Widget::Grid => todo!(),
                 Widget::GridChild => todo!(),
             },

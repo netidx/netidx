@@ -480,6 +480,7 @@ impl View {
             root.add(wroot);
             root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
         }
+        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.add(&selected_path_window);
         root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
         View { root, widget }
@@ -686,7 +687,7 @@ fn setup_css(screen: &gdk::Screen) {
     style
         .load_from_data(
             r#"*.highlighted {
-    border-width: 3px;
+    border-width: 2px;
     border-style: solid;
     border-color: blue;
 }"#
@@ -765,7 +766,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::Highlight(path) => {
-            dbg!(&path);
             if let Some(cur) = &current {
                 cur.widget.set_highlight(highlight.iter().copied(), false);
                 highlight = path;
