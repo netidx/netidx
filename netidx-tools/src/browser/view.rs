@@ -51,6 +51,8 @@ impl GridChild {
 #[derive(Debug, Clone)]
 pub(super) struct Box {
     pub direction: view::Direction,
+    pub homogeneous: bool,
+    pub spacing: u32,
     pub children: Vec<Widget>,
 }
 
@@ -100,7 +102,12 @@ impl Widget {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
-                    Ok(Widget::Box(Box { direction: c.direction, children }))
+                    Ok(Widget::Box(Box {
+                        direction: c.direction,
+                        homogeneous: c.homogeneous,
+                        spacing: c.spacing,
+                        children,
+                    }))
                 }
                 view::Widget::BoxChild(c) => {
                     Ok(Widget::BoxChild(BoxChild::new(resolver, c).await?))

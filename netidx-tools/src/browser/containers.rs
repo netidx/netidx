@@ -27,6 +27,8 @@ impl Box {
             view::Direction::Vertical => Orientation::Vertical,
         };
         let root = gtk::Box::new(dir, 0);
+        root.set_homogeneous(spec.homogeneous);
+        root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
         for s in spec.children.iter() {
             match s {

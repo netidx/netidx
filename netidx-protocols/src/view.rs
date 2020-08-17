@@ -113,6 +113,8 @@ pub struct GridChild {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Box {
     pub direction: Direction,
+    pub homogeneous: bool,
+    pub spacing: u32,
     pub children: Vec<Widget>,
 }
 

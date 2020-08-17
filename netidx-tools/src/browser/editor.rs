@@ -476,10 +476,9 @@ impl BoxContainer {
         iter: &gtk::TreeIter,
         spec: view::Box,
     ) {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = gtk::ComboBoxText::new();
-        root.add(&dircb);
         dircb.append(Some("Horizontal"), "Horizontal");
         dircb.append(Some("Vertical"), "Vertical");
         match spec.borrow().direction {
@@ -494,6 +493,22 @@ impl BoxContainer {
             };
             on_change();
         }));
+        let dirlbl = gtk::Label::new(Some("Direction:"));
+        root.add((dirlbl, dircb));
+        let homo = gtk::CheckButton::with_label("Homogeneous:");
+        root.attach(&homo, 0, 2, 1);
+        homo.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
+            spec.borrow_mut().homogeneous = b.get_active();
+            on_change()
+        }));
+        root.add(parse_entry(
+            "Spacing:",
+            &spec.borrow().spacing,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().spacing = s;
+                on_change()
+            }),
+        ));
         let t = Widget::Box(BoxContainer { root, spec });
         let v = t.to_value();
         store.set_value(iter, 0, &"Box".to_value());
@@ -814,6 +829,8 @@ impl Editor {
             }),
             Some("Box") => view::Widget::Box(view::Box {
                 direction: view::Direction::Vertical,
+                homogeneous: false,
+                spacing: 0,
                 children: Vec::new(),
             }),
             Some("BoxChild") => view::Widget::BoxChild(view::BoxChild {
