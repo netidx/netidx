@@ -465,7 +465,7 @@ impl BoxChild {
 
 #[derive(Clone, Debug)]
 struct BoxContainer {
-    root: gtk::Box,
+    root: TwoColGrid,
     spec: Rc<RefCell<view::Box>>,
 }
 
@@ -520,7 +520,7 @@ impl BoxContainer {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+        self.root.root.upcast_ref()
     }
 }
 
@@ -738,14 +738,25 @@ impl Editor {
             }
         }));
         let menu = gtk::Menu::new();
+        let duplicate = gtk::MenuItem::with_label("Duplicate");
         let new_sib = gtk::MenuItem::with_label("New Sibling");
         let new_child = gtk::MenuItem::with_label("New Child");
         let delete = gtk::MenuItem::with_label("Delete");
+        menu.append(&duplicate);
         menu.append(&new_sib);
         menu.append(&new_child);
         menu.append(&delete);
+        duplicate.connect_activate(clone!(
+        @strong on_change, @weak store, @strong selected => move |_| {
+            if let Some(iter) = &*selected.borrow() {
+                let spec = Editor::build_spec(&store, iter);
+                let parent = store.iter_parent(iter);
+                Editor::build_tree(&on_change, &store, parent.as_ref(), &spec);
+                on_change()
+            }
+        }));
         new_sib.connect_activate(clone!(
-            @strong on_change, @weak store, @strong selected  => move |_| {
+            @strong on_change, @weak store, @strong selected => move |_| {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let spec = Editor::default_spec(Some("Label"));
             Widget::insert(on_change.clone(), &store, &iter, spec);
@@ -889,18 +900,21 @@ impl Editor {
                 view::Widget::Label(view::Source::Constant(s))
             }
             Ok(Some(w)) => match w.spec() {
-                view::Widget::Box(mut b) => match store.iter_children(Some(root)) {
-                    None => view::Widget::Box(b),
-                    Some(iter) => {
-                        loop {
-                            b.children.push(Editor::build_spec(store, &iter));
-                            if !store.iter_next(&iter) {
-                                break;
+                view::Widget::Box(mut b) => {
+                    b.children.clear();
+                    match store.iter_children(Some(root)) {
+                        None => view::Widget::Box(b),
+                        Some(iter) => {
+                            loop {
+                                b.children.push(Editor::build_spec(store, &iter));
+                                if !store.iter_next(&iter) {
+                                    break;
+                                }
                             }
+                            view::Widget::Box(b)
                         }
-                        view::Widget::Box(b)
                     }
-                },
+                }
                 view::Widget::BoxChild(mut b) => match store.iter_children(Some(root)) {
                     None => view::Widget::BoxChild(b),
                     Some(iter) => {
