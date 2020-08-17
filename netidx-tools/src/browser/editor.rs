@@ -626,7 +626,7 @@ impl Editor {
             let column = gtk::TreeViewColumn::new();
             let cell = gtk::CellRendererText::new();
             column.pack_start(&cell, true);
-            column.set_title("widget");
+            column.set_title("view widget tree");
             column.add_attribute(&cell, "text", 0);
             column
         });
