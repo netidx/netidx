@@ -738,21 +738,21 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         if b.get_active() {
             if let Some(editor) = editor.borrow_mut().take() {
                 mainbox.remove(editor.root());
-                if let Some(cur) = &*current.borrow() {
-                    let hl = highlight.borrow();
-                    cur.widget.set_highlight(hl.iter().copied(), false);
-                }
-                highlight.borrow_mut().clear();
-            }
-        } else {
-            if let Some(editor) = editor.borrow_mut().take() {
-                mainbox.remove(editor.root());
             }
             let s = current_spec.borrow().clone();
             let e = Editor::new(ctx.from_gui.clone(), ctx.to_gui.clone(), s);
             mainbox.add1(e.root());
             mainbox.show_all();
             *editor.borrow_mut() = Some(e);
+        } else {
+            if let Some(editor) = editor.borrow_mut().take() {
+                mainbox.remove(editor.root());
+                if let Some(cur) = &*current.borrow() {
+                    let hl = highlight.borrow();
+                    cur.widget.set_highlight(hl.iter().copied(), false);
+                }
+                highlight.borrow_mut().clear();
+            }
         }
     }));
     to_gui.attach(None, move |m| match m {
