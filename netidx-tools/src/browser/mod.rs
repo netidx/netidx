@@ -31,7 +31,7 @@ use netidx_protocols::view as protocol_view;
 use once_cell::{sync::OnceCell, unsync::Lazy};
 use std::{
     boxed,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     mem,
     rc::Rc,
@@ -399,7 +399,32 @@ impl Widget {
     }
 }
 
-fn make_crumbs(ctx: &WidgetCtx, path: &Path, is_custom: bool) -> gtk::Box {
+fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
+    w.get_toplevel()
+        .expect("modal dialog must have a toplevel window")
+        .downcast::<gtk::Window>()
+        .expect("not a window")
+}
+
+fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
+    let d = gtk::MessageDialog::new(
+        Some(&toplevel(w)),
+        gtk::DialogFlags::MODAL,
+        gtk::MessageType::Question,
+        gtk::ButtonsType::YesNo,
+        msg,
+    );
+    let resp = d.run();
+    d.close();
+    resp == gtk::ResponseType::Yes
+}
+
+fn make_crumbs(
+    ctx: &WidgetCtx,
+    path: &Path,
+    is_custom: bool,
+    saved: Rc<Cell<bool>>,
+) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     for target in Path::dirnames(&path) {
         let lbl = gtk::Label::new(None);
@@ -417,7 +442,16 @@ fn make_crumbs(ctx: &WidgetCtx, path: &Path, is_custom: bool) -> gtk::Box {
         };
         let target = glib::markup_escape_text(target);
         lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
-        lbl.connect_activate_link(clone!(@strong ctx => move |_, uri| {
+        lbl.connect_activate_link(clone!(
+            @strong ctx,
+            @strong saved,
+            @weak root => @default-return Inhibit(false), move |_, uri| {
+            if is_custom && !saved.get() {
+                let m = "Unsaved custom view will be lost. continue?";
+                if !ask_modal(&root, m) {
+                    return Inhibit(false)
+                }
+            }
             let m = FromGui::Navigate(Path::from(String::from(uri)));
             let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
             Inhibit(false)
@@ -435,7 +469,13 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: WidgetCtx, path: &Path, is_custom: bool, spec: view::View) -> View {
+    fn new(
+        ctx: WidgetCtx,
+        path: &Path,
+        is_custom: bool,
+        saved: Rc<Cell<bool>>,
+        spec: view::View,
+    ) -> View {
         let vm = {
             let f: fn() -> RootedThread = script::new;
             Rc::new(Lazy::new(f))
@@ -472,7 +512,7 @@ impl View {
             selected_path.clone(),
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.add(&make_crumbs(&ctx, path, is_custom));
+        root.add(&make_crumbs(&ctx, path, is_custom, saved));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -705,9 +745,14 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         Some("document-page-setup"),
         gtk::IconSize::SmallToolbar,
     );
+    let save_img =
+        gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
+    let save_button = gtk::ToolButton::new(Some(&save_img), None);
+    save_button.set_sensitive(false);
     design_mode.set_image(Some(&design_img));
     headerbar.set_show_close_button(true);
     headerbar.pack_start(&design_mode);
+    headerbar.pack_start(&save_button);
     window.set_titlebar(Some(&headerbar));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
@@ -722,6 +767,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         Inhibit(false)
     }));
     let ctx = Rc::new(ctx);
+    let saved = Rc::new(Cell::new(true));
     let current_path: Rc<RefCell<Path>> = Rc::new(RefCell::new(Path::from("/")));
     let current_spec: Rc<RefCell<protocol_view::View>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
@@ -781,12 +827,22 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 None => true,
                 Some(path) => {
                     *current_path.borrow_mut() = path;
+                    if design_mode.get_active() {
+                        design_mode.set_active(false);
+                    }
                     false
                 }
             };
+            saved.set(!custom);
+            save_button.set_sensitive(custom);
             *current_spec.borrow_mut() = original.clone();
-            let cur =
-                View::new((*ctx).clone(), &*current_path.borrow(), custom, raeified);
+            let cur = View::new(
+                (*ctx).clone(),
+                &*current_path.borrow(),
+                custom,
+                Rc::clone(&saved),
+                raeified,
+            );
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
