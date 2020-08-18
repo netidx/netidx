@@ -52,12 +52,7 @@ enum WidgetPath {
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View {
-        path: Path,
-        original: protocol_view::View,
-        raeified: view::View,
-        rendered: bool,
-    },
+    View { path: Option<Path>, original: protocol_view::View, raeified: view::View },
     Highlight(Vec<WidgetPath>),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
@@ -67,7 +62,7 @@ enum ToGui {
 #[derive(Debug, Clone)]
 enum FromGui {
     Navigate(Path),
-    Render(Path, protocol_view::View),
+    Render(protocol_view::View),
     Updated,
     Terminate,
 }
@@ -404,7 +399,7 @@ impl Widget {
     }
 }
 
-fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
+fn make_crumbs(ctx: &WidgetCtx, path: &Path, is_custom: bool) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     for target in Path::dirnames(&path) {
         let lbl = gtk::Label::new(None);
@@ -428,6 +423,9 @@ fn make_crumbs(ctx: &WidgetCtx, path: &Path) -> gtk::Box {
             Inhibit(false)
         }));
     }
+    if is_custom {
+        root.add(&gtk::Label::new(Some(" > custom-view")));
+    }
     root
 }
 
@@ -437,7 +435,7 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: WidgetCtx, path: &Path, spec: view::View) -> View {
+    fn new(ctx: WidgetCtx, path: &Path, is_custom: bool, spec: view::View) -> View {
         let vm = {
             let f: fn() -> RootedThread = script::new;
             Rc::new(Lazy::new(f))
@@ -474,7 +472,7 @@ impl View {
             selected_path.clone(),
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.add(&make_crumbs(&ctx, path));
+        root.add(&make_crumbs(&ctx, path, is_custom));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -510,6 +508,15 @@ macro_rules! break_err {
             Err(_) => break,
         }
     };
+}
+
+fn default_view(path: Path) -> protocol_view::View {
+    protocol_view::View {
+        variables: HashMap::new(),
+        keybinds: Vec::new(),
+        scripts: Vec::new(),
+        root: protocol_view::Widget::Table(path),
+    }
 }
 
 #[derive(Debug)]
@@ -564,7 +571,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     refreshing = false;
                     break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
                 },
-                Some(FromGui::Render(base_path, view)) => {
+                Some(FromGui::Render(view)) => {
                     view_path = None;
                     rx_view = None;
                     _dv_view = None;
@@ -572,10 +579,9 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         Err(e) => warn!("failed to raeify view {}", e),
                         Ok(v) => {
                             let m = ToGui::View {
-                                path: base_path,
+                                path: None,
                                 original: view,
                                 raeified: v,
-                                rendered: true
                             };
                             break_err!(ctx.to_gui.send(m));
                             info!("updated gui view (render)")
@@ -586,22 +592,15 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
                         Ok(spec) => {
-                            let default = protocol_view::View {
-                                variables: HashMap::new(),
-                                keybinds: Vec::new(),
-                                scripts: Vec::new(),
-                                root: protocol_view::Widget::Table(base_path.clone())
-                            };
                             let raeified_default = view::View {
                                 variables: HashMap::new(),
                                 scripts: Vec::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View {
-                                path: base_path.clone(),
-                                original: default,
+                                path: Some(base_path.clone()),
+                                original: default_view(base_path.clone()),
                                 raeified: raeified_default,
-                                rendered: false
                             };
                             break_err!(ctx.to_gui.send(m));
                             let s = subscriber
@@ -637,10 +636,9 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                         Err(e) => warn!("failed to raeify view {}", e),
                                         Ok(v) => {
                                             let m = ToGui::View {
-                                                path: path.clone(),
+                                                path: Some(path.clone()),
                                                 original: view,
                                                 raeified: v,
-                                                rendered: false
                                             };
                                             break_err!(ctx.to_gui.send(m));
                                             info!("updated gui view")
@@ -700,7 +698,17 @@ fn setup_css(screen: &gdk::Screen) {
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
+    let headerbar = gtk::HeaderBar::new();
     let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
+    let design_mode = gtk::ToggleButton::new();
+    let design_img = gtk::Image::from_icon_name(
+        Some("document-page-setup"),
+        gtk::IconSize::SmallToolbar,
+    );
+    design_mode.set_image(Some(&design_img));
+    headerbar.set_show_close_button(true);
+    headerbar.pack_start(&design_mode);
+    window.set_titlebar(Some(&headerbar));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
     window.add(&mainbox);
@@ -713,12 +721,43 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
         Inhibit(false)
     }));
-    let mut current: Option<View> = None;
-    let mut editor: Option<Editor> = None;
-    let mut highlight: Vec<WidgetPath> = vec![];
+    let ctx = Rc::new(ctx);
+    let current_path: Rc<RefCell<Path>> = Rc::new(RefCell::new(Path::from("/")));
+    let current_spec: Rc<RefCell<protocol_view::View>> =
+        Rc::new(RefCell::new(default_view(Path::from("/"))));
+    let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
+    let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
+    let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
+    design_mode.connect_toggled(clone!(
+        @weak mainbox,
+        @strong editor,
+        @strong highlight,
+        @strong current,
+        @strong current_spec,
+        @strong ctx => move |b| {
+        if b.get_active() {
+            if let Some(editor) = editor.borrow_mut().take() {
+                mainbox.remove(editor.root());
+                if let Some(cur) = &*current.borrow() {
+                    let hl = highlight.borrow();
+                    cur.widget.set_highlight(hl.iter().copied(), false);
+                }
+                highlight.borrow_mut().clear();
+            }
+        } else {
+            if let Some(editor) = editor.borrow_mut().take() {
+                mainbox.remove(editor.root());
+            }
+            let s = current_spec.borrow().clone();
+            let e = Editor::new(ctx.from_gui.clone(), ctx.to_gui.clone(), s);
+            mainbox.add1(e.root());
+            mainbox.show_all();
+            *editor.borrow_mut() = Some(e);
+        }
+    }));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
-            if let Some(root) = &mut current {
+            if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = Vec::new();
                 root.update(&mut waits, &batch);
                 if waits.len() == 0 {
@@ -737,44 +776,41 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::View { path, original, raeified, rendered } => {
-            let cur = View::new(ctx.clone(), &path, raeified);
-            if let Some(cur) = current.take() {
+        ToGui::View { path, original, raeified } => {
+            let custom = match path {
+                None => true,
+                Some(path) => {
+                    *current_path.borrow_mut() = path;
+                    false
+                }
+            };
+            *current_spec.borrow_mut() = original.clone();
+            let cur =
+                View::new((*ctx).clone(), &*current_path.borrow(), custom, raeified);
+            if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            if !rendered {
-                if let Some(editor) = editor.take() {
-                    mainbox.remove(editor.root());
-                }
-                let e = Editor::new(
-                    ctx.from_gui.clone(),
-                    ctx.to_gui.clone(),
-                    path.clone(),
-                    original,
-                );
-                mainbox.add1(e.root());
-                mainbox.show_all();
-                editor = Some(e);
-            }
-            window.set_title(&format!("Netidx Browser {}", path));
+            window.set_title(&format!("Netidx Browser {}", &*current_path.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();
-            cur.widget.set_highlight(highlight.iter().copied(), true);
-            current = Some(cur);
+            let hl = highlight.borrow();
+            cur.widget.set_highlight(hl.iter().copied(), true);
+            *current.borrow_mut() = Some(cur);
             let m = ToGui::Update(Arc::new(IndexMap::new()));
             let _: result::Result<_, _> = ctx.to_gui.send(m);
             Continue(true)
         }
         ToGui::Highlight(path) => {
-            if let Some(cur) = &current {
-                cur.widget.set_highlight(highlight.iter().copied(), false);
-                highlight = path;
-                cur.widget.set_highlight(highlight.iter().copied(), true);
+            if let Some(cur) = &*current.borrow() {
+                let mut hl = highlight.borrow_mut();
+                cur.widget.set_highlight(hl.iter().copied(), false);
+                *hl = path;
+                cur.widget.set_highlight(hl.iter().copied(), true);
             }
             Continue(true)
         }
         ToGui::UpdateVar(name, value) => {
-            if let Some(root) = &mut current {
+            if let Some(root) = &mut *current.borrow_mut() {
                 root.update_var(&name, &value);
             }
             Continue(true)

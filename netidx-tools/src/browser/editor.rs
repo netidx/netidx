@@ -612,7 +612,6 @@ impl Editor {
     pub(super) fn new(
         from_gui: mpsc::UnboundedSender<FromGui>,
         to_gui: glib::Sender<ToGui>,
-        path: Path,
         spec: view::View,
     ) -> Editor {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -646,11 +645,10 @@ impl Editor {
                         @strong spec,
                         @strong store,
                         @strong scheduled,
-                        @strong from_gui,
-                        @strong path => move || {
+                        @strong from_gui => move || {
                         if let Some(root) = store.get_iter_first() {
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            let m = FromGui::Render(path.clone(), spec.borrow().clone());
+                            let m = FromGui::Render(spec.borrow().clone());
                             let _: result::Result<_, _> = from_gui.unbounded_send(m);
                         }
                         scheduled.set(false);
