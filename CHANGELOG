@@ -1,3 +1,9 @@
+* 0.4.0:
+  - protocol breaking changes (additions)
+  - allow publisher to unicast to specific subscribers
+  - writes return success or failure instead of silently eating errors
+  - netidx browser "views", publishable and editable custom guis
+
 * 0.3.2:
   - minor api enhancement. add update_changed, and current to publisher::Val
 
