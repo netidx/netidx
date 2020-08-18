@@ -2,6 +2,7 @@ pub use crate::protocol::publisher::v1::{Id, Value};
 use crate::{
     auth::Permissions,
     channel::Channel,
+    chars::Chars,
     config::Config,
     os::{self, Krb5Ctx, ServerCtx},
     path::Path,
@@ -20,6 +21,7 @@ use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
+    borrow::Borrow,
     boxed::Box,
     cmp::{Ord, Ordering, PartialOrd},
     collections::{hash_map::Entry, BTreeMap, BTreeSet, Bound, HashMap, HashSet},
@@ -29,6 +31,7 @@ use std::{
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     ops::{Deref, DerefMut},
+    result,
     str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
@@ -45,7 +48,7 @@ use tokio::{
 static MAX_CLIENTS: usize = 768;
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<(Id, Value)>> = Pool::new(1000);
+    static ref BATCHES: Pool<Vec<(Id, Value, SendError)>> = Pool::new(1000);
 }
 
 // a socketaddr wrapper that implements Ord so we can put clients in a
@@ -56,6 +59,12 @@ struct Addr(SocketAddr);
 impl From<SocketAddr> for Addr {
     fn from(addr: SocketAddr) -> Self {
         Addr(addr)
+    }
+}
+
+impl Borrow<SocketAddr> for Addr {
+    fn borrow(&self) -> &SocketAddr {
+        &self.0
     }
 }
 
@@ -138,6 +147,23 @@ impl Drop for ValInner {
     }
 }
 
+/// Used to signal a write error
+#[derive(Clone, Debug)]
+pub struct SendError(Arc<Mutex<Option<oneshot::Sender<Chars>>>>);
+
+impl SendError {
+    fn new() -> (Self, oneshot::Receiver<Chars>) {
+        let (tx, rx) = oneshot::channel();
+        (SendError(Arc::new(Mutex::new(Some(tx)))), rx)
+    }
+
+    pub fn send(self, msg: &str) {
+        if let Some(s) = self.0.lock().take() {
+            let _ = s.send(Chars::from(String::from(msg)));
+        }
+    }
+}
+
 /// This represents a published value. Internally it is wrapped in an
 /// Arc, so cloning it is free. When all references to a given
 /// published value have been dropped it will be unpublished.  However
@@ -180,33 +206,61 @@ impl Val {
         }
     }
 
+    /// Send `v` as an update ONLY to the specified subscriber, and do
+    /// not update `current`. You can use this to implement a simple
+    /// unicast side channel in parallel with the existing multicast
+    /// `update` mechanism.
+    ///
+    /// One example use for this function is implementing a query
+    /// response value, where the query is encoded in the name of the
+    /// value (perhaps passed via publish_default), and the full
+    /// response set is sent to each client as it subscribes.
+    pub fn update_subscriber(&self, subscriber: &SocketAddr, v: Value) {
+        let inner = self.0.locked.lock();
+        if let Some(q) = inner.subscribed.get(subscriber) {
+            q.push(ToClientMsg::Val(self.0.id, v));
+        }
+    }
+
     /// Register `tx` to receive writes. You can register multiple
     /// channels, and you can register the same channel on multiple
     /// `Val` objects. If no channels are registered to receive writes
-    /// they will be ignored.
-    pub fn writes(&self, tx: fmpsc::Sender<Pooled<Vec<(Id, Value)>>>) {
+    /// they will return an error to the subscriber.
+    ///
+    /// If a write cannot be completed the `SendError::send` method
+    /// should be called to inform the write client about the
+    /// error. In the case of multiple channels receiving the same
+    /// write notification, onlyt the first call to `SendError::send`
+    /// will be processed, subsuquent calles will be ignored.
+    ///
+    /// Dropping all references to `SendError` will inform the client
+    /// that the write was successful.
+    ///
+    /// If you no longer wish to accept writes, simply drop all
+    /// registered channels.
+    pub fn writes(&self, tx: fmpsc::Sender<Pooled<Vec<(Id, Value, SendError)>>>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut pb = publisher.0.lock();
             let e = pb
                 .on_write_chans
                 .entry(ChanWrap(tx.clone()))
                 .or_insert_with(|| (ChanId::new(), HashSet::new()));
-            let id = e.0;
             e.1.insert(self.0.id);
-            let mut gc = Vec::new();
-            let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
-            ow.retain(|(_, c)| {
-                if c.is_closed() {
-                    gc.push(ChanWrap(c.clone()));
-                    false
-                } else {
-                    true
-                }
-            });
-            ow.push((id, tx));
-            for c in gc {
-                pb.on_write_chans.remove(&c);
-            }
+            let id = e.0;
+            pb.on_write.entry(self.0.id).or_insert_with(Vec::new).push((id, tx));
+        }
+    }
+
+    /// Register `tx` to receive a message when a new client subscribes to this value.
+    pub fn subscribers(&self, tx: fmpsc::UnboundedSender<(Id, SocketAddr)>) {
+        if let Some(publisher) = self.0.publisher.upgrade() {
+            publisher
+                .0
+                .lock()
+                .on_subscribe_chans
+                .entry(self.0.id)
+                .or_insert_with(Vec::new)
+                .push(tx);
         }
     }
 
@@ -223,6 +277,10 @@ impl Val {
     /// Get a reference to the `Path` of this published value.
     pub fn path(&self) -> &Path {
         &self.0.path
+    }
+
+    pub fn subscribed(&self) -> Vec<SocketAddr> {
+        self.0.locked.lock().subscribed.keys().map(|a| a.0).collect()
     }
 }
 
@@ -288,11 +346,16 @@ struct PublisherInner {
     hc_subscribed: HashMap<BTreeSet<Addr>, Subscribed, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, ValWeak, FxBuildHasher>,
-    on_write_chans:
-        HashMap<ChanWrap<Pooled<Vec<(Id, Value)>>>, (ChanId, HashSet<Id>), FxBuildHasher>,
+    on_write_chans: HashMap<
+        ChanWrap<Pooled<Vec<(Id, Value, SendError)>>>,
+        (ChanId, HashSet<Id>),
+        FxBuildHasher,
+    >,
+    on_subscribe_chans:
+        HashMap<Id, Vec<fmpsc::UnboundedSender<(Id, SocketAddr)>>, FxBuildHasher>,
     on_write: HashMap<
         Id,
-        Vec<(ChanId, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>)>,
+        Vec<(ChanId, fmpsc::Sender<Pooled<Vec<(Id, Value, SendError)>>>)>,
         FxBuildHasher,
     >,
     resolver: ResolverWrite,
@@ -552,6 +615,7 @@ impl Publisher {
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
+            on_subscribe_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
             to_publish: HashSet::new(),
@@ -843,6 +907,11 @@ fn subscribe(
                 }
                 let m = publisher::v1::From::Subscribed(path, id, inner.current.clone());
                 con.queue_send(&m)?;
+                if let Some(chans) = t.on_subscribe_chans.get(&id) {
+                    for chan in chans {
+                        let _: result::Result<_, _> = chan.unbounded_send((id, addr));
+                    }
+                }
                 if let Some(waiters) = t.wait_clients.remove(&id) {
                     for tx in waiters {
                         let _ = tx.send(());
@@ -885,7 +954,10 @@ async fn handle_batch(
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<
         ChanId,
-        (Pooled<Vec<(Id, Value)>>, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>),
+        (
+            Pooled<Vec<(Id, Value, SendError)>>,
+            fmpsc::Sender<Pooled<Vec<(Id, Value, SendError)>>>,
+        ),
         FxBuildHasher,
     >,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -894,11 +966,13 @@ async fn handle_batch(
     deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
     use crate::protocol::publisher::v1::{From, To::*};
+    let mut wait_write_err = Vec::new();
     {
         let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
         let mut pb = t_st.0.lock();
         let secrets = secrets.read();
         let mut gc = false;
+        let mut gc_on_write = Vec::new();
         for msg in msgs {
             match msg {
                 Subscribe { path, resolver, timestamp, permissions, mut token } => {
@@ -963,33 +1037,88 @@ async fn handle_batch(
                     unsubscribe(&mut *pb, addr, id);
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
-                Write(id, v) => {
-                    if let Some(cl) = pb.clients.get(&addr) {
-                        if let Some(perms) = cl.subscribed.get(&id) {
+                Write(id, v) => match pb.clients.get(&addr) {
+                    None => {
+                        let m = Chars::from("cannot write to unsubscribed value");
+                        con.queue_send(&From::WriteError(m))?;
+                    }
+                    Some(cl) => match cl.subscribed.get(&id) {
+                        None => {
+                            let m = Chars::from("cannot write to unsubscribed value");
+                            con.queue_send(&From::WriteError(m))?;
+                        }
+                        Some(perms) => {
                             if perms.contains(Permissions::WRITE) {
-                                if let Some(ow) = pb.on_write.get(&id) {
-                                    for (cid, ch) in ow.iter() {
-                                        write_batches
-                                            .entry(*cid)
-                                            .or_insert_with(|| {
-                                                (BATCHES.take(), ch.clone())
-                                            })
-                                            .0
-                                            .push((id, v.clone()))
+                                match pb.on_write.get_mut(&id) {
+                                    None => {
+                                        let m = Chars::from(
+                                            "writes not accepted by this value",
+                                        );
+                                        con.queue_send(&From::WriteError(m))?;
+                                    }
+                                    Some(ow) => {
+                                        ow.retain(|(_, c)| {
+                                            if c.is_closed() {
+                                                gc_on_write.push(ChanWrap(c.clone()));
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        if ow.len() == 0 {
+                                            let m = Chars::from(
+                                                "writes not accepted by this value",
+                                            );
+                                            con.queue_send(&From::WriteError(m))?;
+                                        } else {
+                                            let (send_err, wait_err) = SendError::new();
+                                            wait_write_err.push(wait_err);
+                                            for (cid, ch) in ow.iter() {
+                                                write_batches
+                                                    .entry(*cid)
+                                                    .or_insert_with(|| {
+                                                        (BATCHES.take(), ch.clone())
+                                                    })
+                                                    .0
+                                                    .push((
+                                                        id,
+                                                        v.clone(),
+                                                        send_err.clone(),
+                                                    ))
+                                            }
+                                        }
                                     }
                                 }
+                            } else {
+                                let m = Chars::from("write permission denied");
+                                con.queue_send(&From::WriteError(m))?;
                             }
                         }
-                    }
-                }
+                    },
+                },
             }
         }
         if gc {
             pb.hc_subscribed.retain(|_, v| Arc::get_mut(v).is_none());
         }
+        for c in gc_on_write {
+            pb.on_write_chans.remove(&c);
+        }
     }
     for (_, (batch, mut sender)) in write_batches.drain() {
         let _ = sender.send(batch).await;
+    }
+    for rx in wait_write_err {
+        match rx.await {
+            Ok(err) => {
+                con.queue_send(&From::WriteError(err))?;
+            }
+            Err(_) => {
+                // dropping the senderror by all receivers indicates
+                // that the write was successful
+                con.queue_send(&From::WriteSuccess)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1065,7 +1194,10 @@ async fn client_loop(
     let mut batch: Vec<publisher::v1::To> = Vec::new();
     let mut write_batches: HashMap<
         ChanId,
-        (Pooled<Vec<(Id, Value)>>, fmpsc::Sender<Pooled<Vec<(Id, Value)>>>),
+        (
+            Pooled<Vec<(Id, Value, SendError)>>,
+            fmpsc::Sender<Pooled<Vec<(Id, Value, SendError)>>>,
+        ),
         FxBuildHasher,
     > = HashMap::with_hasher(FxBuildHasher::default());
     let mut flushes = flushes.fuse();

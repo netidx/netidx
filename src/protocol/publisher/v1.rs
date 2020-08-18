@@ -216,6 +216,8 @@ pub enum Value {
     False,
     /// Empty value
     Null,
+    /// An explicit error
+    Error(Chars),
 }
 
 impl fmt::Display for Value {
@@ -232,6 +234,7 @@ impl fmt::Display for Value {
             Value::True => write!(f, "True"),
             Value::False => write!(f, "False"),
             Value::Null => write!(f, "Null"),
+            Value::Error(v) => write!(f, "Error {}", v),
         }
     }
 }
@@ -252,6 +255,7 @@ impl Pack for Value {
             Value::String(c) => <Chars as Pack>::len(c),
             Value::Bytes(b) => <Bytes as Pack>::len(b),
             Value::True | Value::False | Value::Null => 0,
+            Value::Error(c) => <Chars as Pack>::len(c)
         }
     }
 
@@ -308,6 +312,10 @@ impl Pack for Value {
             Value::True => Ok(buf.put_u8(12)),
             Value::False => Ok(buf.put_u8(13)),
             Value::Null => Ok(buf.put_u8(14)),
+            Value::Error(e) => {
+                buf.put_u8(15);
+                <Chars as Pack>::encode(e, buf)
+            },
         }
     }
 
@@ -328,6 +336,7 @@ impl Pack for Value {
             12 => Ok(Value::True),
             13 => Ok(Value::False),
             14 => Ok(Value::Null),
+            15 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -355,6 +364,10 @@ pub enum From {
     /// Indicates that the publisher is idle, but still
     /// functioning correctly.
     Heartbeat,
+    /// Indicates the requested write operation was successful
+    WriteSuccess,
+    /// Indicates the requested write operation failed
+    WriteError(Chars),
 }
 
 impl Pack for From {
@@ -368,6 +381,8 @@ impl Pack for From {
             }
             From::Update(id, v) => Id::len(id) + Value::len(v),
             From::Heartbeat => 0,
+            From::WriteSuccess => 0,
+            From::WriteError(e) => <Chars as Pack>::len(e),
         }
     }
 
@@ -397,6 +412,11 @@ impl Pack for From {
                 Value::encode(v, buf)
             }
             From::Heartbeat => Ok(buf.put_u8(5)),
+            From::WriteSuccess => Ok(buf.put_u8(6)),
+            From::WriteError(e) => {
+                buf.put_u8(7);
+                <Chars as Pack>::encode(e, buf)
+            }
         }
     }
 
@@ -417,6 +437,8 @@ impl Pack for From {
                 Ok(From::Update(id, value))
             }
             5 => Ok(From::Heartbeat),
+            6 => Ok(From::WriteSuccess),
+            7 => Ok(From::WriteError(<Chars as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }

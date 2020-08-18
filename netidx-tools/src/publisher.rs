@@ -35,6 +35,7 @@ pub enum Typ {
     Bool,
     String,
     Bytes,
+    Error,
 }
 
 impl Typ {
@@ -53,6 +54,7 @@ impl Typ {
             Typ::Bool => "bool",
             Typ::String => "string",
             Typ::Bytes => "bytes",
+            Typ::Error => "error",
         }
     }
 }
@@ -75,6 +77,7 @@ impl FromStr for Typ {
             "bool" => Ok(Typ::Bool),
             "string" => Ok(Typ::String),
             "bytes" => Ok(Typ::Bytes),
+            "error" => Ok(Typ::Error),
             s => Err(anyhow!(
                 "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes", s))
         }
@@ -98,6 +101,7 @@ pub(crate) enum SValue {
     True,
     False,
     Null,
+    Error(String),
 }
 
 impl SValue {
@@ -118,6 +122,7 @@ impl SValue {
             SValue::True => Some(Typ::Bool),
             SValue::False => Some(Typ::Bool),
             SValue::Null => None,
+            SValue::Error(_) => Some(Typ::Error),
         }
     }
 }
@@ -140,6 +145,7 @@ impl From<Value> for SValue {
             Value::True => SValue::True,
             Value::False => SValue::False,
             Value::Null => SValue::Null,
+            Value::Error(e) => SValue::Error(String::from(e.as_ref())),
         }
     }
 }
@@ -162,6 +168,7 @@ impl Into<Value> for SValue {
             SValue::True => Value::True,
             SValue::False => Value::False,
             SValue::Null => Value::Null,
+            SValue::Error(e) => Value::Error(Chars::from(e))
         }
     }
 }
@@ -186,6 +193,7 @@ pub(crate) fn parse_val(typ: Typ, s: &str) -> Result<SValue> {
             },
             Typ::String => SValue::String(String::from(s)),
             Typ::Bytes => SValue::Bytes(base64::decode(s)?),
+            Typ::Error => SValue::Error(String::from(s)),
         },
     })
 }

@@ -63,6 +63,7 @@ enum ToGui {
 enum FromGui {
     Navigate(Path),
     Render(protocol_view::View),
+//    SaveTo(Path, protocol_view::View),
     Updated,
     Terminate,
 }
