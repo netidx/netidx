@@ -91,7 +91,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Value)>>>, last: bool },
-    Write(Id, Value, oneshot::Sender<Result<()>>),
+    Write(Id, Value, oneshot::Sender<Value>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -165,11 +165,10 @@ impl Val {
     /// The publisher will receive multiple writes in the order you
     /// call `write`.
     ///
-    /// The publisher will respond to the write indicating if it
-    /// success, or failure. The result will be sent to the receiver
-    /// returned by write. If you don't care about the result you can
-    /// just drop the Receiver.
-    pub fn write(&self, v: Value) -> oneshot::Receiver<Result<()>> {
+    /// The publisher will respond to the write with a single value
+    /// reply indicating succes or failure, and any additional
+    /// necessary information.
+    pub fn write(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, tx));
         rx
@@ -976,7 +975,7 @@ async fn process_batch(
     mut batch: Pooled<Vec<From>>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
-    pending_writes: &mut VecDeque<oneshot::Sender<Result<()>>>,
+    pending_writes: &mut HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher>,
     con: &mut WriteChannel<ClientCtx>,
     subscriber: &Subscriber,
     addr: SocketAddr,
@@ -995,14 +994,16 @@ async fn process_batch(
                 None => con.queue_send(&To::Unsubscribe(i))?,
             },
             From::Heartbeat => (),
-            From::WriteSuccess => {
-                if let Some(tx) = pending_writes.pop_front() {
-                    let _ = tx.send(Ok(()));
+            From::WriteResult(id, v) => {
+                let mut empty = false;
+                if let Some(q) = pending_writes.get_mut(&id) {
+                    if let Some(tx) = q.pop_front() {
+                        let _ = tx.send(v);
+                    }
+                    empty = q.is_empty();
                 }
-            }
-            From::WriteError(e) => {
-                if let Some(tx) = pending_writes.pop_front() {
-                    let _ = tx.send(Err(anyhow!("{}", e)));
+                if empty {
+                    pending_writes.remove(&id);
                 }
             }
             From::NoSuchValue(path) => {
@@ -1112,7 +1113,8 @@ async fn connection(
     hello_publisher(&mut con, &auth, &target_spn).await?;
     let (read_con, mut write_con) = con.split();
     let (tx_stop, rx_stop) = oneshot::channel();
-    let mut pending_writes: VecDeque<oneshot::Sender<Result<()>>> = VecDeque::new();
+    let mut pending_writes: HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher> =
+        HashMap::with_hasher(FxBuildHasher::default());
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
     let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Value)>>>, ChanId> =
@@ -1201,7 +1203,7 @@ async fn connection(
                 }
                 Some(BatchItem::InBatch(ToCon::Write(id, v, tx))) => {
                     try_cf!(write_con.queue_send(&To::Write(id, v)));
-                    pending_writes.push_back(tx);
+                    pending_writes.entry(id).or_insert_with(VecDeque::new).push_back(tx);
                 }
                 Some(BatchItem::InBatch(ToCon::Flush(tx))) => {
                     let _ = tx.send(());
