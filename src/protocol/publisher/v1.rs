@@ -4,7 +4,7 @@ use crate::{
     path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{mem, net::SocketAddr, result, fmt};
+use std::{fmt, mem, net::SocketAddr, result};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -123,7 +123,7 @@ pub enum To {
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
     /// Send a write to the specified value.
-    Write(Id, Value),
+    Write(Id, Value, bool),
 }
 
 impl Pack for To {
@@ -137,7 +137,9 @@ impl Pack for To {
                     + <Bytes as Pack>::len(token)
             }
             To::Unsubscribe(id) => Id::len(id),
-            To::Write(id, v) => Id::len(id) + Value::len(v),
+            To::Write(id, v, reply) => {
+                Id::len(id) + Value::len(v) + <bool as Pack>::len(reply)
+            }
         }
     }
 
@@ -155,9 +157,10 @@ impl Pack for To {
                 buf.put_u8(1);
                 Id::encode(id, buf)
             }
-            To::Write(id, v) => {
+            To::Write(id, v, reply) => {
                 buf.put_u8(2);
                 Id::encode(id, buf)?;
+                <bool as Pack>::encode(reply, buf)?;
                 Value::encode(v, buf)
             }
         }
@@ -177,7 +180,8 @@ impl Pack for To {
             2 => {
                 let id = Id::decode(buf)?;
                 let v = Value::decode(buf)?;
-                Ok(To::Write(id, v))
+                let reply = <bool as Pack>::decode(buf)?;
+                Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),
         }
@@ -259,7 +263,7 @@ impl Pack for Value {
             Value::Bytes(b) => <Bytes as Pack>::len(b),
             Value::True | Value::False | Value::Null => 0,
             Value::Ok => 0,
-            Value::Error(c) => <Chars as Pack>::len(c)
+            Value::Error(c) => <Chars as Pack>::len(c),
         }
     }
 
@@ -320,7 +324,7 @@ impl Pack for Value {
             Value::Error(e) => {
                 buf.put_u8(16);
                 <Chars as Pack>::encode(e, buf)
-            },
+            }
         }
     }
 
@@ -444,7 +448,7 @@ impl Pack for From {
                 let id = Id::decode(buf)?;
                 let value = Value::decode(buf)?;
                 Ok(From::WriteResult(id, value))
-            },
+            }
             _ => Err(PackError::UnknownTag),
         }
     }

@@ -91,7 +91,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Value)>>>, last: bool },
-    Write(Id, Value, oneshot::Sender<Value>),
+    Write(Id, Value, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -165,12 +165,24 @@ impl Val {
     /// The publisher will receive multiple writes in the order you
     /// call `write`.
     ///
-    /// The publisher will respond to the write with a single value
-    /// reply indicating succes or failure, and any additional
-    /// necessary information.
-    pub fn write(&self, v: Value) -> oneshot::Receiver<Value> {
+    /// The publisher will not reply to your write, except that it may
+    /// update values you are subscribed to, or trigger some other
+    /// observable action.
+    pub fn write(&self, v: Value) {
+        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, None));
+    }
+
+    /// This does the same thing as `write` except that it requires
+    /// the publisher send a reply indicating the outcome of the
+    /// request. The reply can be read from the returned oneshot
+    /// channel.
+    ///
+    /// Note that compared to `write` this function has higher
+    /// overhead, avoid it in situations where high message volumes
+    /// are required.
+    pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, tx));
+        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, Some(tx)));
         rx
     }
 
@@ -1202,8 +1214,13 @@ async fn connection(
                     }
                 }
                 Some(BatchItem::InBatch(ToCon::Write(id, v, tx))) => {
-                    try_cf!(write_con.queue_send(&To::Write(id, v)));
-                    pending_writes.entry(id).or_insert_with(VecDeque::new).push_back(tx);
+                    try_cf!(write_con.queue_send(&To::Write(id, v, tx.is_some())));
+                    if let Some(tx) = tx {
+                        pending_writes
+                            .entry(id)
+                            .or_insert_with(VecDeque::new)
+                            .push_back(tx);
+                    }
                 }
                 Some(BatchItem::InBatch(ToCon::Flush(tx))) => {
                     let _ = tx.send(());

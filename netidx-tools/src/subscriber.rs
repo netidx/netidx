@@ -99,6 +99,7 @@ impl<'a> Out<'a> {
             SValue::True => write!(&mut w, "true"),
             SValue::False => write!(&mut w, "false"),
             SValue::Null => write!(&mut w, "null"),
+            SValue::Ok => write!(&mut w, "ok"),
             SValue::Error(v) => write!(&mut w, "error {}", v),
         }
         .unwrap(); // this can't fail

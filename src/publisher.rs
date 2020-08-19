@@ -52,7 +52,7 @@ pub struct WriteRequest {
     pub id: Id,
     pub addr: SocketAddr,
     pub value: Value,
-    pub send_result: SendResult,
+    pub send_result: Option<SendResult>,
 }
 
 lazy_static! {
@@ -235,11 +235,13 @@ impl Val {
     /// `Val` objects. If no channels are registered to receive writes
     /// they will return an error to the subscriber.
     ///
-    /// The `send_result` struct member of `WriteRequest` can be used
-    /// to send a result back to the write client. If the
-    /// `WriteRequest` is dropped without any reply being sent then
-    /// `Value::Ok` will be sent. Only one result may be sent, and
-    /// subsuquent results will be ignored.
+    /// If the `send_result` struct member of `WriteRequest` is set
+    /// then the client has requested that an explicit reply be made
+    /// to the write. In that case the included `SendReply` object can
+    /// be used to send the reply back to the write client. If the
+    /// `SendReply` object is dropped without any reply being sent
+    /// then `Value::Ok` will be sent. `SendReply::send` may only be
+    /// called once, further calls will be silently ignored.
     ///
     /// If you no longer wish to accept writes, simply drop all
     /// registered channels.
@@ -252,7 +254,20 @@ impl Val {
                 .or_insert_with(|| (ChanId::new(), HashSet::new()));
             e.1.insert(self.0.id);
             let id = e.0;
-            pb.on_write.entry(self.0.id).or_insert_with(Vec::new).push((id, tx));
+            let mut gc = Vec::new();
+            let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
+            ow.retain(|(_, c)| {
+                if c.is_closed() {
+                    gc.push(ChanWrap(c.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            ow.push((id, tx));
+            for c in gc {
+                pb.on_write_chans.remove(&c);
+            }
         }
     }
 
@@ -969,9 +984,12 @@ async fn handle_batch(
 ) -> Result<()> {
     use crate::protocol::publisher::v1::{From, To::*};
     let mut wait_write_res = Vec::new();
-    fn qwe(con: &mut Channel<ServerCtx>, id: Id, m: &'static str) -> Result<()> {
-        let m = Value::Error(Chars::from(m));
-        Ok(con.queue_send(&From::WriteResult(id, m))?)
+    fn qwe(con: &mut Channel<ServerCtx>, id: Id, r: bool, m: &'static str) -> Result<()> {
+        if r {
+            let m = Value::Error(Chars::from(m));
+            con.queue_send(&From::WriteResult(id, m))?
+        }
+        Ok(())
     }
     {
         let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
@@ -1043,43 +1061,48 @@ async fn handle_batch(
                     unsubscribe(&mut *pb, addr, id);
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
-                Write(id, v) => match pb.clients.get(&addr) {
-                    None => qwe(con, id, "cannot write to unsubscribed value")?,
+                Write(id, v, r) => match pb.clients.get(&addr) {
+                    None => qwe(con, id, r, "cannot write to unsubscribed value")?,
                     Some(cl) => match cl.subscribed.get(&id) {
-                        None => qwe(con, id, "cannot write to unsubscribed value")?,
+                        None => qwe(con, id, r, "cannot write to unsubscribed value")?,
                         Some(perms) => match perms.contains(Permissions::WRITE) {
-                            false => qwe(con, id, "write permission denied")?,
+                            false => qwe(con, id, r, "write permission denied")?,
                             true => match pb.on_write.get_mut(&id) {
-                                None => qwe(con, id, "writes not accepted")?,
+                                None => qwe(con, id, r, "writes not accepted")?,
                                 Some(ow) => {
-                                    ow.retain(|(_, c)| {
-                                        if c.is_closed() {
-                                            gc_on_write.push(ChanWrap(c.clone()));
-                                            false
-                                        } else {
-                                            true
-                                        }
-                                    });
-                                    if ow.len() == 0 {
-                                        qwe(con, id, "writes not accepted")?
+                                    let send_result = if !r {
+                                        None
                                     } else {
+                                        ow.retain(|(_, c)| {
+                                            if c.is_closed() {
+                                                gc_on_write.push(ChanWrap(c.clone()));
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        if ow.len() == 0 {
+                                            qwe(con, id, r, "writes not accepted")?;
+                                            continue;
+                                        }
                                         let (send_result, wait) = SendResult::new();
                                         wait_write_res.push((id, wait));
-                                        for (cid, ch) in ow.iter() {
-                                            let req = WriteRequest {
-                                                id,
-                                                addr: *addr,
-                                                value: v.clone(),
-                                                send_result: send_result.clone(),
-                                            };
-                                            write_batches
-                                                .entry(*cid)
-                                                .or_insert_with(|| {
-                                                    (BATCHES.take(), ch.clone())
-                                                })
-                                                .0
-                                                .push(req)
-                                        }
+                                        Some(send_result)
+                                    };
+                                    for (cid, ch) in ow.iter() {
+                                        let req = WriteRequest {
+                                            id,
+                                            addr: *addr,
+                                            value: v.clone(),
+                                            send_result: send_result.clone(),
+                                        };
+                                        write_batches
+                                            .entry(*cid)
+                                            .or_insert_with(|| {
+                                                (BATCHES.take(), ch.clone())
+                                            })
+                                            .0
+                                            .push(req)
                                     }
                                 }
                             },
