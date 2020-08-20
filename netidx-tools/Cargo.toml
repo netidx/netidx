@@ -20,12 +20,6 @@ opt-level = 3
 lto = true
 debug = false
 
-[profile.dev]
-codegen-units = 1
-opt-level = "z"
-lto = true
-debug = false
-
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 
