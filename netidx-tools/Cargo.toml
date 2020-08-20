@@ -20,6 +20,9 @@ opt-level = 3
 lto = true
 debug = false
 
+[profile.dev]
+debug = false
+
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 

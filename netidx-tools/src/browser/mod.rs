@@ -867,6 +867,7 @@ fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
                 *mainw.borrow_mut() = Some(W::Netidx(e));
             }
         }
+        root.show_all();
     }));
     cb.set_active_id(Some("Netidx"));
     let res = match d.run() {
