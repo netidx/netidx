@@ -33,11 +33,12 @@ use std::{
     boxed,
     cell::{Cell, RefCell},
     collections::HashMap,
-    mem,
+    fmt, mem,
     rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},
     thread,
+    time::Duration,
 };
 use tokio::{runtime::Runtime, task};
 
@@ -56,6 +57,15 @@ enum ViewLoc {
     Netidx(Path),
 }
 
+impl fmt::Display for ViewLoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ViewLoc::File(s) => write!(f, "file:{}", s),
+            ViewLoc::Netidx(s) => write!(f, "netidx:{}", s),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ToGui {
     View {
@@ -70,7 +80,7 @@ enum ToGui {
     Terminate,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum FromGui {
     Navigate(ViewLoc),
     Render(protocol_view::View),
@@ -433,12 +443,13 @@ fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
 
 fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-    let ask_saved = Rc::new(move || {
+    let ask_saved = Rc::new(clone!(@weak root => @default-return true, move || {
         if !saved.get() {
-            let m = "Unsaved custom view will be lost. continue?";
-            ask_modal(&root, m)
+            ask_modal(&root, "Unsaved custom view will be lost. continue?")
+        } else {
+            true
         }
-    });
+    }));
     match loc {
         ViewLoc::Netidx(path) => {
             for target in Path::dirnames(&path) {
@@ -476,27 +487,29 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Bo
             root.add(&rl);
             rl.set_margin_start(10);
             rl.set_markup(r#"<a href=""> / </a>"#);
-            rl.connect_activate(clone!(@strong ctx, @strong ask_saved => move |_, _| {
-                if !ask_saved() {
-                    return Inhibit(false)
-                }
-                let m = FromGui::Navigate(ViewLoc::Netidx(Path::from("/")));
-                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                Inhibit(false)
-            }));
+            rl.connect_activate_link(
+                clone!(@strong ctx, @strong ask_saved => move |_, _| {
+                    if !ask_saved() {
+                        return Inhibit(false)
+                    }
+                    let m = FromGui::Navigate(ViewLoc::Netidx(Path::from("/")));
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                    Inhibit(false)
+                }),
+            );
             let sep = gtk::Label::new(Some(" > "));
             root.add(&sep);
             let fl = gtk::Label::new(None);
             root.add(&fl);
             fl.set_margin_start(10);
             fl.set_markup(&format!(r#"<a href="">file:{}</a>"#, name));
-            fl.connect_activate(
+            fl.connect_activate_link(
                 clone!(@strong ctx, @strong ask_saved, @strong name => move |_, _| {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
                     let m = FromGui::Navigate(ViewLoc::File(name.clone()));
-                    let _: result::Result<_, _> = ctx::from_gui.unbounded_send(m);
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                     Inhibit(false)
                 }),
             );
@@ -660,7 +673,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         Err(e) => warn!("failed to raeify view {}", e),
                         Ok(v) => {
                             let m = ToGui::View {
-                                path: None,
+                                loc: None,
                                 original: view,
                                 raeified: v,
                                 generated: false,
@@ -682,7 +695,8 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                     Err(e) => { let _ = fin.send(Err(Error::from(e))); }
                                     Ok(v) => {
                                         let _ = fin.send(match v {
-                                            Value::Error(s) => Err(anyhow!(&*s)),
+                                            Value::Error(s) =>
+                                                Err(anyhow!(String::from(&*s))),
                                             _ => Ok(())
                                         });
                                     }
@@ -691,7 +705,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         }
                     }
                 },
-                Some(FromGui::Save(ViewLoc::Path(_file), _view, _fin)) => todo!(),
+                Some(FromGui::Save(ViewLoc::File(_file), _view, _fin)) => todo!(),
                 Some(FromGui::Navigate(ViewLoc::Netidx(base_path))) => {
                     match resolver.table(base_path.clone()).await {
                         Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
@@ -702,7 +716,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View {
-                                path: Some(base_path.clone()),
+                                loc: Some(ViewLoc::Netidx(base_path.clone())),
                                 original: default_view(base_path.clone()),
                                 raeified: raeified_default,
                                 generated: true,
@@ -742,7 +756,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                         Err(e) => warn!("failed to raeify view {}", e),
                                         Ok(v) => {
                                             let m = ToGui::View {
-                                                path: Some(ViewLoc::Netidx(path.clone())),
+                                                loc: Some(ViewLoc::Netidx(path.clone())),
                                                 original: view,
                                                 raeified: v,
                                                 generated: false
@@ -891,8 +905,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::View { path, original, raeified, generated } => {
-            match path {
+        ToGui::View { loc, original, raeified, generated } => {
+            match loc {
                 None => {
                     saved.set(false);
                     save_button.set_sensitive(true);
@@ -901,7 +915,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     saved.set(true);
                     save_button.set_sensitive(false);
                     if !generated {
-                        *save_loc.borrow_mut() = loc;
+                        *save_loc.borrow_mut() = Some(loc.clone());
                     }
                     *current_loc.borrow_mut() = loc;
                     if design_mode.get_active() {
@@ -919,7 +933,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            window.set_title(&format!("Netidx Browser {}", &*current_path.borrow()));
+            window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();
             let hl = highlight.borrow();
@@ -961,7 +975,9 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         let (tx_init, rx_init) = smpsc::channel();
         // navigate to the initial location
-        tx_from_gui.unbounded_send(FromGui::Navigate(path.clone())).unwrap();
+        tx_from_gui
+            .unbounded_send(FromGui::Navigate(ViewLoc::Netidx(path.clone())))
+            .unwrap();
         tx_tokio
             .unbounded_send(StartNetidx {
                 cfg: cfg.clone(),

@@ -1,4 +1,4 @@
-use super::{FromGui, WidgetCtx};
+use super::{FromGui, WidgetCtx, ViewLoc};
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
@@ -214,7 +214,7 @@ impl Table {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
                     let path = t.0.base_path.append(row_name);
-                    let m = FromGui::Navigate(path);
+                    let m = FromGui::Navigate(ViewLoc::Netidx(path));
                     let _: result::Result<_, _> = t.0.ctx.from_gui.unbounded_send(m);
                 }
             }
