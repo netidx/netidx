@@ -820,7 +820,7 @@ fn setup_css(screen: &gdk::Screen) {
 fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
     enum W {
         File(gtk::FileChooserWidget),
-        Netidx(gtk::Entry),
+        Netidx(gtk::Box),
     }
     let d = gtk::Dialog::with_buttons(
         Some("Choose Save Location"),
@@ -858,13 +858,17 @@ fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
                 *mainw.borrow_mut() = Some(W::File(w));
             }
             Some("Netidx") | _ => {
+                let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                let l = gtk::Label::new(Some("Netidx Path:"));
                 let e = gtk::Entry::new();
-                root.add(&e);
+                b.pack_start(&l, true, true, 5);
+                b.pack_start(&e, true, true, 5);
+                root.add(&b);
                 e.connect_changed(clone!(@strong loc => move |e| {
                     let p = Path::from(String::from(e.get_text()));
                     *loc.borrow_mut() = Some(ViewLoc::Netidx(p));
                 }));
-                *mainw.borrow_mut() = Some(W::Netidx(e));
+                *mainw.borrow_mut() = Some(W::Netidx(b));
             }
         }
         root.show_all();
@@ -886,8 +890,8 @@ pub fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
         gtk::ButtonsType::Ok,
         msg,
     );
-    d.close();
     d.run();
+    d.close();
 }
 
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
