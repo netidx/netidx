@@ -977,10 +977,17 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     let w = window.clone();
                     let save_button = save_button.clone();
                     let saved = saved.clone();
+                    let save_loc = save_loc.clone();
                     async move {
                         match rx.await {
-                            Err(e) => err_modal(&w, &format!("error saving {}", e)),
-                            Ok(Err(e)) => err_modal(&w, &format!("error saving {}", e)),
+                            Err(e) => {
+                                err_modal(&w, &format!("error saving {}", e));
+                                *save_loc.borrow_mut() = None;
+                            },
+                            Ok(Err(e)) => {
+                                err_modal(&w, &format!("error saving {}", e));
+                                *save_loc.borrow_mut() = None;
+                            },
                             Ok(Ok(())) => {
                                 saved.set(true);
                                 save_button.set_sensitive(false);
@@ -1034,6 +1041,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     save_button.set_sensitive(false);
                     if !generated {
                         *save_loc.borrow_mut() = Some(loc.clone());
+                    } else {
+                        *save_loc.borrow_mut() = None;
                     }
                     *current_loc.borrow_mut() = loc;
                     if design_mode.get_active() {
