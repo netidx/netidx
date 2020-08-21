@@ -968,11 +968,11 @@ fn save_view(
             async move {
                 match rx.await {
                     Err(e) => {
-                        err_modal(&w, &format!("error saving {}", e));
+                        ctx.to_gui.send(ToGui::ShowError(format!("error saving: {}", e)));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(Err(e)) => {
-                        err_modal(&w, &format!("error saving {}", e));
+                        ctx.to_gui.send(ToGui::ShowError(format!("error saving: {}", e)));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(Ok(())) => {
@@ -1017,6 +1017,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     main_menu.append(Some("Go"), Some("app.go"));
     main_menu.append(Some("Save View As"), Some("app.save_as"));
     main_menu.append(Some("Raw View"), Some("app.raw_view"));
+    main_menu.append(Some("New Window"), Some("app.new_window"));
     prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
@@ -1118,6 +1119,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
         }),
     );
+    let new_window_act = gio::SimpleAction::new("new_window", None);
+    app.add_action(&new_window_act);
+    new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
