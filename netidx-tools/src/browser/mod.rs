@@ -55,7 +55,7 @@ enum WidgetPath {
     Grid(usize, usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ViewLoc {
     File(PathBuf),
     Netidx(Path),
@@ -978,9 +978,13 @@ fn save_view(
                     Ok(Ok(())) => {
                         saved.set(true);
                         save_button.set_sensitive(false);
-                        *save_loc.borrow_mut() = Some(loc.clone());
-                        let _: result::Result<_, _> =
-                            ctx.from_gui.unbounded_send(FromGui::Navigate(loc.clone()));
+                        let mut sl = save_loc.borrow_mut();
+                        if sl.as_ref() != Some(&loc) {
+                            *save_loc.borrow_mut() = Some(loc.clone());
+                            let _: result::Result<_, _> = ctx
+                                .from_gui
+                                .unbounded_send(FromGui::Navigate(loc.clone()));
+                        }
                     }
                 }
             }
@@ -1109,7 +1113,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
     app.add_action(&raw_view_act);
     raw_view_act.connect_activate(
-        clone!(@strong ctx, @strong current_loc => move |a, _| {            
+        clone!(@strong ctx, @strong current_loc => move |a, _| {
             if let Some(v) = a.get_state() {
                 let new_v = !v.get::<bool>().expect("invalid state");
                 ctx.raw_view.store(new_v, Ordering::Relaxed);
