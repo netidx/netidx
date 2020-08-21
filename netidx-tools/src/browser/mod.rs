@@ -924,7 +924,7 @@ fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
     res
 }
 
-pub fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
+fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
     let d = gtk::MessageDialog::new(
         Some(&toplevel(w)),
         gtk::DialogFlags::MODAL,
@@ -949,11 +949,15 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let save_img =
         gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
     let save_button = gtk::ToolButton::new(Some(&save_img), None);
+    let prefs_img =
+        gtk::Image::from_icon_name(Some("open-menu"), gtk::IconSize::SmallToolbar);
+    let prefs_button = gtk::ToolButton::new(Some(&prefs_img), None);
     save_button.set_sensitive(false);
     design_mode.set_image(Some(&design_img));
     headerbar.set_show_close_button(true);
     headerbar.pack_start(&design_mode);
     headerbar.pack_start(&save_button);
+    headerbar.pack_end(&prefs_button);
     window.set_titlebar(Some(&headerbar));
     window.set_title("Netidx browser");
     window.set_default_size(800, 600);
