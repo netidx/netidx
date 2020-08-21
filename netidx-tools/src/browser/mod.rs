@@ -37,7 +37,10 @@ use std::{
     path::PathBuf,
     rc::Rc,
     result,
-    sync::{mpsc as smpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc as smpsc, Arc,
+    },
     thread,
     time::Duration,
 };
@@ -99,6 +102,7 @@ struct WidgetCtx {
     state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
     to_gui: glib::Sender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
+    raw_view: Arc<AtomicBool>,
 }
 
 fn call_gluon_function(vm: &RootedThread, f: &str, v: Value) -> Option<Value> {
@@ -625,6 +629,7 @@ struct StartNetidx {
     from_gui: mpsc::UnboundedReceiver<FromGui>,
     to_gui: glib::Sender<ToGui>,
     to_init: smpsc::Sender<(Subscriber, ResolverRead)>,
+    raw_view: Arc<AtomicBool>,
 }
 
 async fn netidx_main(mut ctx: StartNetidx) {
@@ -736,13 +741,15 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 generated: true,
                             };
                             break_err!(ctx.to_gui.send(m));
-                            let s = subscriber
-                                .durable_subscribe(base_path.append(".view"));
-                            let (tx, rx) = mpsc::channel(2);
-                            s.updates(true, tx);
-                            view_path = Some(base_path.clone());
-                            rx_view = Some(rx);
-                            _dv_view = Some(s);
+                            if !ctx.raw_view.load(Ordering::Relaxed) {
+                                let s = subscriber
+                                    .durable_subscribe(base_path.append(".view"));
+                                let (tx, rx) = mpsc::channel(2);
+                                s.updates(true, tx);
+                                view_path = Some(base_path.clone());
+                                rx_view = Some(rx);
+                                _dv_view = Some(s);
+                            }
                         }
                     }
                 },
@@ -1009,6 +1016,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let main_menu = gio::Menu::new();
     main_menu.append(Some("Go"), Some("app.go"));
     main_menu.append(Some("Save View As"), Some("app.save_as"));
+    main_menu.append(Some("Raw View"), Some("app.raw_view"));
     prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
@@ -1096,6 +1104,20 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             save_view(&ctx, &saved, &save_loc, &current_spec, &window, &save_button, true)
         }
     ));
+    let raw_view_act =
+        gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
+    app.add_action(&raw_view_act);
+    raw_view_act.connect_activate(
+        clone!(@strong ctx, @strong current_loc => move |a, _| {            
+            if let Some(v) = a.get_state() {
+                let new_v = !v.get::<bool>().expect("invalid state");
+                ctx.raw_view.store(new_v, Ordering::Relaxed);
+                a.change_state(&new_v.to_variant());
+                let m = FromGui::Navigate(current_loc.borrow().clone());
+                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+            }
+        }),
+    );
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
@@ -1192,6 +1214,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         let (tx_init, rx_init) = smpsc::channel();
+        let raw_view = Arc::new(AtomicBool::new(false));
         // navigate to the initial location
         tx_from_gui
             .unbounded_send(FromGui::Navigate(ViewLoc::Netidx(path.clone())))
@@ -1206,6 +1229,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
                 from_gui: rx_from_gui,
                 to_gui: tx_to_gui.clone(),
                 to_init: tx_init,
+                raw_view: raw_view.clone(),
             })
             .unwrap();
         let (subscriber, resolver) = rx_init.recv().unwrap();
@@ -1216,6 +1240,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
             state_updates: tx_state_updates,
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
+            raw_view,
         };
         run_gui(ctx, app, rx_to_gui);
     });
