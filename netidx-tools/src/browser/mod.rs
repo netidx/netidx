@@ -859,28 +859,24 @@ fn setup_css(screen: &gdk::Screen) {
     gtk::StyleContext::add_provider_for_screen(screen, &style, 800);
 }
 
-fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
+fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLoc> {
     enum W {
         File(gtk::FileChooserWidget),
         Netidx(gtk::Box),
     }
     let d = gtk::Dialog::with_buttons(
-        Some("Choose Save Location"),
+        Some("Choose Location"),
         Some(parent),
         gtk::DialogFlags::MODAL | gtk::DialogFlags::USE_HEADER_BAR,
-        &[("Cancel", gtk::ResponseType::Cancel), ("Save", gtk::ResponseType::Accept)],
+        &[("Cancel", gtk::ResponseType::Cancel), ("Choose", gtk::ResponseType::Accept)],
     );
     let loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let mainw: Rc<RefCell<Option<W>>> = Rc::new(RefCell::new(None));
     let root = d.get_content_area();
-    let lb = gtk::Label::new(Some("Save In: "));
     let cb = gtk::ComboBoxText::new();
-    let bx = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     cb.append(Some("Netidx"), "Netidx");
     cb.append(Some("File"), "File");
-    bx.pack_start(&lb, true, true, 5);
-    bx.pack_start(&cb, true, true, 5);
-    root.add(&bx);
+    root.add(&cb);
     root.add(&gtk::Separator::new(gtk::Orientation::Vertical));
     cb.connect_changed(clone!(@weak root, @strong loc, @strong mainw => move |cb| {
         if let Some(mw) = mainw.borrow_mut().take() {
@@ -892,7 +888,12 @@ fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
         let id = cb.get_active_id();
         match id.as_ref().map(|i| &**i) {
             Some("File") => {
-                let w = gtk::FileChooserWidget::new(gtk::FileChooserAction::Save);
+                let w = gtk::FileChooserWidget::new(
+                    if save {
+                        gtk::FileChooserAction::Save
+                    } else {
+                        gtk::FileChooserAction::Open
+                    });
                 w.connect_selection_changed(clone!(@strong loc => move |w| {
                     *loc.borrow_mut() = w.get_filename().map(|f| ViewLoc::File(f));
                 }));
@@ -936,6 +937,56 @@ fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
     d.close();
 }
 
+fn save_view(
+    ctx: &Rc<WidgetCtx>,
+    saved: &Rc<Cell<bool>>,
+    save_loc: &Rc<RefCell<Option<ViewLoc>>>,
+    current_spec: &Rc<RefCell<protocol_view::View>>,
+    window: &gtk::ApplicationWindow,
+    save_button: &gtk::ToolButton,
+    save_as: bool,
+) {
+    let do_save = |loc: ViewLoc| {
+        let (tx, rx) = oneshot::channel();
+        let spec = current_spec.borrow().clone();
+        let m = FromGui::Save(loc.clone(), spec, tx);
+        let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+        glib::MainContext::default().spawn_local({
+            let w = window.clone();
+            let save_button = save_button.clone();
+            let saved = saved.clone();
+            let save_loc = save_loc.clone();
+            async move {
+                match rx.await {
+                    Err(e) => {
+                        err_modal(&w, &format!("error saving {}", e));
+                        *save_loc.borrow_mut() = None;
+                    }
+                    Ok(Err(e)) => {
+                        err_modal(&w, &format!("error saving {}", e));
+                        *save_loc.borrow_mut() = None;
+                    }
+                    Ok(Ok(())) => {
+                        saved.set(true);
+                        save_button.set_sensitive(false);
+                    }
+                }
+            }
+        });
+    };
+    let mut sl = save_loc.borrow_mut();
+    match &*sl {
+        Some(loc) if !save_as => do_save(loc.clone()),
+        _ => match choose_location(&window, true) {
+            None => (),
+            Some(loc) => {
+                *sl = Some(loc.clone());
+                do_save(loc);
+            }
+        },
+    }
+}
+
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
@@ -955,7 +1006,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     prefs_button.set_image(Some(&menu_img));
     let main_menu = gio::Menu::new();
     main_menu.append(Some("Go"), Some("app.go"));
-    main_menu.append(Some("Open View"), Some("app.open_view"));
     main_menu.append(Some("Save View As"), Some("app.save_as"));
     main_menu.append(Some("Render Views"), Some("app.render_views"));
     prefs_button.set_use_popover(true);
@@ -1021,48 +1071,18 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         @strong save_loc,
         @strong current_spec,
         @strong ctx,
-        @weak window => move |save_button| {
-            let do_save = |loc: ViewLoc| {
-                let (tx, rx) = oneshot::channel();
-                let spec = current_spec.borrow().clone();
-                let m = FromGui::Save(loc.clone(), spec, tx);
-                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                glib::MainContext::default().spawn_local({
-                    let w = window.clone();
-                    let save_button = save_button.clone();
-                    let saved = saved.clone();
-                    let save_loc = save_loc.clone();
-                    async move {
-                        match rx.await {
-                            Err(e) => {
-                                err_modal(&w, &format!("error saving {}", e));
-                                *save_loc.borrow_mut() = None;
-                            },
-                            Ok(Err(e)) => {
-                                err_modal(&w, &format!("error saving {}", e));
-                                *save_loc.borrow_mut() = None;
-                            },
-                            Ok(Ok(())) => {
-                                saved.set(true);
-                                save_button.set_sensitive(false);
-                            }
-                        }
-                    }
-                });
-            };
-            let mut sl = save_loc.borrow_mut();
-            match &*sl {
-                Some(loc) => do_save(loc.clone()),
-                None => match choose_save_location(&window) {
-                    None => (),
-                    Some(loc) => {
-                        *sl = Some(loc.clone());
-                        do_save(loc);
-                    }
-                }
-            }
+        @weak window => move |b| {
+            save_view(&ctx, &saved, &save_loc, &current_spec, &window, b, false)
         }
     ));
+    let go_act = gio::SimpleAction::new("go", None);
+    app.add_action(&go_act);
+    go_act.connect_activate(clone!(@strong ctx, @weak window => move |_, _| {
+        if let Some(loc) = choose_location(&window, false) {
+            let _: result::Result<_, _> =
+                ctx.from_gui.unbounded_send(FromGui::Navigate(loc));
+        }
+    }));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
