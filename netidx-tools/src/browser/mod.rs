@@ -1003,6 +1003,8 @@ fn save_view(
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
+    let group = gtk::WindowGroup::new();
+    group.add_window(&window);
     let headerbar = gtk::HeaderBar::new();
     let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
@@ -1018,10 +1020,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         gtk::Image::from_icon_name(Some("open-menu"), gtk::IconSize::SmallToolbar);
     prefs_button.set_image(Some(&menu_img));
     let main_menu = gio::Menu::new();
-    main_menu.append(Some("Go"), Some("app.go"));
-    main_menu.append(Some("Save View As"), Some("app.save_as"));
-    main_menu.append(Some("Raw View"), Some("app.raw_view"));
-    main_menu.append(Some("New Window"), Some("app.new_window"));
+    main_menu.append(Some("Go"), Some("win.go"));
+    main_menu.append(Some("Save View As"), Some("win.save_as"));
+    main_menu.append(Some("Raw View"), Some("win.raw_view"));
+    main_menu.append(Some("New Window"), Some("win.new_window"));
     prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
@@ -1090,7 +1092,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
-    app.add_action(&go_act);
+    window.add_action(&go_act);
     go_act.connect_activate(clone!(@strong ctx, @weak window => move |_, _| {
         if let Some(loc) = choose_location(&window, false) {
             let _: result::Result<_, _> =
@@ -1098,7 +1100,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
     }));
     let save_as_act = gio::SimpleAction::new("save_as", None);
-    app.add_action(&save_as_act);
+    window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
         @strong saved,
         @strong save_loc,
@@ -1111,7 +1113,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     ));
     let raw_view_act =
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
-    app.add_action(&raw_view_act);
+    window.add_action(&raw_view_act);
     raw_view_act.connect_activate(
         clone!(@strong ctx, @strong current_loc => move |a, _| {
             if let Some(v) = a.get_state() {
@@ -1124,7 +1126,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }),
     );
     let new_window_act = gio::SimpleAction::new("new_window", None);
-    app.add_action(&new_window_act);
+    window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
@@ -1211,8 +1213,11 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
 }
 
 pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
-    let application = Application::new(Some("org.netidx.browser"), Default::default())
-        .expect("failed to initialize GTK application");
+    let application = Application::new(
+        Some("org.netidx.browser"),
+        gio::ApplicationFlags::NON_UNIQUE | Default::default(),
+    )
+    .expect("failed to initialize GTK application");
     let subscriber = Arc::new(OnceCell::new());
     let (tx_tokio, rx_tokio) = mpsc::unbounded();
     run_tokio(rx_tokio);
