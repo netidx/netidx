@@ -900,7 +900,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                 root.add(&w);
                 *mainw.borrow_mut() = Some(W::File(w));
             }
-            Some("Netidx") | _ => {
+            Some("Netidx") | None => {
                 let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
                 let l = gtk::Label::new(Some("Netidx Path:"));
                 let e = gtk::Entry::new();
@@ -913,6 +913,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                 }));
                 *mainw.borrow_mut() = Some(W::Netidx(b));
             }
+            Some(_) => unreachable!(),
         }
         root.show_all();
     }));
@@ -941,6 +942,7 @@ fn save_view(
     ctx: &Rc<WidgetCtx>,
     saved: &Rc<Cell<bool>>,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
+    current_loc: &Rc<RefCell<ViewLoc>>,
     current_spec: &Rc<RefCell<protocol_view::View>>,
     window: &gtk::ApplicationWindow,
     save_button: &gtk::ToolButton,
@@ -956,6 +958,7 @@ fn save_view(
             let save_button = save_button.clone();
             let saved = saved.clone();
             let save_loc = save_loc.clone();
+            let current_loc = current_loc.clone();
             async move {
                 match rx.await {
                     Err(e) => {
@@ -969,6 +972,8 @@ fn save_view(
                     Ok(Ok(())) => {
                         saved.set(true);
                         save_button.set_sensitive(false);
+                        *save_loc.borrow_mut() = Some(loc.clone());
+                        *current_loc.borrow_mut() = loc.clone();
                     }
                 }
             }
@@ -979,10 +984,7 @@ fn save_view(
         Some(loc) if !save_as => do_save(loc.clone()),
         _ => match choose_location(&window, true) {
             None => (),
-            Some(loc) => {
-                *sl = Some(loc.clone());
-                do_save(loc);
-            }
+            Some(loc) => do_save(loc)
         },
     }
 }
@@ -1069,10 +1071,13 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     save_button.connect_clicked(clone!(
         @strong saved,
         @strong save_loc,
+        @strong current_loc,
         @strong current_spec,
         @strong ctx,
         @weak window => move |b| {
-            save_view(&ctx, &saved, &save_loc, &current_spec, &window, b, false)
+            save_view(
+                &ctx, &saved, &save_loc, &current_loc, &current_spec, &window, b, false
+            )
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
@@ -1083,6 +1088,28 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 ctx.from_gui.unbounded_send(FromGui::Navigate(loc));
         }
     }));
+    let save_as_act = gio::SimpleAction::new("save_as", None);
+    app.add_action(&save_as_act);
+    save_as_act.connect_activate(clone!(
+        @strong saved,
+        @strong save_loc,
+        @strong current_loc,
+        @strong current_spec,
+        @strong ctx,
+        @strong save_button,
+        @weak window => move |_, _| {
+            save_view(
+                &ctx,
+                &saved,
+                &save_loc,
+                &current_loc,
+                &current_spec,
+                &window,
+                &save_button,
+                true
+            )
+        }
+    ));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
