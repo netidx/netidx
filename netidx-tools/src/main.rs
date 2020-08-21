@@ -1,4 +1,4 @@
-#![recursion_limit = "1024"]
+#![recursion_limit = "2048"]
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate netidx;
 #[macro_use] extern crate anyhow;

@@ -33,13 +33,13 @@ use std::{
     boxed,
     cell::{Cell, RefCell},
     collections::HashMap,
-    fmt, mem,
+    fmt, fs, mem,
+    path::PathBuf,
     rc::Rc,
     result,
     sync::{mpsc as smpsc, Arc},
     thread,
     time::Duration,
-    path::PathBuf,
 };
 use tokio::{runtime::Runtime, task};
 
@@ -78,6 +78,7 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
+    ShowError(String),
     Terminate,
 }
 
@@ -706,10 +707,22 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         }
                     }
                 },
-                Some(FromGui::Save(ViewLoc::File(_file), _view, _fin)) => todo!(),
+                Some(FromGui::Save(ViewLoc::File(file), view, fin)) => {
+                    match serde_json::to_string(&view) {
+                        Err(e) => { let _ = fin.send(Err(Error::from(e))); }
+                        Ok(s) => match fs::write(file, s) {
+                            Err(e) => { let _ = fin.send(Err(Error::from(e))); }
+                            Ok(()) => { let _ = fin.send(Ok(())); }
+                        }
+                    }
+                },
                 Some(FromGui::Navigate(ViewLoc::Netidx(base_path))) => {
                     match resolver.table(base_path.clone()).await {
-                        Err(e) => warn!("can't fetch table spec for {}, {}", base_path, e),
+                        Err(e) => {
+                            let m =
+                                format!("can't fetch table spec for {}, {}", base_path, e);
+                            break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
+                        },
                         Ok(spec) => {
                             let raeified_default = view::View {
                                 variables: HashMap::new(),
@@ -732,8 +745,37 @@ async fn netidx_main(mut ctx: StartNetidx) {
                             _dv_view = Some(s);
                         }
                     }
-                }
-                Some(FromGui::Navigate(ViewLoc::File(_file))) => todo!(),
+                },
+                Some(FromGui::Navigate(ViewLoc::File(file))) => {
+                    match fs::read_to_string(&file) {
+                        Err(e) => {
+                            let m =
+                                format!("can't load view from file {:?}, {}", file, e);
+                            break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
+                        },
+                        Ok(s) => match serde_json::from_str::<protocol_view::View>(&s) {
+                            Err(e) => {
+                                let m = format!("invalid view: {:?}, {}", file, e);
+                                break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
+                            },
+                            Ok(v) => match view::View::new(&resolver, v.clone()).await {
+                                Err(e) => {
+                                    let m = format!("error building view: {}", e);
+                                    break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
+                                },
+                                Ok(r) => {
+                                    let m = ToGui::View {
+                                        loc: Some(ViewLoc::File(file)),
+                                        original: v,
+                                        raeified: r,
+                                        generated: false
+                                    };
+                                    break_err!(ctx.to_gui.send(m));
+                                },
+                            },
+                        }
+                    }
+                },
             },
             b = ctx.updates.next() => if let Some(mut batch) = b {
                 for (id, v) in batch.drain(..) {
@@ -876,7 +918,7 @@ fn choose_save_location(parent: &gtk::ApplicationWindow) -> Option<ViewLoc> {
     cb.set_active_id(Some("Netidx"));
     let res = match d.run() {
         gtk::ResponseType::Accept => loc.borrow_mut().take(),
-        gtk::ResponseType::Cancel | _ => None
+        gtk::ResponseType::Cancel | _ => None,
     };
     d.close();
     res
@@ -1083,6 +1125,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(root) = &mut *current.borrow_mut() {
                 root.update_var(&name, &value);
             }
+            Continue(true)
+        }
+        ToGui::ShowError(s) => {
+            err_modal(&window, &s);
             Continue(true)
         }
         ToGui::Terminate => Continue(false),
