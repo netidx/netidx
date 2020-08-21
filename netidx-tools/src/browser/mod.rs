@@ -13,7 +13,7 @@ use futures::{
     stream::StreamExt,
 };
 use gdk::{self, prelude::*};
-use gio::prelude::*;
+use gio::{self, prelude::*};
 use glib::{self, clone, source::PRIORITY_LOW};
 use gluon::{vm::api::function::FunctionRef, RootedThread, ThreadExt};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
@@ -949,9 +949,17 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let save_img =
         gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
     let save_button = gtk::ToolButton::new(Some(&save_img), None);
-    let prefs_img =
+    let prefs_button = gtk::MenuButton::new();
+    let menu_img =
         gtk::Image::from_icon_name(Some("open-menu"), gtk::IconSize::SmallToolbar);
-    let prefs_button = gtk::ToolButton::new(Some(&prefs_img), None);
+    prefs_button.set_image(Some(&menu_img));
+    let main_menu = gio::Menu::new();
+    main_menu.append(Some("Go"), Some("app.go"));
+    main_menu.append(Some("Open View"), Some("app.open_view"));
+    main_menu.append(Some("Save View As"), Some("app.save_as"));
+    main_menu.append(Some("Render Views"), Some("app.render_views"));
+    prefs_button.set_use_popover(true);
+    prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
     design_mode.set_image(Some(&design_img));
     headerbar.set_show_close_button(true);
