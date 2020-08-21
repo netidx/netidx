@@ -21,7 +21,7 @@ lto = true
 debug = false
 
 [profile.dev]
-debug = false
+debug = 1
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
