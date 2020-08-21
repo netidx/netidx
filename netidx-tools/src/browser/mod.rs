@@ -980,7 +980,7 @@ fn save_view(
                         save_button.set_sensitive(false);
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
-                            *save_loc.borrow_mut() = Some(loc.clone());
+                            *sl = Some(loc.clone());
                             let _: result::Result<_, _> = ctx
                                 .from_gui
                                 .unbounded_send(FromGui::Navigate(loc.clone()));
