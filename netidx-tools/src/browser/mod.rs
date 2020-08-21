@@ -942,7 +942,6 @@ fn save_view(
     ctx: &Rc<WidgetCtx>,
     saved: &Rc<Cell<bool>>,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
-    current_loc: &Rc<RefCell<ViewLoc>>,
     current_spec: &Rc<RefCell<protocol_view::View>>,
     window: &gtk::ApplicationWindow,
     save_button: &gtk::ToolButton,
@@ -958,7 +957,7 @@ fn save_view(
             let save_button = save_button.clone();
             let saved = saved.clone();
             let save_loc = save_loc.clone();
-            let current_loc = current_loc.clone();
+            let ctx = ctx.clone();
             async move {
                 match rx.await {
                     Err(e) => {
@@ -973,18 +972,19 @@ fn save_view(
                         saved.set(true);
                         save_button.set_sensitive(false);
                         *save_loc.borrow_mut() = Some(loc.clone());
-                        *current_loc.borrow_mut() = loc.clone();
+                        let _: result::Result<_, _> =
+                            ctx.from_gui.unbounded_send(FromGui::Navigate(loc.clone()));
                     }
                 }
             }
         });
     };
-    let mut sl = save_loc.borrow_mut();
+    let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
         _ => match choose_location(&window, true) {
             None => (),
-            Some(loc) => do_save(loc)
+            Some(loc) => do_save(loc),
         },
     }
 }
@@ -1009,7 +1009,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let main_menu = gio::Menu::new();
     main_menu.append(Some("Go"), Some("app.go"));
     main_menu.append(Some("Save View As"), Some("app.save_as"));
-    main_menu.append(Some("Render Views"), Some("app.render_views"));
     prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
@@ -1071,13 +1070,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     save_button.connect_clicked(clone!(
         @strong saved,
         @strong save_loc,
-        @strong current_loc,
         @strong current_spec,
         @strong ctx,
         @weak window => move |b| {
-            save_view(
-                &ctx, &saved, &save_loc, &current_loc, &current_spec, &window, b, false
-            )
+            save_view(&ctx, &saved, &save_loc, &current_spec, &window, b, false)
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
@@ -1093,21 +1089,11 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     save_as_act.connect_activate(clone!(
         @strong saved,
         @strong save_loc,
-        @strong current_loc,
         @strong current_spec,
         @strong ctx,
         @strong save_button,
         @weak window => move |_, _| {
-            save_view(
-                &ctx,
-                &saved,
-                &save_loc,
-                &current_loc,
-                &current_spec,
-                &window,
-                &save_button,
-                true
-            )
+            save_view(&ctx, &saved, &save_loc, &current_spec, &window, &save_button, true)
         }
     ));
     to_gui.attach(None, move |m| match m {
