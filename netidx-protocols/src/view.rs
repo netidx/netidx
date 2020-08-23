@@ -10,16 +10,20 @@ pub enum Source {
     Map {
         /// the source we are mapping from
         from: boxed::Box<Source>,
-        /// the name of the gluon 'Value -> Option Value' function that
-        /// will be called each time the source produces a value. If the
-        /// function returns None then no value will be produced by the
-        /// source, otherwise the returned value will be produced. You
-        /// must define the function in one of the scripts imported by the
-        /// view.
+        /// the name of the built-in 'Value -> Option Value' function
+        /// that will be called each time the source produces a
+        /// value. If the function returns None then no value will be
+        /// produced by the source, otherwise the returned value will
+        /// be produced. You must define the function in one of the
+        /// scripts imported by the view. Note, if the wrapped source
+        /// is a group, and the function is an aggregate function then
+        /// it will operate on all the values (e.g. sum, mean, ewma,
+        /// etc ...), otherwise it will operate on the first value in
+        /// the group to update.
         function: String,
     },
     /// the source produces a value when any of the sub sources produce a value
-    Any(Vec<Source>),
+    Group(Vec<Source>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,15 +31,19 @@ pub enum Sink {
     Store(Path),
     Variable(String),
     /// sinked values are sent to all the specified sinks
-    All(Vec<Sink>),
+    Group(Vec<Sink>),
     /// sinked values are mapped through the specified gluon script
     Map {
         /// the sink we are mapping to
         to: boxed::Box<Sink>,
-        /// the name of the gluon 'Value -> Option Value' function that
-        /// will be called each time the sink is set. If the function
-        /// returns None, then the sink will not be set, otherwise the
-        /// returned value will be set.
+        /// the name of the 'Value -> Option Value' built-in function
+        /// that will be called each time the sink is set. If the
+        /// function returns None, then the sink will not be set,
+        /// otherwise the returned value will be set. Note, if the
+        /// wrapped sink is a group, and the function is an aggregate
+        /// function then it will operate on all the values (e.g. sum,
+        /// mean, ewma, etc ...), otherwise it will operate on the
+        /// first value in the group to update.
         function: String,
     },
 }
@@ -145,6 +153,5 @@ pub enum Widget {
 pub struct View {
     pub variables: HashMap<String, Value>,
     pub keybinds: Vec<Keybind>,
-    pub scripts: Vec<(String, String)>,
     pub root: Widget,
 }

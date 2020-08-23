@@ -2,7 +2,6 @@ use super::{align_to_gtk, Widget, WidgetCtx};
 use crate::browser::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
-use gluon::RootedThread;
 use gtk::{self, prelude::*, Orientation};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
@@ -17,7 +16,6 @@ pub(super) struct Box {
 impl Box {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Box,
         selected_path: gtk::Label,
@@ -42,7 +40,6 @@ impl Box {
                 }) => {
                     let w = Widget::new(
                         ctx.clone(),
-                        vm,
                         variables,
                         (&**widget).clone(),
                         selected_path.clone(),
@@ -62,7 +59,6 @@ impl Box {
                     let w =
                         Widget::new(
                             ctx.clone(),
-                            vm,
                             variables,
                             s.clone(),
                             selected_path.clone(),
@@ -106,7 +102,6 @@ pub(super) struct Grid {
 impl Grid {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Grid,
         selected_path: gtk::Label,
@@ -131,7 +126,6 @@ impl Grid {
                         }) => {
                             let w = Widget::new(
                                 ctx.clone(),
-                                vm,
                                 variables,
                                 (&*widget).clone(),
                                 selected_path.clone(),
@@ -150,7 +144,6 @@ impl Grid {
                         widget => {
                             let w = Widget::new(
                                 ctx.clone(),
-                                vm,
                                 variables,
                                 widget.clone(),
                                 selected_path.clone(),

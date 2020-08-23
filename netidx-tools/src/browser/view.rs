@@ -142,14 +142,12 @@ impl Widget {
 pub(super) struct View {
     pub(super) variables: HashMap<String, Value>,
     pub(super) root: Widget,
-    pub(super) scripts: Vec<(String, String)>,
 }
 
 impl View {
     pub(super) async fn new(resolver: &ResolverRead, view: view::View) -> Result<Self> {
         Ok(View {
             variables: view.variables,
-            scripts: view.scripts,
             root: Widget::new(resolver, view.root).await?,
         })
     }

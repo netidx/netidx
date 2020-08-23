@@ -1,6 +1,5 @@
 mod containers;
 mod editor;
-mod script;
 mod table;
 mod view;
 mod widgets;
@@ -15,7 +14,6 @@ use futures::{
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{self, clone, source::PRIORITY_LOW};
-use gluon::{vm::api::function::FunctionRef, RootedThread, ThreadExt};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
@@ -106,36 +104,18 @@ struct WidgetCtx {
     raw_view: Arc<AtomicBool>,
 }
 
-fn call_gluon_function(vm: &RootedThread, f: &str, v: Value) -> Option<Value> {
-    use script::GluVal as V;
-    match vm.get_global::<FunctionRef<fn(V) -> Option<V>>>(f) {
-        Err(e) => {
-            warn!("no such function {} matching type Value -> Option Value, {}", f, e);
-            None
-        }
-        Ok(mut code) => match code.call(script::GluVal(v)) {
-            Ok(gv) => gv.map(|v| v.0),
-            Err(e) => {
-                warn!("error calling function {}, {}", f, e);
-                None
-            }
-        },
-    }
-}
-
 #[derive(Debug, Clone)]
 enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
-    Any(Vec<Source>),
-    Map { vm: Rc<Lazy<RootedThread>>, from: boxed::Box<Source>, function: String },
+    Group(Vec<Source>),
+    Map { from: boxed::Box<Source>, function: String },
 }
 
 impl Source {
     fn new(
         ctx: &WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Source,
     ) -> Self {
@@ -151,14 +131,11 @@ impl Source {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
-            view::Source::Any(srcs) => Source::Any(
-                srcs.into_iter()
-                    .map(|spec| Source::new(ctx, vm, variables, spec))
-                    .collect(),
+            view::Source::Group(srcs) => Source::Group(
+                srcs.into_iter().map(|spec| Source::new(ctx, variables, spec)).collect(),
             ),
             view::Source::Map { from, function } => Source::Map {
-                vm: vm.clone(),
-                from: boxed::Box::new(Source::new(ctx, vm, variables, (*from).clone())),
+                from: boxed::Box::new(Source::new(ctx, variables, (*from).clone())),
                 function,
             },
         }
@@ -169,10 +146,8 @@ impl Source {
             Source::Constant(v) => Some(v.clone()),
             Source::Load(dv) => dv.last(),
             Source::Variable(_, v) => Some(v.borrow().clone()),
-            Source::Any(srcs) => srcs.iter().find_map(|src| src.current()),
-            Source::Map { vm, from, function } => {
-                from.current().and_then(|v| call_gluon_function(&**vm, function, v))
-            }
+            Source::Group(srcs) => srcs.iter().find_map(|src| src.current()),
+            Source::Map { from, function } => todo!(),
         }
     }
 
@@ -180,10 +155,8 @@ impl Source {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
-            Source::Any(srcs) => srcs.iter().find_map(|s| s.update(changed)),
-            Source::Map { vm, from, function } => {
-                from.update(changed).and_then(|v| call_gluon_function(&**vm, function, v))
-            }
+            Source::Group(srcs) => srcs.iter().find_map(|s| s.update(changed)),
+            Source::Map { from, function } => todo!(),
         }
     }
 
@@ -198,10 +171,8 @@ impl Source {
                     None
                 }
             }
-            Source::Any(srcs) => srcs.iter().find_map(|s| s.update_var(name, value)),
-            Source::Map { vm, from, function } => from
-                .update_var(name, value)
-                .and_then(|v| call_gluon_function(&**vm, function, v)),
+            Source::Group(srcs) => srcs.iter().find_map(|s| s.update_var(name, value)),
+            Source::Map { from, function } => todo!(),
         }
     }
 }
@@ -210,23 +181,22 @@ impl Source {
 enum Sink {
     Store(Dval),
     Variable(String),
-    All(Vec<Sink>),
-    Map { vm: Rc<Lazy<RootedThread>>, to: boxed::Box<Sink>, function: String },
+    Group(Vec<Sink>),
+    Map { to: boxed::Box<Sink>, function: String },
 }
 
 impl Sink {
-    fn new(ctx: &WidgetCtx, vm: &Rc<Lazy<RootedThread>>, spec: view::Sink) -> Self {
+    fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
         match spec {
             view::Sink::Variable(name) => Sink::Variable(name),
             view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::All(sinks) => Sink::All(
-                sinks.into_iter().map(|spec| Sink::new(ctx, vm, spec)).collect(),
+            view::Sink::Group(sinks) => Sink::Group(
+                sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect(),
             ),
             view::Sink::Map { to, function } => Sink::Map {
-                vm: vm.clone(),
-                to: boxed::Box::new(Sink::new(ctx, vm, (*to).clone())),
+                to: boxed::Box::new(Sink::new(ctx, (*to).clone())),
                 function,
             },
         }
@@ -241,16 +211,12 @@ impl Sink {
                 let _: result::Result<_, _> =
                     ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
-            Sink::All(sinks) => {
+            Sink::Group(sinks) => {
                 for sink in sinks {
                     sink.set(ctx, v.clone())
                 }
             }
-            Sink::Map { vm, to, function: f } => {
-                if let Some(v) = call_gluon_function(&**vm, f, v.clone()) {
-                    to.set(ctx, v)
-                }
-            }
+            Sink::Map { to, function: f } => todo!()
         }
     }
 }
@@ -286,7 +252,6 @@ enum Widget {
 impl Widget {
     fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Widget,
         selected_path: gtk::Label,
@@ -300,54 +265,48 @@ impl Widget {
             )),
             view::Widget::Label(spec) => Widget::Label(widgets::Label::new(
                 ctx.clone(),
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Button(spec) => Widget::Button(widgets::Button::new(
                 ctx.clone(),
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
                 ctx.clone(),
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Selector(spec) => Widget::Selector(widgets::Selector::new(
                 ctx.clone(),
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Entry(spec) => Widget::Entry(widgets::Entry::new(
                 ctx.clone(),
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::Box(s) => {
-                Widget::Box(containers::Box::new(ctx, vm, variables, s, selected_path))
+                Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
             }
             view::Widget::BoxChild(view::BoxChild { widget, .. }) => {
-                Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
+                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
             view::Widget::Grid(spec) => Widget::Grid(containers::Grid::new(
                 ctx,
-                vm,
                 variables,
                 spec,
                 selected_path,
             )),
             view::Widget::GridChild(view::GridChild { widget, .. }) => {
-                Widget::new(ctx, vm, variables, (&*widget).clone(), selected_path)
+                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
         }
     }
@@ -537,24 +496,6 @@ impl View {
         saved: Rc<Cell<bool>>,
         spec: view::View,
     ) -> View {
-        let vm = {
-            let f: fn() -> RootedThread = script::new;
-            Rc::new(Lazy::new(f))
-        };
-        for (module, script) in &spec.scripts {
-            match base64::decode(script) {
-                Err(e) => {
-                    warn!("failed to base64 decode the script module {}, {}", module, e)
-                }
-                Ok(octets) => match String::from_utf8(octets) {
-                    Err(e) => warn!("script module {} is not unicode {}", module, e),
-                    Ok(script) => match (***vm).load_script(module, script.as_str()) {
-                        Ok(()) => (),
-                        Err(e) => warn!("compile error module {}, {}", module, e),
-                    },
-                },
-            }
-        }
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -567,7 +508,6 @@ impl View {
         selected_path_window.add(&selected_path);
         let widget = Widget::new(
             ctx.clone(),
-            &vm,
             &spec.variables,
             spec.root.clone(),
             selected_path.clone(),
@@ -615,7 +555,6 @@ fn default_view(path: Path) -> protocol_view::View {
     protocol_view::View {
         variables: HashMap::new(),
         keybinds: Vec::new(),
-        scripts: Vec::new(),
         root: protocol_view::Widget::Table(path),
     }
 }
@@ -732,7 +671,6 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         Ok(spec) => {
                             let raeified_default = view::View {
                                 variables: HashMap::new(),
-                                scripts: Vec::new(),
                                 root: view::Widget::Table(base_path.clone(), spec)
                             };
                             let m = ToGui::View {

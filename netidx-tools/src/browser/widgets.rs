@@ -2,7 +2,6 @@ use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::browser::view;
 use gdk::{self, prelude::*};
 use glib::clone;
-use gluon::RootedThread;
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use log::warn;
@@ -23,16 +22,15 @@ pub(super) struct Button {
 impl Button {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Button,
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Source::new(&ctx, vm, variables, spec.enabled.clone());
-        let label = Source::new(&ctx, vm, variables, spec.label.clone());
-        let source = Source::new(&ctx, vm, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, vm, spec.sink.clone());
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let label = Source::new(&ctx, variables, spec.label.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -94,12 +92,11 @@ pub(super) struct Label {
 impl Label {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Source,
         selected_path: gtk::Label,
     ) -> Label {
-        let source = Source::new(&ctx, vm, variables, spec.clone());
+        let source = Source::new(&ctx, variables, spec.clone());
         let txt = match source.current() {
             None => String::new(),
             Some(v) => format!("{}", v)
@@ -149,7 +146,6 @@ pub(super) struct Selector {
 impl Selector {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Selector,
         selected_path: gtk::Label,
@@ -177,10 +173,10 @@ impl Selector {
                 Inhibit(false)
             }),
         );
-        let enabled = Source::new(&ctx, vm, variables, spec.enabled.clone());
-        let choices = Source::new(&ctx, vm, variables, spec.choices.clone());
-        let source = Source::new(&ctx, vm, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, vm, spec.sink.clone());
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let choices = Source::new(&ctx, variables, spec.choices.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
@@ -291,15 +287,14 @@ pub(super) struct Toggle {
 impl Toggle {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Toggle,
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Source::new(&ctx, vm, variables, spec.enabled.clone());
-        let source = Source::new(&ctx, vm, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, vm, spec.sink.clone());
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
@@ -383,15 +378,14 @@ pub(super) struct Entry {
 impl Entry {
     pub(super) fn new(
         ctx: WidgetCtx,
-        vm: &Rc<Lazy<RootedThread>>,
         variables: &HashMap<String, Value>,
         spec: view::Entry,
         selected_path: gtk::Label,
     ) -> Self {
-        let enabled = Source::new(&ctx, vm, variables, spec.enabled.clone());
-        let visible = Source::new(&ctx, vm, variables, spec.visible.clone());
-        let source = Source::new(&ctx, vm, variables, spec.source.clone());
-        let sink = Sink::new(&ctx, vm, spec.sink.clone());
+        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
+        let visible = Source::new(&ctx, variables, spec.visible.clone());
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
