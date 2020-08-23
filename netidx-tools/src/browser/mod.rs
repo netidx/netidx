@@ -1044,11 +1044,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     if let Some(screen) = window.get_screen() {
         setup_css(&screen);
     }
-    window.connect_delete_event(clone!(@strong ctx, @weak app =>
-    @default-return Inhibit(false), move |_, _| {
-        let _: result::Result<_, _> = ctx.from_gui.unbounded_send(FromGui::Terminate);
-        Inhibit(false)
-    }));
     let ctx = Rc::new(ctx);
     let saved = Rc::new(Cell::new(true));
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
@@ -1059,6 +1054,17 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
+    window.connect_delete_event(clone!(
+        @strong ctx,
+        @strong saved => @default-return Inhibit(false), move |w, _| {
+            if saved.get() || ask_modal(w, "Unsaved view will be lost, are you sure?") {
+                let _: result::Result<_, _> =
+                    ctx.from_gui.unbounded_send(FromGui::Terminate);
+                Inhibit(false)
+            } else {
+                Inhibit(true)
+            }
+    }));
     design_mode.connect_toggled(clone!(
     @weak mainbox,
     @strong editor,
@@ -1164,8 +1170,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     save_button.set_sensitive(false);
                     if !generated {
                         *save_loc.borrow_mut() = Some(match loc.clone() {
-                            v@ ViewLoc::File(_) => v,
-                            ViewLoc::Netidx(p) => ViewLoc::Netidx(p.append(".view"))
+                            v @ ViewLoc::File(_) => v,
+                            ViewLoc::Netidx(p) => ViewLoc::Netidx(p.append(".view")),
                         });
                     } else {
                         *save_loc.borrow_mut() = None;
