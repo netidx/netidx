@@ -82,6 +82,7 @@ enum ToGui {
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
     ShowError(String),
+    SaveError(String),
     Terminate,
 }
 
@@ -960,7 +961,6 @@ fn save_view(
         let m = FromGui::Save(loc.clone(), spec, tx);
         let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
         glib::MainContext::default().spawn_local({
-            let w = window.clone();
             let save_button = save_button.clone();
             let saved = saved.clone();
             let save_loc = save_loc.clone();
@@ -968,11 +968,15 @@ fn save_view(
             async move {
                 match rx.await {
                     Err(e) => {
-                        ctx.to_gui.send(ToGui::ShowError(format!("error saving: {}", e)));
+                        let _: result::Result<_, _> = ctx.to_gui.send(ToGui::SaveError(
+                            format!("error saving to: {:?}, {}", &*save_loc.borrow(), e),
+                        ));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(Err(e)) => {
-                        ctx.to_gui.send(ToGui::ShowError(format!("error saving: {}", e)));
+                        let _: result::Result<_, _> = ctx.to_gui.send(ToGui::SaveError(
+                            format!("error saving to: {:?}, {}", &*save_loc.borrow(), e),
+                        ));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(Ok(())) => {
@@ -1159,7 +1163,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     saved.set(true);
                     save_button.set_sensitive(false);
                     if !generated {
-                        *save_loc.borrow_mut() = Some(loc.clone());
+                        *save_loc.borrow_mut() = Some(match loc.clone() {
+                            v@ ViewLoc::File(_) => v,
+                            ViewLoc::Netidx(p) => ViewLoc::Netidx(p.append(".view"))
+                        });
                     } else {
                         *save_loc.borrow_mut() = None;
                     }
@@ -1206,6 +1213,28 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::ShowError(s) => {
             err_modal(&window, &s);
+            Continue(true)
+        }
+        ToGui::SaveError(s) => {
+            err_modal(&window, &s);
+            idle_add(clone!(
+                @strong ctx,
+                @strong saved,
+                @strong save_loc,
+                @strong current_spec,
+                @strong window,
+                @strong save_button => move || {
+                    save_view(
+                        &ctx,
+                        &saved,
+                        &save_loc,
+                        &current_spec,
+                        &window,
+                        &save_button,
+                        true,
+                    );
+                    Continue(false)
+            }));
             Continue(true)
         }
         ToGui::Terminate => Continue(false),
