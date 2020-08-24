@@ -170,6 +170,42 @@ fn parse_source(s: &str) -> anyhow::Result<Source> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
+fn sink_<I>() -> impl Parser<I, Output = Sink>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(choice((
+        attempt(string("n:").with(quoted()).map(|s| Sink::Store(Path::from(s)))),
+        attempt(string("v:").with(fname()).map(|s| Sink::Variable(s))),
+        (
+            fname(),
+            between(
+                spaces().with(token('(')),
+                spaces().with(token(')')),
+                spaces().with(sep_by1(sink(), spaces().with(token(',')))),
+            ),
+        )
+            .map(|(function, to)| Sink::Map { function, to }),
+    )))
+}
+
+parser! {
+    fn sink[I]()(I) -> Sink
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        sink_()
+    }
+}
+
+fn parse_sink(s: &str) -> anyhow::Result<Sink> {
+    sink()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
