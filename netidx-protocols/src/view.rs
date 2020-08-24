@@ -1,6 +1,6 @@
 use crate::parser;
-use netidx::{path::Path, publisher::Value};
-use std::{boxed, collections::HashMap, str::FromStr, result};
+use netidx::{path::Path, publisher::Value, utils};
+use std::{boxed, collections::HashMap, result, str::FromStr, string::ToString};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Source {
@@ -32,11 +32,66 @@ impl FromStr for Source {
     }
 }
 
+impl ToString for Source {
+    fn to_string(&self) -> String {
+        match self {
+            Source::Constant(v) => match v {
+                Value::U32(v) => format!("u32:{}", v),
+                Value::V32(v) => format!("v32:{}", v),
+                Value::I32(v) => format!("i32:{}", v),
+                Value::Z32(v) => format!("z32:{}", v),
+                Value::U64(v) => format!("u64:{}", v),
+                Value::V64(v) => format!("v64:{}", v),
+                Value::I64(v) => format!("i64:{}", v),
+                Value::Z64(v) => format!("z64:{}", v),
+                Value::F32(v) => format!("f32:{}", v),
+                Value::F64(v) => format!("f64:{}", v),
+                Value::String(s) => {
+                    format!(r#"string:"{}""#, utils::escape(&*s, '\\', '"'))
+                }
+                Value::Bytes(_) => String::from("<binary>"),
+                Value::True => String::from("true"),
+                Value::False => String::from("false"),
+                Value::Null => String::from("null"),
+                Value::Ok => String::from("ok"),
+                Value::Error(v) => format!(r#"err:"{}""#, utils::escape(&*v, '\\', '"')),
+            },
+            Source::Load(p) => format!(r#"n:"{}""#, utils::escape(&*p, '\\', '"')),
+            Source::Variable(v) => format!(r#"v:{}"#, v),
+            Source::Map {from, function} => {
+                let mut res = format!("{}(", function);
+                for i in 0..from.len() {
+                    res.push_str(&from[i].to_string());
+                    if i < from.len() - 1 {
+                        res.push_str(", ")
+                    }
+                }
+                res.push(')');
+                res
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum Sink {
+pub enum SinkLeaf {
     Store(Path),
     Variable(String),
-    All(Vec<Sink>),
+}
+
+impl ToString for SinkLeaf {
+    fn to_string(&self) -> String {
+        match self {
+            SinkLeaf::Store(p) => format!(r#"n:"{}""#, p),
+            SinkLeaf::Variable(v) => format!(r#"v:{}"#, v),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
+pub enum Sink {
+    Leaf(SinkLeaf),
+    All(Vec<SinkLeaf>),
 }
 
 impl FromStr for Sink {
@@ -44,6 +99,25 @@ impl FromStr for Sink {
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         parser::parse_sink(s)
+    }
+}
+
+impl ToString for Sink {
+    fn to_string(&self) -> String {
+        match self {
+            Sink::Leaf(l) => l.to_string(),
+            Sink::All(lv) => {
+                let mut s = String::from("[");
+                for i in 0..lv.len() {
+                    s.push_str(&lv[i].to_string());
+                    if i < lv.len() - 1 {
+                        s.push_str(", ");
+                    }
+                }
+                s.push(']');
+                s
+            }
+        }
     }
 }
 

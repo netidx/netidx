@@ -1,4 +1,4 @@
-use crate::view::{Sink, Source};
+use crate::view::{Sink, SinkLeaf, Source};
 use combine::{
     attempt, between, choice, from_str, many1, optional,
     parser::{
@@ -170,15 +170,15 @@ pub fn parse_source(s: &str) -> anyhow::Result<Source> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-fn sink_prim<I>() -> impl Parser<I, Output = Sink>
+fn sink_leaf<I>() -> impl Parser<I, Output = SinkLeaf>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     spaces().with(choice((
-        string("n:").with(quoted()).map(|s| Sink::Store(Path::from(s))),
-        string("v:").with(fname()).map(|s| Sink::Variable(s)),
+        string("n:").with(quoted()).map(|s| SinkLeaf::Store(Path::from(s))),
+        string("v:").with(fname()).map(|s| SinkLeaf::Variable(s)),
     )))
 }
 
@@ -189,11 +189,11 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        sink_prim(),
+        sink_leaf().map(Sink::Leaf),
         between(
             spaces().with(token('[')),
             spaces().with(token(']')),
-            spaces().with(sep_by1(sink_prim(), spaces().with(token(',')))),
+            spaces().with(sep_by1(sink_leaf(), spaces().with(token(',')))),
         )
         .map(Sink::All),
     )))

@@ -109,8 +109,7 @@ enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
-    Group(Vec<Source>),
-    Map { from: boxed::Box<Source>, function: String },
+    Map { from: Vec<Source>, function: String },
 }
 
 impl Source {
@@ -131,11 +130,11 @@ impl Source {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
-            view::Source::Group(srcs) => Source::Group(
-                srcs.into_iter().map(|spec| Source::new(ctx, variables, spec)).collect(),
-            ),
             view::Source::Map { from, function } => Source::Map {
-                from: boxed::Box::new(Source::new(ctx, variables, (*from).clone())),
+                from: from
+                    .into_iter()
+                    .map(|spec| Source::new(ctx, variables, spec))
+                    .collect(),
                 function,
             },
         }
@@ -146,7 +145,6 @@ impl Source {
             Source::Constant(v) => Some(v.clone()),
             Source::Load(dv) => dv.last(),
             Source::Variable(_, v) => Some(v.borrow().clone()),
-            Source::Group(srcs) => srcs.iter().find_map(|src| src.current()),
             Source::Map { from, function } => todo!(),
         }
     }
@@ -155,7 +153,6 @@ impl Source {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
-            Source::Group(srcs) => srcs.iter().find_map(|s| s.update(changed)),
             Source::Map { from, function } => todo!(),
         }
     }
@@ -171,7 +168,6 @@ impl Source {
                     None
                 }
             }
-            Source::Group(srcs) => srcs.iter().find_map(|s| s.update_var(name, value)),
             Source::Map { from, function } => todo!(),
         }
     }
@@ -181,8 +177,7 @@ impl Source {
 enum Sink {
     Store(Dval),
     Variable(String),
-    Group(Vec<Sink>),
-    Map { to: boxed::Box<Sink>, function: String },
+    All(Vec<Sink>),
 }
 
 impl Sink {
@@ -192,13 +187,9 @@ impl Sink {
             view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::Group(sinks) => Sink::Group(
-                sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect(),
-            ),
-            view::Sink::Map { to, function } => Sink::Map {
-                to: boxed::Box::new(Sink::new(ctx, (*to).clone())),
-                function,
-            },
+            view::Sink::All(sinks) => {
+                Sink::All(sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect())
+            }
         }
     }
 
@@ -211,12 +202,11 @@ impl Sink {
                 let _: result::Result<_, _> =
                     ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
-            Sink::Group(sinks) => {
+            Sink::All(sinks) => {
                 for sink in sinks {
                     sink.set(ctx, v.clone())
                 }
             }
-            Sink::Map { to, function: f } => todo!()
         }
     }
 }
@@ -299,12 +289,9 @@ impl Widget {
             view::Widget::BoxChild(view::BoxChild { widget, .. }) => {
                 Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
-            view::Widget::Grid(spec) => Widget::Grid(containers::Grid::new(
-                ctx,
-                variables,
-                spec,
-                selected_path,
-            )),
+            view::Widget::Grid(spec) => {
+                Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
+            }
             view::Widget::GridChild(view::GridChild { widget, .. }) => {
                 Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }

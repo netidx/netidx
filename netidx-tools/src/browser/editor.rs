@@ -11,6 +11,8 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     result,
+    str::FromStr,
+    string::ToString,
 };
 
 type OnChange = Rc<dyn Fn()>;
@@ -50,19 +52,19 @@ impl Table {
     }
 }
 
-fn parse_entry<T: Serialize + DeserializeOwned + 'static, F: Fn(T) + 'static>(
+fn parse_entry<T: FromStr + ToString + 'static, F: Fn(T) + 'static>(
     label: &str,
     spec: &T,
     on_change: F,
 ) -> (gtk::Label, gtk::Entry) {
     let label = gtk::Label::new(Some(label));
     let entry = gtk::Entry::new();
-    if let Ok(s) = serde_json::to_string(spec) {
+    if let Ok(s) = spec.to_string() {
         entry.set_text(&s);
     }
     entry.connect_activate(move |e| {
         let txt = e.get_text();
-        match serde_json::from_str::<T>(&*txt) {
+        match txt.parse::<T>() {
             Err(e) => warn!("invalid value: {}, {}", &*txt, e),
             Ok(src) => on_change(src),
         }

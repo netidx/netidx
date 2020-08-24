@@ -212,24 +212,7 @@ impl Path {
     /// assert_eq!("\\\\hello world", &*Path::escape("\\hello world"));
     /// ```
     pub fn escape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
-        let s = s.as_ref();
-        if s.find(|c: char| c == SEP || c == ESC).is_none() {
-            Cow::Borrowed(s.as_ref())
-        } else {
-            let mut out = String::with_capacity(s.len());
-            for c in s.chars() {
-                if c == SEP {
-                    out.push(ESC);
-                    out.push(c);
-                } else if c == ESC {
-                    out.push(ESC);
-                    out.push(c);
-                } else {
-                    out.push(c);
-                }
-            }
-            Cow::Owned(out)
-        }
+        utils::escape(s, ESC, SEP)
     }
 
     /// This will unescape the path seperator and the escape character

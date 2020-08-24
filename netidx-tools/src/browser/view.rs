@@ -67,6 +67,7 @@ pub(super) struct Grid {
 
 #[derive(Debug, Clone)]
 pub(super) enum Widget {
+    Action(view::Action),
     Table(Path, resolver::Table),
     Label(view::Source),
     Button(view::Button),
@@ -86,6 +87,7 @@ impl Widget {
     ) -> Pin<boxed::Box<dyn Future<Output = Result<Self>> + 'a + Send>> {
         boxed::Box::pin(async move {
             match widget {
+                view::Widget::Action(a) => Ok(Widget::Action(a)),
                 view::Widget::Table(path) => {
                     let spec = resolver.table(path.clone()).await?;
                     Ok(Widget::Table(path, spec))

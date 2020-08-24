@@ -18,6 +18,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     str,
+    borrow::Cow,
 };
 
 #[macro_export]
@@ -164,6 +165,27 @@ pub fn is_escaped(s: &str, sep: char, esc: char, i: usize) -> bool {
             }
             res
         })
+}
+
+pub fn escape<T: AsRef<str> + ?Sized>(s: &T, esc: char, sep: char) -> Cow<str> {
+    let s = s.as_ref();
+    if s.find(|c: char| c == sep || c == esc).is_none() {
+        Cow::Borrowed(s.as_ref())
+    } else {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if c == sep {
+                out.push(esc);
+                out.push(c);
+            } else if c == esc {
+                out.push(esc);
+                out.push(c);
+            } else {
+                out.push(c);
+            }
+        }
+        Cow::Owned(out)
+    }
 }
 
 pub fn splitn_escaped(
