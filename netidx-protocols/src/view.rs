@@ -2,7 +2,7 @@ use netidx::{path::Path, publisher::Value, utils};
 use anyhow::{Result, Error};
 use std::{boxed, collections::HashMap, str::FromStr, result};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Source {
     Constant(Value),
     Load(Path),
@@ -32,7 +32,7 @@ impl FromStr for Source {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Sink {
     Store(Path),
     Variable(String),
