@@ -170,33 +170,33 @@ fn parse_source(s: &str) -> anyhow::Result<Source> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-fn sink_<I>() -> impl Parser<I, Output = Sink>
+fn sink_prim<I>() -> impl Parser<I, Output = Sink>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(string("n:").with(quoted()).map(|s| Sink::Store(Path::from(s)))),
-        attempt(string("v:").with(fname()).map(|s| Sink::Variable(s))),
-        (
-            fname(),
-            between(
-                spaces().with(token('(')),
-                spaces().with(token(')')),
-                spaces().with(sep_by1(sink(), spaces().with(token(',')))),
-            ),
-        )
-            .map(|(function, to)| Sink::Map { function, to }),
+        string("n:").with(quoted()).map(|s| Sink::Store(Path::from(s))),
+        string("v:").with(fname()).map(|s| Sink::Variable(s)),
     )))
 }
 
-parser! {
-    fn sink[I]()(I) -> Sink
-    where [I: RangeStream<Token = char>, I::Range: Range]
-    {
-        sink_()
-    }
+fn sink<I>() -> impl Parser<I, Output = Sink>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(choice((
+        sink_prim(),
+        between(
+            spaces().with(token('[')),
+            spaces().with(token(']')),
+            spaces().with(sep_by1(sink_prim(), spaces().with(token(',')))),
+        )
+        .map(Sink::All),
+    )))
 }
 
 fn parse_sink(s: &str) -> anyhow::Result<Sink> {
@@ -209,6 +209,20 @@ fn parse_sink(s: &str) -> anyhow::Result<Sink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sink_parse() {
+        let p = Path::from(r#"/foo bar baz/"zam"/_ xyz+ "#);
+        let s = r#"n:"/foo bar baz/\"zam\"/_ xyz+ ""#;
+        assert_eq!(Sink::Store(p), parse_sink(s).unwrap());
+        assert_eq!(Sink::Variable(String::from("foo")), parse_sink("v:foo").unwrap());
+        let snk = Sink::All(vec![
+            Sink::Store(Path::from("/foo/bar")),
+            Sink::Variable(String::from("foo")),
+        ]);
+        let chs = r#"[n:"/foo/bar", v:foo]"#;
+        assert_eq!(snk, parse_sink(chs).unwrap());
+    }
 
     #[test]
     fn source_parse() {

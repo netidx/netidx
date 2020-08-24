@@ -36,20 +36,7 @@ impl FromStr for Source {
 pub enum Sink {
     Store(Path),
     Variable(String),
-    /// sinked values are mapped through the specified gluon script
-    Map {
-        /// the sink we are mapping to
-        to: Vec<Sink>,
-        /// the name of the 'Value -> Option Value' built-in function
-        /// that will be called each time the sink is set. If the
-        /// function returns None, then the sink will not be set,
-        /// otherwise the returned value will be set. Note, if the
-        /// wrapped sink is a group, and the function is an aggregate
-        /// function then it will operate on all the values (e.g. sum,
-        /// mean, ewma, etc ...), otherwise it will operate on the
-        /// first value in the group to update.
-        function: String,
-    },
+    All(Vec<Sink>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
