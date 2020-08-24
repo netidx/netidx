@@ -1,9 +1,7 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use digest::Digest;
-use sha3::Sha3_512;
-use rand::Rng;
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -11,12 +9,15 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
+use rand::Rng;
+use sha3::Sha3_512;
 use std::{
     cell::RefCell,
     hash::Hash,
+    iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    str, iter::{Iterator, IntoIterator},
+    str,
 };
 
 #[macro_export]
@@ -147,6 +148,22 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
         *esc = c == escape && !*esc;
         false
     }
+}
+
+pub fn is_escaped(s: &str, sep: char, esc: char, i: usize) -> bool {
+    let b = s.as_bytes();
+    !s.is_char_boundary(i)
+        || ((b[i] == (sep as u8) || b[i] == (esc as u8)) && {
+            let mut res = false;
+            for j in (0..i).rev() {
+                if s.is_char_boundary(j) && b[j] == (esc as u8) {
+                    res = !res;
+                } else {
+                    break;
+                }
+            }
+            res
+        })
 }
 
 pub fn splitn_escaped(

@@ -1,15 +1,15 @@
-use netidx::{path::Path, publisher::Value};
-use std::{boxed, collections::HashMap};
+use netidx::{path::Path, publisher::Value, utils};
+use anyhow::{Result, Error};
+use std::{boxed, collections::HashMap, str::FromStr, result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Source {
     Constant(Value),
     Load(Path),
     Variable(String),
-    /// map the source through the specified gluon script
     Map {
         /// the source we are mapping from
-        from: boxed::Box<Source>,
+        from: Vec<Source>,
         /// the name of the built-in 'Value -> Option Value' function
         /// that will be called each time the source produces a
         /// value. If the function returns None then no value will be
@@ -22,20 +22,24 @@ pub enum Source {
         /// the group to update.
         function: String,
     },
-    /// the source produces a value when any of the sub sources produce a value
-    Group(Vec<Source>),
+}
+
+impl FromStr for Source {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        todo!()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Sink {
     Store(Path),
     Variable(String),
-    /// sinked values are sent to all the specified sinks
-    Group(Vec<Sink>),
     /// sinked values are mapped through the specified gluon script
     Map {
         /// the sink we are mapping to
-        to: boxed::Box<Sink>,
+        to: Vec<Sink>,
         /// the name of the 'Value -> Option Value' built-in function
         /// that will be called each time the sink is set. If the
         /// function returns None, then the sink will not be set,

@@ -153,22 +153,6 @@ fn canonize(s: &str) -> String {
     res
 }
 
-fn is_escaped(s: &str, i: usize) -> bool {
-    let b = s.as_bytes();
-    !s.is_char_boundary(i)
-        || ((b[i] == (SEP as u8) || b[i] == (ESC as u8)) && {
-            let mut res = false;
-            for j in (0..i).rev() {
-                if s.is_char_boundary(j) && b[j] == (ESC as u8) {
-                    res = !res;
-                } else {
-                    break;
-                }
-            }
-            res
-        })
-}
-
 enum DirNames<'a> {
     Root(bool),
     Path { cur: &'a str, all: &'a str, base: usize },
@@ -259,12 +243,12 @@ impl Path {
     /// ```
     pub fn unescape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
         let s = s.as_ref();
-        if !(0..s.len()).into_iter().any(|i| is_escaped(s, i)) {
+        if !(0..s.len()).into_iter().any(|i| utils::is_escaped(s, SEP, ESC, i)) {
             Cow::Borrowed(s)
         } else {
             let mut out = String::with_capacity(s.len());
             for (i, c) in s.chars().enumerate() {
-                if is_escaped(s, i) {
+                if utils::is_escaped(s, SEP, ESC, i) {
                     out.pop();
                 }
                 out.push(c);
@@ -444,7 +428,7 @@ impl Path {
                 match f(s) {
                     None => return None,
                     Some(i) => {
-                        if !is_escaped(s, i) {
+                        if !utils::is_escaped(s, SEP, ESC, i) {
                             return Some(i);
                         } else {
                             s = &s[0..i];
