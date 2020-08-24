@@ -95,60 +95,54 @@ where
     spaces().with(choice((
         attempt(
             string("u32:")
-                .with(from_str(uint()).map(|v| dbg!(Source::Constant(Value::U32(v))))),
+                .with(from_str(uint()).map(|v| Source::Constant(Value::U32(v)))),
         ),
         attempt(
             string("v32:")
-                .with(from_str(uint()).map(|v| dbg!(Source::Constant(Value::V32(v))))),
+                .with(from_str(uint()).map(|v| Source::Constant(Value::V32(v)))),
         ),
         attempt(
-            string("i32:")
-                .with(from_str(int()).map(|v| dbg!(Source::Constant(Value::I32(v))))),
+            string("i32:").with(from_str(int()).map(|v| Source::Constant(Value::I32(v)))),
         ),
         attempt(
-            string("z32:")
-                .with(from_str(int()).map(|v| dbg!(Source::Constant(Value::Z32(v))))),
+            string("z32:").with(from_str(int()).map(|v| Source::Constant(Value::Z32(v)))),
         ),
         attempt(
             string("u64:")
-                .with(from_str(uint()).map(|v| dbg!(Source::Constant(Value::U64(v))))),
+                .with(from_str(uint()).map(|v| Source::Constant(Value::U64(v)))),
         ),
         attempt(
             string("v64:")
-                .with(from_str(uint()).map(|v| dbg!(Source::Constant(Value::V64(v))))),
+                .with(from_str(uint()).map(|v| Source::Constant(Value::V64(v)))),
         ),
         attempt(
-            string("i64:")
-                .with(from_str(int()).map(|v| dbg!(Source::Constant(Value::I64(v))))),
+            string("i64:").with(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
         ),
         attempt(
-            string("z64:")
-                .with(from_str(int()).map(|v| dbg!(Source::Constant(Value::Z64(v))))),
+            string("z64:").with(from_str(int()).map(|v| Source::Constant(Value::Z64(v)))),
         ),
         attempt(
-            string("f32:")
-                .with(from_str(flt()).map(|v| dbg!(Source::Constant(Value::F32(v))))),
+            string("f32:").with(from_str(flt()).map(|v| Source::Constant(Value::F32(v)))),
         ),
         attempt(
-            string("f64:")
-                .with(from_str(flt()).map(|v| dbg!(Source::Constant(Value::F64(v))))),
+            string("f64:").with(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
         ),
         attempt(
             string("string:")
                 .with(quoted())
-                .map(|v| dbg!(Source::Constant(Value::String(Chars::from(v))))),
+                .map(|v| Source::Constant(Value::String(Chars::from(v)))),
         ),
-        attempt(string("true").map(|_| dbg!(Source::Constant(Value::True)))),
-        attempt(string("false").map(|_| dbg!(Source::Constant(Value::False)))),
-        attempt(string("null").map(|_| dbg!(Source::Constant(Value::Null)))),
-        attempt(string("ok").map(|_| dbg!(Source::Constant(Value::Ok)))),
+        attempt(string("true").map(|_| Source::Constant(Value::True))),
+        attempt(string("false").map(|_| Source::Constant(Value::False))),
+        attempt(string("null").map(|_| Source::Constant(Value::Null))),
+        attempt(string("ok").map(|_| Source::Constant(Value::Ok))),
         attempt(
             string("err:")
                 .with(quoted())
-                .map(|s| dbg!(Source::Constant(Value::Error(Chars::from(s))))),
+                .map(|s| Source::Constant(Value::Error(Chars::from(s)))),
         ),
-        attempt(string("n:").with(quoted().map(|s| dbg!(Source::Load(Path::from(s)))))),
-        attempt(string("v:").with(fname()).map(|s| dbg!(Source::Variable(s)))),
+        attempt(string("n:").with(quoted().map(|s| Source::Load(Path::from(s))))),
+        attempt(string("v:").with(fname()).map(|s| Source::Variable(s))),
         (
             fname(),
             between(
@@ -157,7 +151,7 @@ where
                 spaces().with(sep_by1(source(), spaces().with(token(',')))),
             ),
         )
-            .map(|(function, from)| dbg!(Source::Map { function, from })),
+            .map(|(function, from)| Source::Map { function, from }),
     )))
 }
 
@@ -182,7 +176,6 @@ mod tests {
 
     #[test]
     fn source_parse() {
-        /*
         assert_eq!(Source::Constant(Value::U32(23)), parse_source(" u32:23 ").unwrap());
         assert_eq!(Source::Constant(Value::V32(42)), parse_source("v32:42").unwrap());
         assert_eq!(Source::Constant(Value::I32(-10)), parse_source("i32:-10").unwrap());
@@ -239,13 +232,6 @@ mod tests {
             function: String::from("sum"),
         };
         let chs = r#"sum(f32:1, n:"/foo/bar", max(f32:0, n:"/foo/baz"))"#;
-        assert_eq!(src, parse_source(chs).unwrap());
-        */
-        let src = Source::Map {
-            from: vec![Source::Constant(Value::F32(1.))],
-            function: String::from("sum"),
-        };
-        let chs = r#"sum(f32:1)"#;
         assert_eq!(src, parse_source(chs).unwrap());
     }
 }
