@@ -1,6 +1,6 @@
 use crate::view::{Sink, Source};
 use combine::{
-    attempt, between, choice, from_str, many, many1, one_of, optional,
+    attempt, between, choice, from_str, many1, optional,
     parser::{
         char::{digit, spaces, string},
         combinator::recognize,
@@ -163,7 +163,7 @@ parser! {
     }
 }
 
-fn parse_source(s: &str) -> anyhow::Result<Source> {
+pub fn parse_source(s: &str) -> anyhow::Result<Source> {
     source()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
@@ -199,7 +199,7 @@ where
     )))
 }
 
-fn parse_sink(s: &str) -> anyhow::Result<Sink> {
+pub fn parse_sink(s: &str) -> anyhow::Result<Sink> {
     sink()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)

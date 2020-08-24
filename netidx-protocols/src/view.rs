@@ -1,5 +1,5 @@
-use netidx::{path::Path, publisher::Value, utils};
-use anyhow::{Result, Error};
+use crate::parser;
+use netidx::{path::Path, publisher::Value};
 use std::{boxed, collections::HashMap, str::FromStr, result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
@@ -25,10 +25,10 @@ pub enum Source {
 }
 
 impl FromStr for Source {
-    type Err = &'static str;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        todo!()
+        parser::parse_source(s)
     }
 }
 
@@ -37,6 +37,14 @@ pub enum Sink {
     Store(Path),
     Variable(String),
     All(Vec<Sink>),
+}
+
+impl FromStr for Sink {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        parser::parse_sink(s)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +58,12 @@ pub struct Keybind {
 pub enum Direction {
     Horizontal,
     Vertical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Action {
+    pub source: Source,
+    pub sink: Sink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +142,7 @@ pub struct Grid {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Widget {
+    Action(Action),
     Table(Path),
     Label(Source),
     Button(Button),
