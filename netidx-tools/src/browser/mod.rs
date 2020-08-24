@@ -183,13 +183,16 @@ enum Sink {
 impl Sink {
     fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
         match spec {
-            view::Sink::Variable(name) => Sink::Variable(name),
-            view::Sink::Store(path) => {
+            view::Sink::Leaf(view::SinkLeaf::Variable(name)) => Sink::Variable(name),
+            view::Sink::Leaf(view::SinkLeaf::Store(path)) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::All(sinks) => {
-                Sink::All(sinks.into_iter().map(|spec| Sink::new(ctx, spec)).collect())
-            }
+            view::Sink::All(sinks) => Sink::All(
+                sinks
+                    .into_iter()
+                    .map(|spec| Sink::new(ctx, view::Sink::Leaf(spec)))
+                    .collect(),
+            ),
         }
     }
 
@@ -229,6 +232,7 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
 }
 
 enum Widget {
+    Action(widgets::Action),
     Table(table::Table),
     Label(widgets::Label),
     Button(widgets::Button),
@@ -247,6 +251,11 @@ impl Widget {
         selected_path: gtk::Label,
     ) -> Widget {
         match spec {
+            view::Widget::Action(spec) => Widget::Action(widgets::Action::new(
+                ctx.clone(),
+                variables,
+                spec,
+            )),
             view::Widget::Table(base_path, spec) => Widget::Table(table::Table::new(
                 ctx.clone(),
                 base_path,
@@ -300,6 +309,7 @@ impl Widget {
 
     fn root(&self) -> Option<&gtk::Widget> {
         match self {
+            Widget::Action(_) => None,
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
             Widget::Button(t) => Some(t.root()),
@@ -317,6 +327,7 @@ impl Widget {
         changed: &'b Arc<IndexMap<SubId, Value>>,
     ) {
         match self {
+            Widget::Action(t) => t.update(changed),
             Widget::Table(t) => t.update(waits, changed),
             Widget::Label(t) => t.update(changed),
             Widget::Button(t) => t.update(changed),
@@ -330,6 +341,7 @@ impl Widget {
 
     fn update_var(&self, name: &str, value: &Value) {
         match self {
+            Widget::Action(t) => t.update_var(name, value),
             Widget::Table(_) => (),
             Widget::Label(t) => t.update_var(name, value),
             Widget::Button(t) => t.update_var(name, value),
@@ -363,6 +375,7 @@ impl Widget {
                 (WidgetPath::Grid(_, _), _) => (),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Action(_)) => (),
                 (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),

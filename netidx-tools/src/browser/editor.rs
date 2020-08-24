@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::{
     boxed,
     cell::{Cell, RefCell},
+    fmt::Display,
     rc::Rc,
     result,
     str::FromStr,
@@ -52,16 +53,15 @@ impl Table {
     }
 }
 
-fn parse_entry<T: FromStr + ToString + 'static, F: Fn(T) + 'static>(
-    label: &str,
-    spec: &T,
-    on_change: F,
-) -> (gtk::Label, gtk::Entry) {
+fn parse_entry<T, F>(label: &str, spec: &T, on_change: F) -> (gtk::Label, gtk::Entry)
+where
+    T: FromStr + ToString + 'static,
+    T::Err: Display,
+    F: Fn(T) + 'static,
+{
     let label = gtk::Label::new(Some(label));
     let entry = gtk::Entry::new();
-    if let Ok(s) = spec.to_string() {
-        entry.set_text(&s);
-    }
+    entry.set_text(&spec.to_string());
     entry.connect_activate(move |e| {
         let txt = e.get_text();
         match txt.parse::<T>() {
@@ -92,6 +92,52 @@ impl TwoColGrid {
     fn attach<T: IsA<gtk::Widget>>(&mut self, w: &T, col: i32, cols: i32, rows: i32) {
         self.root.attach(w, col, self.row, cols, rows);
         self.row += 1;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Action {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Action>>,
+}
+
+impl Action {
+    fn insert(
+        on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
+        spec: view::Action,
+    ) {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        root.add(parse_entry(
+            "Source:",
+            &spec.borrow().source,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().source = s;
+                on_change()
+            }),
+        ));
+        root.add(parse_entry(
+            "Sink:",
+            &spec.borrow().sink,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().sink = s;
+                on_change()
+            }),
+        ));
+        let t = Widget::Action(Action { root, spec });
+        let v = t.to_value();
+        store.set_value(iter, 0, &"Action".to_value());
+        store.set_value(iter, 1, &v);
+    }
+
+    fn spec(&self) -> view::Widget {
+        view::Widget::Action(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root.upcast_ref()
     }
 }
 
@@ -529,6 +575,7 @@ impl BoxContainer {
 #[derive(Clone, Debug, GBoxed)]
 #[gboxed(type_name = "NetidxEditorWidget")]
 enum Widget {
+    Action(Action),
     Table(Table),
     Label(Label),
     Button(Button),
@@ -549,6 +596,7 @@ impl Widget {
         spec: view::Widget,
     ) {
         match spec {
+            view::Widget::Action(s) => Action::insert(on_change, store, iter, s),
             view::Widget::Table(s) => Table::insert(on_change, store, iter, s),
             view::Widget::Label(s) => Label::insert(on_change, store, iter, s),
             view::Widget::Button(s) => Button::insert(on_change, store, iter, s),
@@ -564,6 +612,7 @@ impl Widget {
 
     fn spec(&self) -> view::Widget {
         match self {
+            Widget::Action(w) => w.spec(),
             Widget::Table(w) => w.spec(),
             Widget::Label(w) => w.spec(),
             Widget::Button(w) => w.spec(),
@@ -579,6 +628,7 @@ impl Widget {
 
     fn root(&self) -> &gtk::Widget {
         match self {
+            Widget::Action(w) => w.root(),
             Widget::Table(w) => w.root(),
             Widget::Label(w) => w.root(),
             Widget::Button(w) => w.root(),
@@ -814,13 +864,17 @@ impl Editor {
                     enabled: view::Source::Constant(Value::True),
                     label: view::Source::Constant(Value::String(l)),
                     source: view::Source::Load(Path::from("/somewhere")),
-                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
+                        "/somewhere/else",
+                    ))),
                 })
             }
             Some("Toggle") => view::Widget::Toggle(view::Toggle {
                 enabled: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
-                sink: view::Sink::Store(Path::from("/somewhere/else")),
+                sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
+                    "/somewhere/else",
+                ))),
             }),
             Some("Selector") => {
                 let choices =
@@ -829,14 +883,18 @@ impl Editor {
                     enabled: view::Source::Constant(Value::True),
                     choices: view::Source::Constant(Value::String(choices)),
                     source: view::Source::Load(Path::from("/somewhere")),
-                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
+                        "/somewhere/else",
+                    ))),
                 })
             }
             Some("Entry") => view::Widget::Entry(view::Entry {
                 enabled: view::Source::Constant(Value::True),
                 visible: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
-                sink: view::Sink::Store(Path::from("/somewhere/else")),
+                sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
+                    "/somewhere/else",
+                ))),
             }),
             Some("Box") => view::Widget::Box(view::Box {
                 direction: view::Direction::Vertical,
@@ -879,7 +937,8 @@ impl Editor {
             }
             view::Widget::Grid(_) => todo!(),
             view::Widget::GridChild(_) => todo!(),
-            view::Widget::Table(_)
+            view::Widget::Action(_)
+            | view::Widget::Table(_)
             | view::Widget::Label(_)
             | view::Widget::Button(_)
             | view::Widget::Toggle(_)
@@ -939,6 +998,9 @@ impl Editor {
         match v.get::<&Widget>() {
             Err(_) | Ok(None) => (),
             Ok(Some(w)) => match w {
+                Widget::Action(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                }
                 Widget::Table(_) => {
                     path.insert(0, WidgetPath::Leaf);
                 }

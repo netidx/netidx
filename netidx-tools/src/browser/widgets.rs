@@ -134,6 +134,36 @@ impl Label {
     }
 }
 
+pub(super) struct Action {
+    source: Source,
+    sink: Sink,
+    ctx: WidgetCtx,
+}
+
+impl Action {
+    pub(super) fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::Action,
+    ) -> Self {
+        let source = Source::new(&ctx, variables, spec.source.clone());
+        let sink = Sink::new(&ctx, spec.sink.clone());
+        Action { source, sink, ctx }
+    }
+
+    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some(new) = self.source.update(changed) {
+            self.sink.set(&self.ctx, new);
+        }
+    }
+
+    pub(super) fn update_var(&self, name: &str, value: &Value) {
+        if let Some(value) = self.source.update_var(name, value) {
+            self.sink.set(&self.ctx, value);
+        }
+    }
+}
+
 pub(super) struct Selector {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
