@@ -3,8 +3,10 @@ mod editor;
 mod table;
 mod view;
 mod widgets;
+mod formula;
 use anyhow::{anyhow, Error, Result};
 use editor::Editor;
+use formula::Formula;
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -109,7 +111,7 @@ enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
-    Map { from: Vec<Source>, function: String },
+    Map { from: Vec<Source>, function: Formula },
 }
 
 impl Source {
