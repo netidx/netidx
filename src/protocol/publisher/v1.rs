@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
     fmt, mem,
     net::SocketAddr,
-    ops::{Add, Div, Mul, Not},
+    ops::{Add, Sub, Div, Mul, Not},
     result,
 };
 
