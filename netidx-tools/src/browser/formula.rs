@@ -438,40 +438,6 @@ fn cast_val(typ: Typ, v: Value) -> Option<Value> {
     }
 }
 
-fn cast_eval(from: &[Source]) -> Option<Value> {
-    match from {
-        [typ, src] => match (typ.current(), src.current()) {
-            (_, None) => None,
-            (None, _) => Some(Value::Error(Chars::from(format!(
-                "cast(typ, src): expected type, got None"
-            )))),
-            (Some(Value::String(s)), Some(v)) => match s.parse::<Typ>() {
-                Ok(typ) => cast_val(typ, v),
-                Err(e) => Some(Value::Error(Chars::from(format!(
-                    "cast(typ, src): invalid type {}, {}",
-                    s, e
-                )))),
-            },
-            (Some(v), _) => Some(Value::Error(Chars::from(format!(
-                "cast(typ, src): expected type name, got {:?}",
-                v
-            )))),
-        },
-        _ => Some(Value::Error(Chars::from(format!(
-            "cast(typ, src): expected 2 arguments got {}",
-            from.len()
-        )))),
-    }
-}
-
-fn cast_update(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        cast_eval(from)
-    } else {
-        None
-    }
-}
-
 struct Mean {
     total: Cell<f64>,
     samples: Cell<usize>,
@@ -575,26 +541,6 @@ fn update_not(from: &[Source], up: Update) -> Option<Value> {
     }
 }
 
-fn eval_if(from: &[Source]) -> Option<Value> {
-    match from {
-        [cond, b1, b2] => match cond.current() {
-            None => None,
-            Some(Value::True) => b1.current(),
-            Some(Value::False) => b2.current(),
-            _ => Some(Value::Error(Chars::from("if: expected boolean condition"))),
-        },
-        _ => Some(Value::Error(Chars::from("if: expected 3 arguments"))),
-    }
-}
-
-fn update_if(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_if(from)
-    } else {
-        None
-    }
-}
-
 fn eval_op<T: PartialEq + PartialOrd>(op: &str, v0: T, v1: T) -> Value {
     match op {
         "eq" => {
@@ -691,6 +637,104 @@ fn update_cmp(from: &[Source], up: Update) -> Option<Value> {
     }
 }
 
+fn eval_if(from: &[Source]) -> Option<Value> {
+    match from {
+        [cond, b1, b2] => match cond.current() {
+            None => None,
+            Some(Value::True) => b1.current(),
+            Some(Value::False) => b2.current(),
+            _ => Some(Value::Error(Chars::from("if: expected boolean condition"))),
+        },
+        _ => Some(Value::Error(Chars::from("if: expected 3 arguments"))),
+    }
+}
+
+fn update_if(from: &[Source], up: Update) -> Option<Value> {
+    if up.apply_all(from) {
+        eval_if(from)
+    } else {
+        None
+    }
+}
+
+fn eval_filter(from: &[Source]) -> Option<Value> {
+    match from {
+        [typ, src] => match typ.current() {
+            None => None,
+            Some(Value::String(s)) => match s.parse::<Typ>() {
+                Err(e) => Some(Value::Error(Chars::from(format!(
+                    "filter(typ, src): invalid type {}, {}",
+                    s, e
+                )))),
+                Ok(typ) => match (typ, src.current()) {
+                    (_, None)  => None,
+                    (Typ::U32, v@ Some(Value::U32(_))) => v,
+                    (Typ::V32, v@ Some(Value::V32(_))) => v,
+                    (Typ::I32, v@ Some(Value::I32(_))) => v,
+                    (Typ::Z32, v@ Some(Value::Z32(_))) => v,
+                    (Typ::U64, v@ Some(Value::U64(_))) => v,
+                    (Typ::V64, v@ Some(Value::V64(_))) => v,
+                    (Typ::I64, v@ Some(Value::I64(_))) => v,
+                    (Typ::Z64, v@ Some(Value::Z64(_))) => v,
+                    (Typ::F32, v@ Some(Value::F32(_))) => v,
+                    (Typ::F64, v@ Some(Value::F64(_))) => v,
+                    (Typ::Bool, v@ Some(Value::True | Value::False)) => v,
+                    (Typ::String, v@ Some(Value::String(_))) => v,
+                    (Typ::Bytes, v@ Some(Value::Bytes(_))) => v,
+                    (Typ::Result, v@ Some(Value::Ok | Value::Error(_))) => v,
+                    (_, _) => None
+                },
+            },
+            _ => {
+                Some(Value::Error(Chars::from("filter(typ, src) expected typ as string")))
+            }
+        },
+        _ => Some(Value::Error(Chars::from("filter(typ, src) expected 2 arguments"))),
+    }
+}
+
+fn update_filter(from: &[Source], up: Update) -> Option<Value> {
+    if up.apply_all(from) {
+        eval_filter(from)
+    } else {
+        None
+    }
+}
+
+fn eval_cast(from: &[Source]) -> Option<Value> {
+    match from {
+        [typ, src] => match (typ.current(), src.current()) {
+            (_, None) => None,
+            (None, _) => Some(Value::Error(Chars::from(format!(
+                "cast(typ, src): expected type, got None"
+            )))),
+            (Some(Value::String(s)), Some(v)) => match s.parse::<Typ>() {
+                Ok(typ) => cast_val(typ, v),
+                Err(e) => Some(Value::Error(Chars::from(format!(
+                    "cast(typ, src): invalid type {}, {}",
+                    s, e
+                )))),
+            },
+            (Some(v), _) => Some(Value::Error(Chars::from(format!(
+                "cast(typ, src): expected type name, got {:?}",
+                v
+            )))),
+        },
+        _ => Some(Value::Error(Chars::from(format!(
+            "cast(typ, src): expected 2 arguments got {}",
+            from.len()
+        )))),
+    }
+}
+
+fn update_cast(from: &[Source], up: Update) -> Option<Value> {
+    if up.apply_all(from) {
+        cast_eval(from)
+    } else {
+        None
+    }
+}
+
 enum Formula {
     Any,
     All,
@@ -707,7 +751,7 @@ enum Formula {
     If,
     Filter,
     Cast,
-    Is,
+    IsA,
 }
 
 impl Formula {
@@ -727,7 +771,7 @@ impl Formula {
             "if" => Ok(Formula::If),
             "filter" => Ok(Formula::Filter),
             "cast" => Ok(Formula::Cast),
-            "is" => Ok(Formula::Is),
+            "isa" => Ok(Formula::IsA),
             name => Err(anyhow!("no such function {}", name)),
         }
     }
