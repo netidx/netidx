@@ -4,7 +4,12 @@ use crate::{
     path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{fmt, mem, net::SocketAddr, result};
+use std::{
+    fmt, mem,
+    net::SocketAddr,
+    ops::{Add, Div, Mul, Not},
+    result,
+};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -242,6 +247,170 @@ impl fmt::Display for Value {
             Value::Null => write!(f, "Null"),
             Value::Ok => write!(f, "Ok"),
             Value::Error(v) => write!(f, "Error {}", v),
+        }
+    }
+}
+
+impl Add for Value {
+    type Output = Value;
+
+    fn add(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Value::U32(l), Value::U32(r)) => Value::U32(l + r),
+            (Value::U32(l), Value::V32(r)) => Value::U32(l + r),
+            (Value::V32(l), Value::V32(r)) => Value::V32(l + r),
+            (Value::V32(l), Value::U32(r)) => Value::U32(l + r),
+            (Value::I32(l), Value::I32(r)) => Value::I32(l + r),
+            (Value::I32(l), Value::Z32(r)) => Value::I32(l + r),
+            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l + r),
+            (Value::Z32(l), Value::I32(r)) => Value::I32(l + r),
+            (Value::U64(l), Value::U64(r)) => Value::U64(l + r),
+            (Value::U64(l), Value::V64(r)) => Value::U64(l + r),
+            (Value::V64(l), Value::V64(r)) => Value::V64(l + r),
+            (Value::I64(l), Value::I64(r)) => Value::I64(l + r),
+            (Value::I64(l), Value::Z64(r)) => Value::I64(l + r),
+            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l + r),
+            (Value::Z64(l), Value::I64(r)) => Value::I64(l + r),
+            (Value::F32(l), Value::F32(r)) => Value::F32(l + r),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l + r),
+            (l, r) => Value::Error(Chars::from(format!("can't add {:?} and {:?}", l, r))),
+        }
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Value::U32(l), Value::U32(r)) if l >= r => Value::U32(l - r),
+            (Value::U32(l), Value::V32(r)) if l >= r => Value::U32(l - r),
+            (Value::V32(l), Value::V32(r)) if l >= r => Value::V32(l - r),
+            (Value::V32(l), Value::U32(r)) if l >= r => Value::U32(l - r),
+            (Value::I32(l), Value::I32(r)) => Value::I32(l - r),
+            (Value::I32(l), Value::Z32(r)) => Value::I32(l - r),
+            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l - r),
+            (Value::Z32(l), Value::I32(r)) => Value::I32(l - r),
+            (Value::U64(l), Value::U64(r)) if l >= r => Value::U64(l - r),
+            (Value::U64(l), Value::V64(r)) if l >= r => Value::U64(l - r),
+            (Value::V64(l), Value::V64(r)) if l >= r => Value::V64(l - r),
+            (Value::I64(l), Value::I64(r)) => Value::I64(l - r),
+            (Value::I64(l), Value::Z64(r)) => Value::I64(l - r),
+            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l - r),
+            (Value::Z64(l), Value::I64(r)) => Value::I64(l - r),
+            (Value::F32(l), Value::F32(r)) => Value::F32(l - r),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l - r),
+            (l, r) => Value::Error(Chars::from(format!("can't sub {:?} and {:?}", l, r))),
+        }
+    }
+}
+
+impl Mul for Value {
+    type Output = Value;
+
+    fn mul(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Value::U32(l), Value::U32(r)) => Value::U32(l * r),
+            (Value::U32(l), Value::V32(r)) => Value::U32(l * r),
+            (Value::V32(l), Value::V32(r)) => Value::V32(l * r),
+            (Value::V32(l), Value::U32(r)) => Value::U32(l * r),
+            (Value::I32(l), Value::I32(r)) => Value::I32(l * r),
+            (Value::I32(l), Value::Z32(r)) => Value::I32(l * r),
+            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l * r),
+            (Value::Z32(l), Value::I32(r)) => Value::I32(l * r),
+            (Value::U64(l), Value::U64(r)) => Value::U64(l * r),
+            (Value::U64(l), Value::V64(r)) => Value::U64(l * r),
+            (Value::V64(l), Value::V64(r)) => Value::V64(l * r),
+            (Value::I64(l), Value::I64(r)) => Value::I64(l * r),
+            (Value::I64(l), Value::Z64(r)) => Value::I64(l * r),
+            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l * r),
+            (Value::Z64(l), Value::I64(r)) => Value::I64(l * r),
+            (Value::F32(l), Value::F32(r)) => Value::F32(l * r),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l * r),
+            (l, r) => {
+                Value::Error(Chars::from(format!("can't multiply {:?} and {:?}", l, r)))
+            }
+        }
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+
+    fn div(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Value::U32(l), Value::U32(r)) if r > 0 => Value::U32(l / r),
+            (Value::U32(l), Value::V32(r)) if r > 0 => Value::U32(l / r),
+            (Value::V32(l), Value::V32(r)) if r > 0 => Value::V32(l / r),
+            (Value::V32(l), Value::U32(r)) if r > 0 => Value::U32(l / r),
+            (Value::I32(l), Value::I32(r)) if r > 0 => Value::I32(l / r),
+            (Value::I32(l), Value::Z32(r)) if r > 0 => Value::I32(l / r),
+            (Value::Z32(l), Value::Z32(r)) if r > 0 => Value::Z32(l / r),
+            (Value::Z32(l), Value::I32(r)) if r > 0 => Value::I32(l / r),
+            (Value::U64(l), Value::U64(r)) if r > 0 => Value::U64(l / r),
+            (Value::U64(l), Value::V64(r)) if r > 0 => Value::U64(l / r),
+            (Value::V64(l), Value::V64(r)) if r > 0 => Value::V64(l / r),
+            (Value::I64(l), Value::I64(r)) if r > 0 => Value::I64(l / r),
+            (Value::I64(l), Value::Z64(r)) if r > 0 => Value::I64(l / r),
+            (Value::Z64(l), Value::Z64(r)) if r > 0 => Value::Z64(l / r),
+            (Value::Z64(l), Value::I64(r)) if r > 0 => Value::I64(l / r),
+            (Value::F32(l), Value::F32(r)) => Value::F32(l / r),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l / r),
+            (l, r) => {
+                Value::Error(Chars::from(format!("can't multiply {:?} and {:?}", l, r)))
+            }
+        }
+    }
+}
+
+impl Not for Value {
+    type Output = Value;
+
+    fn not(self) -> Self {
+        match self {
+            Value::U32(v) => {
+                Value::Error(Chars::from(format!("can't apply not to U32({})", v)))
+            }
+            Value::V32(v) => {
+                Value::Error(Chars::from(format!("can't apply not to V32({})", v)))
+            }
+            Value::I32(v) => {
+                Value::Error(Chars::from(format!("can't apply not to I32({})", v)))
+            }
+            Value::Z32(v) => {
+                Value::Error(Chars::from(format!("can't apply not to Z32({})", v)))
+            }
+            Value::U64(v) => {
+                Value::Error(Chars::from(format!("can't apply not to U64({})", v)))
+            }
+            Value::V64(v) => {
+                Value::Error(Chars::from(format!("can't apply not to V64({})", v)))
+            }
+            Value::I64(v) => {
+                Value::Error(Chars::from(format!("can't apply not to I64({})", v)))
+            }
+            Value::Z64(v) => {
+                Value::Error(Chars::from(format!("can't apply not to Z64({})", v)))
+            }
+            Value::F32(v) => {
+                Value::Error(Chars::from(format!("can't apply not to F32({})", v)))
+            }
+            Value::F64(v) => {
+                Value::Error(Chars::from(format!("can't apply not to F64({})", v)))
+            }
+            Value::String(v) => {
+                Value::Error(Chars::from(format!("can't apply not to String({})", v)))
+            }
+            Value::Bytes(_) => {
+                Value::Error(Chars::from(format!("can't apply not to Bytes")))
+            }
+            Value::True => Value::False,
+            Value::False => Value::True,
+            Value::Null => Value::Null,
+            Value::Ok => Value::Error(Chars::from(format!("can't apply not to Ok"))),
+            Value::Error(v) => {
+                Value::Error(Chars::from(format!("can't apply not to Error({})", v)))
+            }
         }
     }
 }

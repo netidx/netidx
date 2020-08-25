@@ -2,7 +2,7 @@ use super::Source;
 use anyhow::Result;
 use indexmap::IndexMap;
 use netidx::subscriber::Value;
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy)]
 enum Update<'a> {
@@ -74,43 +74,106 @@ fn all_eval(from: &[Source]) -> Option<Value> {
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
         (None, None) => None,
-        (None, r@Some(_)) => r,
-        (r@Some(_), None) => r,
-        (None, r@Some(_)) => Some(r),
-        (Some(Value::U32(l)), Some(Value::U32(r))) => Some(Value::U32(l + r)),
-        (Some(Value::U32(l)), Some(Value::V32(r))) => Some(Value::U32(l + r)),
-        (Some(Value::V32(l)), Some(Value::V32(r))) => Some(Value::V32(l + r)),
-        (Some(Value::V32(l)), Some(Value::U32(r))) => Some(Value::U32(l + r)),
-        (Some(Value::I32(l)), Some(Value::I32(r))) => Some(Value::I32(l + r)),
-        (Some(Value::I32(l)), Some(Value::Z32(r))) => Some(Value::I32(l + r)),
-        (Some(Value::Z32(l)), Some(Value::Z32(r))) => Some(Value::Z32(l + r)),
-        (Some(Value::Z32(l)), Some(Value::I32(r))) => Some(Value::I32(l + r)),
-        (Some(Value::U64(l)), Some(Value::U64(r))) => Some(Value::U64(l + r)),
-        (Some(Value::U64(l)), Some(Value::V64(r))) => Some(Value::U64(l + r)),
-        (Some(Value::V64(l)), Some(Value::V64(r))) => Some(Value::V64(l + r)),
-        (Some(Value::I64(l)), Some(Value::I64(r))) => Some(Value::I64(l + r)),
-        (Some(Value::I64(l)), Some(Value::Z64(r))) => Some(Value::I64(l + r)),
-        (Some(Value::Z64(l)), Some(Value::Z64(r))) => Some(Value::Z64(l + r)),
-        (Some(Value::Z64(l)), Some(Value::I64(r))) => Some(Value::I64(l + r)),
-        (Some(Value::F32(l)), Some(Value::F32(r))) => Some(Value::F32(l + r)),
-        (Some(Value::F64(l)), Some(Value::F64(r))) => Some(Value::F64(l + r)),
-        (l, r) => Some(Value::Error(format!("can't add {:?} and {:?}", l, r))),
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (None, r @ Some(_)) => Some(r),
+        (Some(l), Some(r)) => Some(l + r),
     }
 }
 
 fn sum_update(from: &[Source], up: Update) -> Option<Value> {
+    let changed = from.into_iter().filter_map(|s| match up {
+        Update::Var(name, value) => s.update_var(name, value),
+        Update::DVal(changed) => s.update(changed)
+    }).last().is_some();
+    if !changed {
+        None
+    } else {
+        sum_eval(from)
+    }
+}
+
+fn sum_eval(from: &[Source]) -> Option<Value> {
     from.into_iter().fold(None, |res, s| match res {
-        res@ Some(Value::Error(_)) => res,
-        res => add_vals(res, updated_or_cur(s, up))
+        res @ Some(Value::Error(_)) => res,
+        res => add_vals(res, s.current()),
     })
 }
+
+fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (None, r @ Some(_)) => Some(r),
+        (Some(l), Some(r)) => Some(l * r),
+    }
+}
+
+fn product_update(from: &[Source], up: Update) -> Option<Value> {
+    from.into_iter().fold(None, |res, s| match res {
+        res @ Some(Value::Error(_)) => res,
+        res => prod_vals(res, updated_or_cur(s, up)),
+    })
+}
+
+fn product_eval(from: &[Source]) -> Option<Value> {
+    from.into_iter().fold(None, |res, s| match res {
+        res @ Some(Value::Error(_)) => res,
+        res => prod_vals(res, s.current()),
+    })
+}
+
+fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (None, r @ Some(_)) => Some(r),
+        (Some(l), Some(r)) => Some(l / r),
+    }
+}
+
+fn divide_update(from: &[Source], up: Update) -> Option<Value> {
+    from.into_iter().fold(None, |res, s| match res {
+        res @ Some(Value::Error(_)) => res,
+        res => div_vals(res, updated_or_cur(s, up)),
+    })
+}
+
+fn divide_eval(from: &[Source]) -> Option<Value> {
+    from.into_iter().fold(None, |res, s| match res {
+        res @ Some(Value::Error(_)) => res,
+        res => div_vals(res, s.current()),
+    })
+}
+
+fn cast_update(from: &[Source], up: Update) -> Option<Value> {
+    match from {
+        [typ, src] => {
+            
+        }
+        _ => Some(Value::Error(format!(
+            "cast(typ, src): expected 2 arguments got {}",
+            from.len()
+        ))),
+    }
+}
+
+struct Mean {
+    total: Cell<f64>,
+    samples: Cell<usize>,
+}
+
+fn mean_update(from: Source, total: Rc<Cell<f64>>, samples: Rc<Cell<usize>>) {}
 
 enum Formula {
     Any,
     All,
     Sum,
     Product,
-    Mean { total: f64, samples: usize },
+    Divide,
+    Mean(Rc<Mean>),
     Min,
     Max,
     And,
@@ -130,6 +193,7 @@ impl Formula {
             "all" => Ok(Formula::All),
             "sum" => Ok(Formula::Sum),
             "product" => Ok(Formula::Product),
+            "divide" => Ok(Formula::Divide),
             "mean" => Ok(Formula::Mean { total: 0., samples: 0 }),
             "min" => Ok(Formula::Min),
             "max" => Ok(Formula::Max),
