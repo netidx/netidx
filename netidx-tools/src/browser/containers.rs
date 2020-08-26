@@ -5,8 +5,7 @@ use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use once_cell::unsync::Lazy;
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 pub(super) struct Box {
     root: gtk::Box,

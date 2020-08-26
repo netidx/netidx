@@ -5,7 +5,6 @@ use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
-use serde::{de::DeserializeOwned, Serialize};
 use std::{
     boxed,
     cell::{Cell, RefCell},

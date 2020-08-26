@@ -9,7 +9,6 @@ use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
-use once_cell::unsync::Lazy;
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) struct Button {

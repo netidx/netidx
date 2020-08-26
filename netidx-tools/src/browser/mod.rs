@@ -1,9 +1,9 @@
 mod containers;
 mod editor;
+mod formula;
 mod table;
 mod view;
 mod widgets;
-mod formula;
 use anyhow::{anyhow, Error, Result};
 use editor::Editor;
 use formula::Formula;
@@ -28,9 +28,8 @@ use netidx::{
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
 };
 use netidx_protocols::view as protocol_view;
-use once_cell::{sync::OnceCell, unsync::Lazy};
+use once_cell::sync::OnceCell;
 use std::{
-    boxed,
     cell::{Cell, RefCell},
     collections::HashMap,
     fmt, fs, mem,
@@ -137,7 +136,7 @@ impl Source {
                     .into_iter()
                     .map(|spec| Source::new(ctx, variables, spec))
                     .collect(),
-                function,
+                function: Formula::new(function),
             },
         }
     }
@@ -147,7 +146,7 @@ impl Source {
             Source::Constant(v) => Some(v.clone()),
             Source::Load(dv) => dv.last(),
             Source::Variable(_, v) => Some(v.borrow().clone()),
-            Source::Map { from, function } => todo!(),
+            Source::Map { from, function } => function.current(from),
         }
     }
 
@@ -155,13 +154,14 @@ impl Source {
         match self {
             Source::Constant(_) | Source::Variable(_, _) => None,
             Source::Load(dv) => changed.get(&dv.id()).cloned(),
-            Source::Map { from, function } => todo!(),
+            Source::Map { from, function } => function.update(from, changed),
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) -> Option<Value> {
         match self {
             Source::Load(_) | Source::Constant(_) => None,
+            Source::Map { from, function } => function.update_var(from, name, value),
             Source::Variable(our_name, cur) => {
                 if name == our_name {
                     *cur.borrow_mut() = value.clone();
@@ -170,7 +170,6 @@ impl Source {
                     None
                 }
             }
-            Source::Map { from, function } => todo!(),
         }
     }
 }
@@ -253,11 +252,9 @@ impl Widget {
         selected_path: gtk::Label,
     ) -> Widget {
         match spec {
-            view::Widget::Action(spec) => Widget::Action(widgets::Action::new(
-                ctx.clone(),
-                variables,
-                spec,
-            )),
+            view::Widget::Action(spec) => {
+                Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
+            }
             view::Widget::Table(base_path, spec) => Widget::Table(table::Table::new(
                 ctx.clone(),
                 base_path,

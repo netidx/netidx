@@ -1,15 +1,13 @@
 use super::super::publisher::Typ;
 use super::Source;
-use anyhow::Result;
 use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     cmp::{PartialEq, PartialOrd},
-    rc::Rc,
     sync::Arc,
 };
 
@@ -38,7 +36,6 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
         (None, None) => None,
         (None, r @ Some(_)) => r,
         (r @ Some(_), None) => r,
-        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l + r),
     }
 }
@@ -55,7 +52,6 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
         (None, None) => None,
         (None, r @ Some(_)) => r,
         (r @ Some(_), None) => r,
-        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l * r),
     }
 }
@@ -72,7 +68,6 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
         (None, None) => None,
         (None, r @ Some(_)) => r,
         (r @ Some(_), None) => r,
-        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l / r),
     }
 }
@@ -370,7 +365,7 @@ fn cast_val(typ: Typ, v: Value) -> Option<Value> {
 }
 
 #[derive(Debug, Clone)]
-struct Mean {
+pub(super) struct Mean {
     total: Cell<f64>,
     samples: Cell<usize>,
 }
@@ -539,7 +534,11 @@ fn eval_cmp(from: &[Source]) -> Option<Value> {
                     )))),
                 },
             },
+            Some(_) => Some(Value::Error(Chars::from(
+                "cmp(op, v0, v1): expected op to be a string",
+            ))),
         },
+        _ => Some(Value::Error(Chars::from("cmp(op, v0, v1): expected 3 arguments"))),
     }
 }
 
@@ -650,27 +649,29 @@ pub(super) enum Formula {
     Filter,
     Cast,
     IsA,
+    Unknown(String),
 }
 
 impl Formula {
-    pub(super) fn new(name: &str) -> Result<Formula> {
-        match name {
-            "any" => Ok(Formula::Any),
-            "all" => Ok(Formula::All),
-            "sum" => Ok(Formula::Sum),
-            "product" => Ok(Formula::Product),
-            "divide" => Ok(Formula::Divide),
-            "mean" => Ok(Formula::Mean(Mean::new())),
-            "min" => Ok(Formula::Min),
-            "max" => Ok(Formula::Max),
-            "and" => Ok(Formula::And),
-            "or" => Ok(Formula::Or),
-            "not" => Ok(Formula::Not),
-            "if" => Ok(Formula::If),
-            "filter" => Ok(Formula::Filter),
-            "cast" => Ok(Formula::Cast),
-            "isa" => Ok(Formula::IsA),
-            name => Err(anyhow!("no such function {}", name)),
+    pub(super) fn new(name: String) -> Formula {
+        match name.as_str() {
+            "any" => Formula::Any,
+            "all" => Formula::All,
+            "sum" => Formula::Sum,
+            "product" => Formula::Product,
+            "divide" => Formula::Divide,
+            "mean" => Formula::Mean(Mean::new()),
+            "min" => Formula::Min,
+            "max" => Formula::Max,
+            "and" => Formula::And,
+            "or" => Formula::Or,
+            "not" => Formula::Not,
+            "cmp" => Formula::Cmp,
+            "if" => Formula::If,
+            "filter" => Formula::Filter,
+            "cast" => Formula::Cast,
+            "isa" => Formula::IsA,
+            _ => Formula::Unknown(name),
         }
     }
 
@@ -692,6 +693,9 @@ impl Formula {
             Formula::Filter => eval_filter(from),
             Formula::Cast => eval_cast(from),
             Formula::IsA => eval_isa(from),
+            Formula::Unknown(s) => {
+                Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
+            }
         }
     }
 
