@@ -29,39 +29,8 @@ impl Update {
     }
 }
 
-fn any_update(from: &[Source], up: Update) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match (up.apply(s), res) {
-        (_, v @ Some(_)) => v,
-        (v @ Some(_), None) => v,
-        (None, None) => None,
-    })
-}
-
 fn any_eval(from: &[Source]) -> Option<Value> {
     from.into_iter().find_map(|s| s.current())
-}
-
-fn updated_or_cur(s: &Source, up: Update) -> Option<Value> {
-    match up.apply(s) {
-        v @ Some(_) => v,
-        None => s.current(),
-    }
-}
-
-fn all_update(from: &[Source], up: Update) -> Option<Value> {
-    match from {
-        [] => None,
-        [hd, tl @ ..] => match updated_or_cur(hd, up) {
-            None => None,
-            v @ Some(_) => tl.into_iter().fold(v, |res, s| {
-                if res == updated_or_cur(s, up) {
-                    res
-                } else {
-                    None
-                }
-            }),
-        },
-    }
 }
 
 fn all_eval(from: &[Source]) -> Option<Value> {
@@ -90,14 +59,6 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-fn sum_update(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        sum_eval(from)
-    } else {
-        None
-    }
-}
-
 fn sum_eval(from: &[Source]) -> Option<Value> {
     from.into_iter().fold(None, |res, s| match res {
         res @ Some(Value::Error(_)) => res,
@@ -115,13 +76,6 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-fn product_update(from: &[Source], up: Update) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match res {
-        res @ Some(Value::Error(_)) => res,
-        res => prod_vals(res, updated_or_cur(s, up)),
-    })
-}
-
 fn product_eval(from: &[Source]) -> Option<Value> {
     from.into_iter().fold(None, |res, s| match res {
         res @ Some(Value::Error(_)) => res,
@@ -137,13 +91,6 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
         (None, r @ Some(_)) => Some(r),
         (Some(l), Some(r)) => Some(l / r),
     }
-}
-
-fn divide_update(from: &[Source], up: Update) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match res {
-        res @ Some(Value::Error(_)) => res,
-        res => div_vals(res, updated_or_cur(s, up)),
-    })
 }
 
 fn divide_eval(from: &[Source]) -> Option<Value> {
@@ -441,34 +388,25 @@ fn cast_val(typ: Typ, v: Value) -> Option<Value> {
 struct Mean {
     total: Cell<f64>,
     samples: Cell<usize>,
-    current: RefCell<Option<Value>>,
 }
 
 impl Mean {
     fn new() -> Self {
-        Mean { total: Cell::new(0.), samples: Cell::new(0), current: RefCell::new(None) }
+        Mean { total: Cell::new(0.), samples: Cell::new(0) }
     }
 
-    fn update(&self, from: &[Source], up: Update) -> Option<Value> {
-        let mut updated = false;
-        for v in from.into_iter().filter_map(|s| up.apply(s)) {
-            if let Some(Value::F64(v)) = cast_val(Typ::F64, v) {
-                updated = true;
+    fn eval(&self) -> Option<Value> {
+        for s in from.into_iter() {
+            if let Some(Value::F64(v)) = cast_val(Typ::F64, s.current()) {
                 self.total.set(self.total.get() + v);
                 self.samples.set(self.samples.get() + 1);
             }
         }
-        if !updated {
-            None
+        if self.samples.get() > 0 {
+            Some(Value::F64(self.total.get() / (self.samples.get() as f64)))
         } else {
-            *self.current.borrow_mut() =
-                Some(self.total.get() / (self.samples.get() as f64));
-            self.current.borrow().clone()
+            None
         }
-    }
-
-    fn eval(&self) -> Option<Value> {
-        self.current.borrow().clone()
     }
 }
 
@@ -476,24 +414,8 @@ fn eval_min(from: &[Source]) -> Option<Value> {
     from.into_iter().filter_map(|s| s.current()).min()
 }
 
-fn update_min(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_min(from)
-    } else {
-        None
-    }
-}
-
 fn eval_max(from: &[Source]) -> Option<Value> {
     from.into_iter().filter_map(|s| s.current()).max()
-}
-
-fn update_max(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_max(from)
-    } else {
-        None
-    }
 }
 
 fn eval_and(from: &[Source]) -> Option<Value> {
@@ -503,14 +425,6 @@ fn eval_and(from: &[Source]) -> Option<Value> {
     })
 }
 
-fn update_and(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_and(from)
-    } else {
-        None
-    }
-}
-
 fn eval_or(from: &[Source]) -> Option<Value> {
     from.into_iter().any(|s| match s.current() {
         Some(Value::True) => true,
@@ -518,26 +432,10 @@ fn eval_or(from: &[Source]) -> Option<Value> {
     })
 }
 
-fn update_or(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_or(from)
-    } else {
-        None
-    }
-}
-
 fn eval_not(from: &[Source]) -> Option<Value> {
     match from {
         [s] => s.current().map(|v| !v),
         _ => Some(Value::Error(Chars::from("not expected 1 argument"))),
-    }
-}
-
-fn update_not(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_not(from)
-    } else {
-        None
     }
 }
 
@@ -629,14 +527,6 @@ fn eval_cmp(from: &[Source]) -> Option<Value> {
     }
 }
 
-fn update_cmp(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_cmp(from)
-    } else {
-        None
-    }
-}
-
 fn eval_if(from: &[Source]) -> Option<Value> {
     match from {
         [cond, b1, b2] => match cond.current() {
@@ -649,90 +539,77 @@ fn eval_if(from: &[Source]) -> Option<Value> {
     }
 }
 
-fn update_if(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_if(from)
-    } else {
-        None
-    }
-}
-
-fn eval_filter(from: &[Source]) -> Option<Value> {
+fn with_typ_prefix(
+    from: &[Source],
+    name: &'static str,
+    f: impl Fn(Typ, Source) -> Option<Value>,
+) -> Option<Value> {
     match from {
         [typ, src] => match typ.current() {
             None => None,
             Some(Value::String(s)) => match s.parse::<Typ>() {
                 Err(e) => Some(Value::Error(Chars::from(format!(
-                    "filter(typ, src): invalid type {}, {}",
-                    s, e
+                    "{}: invalid type {}, {}",
+                    name, s, e
                 )))),
-                Ok(typ) => match (typ, src.current()) {
-                    (_, None)  => None,
-                    (Typ::U32, v@ Some(Value::U32(_))) => v,
-                    (Typ::V32, v@ Some(Value::V32(_))) => v,
-                    (Typ::I32, v@ Some(Value::I32(_))) => v,
-                    (Typ::Z32, v@ Some(Value::Z32(_))) => v,
-                    (Typ::U64, v@ Some(Value::U64(_))) => v,
-                    (Typ::V64, v@ Some(Value::V64(_))) => v,
-                    (Typ::I64, v@ Some(Value::I64(_))) => v,
-                    (Typ::Z64, v@ Some(Value::Z64(_))) => v,
-                    (Typ::F32, v@ Some(Value::F32(_))) => v,
-                    (Typ::F64, v@ Some(Value::F64(_))) => v,
-                    (Typ::Bool, v@ Some(Value::True | Value::False)) => v,
-                    (Typ::String, v@ Some(Value::String(_))) => v,
-                    (Typ::Bytes, v@ Some(Value::Bytes(_))) => v,
-                    (Typ::Result, v@ Some(Value::Ok | Value::Error(_))) => v,
-                    (_, _) => None
-                },
+                Ok(typ) => f(typ, src.current()),
             },
-            _ => {
-                Some(Value::Error(Chars::from("filter(typ, src) expected typ as string")))
-            }
+            _ => Some(Value::Error(Chars::from(format!(
+                "{} expected typ as string",
+                name
+            )))),
         },
-        _ => Some(Value::Error(Chars::from("filter(typ, src) expected 2 arguments"))),
+        _ => Some(Value::Error(Chars::from("{} expected 2 arguments", name))),
     }
 }
 
-fn update_filter(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        eval_filter(from)
-    } else {
-        None
-    }
+fn eval_filter(from: &[Source]) -> Option<Value> {
+    with_typ_prefix(from, "filter(typ, src)", |typ, src| match (typ, src.current()) {
+        (_, None) => None,
+        (Typ::U32, v @ Some(Value::U32(_))) => v,
+        (Typ::V32, v @ Some(Value::V32(_))) => v,
+        (Typ::I32, v @ Some(Value::I32(_))) => v,
+        (Typ::Z32, v @ Some(Value::Z32(_))) => v,
+        (Typ::U64, v @ Some(Value::U64(_))) => v,
+        (Typ::V64, v @ Some(Value::V64(_))) => v,
+        (Typ::I64, v @ Some(Value::I64(_))) => v,
+        (Typ::Z64, v @ Some(Value::Z64(_))) => v,
+        (Typ::F32, v @ Some(Value::F32(_))) => v,
+        (Typ::F64, v @ Some(Value::F64(_))) => v,
+        (Typ::Bool, v @ Some(Value::True | Value::False)) => v,
+        (Typ::String, v @ Some(Value::String(_))) => v,
+        (Typ::Bytes, v @ Some(Value::Bytes(_))) => v,
+        (Typ::Result, v @ Some(Value::Ok | Value::Error(_))) => v,
+        (_, _) => None,
+    })
 }
 
 fn eval_cast(from: &[Source]) -> Option<Value> {
-    match from {
-        [typ, src] => match (typ.current(), src.current()) {
-            (_, None) => None,
-            (None, _) => Some(Value::Error(Chars::from(format!(
-                "cast(typ, src): expected type, got None"
-            )))),
-            (Some(Value::String(s)), Some(v)) => match s.parse::<Typ>() {
-                Ok(typ) => cast_val(typ, v),
-                Err(e) => Some(Value::Error(Chars::from(format!(
-                    "cast(typ, src): invalid type {}, {}",
-                    s, e
-                )))),
-            },
-            (Some(v), _) => Some(Value::Error(Chars::from(format!(
-                "cast(typ, src): expected type name, got {:?}",
-                v
-            )))),
-        },
-        _ => Some(Value::Error(Chars::from(format!(
-            "cast(typ, src): expected 2 arguments got {}",
-            from.len()
-        )))),
-    }
+    with_typ_prefix(from, "cast(typ, src)", |typ, src| match src.current() {
+        None => None,
+        Some(v) => cast_val(typ, v),
+    })
 }
 
-fn update_cast(from: &[Source], up: Update) -> Option<Value> {
-    if up.apply_all(from) {
-        cast_eval(from)
-    } else {
-        None
-    }
+fn eval_isa(from: &[Source]) -> Option<Value> {
+    with_typ_prefix(from, "isa(typ, src)", |typ, src| match (typ, src.current()) {
+        (_, None) => None,
+        (Typ::U32, Some(Value::U32(_))) => Some(Value::True),
+        (Typ::V32, Some(Value::V32(_))) => Some(Value::True),
+        (Typ::I32, Some(Value::I32(_))) => Some(Value::True),
+        (Typ::Z32, Some(Value::Z32(_))) => Some(Value::True),
+        (Typ::U64, Some(Value::U64(_))) => Some(Value::True),
+        (Typ::V64, Some(Value::V64(_))) => Some(Value::True),
+        (Typ::I64, Some(Value::I64(_))) => Some(Value::True),
+        (Typ::Z64, Some(Value::Z64(_))) => Some(Value::True),
+        (Typ::F32, Some(Value::F32(_))) => Some(Value::True),
+        (Typ::F64, Some(Value::F64(_))) => Some(Value::True),
+        (Typ::Bool, Some(Value::True | Value::False)) => Some(Value::True),
+        (Typ::String, Some(Value::String(_))) => Some(Value::True),
+        (Typ::Bytes, Some(Value::Bytes(_))) => Some(Value::True),
+        (Typ::Result, Some(Value::Ok | Value::Error(_))) => Some(Value::True),
+        (_, Some(_)) => Some(Value::False),
+    })
 }
 
 enum Formula {
@@ -776,14 +653,44 @@ impl Formula {
         }
     }
 
+    fn current(&self, from: &[Source]) -> Option<Value> {
+        match self {
+            Formula::Any => eval_any(from),
+            Formula::All => eval_all(from),
+            Formula::Sum => eval_sum(from),
+            Formula::Product => eval_product(from),
+            Formula::Divide => eval_divide(from),
+            Formula::Mean(m) => m.eval(from),
+            Formula::Min => eval_min(from),
+            Formula::Max => eval_max(from),
+            Formula::And => eval_and(from),
+            Formula::Or => eval_or(from),
+            Formula::Not => eval_not(from),
+            Formula::Cmp => eval_cmp(from),
+            Formula::If => eval_if(from),
+            Formula::Filter => eval_filter(from),
+            Formula::Cast => eval_cast(from),
+            Formula::IsA => eval_isa(from),
+        }
+    }
+
     fn update(
         &self,
         from: &[Source],
         changed: &Arc<IndexMap<SubId, Value>>,
     ) -> Option<Value> {
-        match self {
-            Formula::Any => update_any(from, changed),
-            _ => todo!(),
+        if !from.into_iter().filter_map(|s| s.update(changed)).last().is_some() {
+            None
+        } else {
+            self.current(from)
+        }
+    }
+
+    fn update_var(&self, from: &[Source], name: &str, value: &Value) -> Option<Value> {
+        if !from.into_iter().filter_map(|s| s.update_var(name, value)).last().is_some() {
+            None
+        } else {
+            self.current(from)
         }
     }
 }
