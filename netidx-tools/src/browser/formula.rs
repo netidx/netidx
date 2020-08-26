@@ -6,14 +6,10 @@ use netidx::{
     subscriber::{SubId, Value},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
     sync::Arc,
 };
-
-fn eval_any(from: &[Source]) -> Option<Value> {
-    from.into_iter().find_map(|s| s.current())
-}
 
 fn eval_all(from: &[Source]) -> Option<Value> {
     match from {
@@ -633,7 +629,7 @@ fn eval_isa(from: &[Source]) -> Option<Value> {
 
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
-    Any,
+    Any(RefCell<Option<Value>>),
     All,
     Sum,
     Product,
@@ -655,7 +651,7 @@ pub(super) enum Formula {
 impl Formula {
     pub(super) fn new(name: String) -> Formula {
         match name.as_str() {
-            "any" => Formula::Any,
+            "any" => Formula::Any(RefCell::new(None)),
             "all" => Formula::All,
             "sum" => Formula::Sum,
             "product" => Formula::Product,
@@ -677,7 +673,7 @@ impl Formula {
 
     pub(super) fn current(&self, from: &[Source]) -> Option<Value> {
         match self {
-            Formula::Any => eval_any(from),
+            Formula::Any(c) => c.borrow().clone(),
             Formula::All => eval_all(from),
             Formula::Sum => eval_sum(from),
             Formula::Product => eval_product(from),
@@ -704,10 +700,25 @@ impl Formula {
         from: &[Source],
         changed: &Arc<IndexMap<SubId, Value>>,
     ) -> Option<Value> {
-        if !from.into_iter().filter_map(|s| s.update(changed)).last().is_some() {
-            None
-        } else {
-            self.current(from)
+        match self {
+            Formula::Any(c) => {
+                let res = from.into_iter().filter_map(|s| s.update(changed)).fold(
+                    None,
+                    |res, v| match res {
+                        None => Some(v),
+                        Some(_) => res,
+                    },
+                );
+                *c.borrow_mut() = res.clone();
+                res
+            }
+            _ => {
+                if !from.into_iter().filter_map(|s| s.update(changed)).last().is_some() {
+                    None
+                } else {
+                    self.current(from)
+                }
+            }
         }
     }
 
@@ -717,10 +728,30 @@ impl Formula {
         name: &str,
         value: &Value,
     ) -> Option<Value> {
-        if !from.into_iter().filter_map(|s| s.update_var(name, value)).last().is_some() {
-            None
-        } else {
-            self.current(from)
+        match self {
+            Formula::Any(c) => {
+                let res = from
+                    .into_iter()
+                    .filter_map(|s| s.update_var(name, value))
+                    .fold(None, |res, v| match res {
+                        None => Some(v),
+                        Some(_) => res,
+                    });
+                *c.borrow_mut() = res.clone();
+                res
+            }
+            _ => {
+                if !from
+                    .into_iter()
+                    .filter_map(|s| s.update_var(name, value))
+                    .last()
+                    .is_some()
+                {
+                    None
+                } else {
+                    self.current(from)
+                }
+            }
         }
     }
 }
