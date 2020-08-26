@@ -15,7 +15,7 @@ use futures::{
 };
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
-use glib::{self, clone, source::PRIORITY_LOW};
+use glib::{self, clone, source::PRIORITY_LOW, idle_add_local};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
@@ -1160,7 +1160,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::SaveError(s) => {
             err_modal(&window, &s);
-            idle_add(clone!(
+            idle_add_local(clone!(
                 @strong ctx,
                 @strong saved,
                 @strong save_loc,

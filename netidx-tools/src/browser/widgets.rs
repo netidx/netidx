@@ -1,7 +1,7 @@
 use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::browser::view;
 use gdk::{self, prelude::*};
-use glib::clone;
+use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use log::warn;
@@ -98,7 +98,7 @@ impl Label {
         let source = Source::new(&ctx, variables, spec.clone());
         let txt = match source.current() {
             None => String::new(),
-            Some(v) => format!("{}", v)
+            Some(v) => format!("{}", v),
         };
         let label = gtk::Label::new(Some(txt.as_str()));
         label.set_selectable(true);
@@ -224,7 +224,7 @@ impl Selector {
                         sink.set(&ctx, idv);
                     }
                 }
-                idle_add(clone!(
+                idle_add_local(clone!(
                     @strong source, @strong combo, @strong we_set => move || {
                         we_set.set(true);
                         Selector::update_active(&combo, &source.current());
@@ -338,7 +338,8 @@ impl Toggle {
         move |switch, state| {
             if !we_set.get() {
                 sink.set(&ctx, if state { Value::True } else { Value::False });
-                idle_add(clone!(@strong source, @strong switch, @strong we_set => move || {
+                idle_add_local(
+                    clone!(@strong source, @strong switch, @strong we_set => move || {
                     we_set.set(true);
                     if let Some(v) = source.current() {
                         let v = val_to_bool(&v);
@@ -429,7 +430,7 @@ impl Entry {
         }
         fn submit(ctx: &WidgetCtx, source: &Source, sink: &Sink, entry: &gtk::Entry) {
             sink.set(&ctx, Value::String(Chars::from(String::from(entry.get_text()))));
-            idle_add(clone!(@strong source, @strong entry => move || {
+            idle_add_local(clone!(@strong source, @strong entry => move || {
                 match source.current() {
                     None => entry.set_text(""),
                     Some(Value::String(s)) => entry.set_text(&*s),

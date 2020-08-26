@@ -2,9 +2,9 @@ use super::{FromGui, WidgetCtx, ViewLoc};
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{self, clone, signal::Inhibit, source::Continue};
+use glib::{self, clone, signal::Inhibit, source::Continue, idle_add_local};
 use gtk::{
-    idle_add, prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
+    prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
     TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
     Widget as GtkWidget,
@@ -201,7 +201,7 @@ impl Table {
                     t.store().set_unsorted();
                 }
             }
-            idle_add(clone!(@weak t => @default-return Continue(false), move || {
+            idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                 t.update_subscriptions();
                 Continue(false)
             }));
@@ -222,7 +222,7 @@ impl Table {
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.get_vadjustment().map(|va| {
             va.connect_value_changed(clone!(@weak t => move |_| {
-                idle_add(clone!(@weak t => @default-return Continue(false), move || {
+                idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                     t.update_subscriptions();
                     Continue(false)
                 }));
@@ -320,7 +320,7 @@ impl Table {
             None => {
                 if self.0.descriptor.rows.len() > 0 {
                     let t = self;
-                    idle_add(
+                    idle_add_local(
                         clone!(@weak t => @default-return Continue(false), move || {
                             t.update_subscriptions();
                             Continue(false)
@@ -445,7 +445,7 @@ impl Table {
         let sctx = self.disable_sort();
         let mut i = 0;
         let t = self;
-        idle_add(
+        idle_add_local(
             clone!(@weak t, @strong changed => @default-return Continue(false), move || {
                 let mut n = 0;
                 while n < 10000 && i < changed.len() {

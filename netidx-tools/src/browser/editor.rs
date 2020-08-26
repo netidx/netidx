@@ -1,6 +1,6 @@
 use super::{FromGui, ToGui, WidgetPath};
 use futures::channel::mpsc;
-use glib::{clone, prelude::*, subclass::prelude::*, GString};
+use glib::{clone, prelude::*, subclass::prelude::*, GString, idle_add_local};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -692,7 +692,7 @@ impl Editor {
             move || {
                 if !scheduled.get() {
                     scheduled.set(true);
-                    gtk::idle_add(clone!(
+                    idle_add_local(clone!(
                         @strong spec,
                         @strong store,
                         @strong scheduled,
