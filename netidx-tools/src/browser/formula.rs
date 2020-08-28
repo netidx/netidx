@@ -11,14 +11,49 @@ use std::{
     sync::Arc,
 };
 
-fn eval_all(from: &[Source]) -> Option<Value> {
-    match from {
+#[derive(Debug, Clone)]
+pub(super) struct CachedVals(RefCell<Vec<Option<Value>>>);
+
+impl CachedVals {
+    fn new(from: &[Source]) -> CachedVals {
+        CachedVals(RefCell::new(from.into_iter().map(|_| None).collect()))
+    }
+
+    fn update(&self, from: &[Source], changed: &Arc<IndexMap<SubId, Value>>) -> bool {
+        let mut vals = self.0.borrow_mut();
+        from.into_iter().enumerate().fold(false, |res, (i, src)| {
+            match src.update(changed) {
+                None => res,
+                v @ Some(_) => {
+                    vals[i] = v;
+                    true
+                }
+            }
+        })
+    }
+
+    fn update_var(&self, from: &[Source], name: &str, value: &Value) -> bool {
+        let mut vals = self.0.borrow_mut();
+        from.into_iter().enumerate().fold(false, |res, (i, src)| {
+            match src.update_var(name, value) {
+                None => res,
+                v @ Some(_) => {
+                    vals[i] = v;
+                    true
+                }
+            }
+        })
+    }
+}
+
+fn eval_all(from: &CachedVals) -> Option<Value> {
+    match &**from.0.borrow() {
         [] => None,
-        [hd, tl @ ..] => match hd.current() {
+        [hd, tl @ ..] => match hd {
             None => None,
             v @ Some(_) => {
-                if tl.into_iter().all(|s| s.current() == v) {
-                    v
+                if tl.into_iter().all(|v1| v1 == v) {
+                    v.clone()
                 } else {
                     None
                 }
@@ -36,10 +71,10 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-fn eval_sum(from: &[Source]) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match res {
+fn eval_sum(from: &CachedVals) -> Option<Value> {
+    from.0.borrow().iter().fold(None, |res, v| match res {
         res @ Some(Value::Error(_)) => res,
-        res => add_vals(res, s.current()),
+        res => add_vals(res, v.clone()),
     })
 }
 
@@ -52,10 +87,10 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-fn eval_product(from: &[Source]) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match res {
+fn eval_product(from: &CachedVals) -> Option<Value> {
+    from.0.borrow().iter().fold(None, |res, v| match res {
         res @ Some(Value::Error(_)) => res,
-        res => prod_vals(res, s.current()),
+        res => prod_vals(res, v.clone()),
     })
 }
 
@@ -68,10 +103,10 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-fn eval_divide(from: &[Source]) -> Option<Value> {
-    from.into_iter().fold(None, |res, s| match res {
+fn eval_divide(from: &CachedVals) -> Option<Value> {
+    from.0.borrow().iter().fold(None, |res, v| match res {
         res @ Some(Value::Error(_)) => res,
-        res => div_vals(res, s.current()),
+        res => div_vals(res, v.clone()),
     })
 }
 
@@ -362,19 +397,40 @@ fn cast_val(typ: Typ, v: Value) -> Option<Value> {
 
 #[derive(Debug, Clone)]
 pub(super) struct Mean {
+    from: CachedVals,
     total: Cell<f64>,
     samples: Cell<usize>,
 }
 
 impl Mean {
-    fn new() -> Self {
-        Mean { total: Cell::new(0.), samples: Cell::new(0) }
+    fn new(from: &[Source]) -> Self {
+        Mean { from: CachedVals::new(from), total: Cell::new(0.), samples: Cell::new(0) }
     }
 
-    fn eval(&self, from: &[Source]) -> Option<Value> {
-        for s in from.into_iter() {
-            if let Some(v) = s.current() {
-                if let Some(Value::F64(v)) = cast_val(Typ::F64, v) {
+    fn update(
+        &self,
+        from: &[Source],
+        changed: &Arc<IndexMap<SubId, Value>>,
+    ) -> Option<Value> {
+        if self.from.update(from, changed) {
+            self.eval()
+        } else {
+            None
+        }
+    }
+
+    fn update_var(&self, from: &[Source], name: &str, value: &Value) -> Option<Value> {
+        if self.from.update_var(from, name, value) {
+            self.eval()
+        } else {
+            None
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        for v in &*self.from.0.borrow() {
+            if let Some(v) = v {
+                if let Some(Value::F64(v)) = cast_val(Typ::F64, v.clone()) {
                     self.total.set(self.total.get() + v);
                     self.samples.set(self.samples.get() + 1);
                 }
@@ -388,8 +444,8 @@ impl Mean {
     }
 }
 
-fn eval_min(from: &[Source]) -> Option<Value> {
-    from.into_iter().filter_map(|s| s.current()).fold(None, |res, v| match res {
+fn eval_min(from: &CachedVals) -> Option<Value> {
+    from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
         None => Some(v),
         Some(v0) => {
             if v < v0 {
@@ -401,8 +457,8 @@ fn eval_min(from: &[Source]) -> Option<Value> {
     })
 }
 
-fn eval_max(from: &[Source]) -> Option<Value> {
-    from.into_iter().filter_map(|s| s.current()).fold(None, |res, v| match res {
+fn eval_max(from: &CachedVals) -> Option<Value> {
+    from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
         None => Some(v),
         Some(v0) => {
             if v > v0 {
@@ -414,8 +470,8 @@ fn eval_max(from: &[Source]) -> Option<Value> {
     })
 }
 
-fn eval_and(from: &[Source]) -> Option<Value> {
-    let res = from.into_iter().all(|s| match s.current() {
+fn eval_and(from: &CachedVals) -> Option<Value> {
+    let res = from.0.borrow().iter().all(|v| match v {
         Some(Value::True) => true,
         _ => false,
     });
@@ -426,8 +482,8 @@ fn eval_and(from: &[Source]) -> Option<Value> {
     }
 }
 
-fn eval_or(from: &[Source]) -> Option<Value> {
-    let res = from.into_iter().any(|s| match s.current() {
+fn eval_or(from: &CachedVals) -> Option<Value> {
+    let res = from.0.borrow().iter().any(|v| match v {
         Some(Value::True) => true,
         _ => false,
     });
@@ -438,9 +494,9 @@ fn eval_or(from: &[Source]) -> Option<Value> {
     }
 }
 
-fn eval_not(from: &[Source]) -> Option<Value> {
-    match from {
-        [s] => s.current().map(|v| !v),
+fn eval_not(from: &CachedVals) -> Option<Value> {
+    match &**from.0.borrow() {
+        [v] => v.as_ref().map(|v| !(v.clone())),
         _ => Some(Value::Error(Chars::from("not expected 1 argument"))),
     }
 }
@@ -489,11 +545,11 @@ fn eval_op<T: PartialEq + PartialOrd>(op: &str, v0: T, v1: T) -> Value {
     }
 }
 
-fn eval_cmp(from: &[Source]) -> Option<Value> {
-    match from {
-        [op, v0, v1] => match op.current() {
+fn eval_cmp(from: &CachedVals) -> Option<Value> {
+    match &**from.0.borrow() {
+        [op, v0, v1] => match op {
             None => None,
-            Some(Value::String(op)) => match (v0.current(), v1.current()) {
+            Some(Value::String(op)) => match (v0, v1) {
                 (None, None) => Some(Value::False),
                 (_, None) => Some(Value::False),
                 (None, _) => Some(Value::False),
@@ -538,12 +594,12 @@ fn eval_cmp(from: &[Source]) -> Option<Value> {
     }
 }
 
-fn eval_if(from: &[Source]) -> Option<Value> {
-    match from {
-        [cond, b1, b2] => match cond.current() {
+fn eval_if(from: &CachedVals) -> Option<Value> {
+    match &**from.0.borrow() {
+        [cond, b1, b2] => match cond {
             None => None,
-            Some(Value::True) => b1.current(),
-            Some(Value::False) => b2.current(),
+            Some(Value::True) => b1.clone(),
+            Some(Value::False) => b2.clone(),
             _ => Some(Value::Error(Chars::from("if: expected boolean condition"))),
         },
         _ => Some(Value::Error(Chars::from("if: expected 3 arguments"))),
@@ -551,19 +607,19 @@ fn eval_if(from: &[Source]) -> Option<Value> {
 }
 
 fn with_typ_prefix(
-    from: &[Source],
+    from: &CachedVals,
     name: &'static str,
-    f: impl Fn(Typ, &Source) -> Option<Value>,
+    f: impl Fn(Typ, &Option<Value>) -> Option<Value>,
 ) -> Option<Value> {
-    match from {
-        [typ, src] => match typ.current() {
+    match &**from.0.borrow() {
+        [typ, src] => match typ {
             None => None,
             Some(Value::String(s)) => match s.parse::<Typ>() {
+                Ok(typ) => f(typ, src),
                 Err(e) => Some(Value::Error(Chars::from(format!(
                     "{}: invalid type {}, {}",
                     name, s, e
                 )))),
-                Ok(typ) => f(typ, src),
             },
             _ => Some(Value::Error(Chars::from(format!(
                 "{} expected typ as string",
@@ -574,38 +630,38 @@ fn with_typ_prefix(
     }
 }
 
-fn eval_filter(from: &[Source]) -> Option<Value> {
-    with_typ_prefix(from, "filter(typ, src)", |typ, src| match (typ, src.current()) {
+fn eval_filter(from: &CachedVals) -> Option<Value> {
+    with_typ_prefix(from, "filter(typ, src)", |typ, v| match (typ, v) {
         (_, None) => None,
-        (Typ::U32, v @ Some(Value::U32(_))) => v,
-        (Typ::V32, v @ Some(Value::V32(_))) => v,
-        (Typ::I32, v @ Some(Value::I32(_))) => v,
-        (Typ::Z32, v @ Some(Value::Z32(_))) => v,
-        (Typ::U64, v @ Some(Value::U64(_))) => v,
-        (Typ::V64, v @ Some(Value::V64(_))) => v,
-        (Typ::I64, v @ Some(Value::I64(_))) => v,
-        (Typ::Z64, v @ Some(Value::Z64(_))) => v,
-        (Typ::F32, v @ Some(Value::F32(_))) => v,
-        (Typ::F64, v @ Some(Value::F64(_))) => v,
-        (Typ::Bool, v @ Some(Value::True)) => v,
-        (Typ::Bool, v @ Some(Value::False)) => v,
-        (Typ::String, v @ Some(Value::String(_))) => v,
-        (Typ::Bytes, v @ Some(Value::Bytes(_))) => v,
-        (Typ::Result, v @ Some(Value::Ok)) => v,
-        (Typ::Result, v @ Some(Value::Error(_))) => v,
+        (Typ::U32, v @ Some(Value::U32(_))) => v.clone(),
+        (Typ::V32, v @ Some(Value::V32(_))) => v.clone(),
+        (Typ::I32, v @ Some(Value::I32(_))) => v.clone(),
+        (Typ::Z32, v @ Some(Value::Z32(_))) => v.clone(),
+        (Typ::U64, v @ Some(Value::U64(_))) => v.clone(),
+        (Typ::V64, v @ Some(Value::V64(_))) => v.clone(),
+        (Typ::I64, v @ Some(Value::I64(_))) => v.clone(),
+        (Typ::Z64, v @ Some(Value::Z64(_))) => v.clone(),
+        (Typ::F32, v @ Some(Value::F32(_))) => v.clone(),
+        (Typ::F64, v @ Some(Value::F64(_))) => v.clone(),
+        (Typ::Bool, v @ Some(Value::True)) => v.clone(),
+        (Typ::Bool, v @ Some(Value::False)) => v.clone(),
+        (Typ::String, v @ Some(Value::String(_))) => v.clone(),
+        (Typ::Bytes, v @ Some(Value::Bytes(_))) => v.clone(),
+        (Typ::Result, v @ Some(Value::Ok)) => v.clone(),
+        (Typ::Result, v @ Some(Value::Error(_))) => v.clone(),
         (_, _) => None,
     })
 }
 
-fn eval_cast(from: &[Source]) -> Option<Value> {
-    with_typ_prefix(from, "cast(typ, src)", |typ, src| match src.current() {
+fn eval_cast(from: &CachedVals) -> Option<Value> {
+    with_typ_prefix(from, "cast(typ, src)", |typ, v| match v {
         None => None,
-        Some(v) => cast_val(typ, v),
+        Some(v) => cast_val(typ, v.clone()),
     })
 }
 
-fn eval_isa(from: &[Source]) -> Option<Value> {
-    with_typ_prefix(from, "isa(typ, src)", |typ, src| match (typ, src.current()) {
+fn eval_isa(from: &CachedVals) -> Option<Value> {
+    with_typ_prefix(from, "isa(typ, src)", |typ, v| match (typ, v) {
         (_, None) => None,
         (Typ::U32, Some(Value::U32(_))) => Some(Value::True),
         (Typ::V32, Some(Value::V32(_))) => Some(Value::True),
@@ -627,68 +683,95 @@ fn eval_isa(from: &[Source]) -> Option<Value> {
     })
 }
 
+fn update_cached(
+    eval: impl Fn(&CachedVals) -> Option<Value>,
+    cached: &CachedVals,
+    from: &[Source],
+    changed: &Arc<IndexMap<SubId, Value>>,
+) -> Option<Value> {
+    if cached.update(from, changed) {
+        eval(cached)
+    } else {
+        None
+    }
+}
+
+fn update_var_cached(
+    eval: impl Fn(&CachedVals) -> Option<Value>,
+    cached: &CachedVals,
+    from: &[Source],
+    name: &str,
+    value: &Value,
+) -> Option<Value> {
+    if cached.update_var(from, name, value) {
+        eval(cached)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
     Any(RefCell<Option<Value>>),
-    All,
-    Sum,
-    Product,
-    Divide,
+    All(CachedVals),
+    Sum(CachedVals),
+    Product(CachedVals),
+    Divide(CachedVals),
     Mean(Mean),
-    Min,
-    Max,
-    And,
-    Or,
-    Not,
-    Cmp,
-    If,
-    Filter,
-    Cast,
-    IsA,
+    Min(CachedVals),
+    Max(CachedVals),
+    And(CachedVals),
+    Or(CachedVals),
+    Not(CachedVals),
+    Cmp(CachedVals),
+    If(CachedVals),
+    Filter(CachedVals),
+    Cast(CachedVals),
+    IsA(CachedVals),
     Unknown(String),
 }
 
 impl Formula {
-    pub(super) fn new(name: String) -> Formula {
+    pub(super) fn new(name: String, from: &[Source]) -> Formula {
         match name.as_str() {
             "any" => Formula::Any(RefCell::new(None)),
-            "all" => Formula::All,
-            "sum" => Formula::Sum,
-            "product" => Formula::Product,
-            "divide" => Formula::Divide,
-            "mean" => Formula::Mean(Mean::new()),
-            "min" => Formula::Min,
-            "max" => Formula::Max,
-            "and" => Formula::And,
-            "or" => Formula::Or,
-            "not" => Formula::Not,
-            "cmp" => Formula::Cmp,
-            "if" => Formula::If,
-            "filter" => Formula::Filter,
-            "cast" => Formula::Cast,
-            "isa" => Formula::IsA,
+            "all" => Formula::All(CachedVals::new(from)),
+            "sum" => Formula::Sum(CachedVals::new(from)),
+            "product" => Formula::Product(CachedVals::new(from)),
+            "divide" => Formula::Divide(CachedVals::new(from)),
+            "mean" => Formula::Mean(Mean::new(from)),
+            "min" => Formula::Min(CachedVals::new(from)),
+            "max" => Formula::Max(CachedVals::new(from)),
+            "and" => Formula::And(CachedVals::new(from)),
+            "or" => Formula::Or(CachedVals::new(from)),
+            "not" => Formula::Not(CachedVals::new(from)),
+            "cmp" => Formula::Cmp(CachedVals::new(from)),
+            "if" => Formula::If(CachedVals::new(from)),
+            "filter" => Formula::Filter(CachedVals::new(from)),
+            "cast" => Formula::Cast(CachedVals::new(from)),
+            "isa" => Formula::IsA(CachedVals::new(from)),
             _ => Formula::Unknown(name),
         }
     }
 
-    pub(super) fn current(&self, from: &[Source]) -> Option<Value> {
+    pub(super) fn current(&self) -> Option<Value> {
         match self {
             Formula::Any(c) => c.borrow().clone(),
-            Formula::All => eval_all(from),
-            Formula::Sum => eval_sum(from),
-            Formula::Product => eval_product(from),
-            Formula::Divide => eval_divide(from),
-            Formula::Mean(m) => m.eval(from),
-            Formula::Min => eval_min(from),
-            Formula::Max => eval_max(from),
-            Formula::And => eval_and(from),
-            Formula::Or => eval_or(from),
-            Formula::Not => eval_not(from),
-            Formula::Cmp => eval_cmp(from),
-            Formula::If => eval_if(from),
-            Formula::Filter => eval_filter(from),
-            Formula::Cast => eval_cast(from),
-            Formula::IsA => eval_isa(from),
+            Formula::All(c) => eval_all(c),
+            Formula::Sum(c) => eval_sum(c),
+            Formula::Product(c) => eval_product(c),
+            Formula::Divide(c) => eval_divide(c),
+            Formula::Mean(m) => m.eval(),
+            Formula::Min(c) => eval_min(c),
+            Formula::Max(c) => eval_max(c),
+            Formula::And(c) => eval_and(c),
+            Formula::Or(c) => eval_or(c),
+            Formula::Not(c) => eval_not(c),
+            Formula::Cmp(c) => eval_cmp(c),
+            Formula::If(c) => eval_if(c),
+            Formula::Filter(c) => eval_filter(c),
+            Formula::Cast(c) => eval_cast(c),
+            Formula::IsA(c) => eval_isa(c),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -712,12 +795,23 @@ impl Formula {
                 *c.borrow_mut() = res.clone();
                 res
             }
-            _ => {
-                if !from.into_iter().filter_map(|s| s.update(changed)).last().is_some() {
-                    None
-                } else {
-                    self.current(from)
-                }
+            Formula::All(c) => update_cached(eval_all, c, from, changed),
+            Formula::Sum(c) => update_cached(eval_sum, c, from, changed),
+            Formula::Product(c) => update_cached(eval_product, c, from, changed),
+            Formula::Divide(c) => update_cached(eval_divide, c, from, changed),
+            Formula::Mean(m) => m.update(from, changed),
+            Formula::Min(c) => update_cached(eval_min, c, from, changed),
+            Formula::Max(c) => update_cached(eval_max, c, from, changed),
+            Formula::And(c) => update_cached(eval_and, c, from, changed),
+            Formula::Or(c) => update_cached(eval_or, c, from, changed),
+            Formula::Not(c) => update_cached(eval_not, c, from, changed),
+            Formula::Cmp(c) => update_cached(eval_cmp, c, from, changed),
+            Formula::If(c) => update_cached(eval_if, c, from, changed),
+            Formula::Filter(c) => update_cached(eval_filter, c, from, changed),
+            Formula::Cast(c) => update_cached(eval_cast, c, from, changed),
+            Formula::IsA(c) => update_cached(eval_isa, c, from, changed),
+            Formula::Unknown(s) => {
+                Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
         }
     }
@@ -740,17 +834,23 @@ impl Formula {
                 *c.borrow_mut() = res.clone();
                 res
             }
-            _ => {
-                if !from
-                    .into_iter()
-                    .filter_map(|s| s.update_var(name, value))
-                    .last()
-                    .is_some()
-                {
-                    None
-                } else {
-                    self.current(from)
-                }
+            Formula::All(c) => update_var_cached(eval_all, c, from, name, value),
+            Formula::Sum(c) => update_var_cached(eval_sum, c, from, name, value),
+            Formula::Product(c) => update_var_cached(eval_product, c, from, name, value),
+            Formula::Divide(c) => update_var_cached(eval_divide, c, from, name, value),
+            Formula::Mean(m) => m.update_var(from, name, value),
+            Formula::Min(c) => update_var_cached(eval_min, c, from, name, value),
+            Formula::Max(c) => update_var_cached(eval_max, c, from, name, value),
+            Formula::And(c) => update_var_cached(eval_and, c, from, name, value),
+            Formula::Or(c) => update_var_cached(eval_or, c, from, name, value),
+            Formula::Not(c) => update_var_cached(eval_not, c, from, name, value),
+            Formula::Cmp(c) => update_var_cached(eval_cmp, c, from, name, value),
+            Formula::If(c) => update_var_cached(eval_if, c, from, name, value),
+            Formula::Filter(c) => update_var_cached(eval_filter, c, from, name, value),
+            Formula::Cast(c) => update_var_cached(eval_cast, c, from, name, value),
+            Formula::IsA(c) => update_var_cached(eval_isa, c, from, name, value),
+            Formula::Unknown(s) => {
+                Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
         }
     }

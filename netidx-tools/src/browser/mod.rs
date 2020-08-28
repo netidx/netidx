@@ -15,7 +15,7 @@ use futures::{
 };
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
-use glib::{self, clone, source::PRIORITY_LOW, idle_add_local};
+use glib::{self, clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
@@ -131,13 +131,14 @@ impl Source {
                 let v = variables.get(&name).cloned().unwrap_or(Value::Null);
                 Source::Variable(name, Rc::new(RefCell::new(v)))
             }
-            view::Source::Map { from, function } => Source::Map {
-                from: from
+            view::Source::Map { from, function } => {
+                let from: Vec<Source> = from
                     .into_iter()
                     .map(|spec| Source::new(ctx, variables, spec))
-                    .collect(),
-                function: Formula::new(function),
-            },
+                    .collect();
+                let function = Formula::new(function, &*from);
+                Source::Map { from, function }
+            }
         }
     }
 
@@ -146,7 +147,7 @@ impl Source {
             Source::Constant(v) => Some(v.clone()),
             Source::Load(dv) => dv.last(),
             Source::Variable(_, v) => Some(v.borrow().clone()),
-            Source::Map { from, function } => function.current(from),
+            Source::Map { from: _, function } => function.current(),
         }
     }
 
