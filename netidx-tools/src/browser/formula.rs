@@ -16,7 +16,7 @@ pub(super) struct CachedVals(RefCell<Vec<Option<Value>>>);
 
 impl CachedVals {
     fn new(from: &[Source]) -> CachedVals {
-        CachedVals(RefCell::new(from.into_iter().map(|_| None).collect()))
+        CachedVals(RefCell::new(from.into_iter().map(|s| s.current()).collect()))
     }
 
     fn update(&self, from: &[Source], changed: &Arc<IndexMap<SubId, Value>>) -> bool {
