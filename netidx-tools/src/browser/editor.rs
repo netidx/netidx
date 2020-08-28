@@ -646,7 +646,8 @@ pub(super) struct Editor {
     root: gtk::Box,
 }
 
-static KINDS: [&'static str; 10] = [
+static KINDS: [&'static str; 11] = [
+    "Action",
     "Table",
     "Label",
     "Button",
@@ -852,6 +853,10 @@ impl Editor {
     fn default_spec(name: Option<&str>) -> view::Widget {
         match name {
             None => view::Widget::Table(Path::from("/")),
+            Some("Action") => view::Widget::Action(view::Action {
+                source: view::Source::Constant(Value::U64(42)),
+                sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo")))
+            }),
             Some("Table") => view::Widget::Table(Path::from("/")),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
