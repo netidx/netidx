@@ -1,4 +1,6 @@
-use super::{FromGui, ToGui, WidgetPath, util::{parse_entry, TwoColGrid}};
+mod util;
+use super::{FromGui, ToGui, WidgetPath};
+use util::{parse_entry, TwoColGrid};
 use futures::channel::mpsc;
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
@@ -94,7 +96,7 @@ impl Action {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
