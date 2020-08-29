@@ -1,3 +1,4 @@
+mod util;
 mod containers;
 mod editor;
 mod formula;

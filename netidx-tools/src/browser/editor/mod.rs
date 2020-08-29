@@ -1,6 +1,6 @@
-use super::{FromGui, ToGui, WidgetPath};
+use super::{FromGui, ToGui, WidgetPath, util::{parse_entry, TwoColGrid}};
 use futures::channel::mpsc;
-use glib::{clone, prelude::*, subclass::prelude::*, GString, idle_add_local};
+use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -49,48 +49,6 @@ impl Table {
 
     fn root(&self) -> &gtk::Widget {
         self.path.upcast_ref()
-    }
-}
-
-fn parse_entry<T, F>(label: &str, spec: &T, on_change: F) -> (gtk::Label, gtk::Entry)
-where
-    T: FromStr + ToString + 'static,
-    T::Err: Display,
-    F: Fn(T) + 'static,
-{
-    let label = gtk::Label::new(Some(label));
-    let entry = gtk::Entry::new();
-    entry.set_text(&spec.to_string());
-    entry.connect_activate(move |e| {
-        let txt = e.get_text();
-        match txt.parse::<T>() {
-            Err(e) => warn!("invalid value: {}, {}", &*txt, e),
-            Ok(src) => on_change(src),
-        }
-    });
-    (label, entry)
-}
-
-#[derive(Clone, Debug)]
-struct TwoColGrid {
-    root: gtk::Grid,
-    row: i32,
-}
-
-impl TwoColGrid {
-    fn new() -> Self {
-        TwoColGrid { root: gtk::Grid::new(), row: 0 }
-    }
-
-    fn add<T: IsA<gtk::Widget>, U: IsA<gtk::Widget>>(&mut self, w: (T, U)) {
-        self.root.attach(&w.0, 0, self.row, 1, 1);
-        self.root.attach(&w.1, 1, self.row, 1, 1);
-        self.row += 1;
-    }
-
-    fn attach<T: IsA<gtk::Widget>>(&mut self, w: &T, col: i32, cols: i32, rows: i32) {
-        self.root.attach(w, col, self.row, cols, rows);
-        self.row += 1;
     }
 }
 
@@ -238,7 +196,7 @@ impl Button {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -292,7 +250,7 @@ impl Toggle {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -354,7 +312,7 @@ impl Selector {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -416,7 +374,7 @@ impl Entry {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -506,7 +464,7 @@ impl BoxChild {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -567,7 +525,7 @@ impl BoxContainer {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -684,7 +642,7 @@ impl Editor {
         let store = gtk::TreeStore::new(&[String::static_type(), Widget::static_type()]);
         view.set_model(Some(&store));
         view.set_reorderable(true);
-        view.set_grid_lines(gtk::TreeViewGridLines::Both);
+        view.set_enable_tree_lines(true);
         let spec = Rc::new(RefCell::new(spec));
         let on_change: OnChange = Rc::new({
             let spec = Rc::clone(&spec);
@@ -754,37 +712,35 @@ impl Editor {
         @weak reveal_properties,
         @weak properties,
         @strong to_gui,
-        @strong inhibit_change => move |s| match s.get_selected() {
-            None => {
-                let children = properties.get_children();
-                if children.len() == 3 {
-                    properties.remove(&children[2]);
-                }
-                *selected.borrow_mut() = None;
-                let _: result::Result<_, _> = to_gui.send(ToGui::Highlight(vec![]));
-                reveal_properties.set_reveal_child(false);
+        @strong inhibit_change => move |s| {
+            let children = properties.get_children();
+            if children.len() == 3 {
+                properties.remove(&children[2]);
             }
-            Some((_, iter)) => {
-                let children = properties.get_children();
-                if children.len() == 3 {
-                    properties.remove(&children[2]);
+            match s.get_selected() {
+                None => {
+                    *selected.borrow_mut() = None;
+                    let _: result::Result<_, _> = to_gui.send(ToGui::Highlight(vec![]));
+                    reveal_properties.set_reveal_child(false);
                 }
-                *selected.borrow_mut() = Some(iter.clone());
-                let mut path = Vec::new();
-                Editor::build_widget_path(&store, &iter, 0, &mut path);
-                let _: result::Result<_,_> = to_gui.send(ToGui::Highlight(path));
-                let v = store.get_value(&iter, 0);
-                if let Ok(Some(id)) = v.get::<&str>() {
-                    inhibit_change.set(true);
-                    kind.set_active_id(Some(id));
-                    inhibit_change.set(false);
+                Some((_, iter)) => {
+                    *selected.borrow_mut() = Some(iter.clone());
+                    let mut path = Vec::new();
+                    Editor::build_widget_path(&store, &iter, 0, &mut path);
+                    let _: result::Result<_,_> = to_gui.send(ToGui::Highlight(path));
+                    let v = store.get_value(&iter, 0);
+                    if let Ok(Some(id)) = v.get::<&str>() {
+                        inhibit_change.set(true);
+                        kind.set_active_id(Some(id));
+                        inhibit_change.set(false);
+                    }
+                    let v = store.get_value(&iter, 1);
+                    if let Ok(Some(w)) = v.get::<&Widget>() {
+                        properties.add(w.root());
+                    }
+                    properties.show_all();
+                    reveal_properties.set_reveal_child(true);
                 }
-                let v = store.get_value(&iter, 1);
-                if let Ok(Some(w)) = v.get::<&Widget>() {
-                    properties.add(w.root());
-                }
-                properties.show_all();
-                reveal_properties.set_reveal_child(true);
             }
         }));
         let menu = gtk::Menu::new();
@@ -839,11 +795,9 @@ impl Editor {
                 Inhibit(false)
             }
         });
-        store.connect_row_deleted(
-            clone!(@strong on_change, @strong selected => move |_, _| {
-                on_change();
-            }),
-        );
+        store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
+            on_change();
+        }));
         store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
             on_change();
         }));
@@ -855,7 +809,7 @@ impl Editor {
             None => view::Widget::Table(Path::from("/")),
             Some("Action") => view::Widget::Action(view::Action {
                 source: view::Source::Constant(Value::U64(42)),
-                sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo")))
+                sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo"))),
             }),
             Some("Table") => view::Widget::Table(Path::from("/")),
             Some("Label") => {
