@@ -1,10 +1,10 @@
 use super::Source;
 use indexmap::IndexMap;
-use netidx_protocols::value_type::Typ;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
+use netidx_protocols::value_type::Typ;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -711,7 +711,7 @@ fn update_var_cached(
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Formula {
+pub(crate) enum Formula {
     Any(RefCell<Option<Value>>),
     All(CachedVals),
     Sum(CachedVals),
@@ -731,8 +731,13 @@ pub(super) enum Formula {
     Unknown(String),
 }
 
+pub(crate) static FORMULAS: [&'static str; 16] = [
+    "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
+    "cmp", "if", "filter", "cast", "isa",
+];
+
 impl Formula {
-    pub(super) fn new(name: String, from: &[Source]) -> Formula {
+    pub(crate) fn new(name: String, from: &[Source]) -> Formula {
         match name.as_str() {
             "any" => Formula::Any(RefCell::new(None)),
             "all" => Formula::All(CachedVals::new(from)),
@@ -754,7 +759,7 @@ impl Formula {
         }
     }
 
-    pub(super) fn current(&self) -> Option<Value> {
+    pub(crate) fn current(&self) -> Option<Value> {
         match self {
             Formula::Any(c) => c.borrow().clone(),
             Formula::All(c) => eval_all(c),
@@ -778,7 +783,7 @@ impl Formula {
         }
     }
 
-    pub(super) fn update(
+    pub(crate) fn update(
         &self,
         from: &[Source],
         changed: &Arc<IndexMap<SubId, Value>>,
@@ -816,7 +821,7 @@ impl Formula {
         }
     }
 
-    pub(super) fn update_var(
+    pub(crate) fn update_var(
         &self,
         from: &[Source],
         name: &str,

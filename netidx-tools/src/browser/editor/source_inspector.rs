@@ -2,6 +2,7 @@ use super::{
     util::{parse_entry, TwoColGrid},
     OnChange,
 };
+use super::super::formula;
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
@@ -180,7 +181,60 @@ impl Load {
     }
 }
 
-struct Map;
+struct Map {
+    root: gtk::Box,
+    spec: Rc<RefCell<String>>,
+}
+
+impl Map {
+    fn insert(
+        on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
+        spec: String,
+    ) {
+        let spec = Rc::new(RefCell::new(spec));
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let lblfun = gtk::Label::new(Some("Function:"));
+        let cbfun = gtk::ComboBoxText::new();
+        let lblerr = gtk::Label::new(None);
+        root.add(&entbox);
+        entbox.add(&lblfun);
+        entbox.add(&cbfun);
+        root.add(&lblerr);
+        for name in &formula::FORMULAS {
+            cbfun.add(Some(name), name);
+        }
+        cbfun.connect_changed(clone!(
+        @strong on_change, @strong spec, @weak lblerr => move |e| {
+            let path = Path::from(String::from(&*e.get_text()));
+            if !Path::is_absolute(&*path) {
+                lblerr.set_text("Absolute path is required (must start with /)");
+            } else {
+                *spec.borrow_mut() = path;
+                lblerr.set_text("");
+                on_change()
+            }
+        }));
+        {
+            let cur = spec.borrow();
+            cbfun.set_active_id(Some(cur.as_str()));
+        }
+        let t = Properties::Load(Load { root, spec });
+        store.set_value(iter, 0, &"Load Path".to_value());
+        store.set_value(iter, 1, &"".to_value());
+        store.set_value(iter, 2, &t.to_value());
+    }
+
+    fn spec(&self) -> view::Source {
+        view::Source::Load(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
 
 #[derive(Clone, Debug, GBoxed)]
 #[gboxed(type_name = "NetidxSourceInspectorProps")]

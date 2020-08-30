@@ -622,7 +622,7 @@ impl Editor {
         to_gui: glib::Sender<ToGui>,
         spec: view::View,
     ) -> Editor {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
