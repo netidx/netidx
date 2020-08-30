@@ -1,4 +1,3 @@
-use crate::publisher::{parse_val, SValue, Typ};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use futures::{
@@ -15,6 +14,7 @@ use netidx::{
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
     utils::{BatchItem, Batched},
 };
+use netidx_protocols::value_type::Typ;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -29,7 +29,7 @@ use tokio::{
 enum In {
     Add(String),
     Drop(String),
-    Write(String, SValue),
+    Write(String, Value),
 }
 
 impl FromStr for In {
@@ -50,7 +50,7 @@ impl FromStr for In {
                 .ok_or_else(|| anyhow!("expected | before type"))?
                 .parse::<Typ>()?;
             let val =
-                parse_val(typ, parts.next().ok_or_else(|| anyhow!("expected value"))?)?;
+                typ.parse(parts.next().ok_or_else(|| anyhow!("expected value"))?)?;
             Ok(In::Write(path, val))
         } else {
             bail!("parse error, expected ADD, DROP, or WRITE")
@@ -74,33 +74,33 @@ impl Write for BytesWriter<'_> {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Out<'a> {
     path: &'a str,
-    value: SValue,
+    value: Value,
 }
 
 impl<'a> Out<'a> {
     fn write(&self, to_stdout: &mut BytesMut) {
         to_stdout.extend_from_slice(self.path.as_bytes());
         to_stdout.extend_from_slice(b"|");
-        to_stdout.extend_from_slice(match self.value.typ() {
+        to_stdout.extend_from_slice(match Typ::get(&self.value) {
             None => b"none",
             Some(typ) => typ.name().as_bytes(),
         });
         to_stdout.extend_from_slice(b"|");
         let mut w = BytesWriter(to_stdout);
         match &self.value {
-            SValue::U32(v) | SValue::V32(v) => write!(&mut w, "{}", v),
-            SValue::I32(v) | SValue::Z32(v) => write!(&mut w, "{}", v),
-            SValue::U64(v) | SValue::V64(v) => write!(&mut w, "{}", v),
-            SValue::I64(v) | SValue::Z64(v) => write!(&mut w, "{}", v),
-            SValue::F32(v) => write!(&mut w, "{}", v),
-            SValue::F64(v) => write!(&mut w, "{}", v),
-            SValue::String(v) => write!(&mut w, "{}", &*v),
-            SValue::Bytes(v) => write!(&mut w, "{}", &*base64::encode(v)),
-            SValue::True => write!(&mut w, "true"),
-            SValue::False => write!(&mut w, "false"),
-            SValue::Null => write!(&mut w, "null"),
-            SValue::Ok => write!(&mut w, "ok"),
-            SValue::Error(v) => write!(&mut w, "error {}", v),
+            Value::U32(v) | Value::V32(v) => write!(&mut w, "{}", v),
+            Value::I32(v) | Value::Z32(v) => write!(&mut w, "{}", v),
+            Value::U64(v) | Value::V64(v) => write!(&mut w, "{}", v),
+            Value::I64(v) | Value::Z64(v) => write!(&mut w, "{}", v),
+            Value::F32(v) => write!(&mut w, "{}", v),
+            Value::F64(v) => write!(&mut w, "{}", v),
+            Value::String(v) => write!(&mut w, "{}", &*v),
+            Value::Bytes(v) => write!(&mut w, "{}", &*base64::encode(v)),
+            Value::True => write!(&mut w, "true"),
+            Value::False => write!(&mut w, "false"),
+            Value::Null => write!(&mut w, "null"),
+            Value::Ok => write!(&mut w, "ok"),
+            Value::Error(v) => write!(&mut w, "error {}", v),
         }
         .unwrap(); // this can't fail
         write!(w, "\n").unwrap();
@@ -122,7 +122,7 @@ struct Ctx {
     to_stderr: BytesMut,
     add: HashSet<String>,
     drop: HashSet<String>,
-    write: Vec<(String, SValue)>,
+    write: Vec<(String, Value)>,
 }
 
 impl Ctx {
@@ -249,7 +249,6 @@ impl Ctx {
             Some(BatchItem::InBatch(mut batch)) => {
                 for (id, value) in batch.drain(..) {
                     if let Some(path) = self.paths.get(&id) {
-                        let value = SValue::from(value);
                         Out { path: &**path, value }.write(&mut self.to_stdout);
                     }
                 }

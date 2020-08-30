@@ -4,17 +4,13 @@ use util::{parse_entry, TwoColGrid};
 use futures::channel::mpsc;
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
-use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
 use std::{
     boxed,
     cell::{Cell, RefCell},
-    fmt::Display,
     rc::Rc,
     result,
-    str::FromStr,
-    string::ToString,
 };
 
 type OnChange = Rc<dyn Fn()>;

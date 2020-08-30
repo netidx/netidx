@@ -1,21 +1,22 @@
-use super::OnChange;
+use super::{
+    util::{parse_entry, TwoColGrid},
+    OnChange,
+};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
-use netidx_protocols::view;
+use netidx_protocols::{view, value_type::{Typ, TYPES}};
 use std::{
     boxed,
     cell::{Cell, RefCell},
     fmt::Display,
     rc::Rc,
     result,
-    str::FromStr,
-    string::ToString,
 };
 
 struct Constant {
-    root: gtk::Box,
+    root: TwoColGrid,
     spec: Rc<RefCell<Value>>,
 }
 
@@ -26,9 +27,24 @@ impl Constant {
         iter: &gtk::TreeIter,
         spec: Value,
     ) {
-        let root = gtk::Box::new(gtk::Orientation::Vertical);
-        let typ = gtk::ComboBoxText::new();
-        
+        let spec = Rc::new(RefCell::new(spec));
+        let root = TwoColGrid::new();
+        let typlbl = gtk::Label::new(Some("Type: "));
+        let typsel = gtk::ComboBoxText::new();
+        let vallbl = gtk::Label::new(Some("Value: "));
+        let valent = gtk::Entry::new();
+        root.add((&typlbl, &typ));
+        root.add((&vallbl, &valent));
+        for typ in &TYPES {
+            let name = typ.name();
+            typsel.add(Some(name), name);
+        }
+        typsel.set_active_id(Typ::get(&*spec.borrow()).map(|t| t.name()));
+        typsel.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+            if let Some(Ok(typ)) = c.get_active_id().parse::<Typ>() {
+                
+            }
+        }));
     }
 }
 

@@ -1,6 +1,6 @@
-use super::super::publisher::Typ;
 use super::Source;
 use indexmap::IndexMap;
+use netidx_protocols::value_type::Typ;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
