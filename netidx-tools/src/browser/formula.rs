@@ -12,7 +12,7 @@ use std::{
 };
 
 #[derive(Debug, Clone)]
-pub(super) struct CachedVals(RefCell<Vec<Option<Value>>>);
+pub struct CachedVals(RefCell<Vec<Option<Value>>>);
 
 impl CachedVals {
     fn new(from: &[Source]) -> CachedVals {
@@ -711,7 +711,7 @@ fn update_var_cached(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Formula {
+pub(super) enum Formula {
     Any(RefCell<Option<Value>>),
     All(CachedVals),
     Sum(CachedVals),
@@ -731,13 +731,13 @@ pub(crate) enum Formula {
     Unknown(String),
 }
 
-pub(crate) static FORMULAS: [&'static str; 16] = [
+pub(super) static FORMULAS: [&'static str; 16] = [
     "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
     "cmp", "if", "filter", "cast", "isa",
 ];
 
 impl Formula {
-    pub(crate) fn new(name: String, from: &[Source]) -> Formula {
+    pub(super) fn new(name: String, from: &[Source]) -> Formula {
         match name.as_str() {
             "any" => Formula::Any(RefCell::new(None)),
             "all" => Formula::All(CachedVals::new(from)),
@@ -759,7 +759,7 @@ impl Formula {
         }
     }
 
-    pub(crate) fn current(&self) -> Option<Value> {
+    pub(super) fn current(&self) -> Option<Value> {
         match self {
             Formula::Any(c) => c.borrow().clone(),
             Formula::All(c) => eval_all(c),
@@ -783,7 +783,7 @@ impl Formula {
         }
     }
 
-    pub(crate) fn update(
+    pub(super) fn update(
         &self,
         from: &[Source],
         changed: &Arc<IndexMap<SubId, Value>>,
@@ -821,7 +821,7 @@ impl Formula {
         }
     }
 
-    pub(crate) fn update_var(
+    pub(super) fn update_var(
         &self,
         from: &[Source],
         name: &str,

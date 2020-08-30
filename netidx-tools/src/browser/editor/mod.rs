@@ -626,7 +626,7 @@ impl Editor {
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        root.add(&treewin);
+        root.pack_start(&treewin, true, true, 5);
         let view = gtk::TreeView::new();
         treewin.add(&view);
         view.append_column(&{
@@ -668,7 +668,7 @@ impl Editor {
         Editor::build_tree(&on_change, &store, None, &spec.borrow().root);
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
-        root.add(&reveal_properties);
+        root.pack_end(&reveal_properties, false, false, 5);
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.add(&properties);
         let inhibit_change = Rc::new(Cell::new(false));

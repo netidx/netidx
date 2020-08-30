@@ -1,8 +1,8 @@
+use super::super::formula;
 use super::{
     util::{parse_entry, TwoColGrid},
     OnChange,
 };
-use super::super::formula;
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
@@ -145,14 +145,11 @@ impl Load {
         spec: Path,
     ) {
         let spec = Rc::new(RefCell::new(spec));
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblvar = gtk::Label::new(Some("Path:"));
         let entvar = gtk::Entry::new();
-        let lblerr = gtk::Label::new(None);
-        root.add(&entbox);
-        entbox.add(&lblvar);
-        entbox.add(&entvar);
+        root.add(&lblvar);
+        root.add(&entvar);
         root.add(&lblerr);
         entvar.set_text(&**spec.borrow());
         entvar.connect_activate(clone!(
@@ -193,34 +190,22 @@ impl Map {
         iter: &gtk::TreeIter,
         spec: String,
     ) {
-        let spec = Rc::new(RefCell::new(spec));
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblfun = gtk::Label::new(Some("Function:"));
         let cbfun = gtk::ComboBoxText::new();
-        let lblerr = gtk::Label::new(None);
-        root.add(&entbox);
-        entbox.add(&lblfun);
-        entbox.add(&cbfun);
-        root.add(&lblerr);
+        root.add(&lblfun);
+        root.add(&cbfun);
         for name in &formula::FORMULAS {
             cbfun.add(Some(name), name);
         }
-        cbfun.connect_changed(clone!(
-        @strong on_change, @strong spec, @weak lblerr => move |e| {
-            let path = Path::from(String::from(&*e.get_text()));
-            if !Path::is_absolute(&*path) {
-                lblerr.set_text("Absolute path is required (must start with /)");
-            } else {
-                *spec.borrow_mut() = path;
-                lblerr.set_text("");
+        cbfun.set_active_id(Some(spec));
+        let spec = Rc::new(RefCell::new(spec));
+        cbfun.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+            if let Some(id) = c.get_active_id() {
+                spec.borrow_mut() = String::from(&*id);
                 on_change()
             }
         }));
-        {
-            let cur = spec.borrow();
-            cbfun.set_active_id(Some(cur.as_str()));
-        }
         let t = Properties::Load(Load { root, spec });
         store.set_value(iter, 0, &"Load Path".to_value());
         store.set_value(iter, 1, &"".to_value());
@@ -289,7 +274,7 @@ static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Fu
 
 impl SourceInspector {
     fn new(on_change: impl Fn(view::Source), init: view::Source) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let text = gtk::Entry::new();
         let store = gtk::TreeStore::new(&[
             String::static_type(),
