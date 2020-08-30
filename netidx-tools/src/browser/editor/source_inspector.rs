@@ -38,10 +38,8 @@ impl Constant {
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
-        let lblerr = gtk::Label::new(None);
         root.add((&typlbl, &typ));
         root.add((&vallbl, &valent));
-        root.attach(&lblerr, 0, 2, 1);
         for typ in &TYPES {
             let name = typ.name();
             typsel.add(Some(name), name);
@@ -50,15 +48,14 @@ impl Constant {
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
-            @weak lblerr,
+            @weak store,
             @weak iter,
             @weak typsel,
             @weak store => move || {
             if let Some(Ok(typ)) = typsel.get_active_id().parse::<Typ>() {
                 match typ.parse(&*valent.get_text()) {
-                    Err(e) => lblerr.set_text(&format!("{}", e)),
+                    Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
                     Ok(value) => {
-                        lblerr.set_text("");
                         *spec.borrow_mut() = value;
                         store.set_value(&iter, 1, &format!("{}", value).to_value());
                         on_change()
@@ -96,23 +93,19 @@ impl Variable {
         spec: String,
     ) {
         let spec = Rc::new(RefCell::new(spec));
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblvar = gtk::Label::new(Some("Name:"));
         let entvar = gtk::Entry::new();
-        let lblerr = gtk::Label::new(None);
-        root.add(&entbox);
-        entbox.add(&lblvar);
-        entbox.add(&entvar);
-        root.add(&lblerr);
+        root.add(&lblvar);
+        root.add(&entvar);
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @weak lblerr => move |e|
+        @strong on_change, @strong spec, @weak iter, @weak store => move |e|
         match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
-            Err(e) => lblerr.set_text(&format!("{}", e)),
+            Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
             Ok(view::Source::Variable(name)) => {
                 *spec.borrow_mut() = name;
-                lblerr.set_text("");
+                store.set_value(&iter, 1, &"".to_value());
                 on_change()
             }
             Ok(_) => unreachable!()
@@ -150,16 +143,15 @@ impl Load {
         let entvar = gtk::Entry::new();
         root.add(&lblvar);
         root.add(&entvar);
-        root.add(&lblerr);
         entvar.set_text(&**spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @weak lblerr => move |e| {
+        @strong on_change, @strong spec, @weak store, @weak iter => move |e| {
             let path = Path::from(String::from(&*e.get_text()));
             if !Path::is_absolute(&*path) {
-                lblerr.set_text("Absolute path is required (must start with /)");
+                store.set_value(iter, 1, &"Absolute path required".to_value());
             } else {
                 *spec.borrow_mut() = path;
-                lblerr.set_text("");
+                store.set_value(iter, 1, &"".to_value());
                 on_change()
             }
         }));
@@ -274,7 +266,7 @@ static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Fu
 
 impl SourceInspector {
     fn new(on_change: impl Fn(view::Source), init: view::Source) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let text = gtk::Entry::new();
         let store = gtk::TreeStore::new(&[
             String::static_type(),
@@ -282,32 +274,58 @@ impl SourceInspector {
             Properties::static_type(),
         ]);
         let view = gtk::TreeView::new();
+        let treewin =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        treewin.set_policy(gtk::PolicyTyp::Never, gtk::PolicyType::Automatic);
         let reveal_properties = gtk::Revealer::new();
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let kind = gtk::ComboBoxText::new();
-        root.add(&text);
-        root.add(&view);
-        root.add(&reveal_properties);
+        treewin.add(&view);
+        root.pack_start(&text, false, false, 5);
+        root.pack_start(&treewin, true, true, 5);
+        root.pack_end(&reveal_properties, false, false, 5);
         reveal_properties.add(&properties);
-        properties.add(&kind);
-        properties.add(&gtk::Separator::new(gtk::Orientation::Vertical));
+        properties.pack_start(&kind, false, false, 5);
+        properties.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Vertical),
+            false,
+            false,
+            5,
+        );
         view.set_model(Some(&store));
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
-        SourceInspector::build_tree(&on_change, &store, None, &init);
         for k in &KINDS {
             kind.append(Some(k), k);
         }
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
+        let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let on_change: Rc<Fn()> = Rc::new({
             let store = store.clone();
+            let text = text.clone();
+            let inhibit = inhibit.clone();
             move || {
                 if let Some(root) = store.get_iter_first() {
-                    on_change(SourceInspector::build_source(&store, &root))
+                    let src = SourceInspector::build_source(&store, &root);
+                    inhibit.set(true);
+                    text.set_text(&src.to_string());
+                    inhibit.set(false);
+                    on_change(src)
                 }
             }
         });
-        let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        SourceInspector::build_tree(&on_change, &store, None, &init);
+        text.connect_activate(clone!(
+        @strong on_change, @weak store => move |txt| {
+            match txt.get_text().parse::<view::Source>() {
+                Err(_) => (), // CR estokes: do something with this
+                Ok(src) => {
+                    store.clear();
+                    SourceInspector::build_tree(&on_change, &store, None, &src);
+                    on_change()
+                }
+            }
+        }));
         kind.connect_changed(clone!(
         @strong on_change,
         @strong store,
