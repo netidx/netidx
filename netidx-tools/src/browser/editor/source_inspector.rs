@@ -6,7 +6,10 @@ use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
-use netidx_protocols::{view, value_type::{Typ, TYPES}};
+use netidx_protocols::{
+    value_type::{Typ, TYPES},
+    view,
+};
 use std::{
     boxed,
     cell::{Cell, RefCell},
@@ -15,6 +18,7 @@ use std::{
     result,
 };
 
+#[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,
     spec: Rc<RefCell<Value>>,
@@ -33,23 +37,149 @@ impl Constant {
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
+        let lblerr = gtk::Label::new(None);
         root.add((&typlbl, &typ));
         root.add((&vallbl, &valent));
+        root.attach(&lblerr, 0, 2, 1);
         for typ in &TYPES {
             let name = typ.name();
             typsel.add(Some(name), name);
         }
         typsel.set_active_id(Typ::get(&*spec.borrow()).map(|t| t.name()));
-        typsel.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            if let Some(Ok(typ)) = c.get_active_id().parse::<Typ>() {
-                
+        let val_change = Rc::new(clone!(
+            @strong on_change,
+            @strong spec,
+            @weak lblerr,
+            @weak iter,
+            @weak typsel,
+            @weak store => move || {
+            if let Some(Ok(typ)) = typsel.get_active_id().parse::<Typ>() {
+                match typ.parse(&*valent.get_text()) {
+                    Err(e) => lblerr.set_text(&format!("{}", e)),
+                    Ok(value) => {
+                        lblerr.set_text("");
+                        *spec.borrow_mut() = value;
+                        store.set_value(&iter, 1, &format!("{}", value).to_value());
+                        on_change()
+                    }
+                }
             }
         }));
+        typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
+        valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
+        let t = Properties::Constant(Constant { root, spec });
+        store.set_value(iter, 0, &"Constant".to_value());
+        store.set_value(iter, 1, &format!("{}", &*spec.borrow()).to_value());
+        store.set_value(iter, 2, &t.to_value());
+    }
+
+    fn spec(&self) -> view::Source {
+        view::Source::Constant(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
     }
 }
 
-struct Variable;
-struct Load;
+struct Variable {
+    root: gtk::Box,
+    spec: Rc<RefCell<String>>,
+}
+
+impl Variable {
+    fn insert(
+        on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
+        spec: String,
+    ) {
+        let spec = Rc::new(RefCell::new(spec));
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let lblvar = gtk::Label::new(Some("Name:"));
+        let entvar = gtk::Entry::new();
+        let lblerr = gtk::Label::new(None);
+        root.add(&entbox);
+        entbox.add(&lblvar);
+        entbox.add(&entvar);
+        root.add(&lblerr);
+        entvar.set_text(&*spec.borrow());
+        entvar.connect_activate(clone!(
+        @strong on_change, @strong spec, @weak lblerr => move |e|
+        match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
+            Err(e) => lblerr.set_text(&format!("{}", e)),
+            Ok(view::Source::Variable(name)) => {
+                *spec.borrow_mut() = name;
+                lblerr.set_text("");
+                on_change()
+            }
+            Ok(_) => unreachable!()
+        }));
+        let t = Properties::Variable(Variable { root, spec });
+        store.set_value(iter, 0, &"Load Variable".to_value());
+        store.set_value(iter, 1, &"".to_value());
+        store.set_value(iter, 2, &t.to_value());
+    }
+
+    fn spec(&self) -> view::Source {
+        view::Source::Variable(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
+
+struct Load {
+    root: gtk::Box,
+    spec: Rc<RefCell<Path>>,
+}
+
+impl Load {
+    fn insert(
+        on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
+        spec: Path,
+    ) {
+        let spec = Rc::new(RefCell::new(spec));
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let lblvar = gtk::Label::new(Some("Path:"));
+        let entvar = gtk::Entry::new();
+        let lblerr = gtk::Label::new(None);
+        root.add(&entbox);
+        entbox.add(&lblvar);
+        entbox.add(&entvar);
+        root.add(&lblerr);
+        entvar.set_text(&**spec.borrow());
+        entvar.connect_activate(clone!(
+        @strong on_change, @strong spec, @weak lblerr => move |e| {
+            let path = Path::from(String::from(&*e.get_text()));
+            if !Path::is_absolute(&*path) {
+                lblerr.set_text("Absolute path is required (must start with /)");
+            } else {
+                *spec.borrow_mut() = path;
+                lblerr.set_text("");
+                on_change()
+            }
+        }));
+        let t = Properties::Load(Load { root, spec });
+        store.set_value(iter, 0, &"Load Path".to_value());
+        store.set_value(iter, 1, &"".to_value());
+        store.set_value(iter, 2, &t.to_value());
+    }
+
+    fn spec(&self) -> view::Source {
+        view::Source::Load(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
+
 struct Map;
 
 #[derive(Clone, Debug, GBoxed)]
