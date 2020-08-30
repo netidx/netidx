@@ -27,6 +27,7 @@ impl Constant {
         spec: Value,
     ) {
         let root = gtk::Box::new(gtk::Orientation::Vertical);
+        let typ = gtk::ComboBoxText::new();
         
     }
 }
