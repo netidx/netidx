@@ -1,6 +1,6 @@
 use super::super::formula;
 use super::{util::TwoColGrid, OnChange};
-use glib::{clone, prelude::*, subclass::prelude::*};
+use glib::{clone, prelude::*, subclass::prelude::*, idle_add_local};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::{
@@ -41,6 +41,7 @@ impl Constant {
             typsel.append(Some(name), name);
         }
         typsel.set_active_id(Typ::get(&*spec.borrow()).map(|t| t.name()));
+        valent.set_text(&format!("{}", &*spec.borrow()));
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
@@ -197,8 +198,10 @@ impl Map {
         }
         cbfun.set_active_id(Some(spec.as_str()));
         let spec = Rc::new(RefCell::new(spec));
-        cbfun.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+        cbfun.connect_changed(clone!(
+            @strong on_change, @strong spec, @strong store, @strong iter => move |c| {
             if let Some(id) = c.get_active_id() {
+                store.set_value(&iter, 0, &id.to_value());
                 *spec.borrow_mut() = String::from(&*id);
                 on_change()
             }
@@ -381,10 +384,24 @@ pub(super) fn source_inspector(
     let on_change: Rc<dyn Fn()> = Rc::new({
         let store = store.clone();
         let inhibit = inhibit.clone();
+        let scheduled = Rc::new(Cell::new(false));
+        let on_change = Rc::new(on_change);
         move || {
-            if let Some(root) = store.get_iter_first() {
-                let src = build_source(&store, &root);
-                on_change(src)
+            if !scheduled.get() {
+                scheduled.set(true);
+                idle_add_local(clone!(
+                    @strong store,
+                    @strong inhibit,
+                    @strong scheduled,
+                    @strong on_change => move || {
+                        if let Some(root) = store.get_iter_first() {
+                            let src = build_source(&store, &root);
+                            on_change(src)
+                        }
+                        scheduled.set(false);
+                        glib::Continue(false)
+                    }
+                ));
             }
         }
     });
@@ -407,6 +424,7 @@ pub(super) fn source_inspector(
                 let pv = store.get_value(&iter, 2);
                 if let Ok(Some(p)) = pv.get::<&Properties>() {
                     properties.add(p.root());
+                    properties.show_all();
                 }
                 on_change()
             }
