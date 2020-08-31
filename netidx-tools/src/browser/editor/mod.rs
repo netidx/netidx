@@ -60,11 +60,11 @@ fn source(
     let source = Rc::new(RefCell::new(init.clone()));
     let inspector_win: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
     let lbl = gtk::Label::new(Some("Source:"));
-    let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let entry = gtk::Entry::new();
     let inspect = gtk::ToggleButton::new();
-    ibox.pack_start(&entry, true, true, 5);
-    ibox.pack_end(&inspect, false, false, 5);
+    ibox.pack_start(&entry, true, true, 0);
+    ibox.pack_end(&inspect, false, false, 0);
     entry.set_text(&source.borrow().to_string());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
@@ -105,6 +105,7 @@ fn source(
                 b.set_active(false);
                 Inhibit(false)
             }));
+            w.show_all();
         }
     }));
     (lbl, ibox)

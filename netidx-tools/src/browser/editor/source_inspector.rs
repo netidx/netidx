@@ -337,7 +337,6 @@ pub(super) fn source_inspector(
     init: view::Source,
 ) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    let text = gtk::Entry::new();
     let store = gtk::TreeStore::new(&[
         String::static_type(),
         String::static_type(),
@@ -351,7 +350,16 @@ pub(super) fn source_inspector(
     let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
     let kind = gtk::ComboBoxText::new();
     treewin.add(&view);
-    root.pack_start(&text, false, false, 5);
+    for (i, name) in ["kind", "current"].iter().enumerate() {
+        view.append_column(&{
+            let column = gtk::TreeViewColumn::new();
+            let cell = gtk::CellRendererText::new();
+            column.pack_start(&cell, true);
+            column.set_title(name);
+            column.add_attribute(&cell, "text", i as i32);
+            column
+        });
+    }
     root.pack_start(&treewin, true, true, 5);
     root.pack_end(&reveal_properties, false, false, 5);
     reveal_properties.add(&properties);
@@ -372,30 +380,15 @@ pub(super) fn source_inspector(
     let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let on_change: Rc<dyn Fn()> = Rc::new({
         let store = store.clone();
-        let text = text.clone();
         let inhibit = inhibit.clone();
         move || {
             if let Some(root) = store.get_iter_first() {
                 let src = build_source(&store, &root);
-                inhibit.set(true);
-                text.set_text(&src.to_string());
-                inhibit.set(false);
                 on_change(src)
             }
         }
     });
     build_tree(&on_change, &store, None, &init);
-    text.connect_activate(clone!(
-    @strong on_change, @weak store => move |txt| {
-        match txt.get_text().parse::<view::Source>() {
-            Err(_) => (), // CR estokes: do something with this
-            Ok(src) => {
-                store.clear();
-                build_tree(&on_change, &store, None, &src);
-                on_change()
-            }
-        }
-    }));
     kind.connect_changed(clone!(
     @strong on_change,
     @strong store,
