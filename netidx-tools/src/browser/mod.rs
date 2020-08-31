@@ -1065,6 +1065,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     });
                 }
             }
+            if let Some(editor) = *editor.borrow() {
+                editor.update(&batch)
+            }
             Continue(true)
         }
         ToGui::View { loc, original, raeified, generated } => {
@@ -1122,6 +1125,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::UpdateVar(name, value) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 root.update_var(&name, &value);
+            }
+            if let Some(editor) = *editor.borrow() {
+                editor.update_var(&name, &value);
             }
             Continue(true)
         }

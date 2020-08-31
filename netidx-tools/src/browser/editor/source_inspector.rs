@@ -1,6 +1,6 @@
-use super::super::formula;
+use super::super::{formula, Source};
 use super::{util::TwoColGrid, OnChange};
-use glib::{clone, prelude::*, subclass::prelude::*, idle_add_local};
+use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::{
@@ -282,6 +282,7 @@ fn default_source(id: Option<&str>) -> view::Source {
 }
 
 fn build_tree(
+    ctx: &WidgetCtx,
     on_change: &OnChange,
     store: &gtk::TreeStore,
     parent: Option<&gtk::TreeIter>,
@@ -335,191 +336,225 @@ fn build_source(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Source {
     }
 }
 
-pub(super) fn source_inspector(
-    on_change: impl Fn(view::Source) + 'static,
-    init: view::Source,
-) -> gtk::Box {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    let store = gtk::TreeStore::new(&[
-        String::static_type(),
-        String::static_type(),
-        Properties::static_type(),
-    ]);
-    let view = gtk::TreeView::new();
-    let treewin =
-        gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    let reveal_properties = gtk::Revealer::new();
-    let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    let kind = gtk::ComboBoxText::new();
-    treewin.add(&view);
-    for (i, name) in ["kind", "current"].iter().enumerate() {
-        view.append_column(&{
-            let column = gtk::TreeViewColumn::new();
-            let cell = gtk::CellRendererText::new();
-            column.pack_start(&cell, true);
-            column.set_title(name);
-            column.add_attribute(&cell, "text", i as i32);
-            column
-        });
-    }
-    root.pack_start(&treewin, true, true, 5);
-    root.pack_end(&reveal_properties, false, false, 5);
-    reveal_properties.add(&properties);
-    properties.pack_start(&kind, false, false, 5);
-    properties.pack_start(
-        &gtk::Separator::new(gtk::Orientation::Vertical),
-        false,
-        false,
-        5,
-    );
-    view.set_model(Some(&store));
-    view.set_reorderable(true);
-    view.set_enable_tree_lines(true);
-    for k in &KINDS {
-        kind.append(Some(k), k);
-    }
-    let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
-    let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    let on_change: Rc<dyn Fn()> = Rc::new({
-        let store = store.clone();
-        let inhibit = inhibit.clone();
-        let scheduled = Rc::new(Cell::new(false));
-        let on_change = Rc::new(on_change);
-        move || {
-            if !scheduled.get() {
-                scheduled.set(true);
-                idle_add_local(clone!(
-                    @strong store,
-                    @strong inhibit,
-                    @strong scheduled,
-                    @strong on_change => move || {
-                        if let Some(root) = store.get_iter_first() {
-                            let src = build_source(&store, &root);
-                            on_change(src)
-                        }
-                        scheduled.set(false);
-                        glib::Continue(false)
-                    }
-                ));
-            }
+pub(super) struct SourceInspector {
+    root: gtk::Box,
+    store: gtk::TreeStore,
+}
+
+impl SourceInspector {
+    pub(super) fn new(
+        ctx: WidgetCtx,
+        on_change: impl Fn(view::Source) + 'static,
+        init: view::Source,
+    ) -> gtk::Box {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let store = gtk::TreeStore::new(&[
+            String::static_type(),
+            String::static_type(),
+            Properties::static_type(),
+        ]);
+        let view = gtk::TreeView::new();
+        let treewin =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        let reveal_properties = gtk::Revealer::new();
+        let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let kind = gtk::ComboBoxText::new();
+        treewin.add(&view);
+        for (i, name) in ["kind", "current"].iter().enumerate() {
+            view.append_column(&{
+                let column = gtk::TreeViewColumn::new();
+                let cell = gtk::CellRendererText::new();
+                column.pack_start(&cell, true);
+                column.set_title(name);
+                column.add_attribute(&cell, "text", i as i32);
+                column
+            });
         }
-    });
-    build_tree(&on_change, &store, None, &init);
-    kind.connect_changed(clone!(
-    @strong on_change,
-    @strong store,
-    @strong selected,
-    @strong inhibit,
-    @weak properties => move |c| {
-        if !inhibit.get() {
-            if let Some(iter) = selected.borrow().clone() {
-                let pv = store.get_value(&iter, 2);
-                if let Ok(Some(p)) = pv.get::<&Properties>() {
-                    properties.remove(p.root());
+        root.pack_start(&treewin, true, true, 5);
+        root.pack_end(&reveal_properties, false, false, 5);
+        reveal_properties.add(&properties);
+        properties.pack_start(&kind, false, false, 5);
+        properties.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Vertical),
+            false,
+            false,
+            5,
+        );
+        view.set_model(Some(&store));
+        view.set_reorderable(true);
+        view.set_enable_tree_lines(true);
+        for k in &KINDS {
+            kind.append(Some(k), k);
+        }
+        let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
+        let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let on_change: Rc<dyn Fn()> = Rc::new({
+            let store = store.clone();
+            let inhibit = inhibit.clone();
+            let scheduled = Rc::new(Cell::new(false));
+            let on_change = Rc::new(on_change);
+            move || {
+                if !scheduled.get() {
+                    scheduled.set(true);
+                    idle_add_local(clone!(
+                        @strong store,
+                        @strong inhibit,
+                        @strong scheduled,
+                        @strong on_change => move || {
+                            if let Some(root) = store.get_iter_first() {
+                                let src = build_source(&store, &root);
+                                on_change(src)
+                            }
+                            scheduled.set(false);
+                            glib::Continue(false)
+                        }
+                    ));
                 }
-                let id = c.get_active_id();
-                let src = default_source(id.as_ref().map(|s| &**s));
-                Properties::insert(on_change.clone(), &store, &iter, src);
-                let pv = store.get_value(&iter, 2);
-                if let Ok(Some(p)) = pv.get::<&Properties>() {
-                    properties.add(p.root());
+            }
+        });
+        build_tree(&on_change, &store, None, &init);
+        kind.connect_changed(clone!(
+        @strong on_change,
+        @strong store,
+        @strong selected,
+        @strong inhibit,
+        @weak properties => move |c| {
+            if !inhibit.get() {
+                if let Some(iter) = selected.borrow().clone() {
+                    let pv = store.get_value(&iter, 2);
+                    if let Ok(Some(p)) = pv.get::<&Properties>() {
+                        properties.remove(p.root());
+                    }
+                    let id = c.get_active_id();
+                    let src = default_source(id.as_ref().map(|s| &**s));
+                    Properties::insert(on_change.clone(), &store, &iter, src);
+                    let pv = store.get_value(&iter, 2);
+                    if let Ok(Some(p)) = pv.get::<&Properties>() {
+                        properties.add(p.root());
+                        properties.show_all();
+                    }
+                    on_change()
+                }
+            }
+        }));
+        let selection = view.get_selection();
+        selection.set_mode(gtk::SelectionMode::Single);
+        selection.connect_changed(clone!(
+        @weak store,
+        @strong selected,
+        @weak kind,
+        @strong inhibit => move |s| {
+            let children = properties.get_children();
+            if children.len() == 3 {
+                properties.remove(&children[2]);
+            }
+            match s.get_selected() {
+                None => {
+                    *selected.borrow_mut() = None;
+                    reveal_properties.set_reveal_child(false);
+                }
+                Some((_, iter)) => {
+                    *selected.borrow_mut() = Some(iter.clone());
+                    let v = store.get_value(&iter, 0);
+                    if let Ok(Some(id)) = v.get::<&str>() {
+                        inhibit.set(true);
+                        kind.set_active_id(Some(id));
+                        inhibit.set(false);
+                    }
+                    let v = store.get_value(&iter, 2);
+                    if let Ok(Some(p)) = v.get::<&Properties>() {
+                        properties.add(p.root());
+                    }
                     properties.show_all();
+                    reveal_properties.set_reveal_child(true);
                 }
+            }
+        }));
+        let menu = gtk::Menu::new();
+        let duplicate = gtk::MenuItem::with_label("Duplicate");
+        let new_sib = gtk::MenuItem::with_label("New Sibling");
+        let new_child = gtk::MenuItem::with_label("New Child");
+        let delete = gtk::MenuItem::with_label("Delete");
+        menu.append(&duplicate);
+        menu.append(&new_sib);
+        menu.append(&new_child);
+        menu.append(&delete);
+        duplicate.connect_activate(clone!(
+        @strong on_change, @weak store, @strong selected => move |_| {
+            if let Some(iter) = &*selected.borrow() {
+                let src = build_source(&store, iter);
+                let parent = store.iter_parent(iter);
+                build_tree(&on_change, &store, parent.as_ref(), &src);
                 on_change()
             }
-        }
-    }));
-    let selection = view.get_selection();
-    selection.set_mode(gtk::SelectionMode::Single);
-    selection.connect_changed(clone!(
-    @weak store,
-    @strong selected,
-    @weak kind,
-    @strong inhibit => move |s| {
-        let children = properties.get_children();
-        if children.len() == 3 {
-            properties.remove(&children[2]);
-        }
-        match s.get_selected() {
-            None => {
-                *selected.borrow_mut() = None;
-                reveal_properties.set_reveal_child(false);
-            }
-            Some((_, iter)) => {
-                *selected.borrow_mut() = Some(iter.clone());
-                let v = store.get_value(&iter, 0);
-                if let Ok(Some(id)) = v.get::<&str>() {
-                    inhibit.set(true);
-                    kind.set_active_id(Some(id));
-                    inhibit.set(false);
-                }
-                let v = store.get_value(&iter, 2);
-                if let Ok(Some(p)) = v.get::<&Properties>() {
-                    properties.add(p.root());
-                }
-                properties.show_all();
-                reveal_properties.set_reveal_child(true);
-            }
-        }
-    }));
-    let menu = gtk::Menu::new();
-    let duplicate = gtk::MenuItem::with_label("Duplicate");
-    let new_sib = gtk::MenuItem::with_label("New Sibling");
-    let new_child = gtk::MenuItem::with_label("New Child");
-    let delete = gtk::MenuItem::with_label("Delete");
-    menu.append(&duplicate);
-    menu.append(&new_sib);
-    menu.append(&new_child);
-    menu.append(&delete);
-    duplicate.connect_activate(clone!(
-    @strong on_change, @weak store, @strong selected => move |_| {
-        if let Some(iter) = &*selected.borrow() {
-            let src = build_source(&store, iter);
-            let parent = store.iter_parent(iter);
-            build_tree(&on_change, &store, parent.as_ref(), &src);
-            on_change()
-        }
-    }));
-    new_sib.connect_activate(clone!(
-    @strong on_change, @weak store, @strong selected => move |_| {
-        let iter = store.insert_after(None, selected.borrow().as_ref());
-        let src = default_source(Some("Constant"));
-        Properties::insert(on_change.clone(), &store, &iter, src);
-        on_change();
-    }));
-    new_child.connect_activate(clone!(
-    @strong on_change, @weak store, @strong selected  => move |_| {
-        let iter = store.insert_after(selected.borrow().as_ref(), None);
-        let src = default_source(Some("Constant"));
-        Properties::insert(on_change.clone(), &store, &iter, src);
-        on_change();
-    }));
-    delete.connect_activate(clone!(
-    @weak selection, @strong on_change, @weak store, @strong selected => move |_| {
-        let iter = selected.borrow().clone();
-        if let Some(iter) = iter {
-            selection.unselect_iter(&iter);
-            store.remove(&iter);
+        }));
+        new_sib.connect_activate(clone!(
+        @strong on_change, @weak store, @strong selected => move |_| {
+            let iter = store.insert_after(None, selected.borrow().as_ref());
+            let src = default_source(Some("Constant"));
+            Properties::insert(on_change.clone(), &store, &iter, src);
             on_change();
-        }
-    }));
-    view.connect_button_press_event(move |_, b| {
-        let right_click =
-            gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
-        if right_click {
-            menu.show_all();
-            menu.popup_at_pointer(Some(&*b));
-            Inhibit(true)
-        } else {
-            Inhibit(false)
-        }
-    });
-    store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
-        on_change();
-    }));
-    store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
-        on_change();
-    }));
-    root
+        }));
+        new_child.connect_activate(clone!(
+        @strong on_change, @weak store, @strong selected => move |_| {
+            let iter = store.insert_after(selected.borrow().as_ref(), None);
+            let src = default_source(Some("Constant"));
+            Properties::insert(on_change.clone(), &store, &iter, src);
+            on_change();
+        }));
+        delete.connect_activate(clone!(
+        @weak selection, @strong on_change, @weak store, @strong selected => move |_| {
+            let iter = selected.borrow().clone();
+            if let Some(iter) = iter {
+                selection.unselect_iter(&iter);
+                store.remove(&iter);
+                on_change();
+            }
+        }));
+        view.connect_button_press_event(move |_, b| {
+            let right_click =
+                gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
+            if right_click {
+                menu.show_all();
+                menu.popup_at_pointer(Some(&*b));
+                Inhibit(true)
+            } else {
+                Inhibit(false)
+            }
+        });
+        store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
+            on_change();
+        }));
+        store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
+            on_change();
+        }));
+        SourceInspector { root, store }
+    }
+
+    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        self.store.for_each(|store, _, iter| {
+            let v = store.get_value(iter, 1);
+            match v.get::<&Properties>() {
+                Err(_) | Ok(None) => false,
+                Ok(Some(w)) => {
+                    w.update(changed);
+                    false
+                }
+            }
+        })
+    }
+
+    pub(super) fn update_var(&self, name: &str, value: &Value) {
+        self.store.for_each(|store, _, iter| {
+            let v = store.get_value(iter, 1);
+            match v.get::<&Properties>() {
+                Err(_) | Ok(None) => false,
+                Ok(Some(w)) => {
+                    w.update_var(name, value);
+                    false
+                }
+            }
+        })
+    }
 }

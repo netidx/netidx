@@ -2,11 +2,13 @@ mod source_inspector;
 mod util;
 use super::{util::err_modal, FromGui, ToGui, WidgetPath};
 use futures::channel::mpsc;
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
+use glib::{
+    clone, idle_add_local, prelude::*, subclass::prelude::*, value::GetError, GString,
+};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
-use source_inspector::source_inspector;
+use source_inspector::SourceInspector;
 use std::{
     boxed,
     cell::{Cell, RefCell},
@@ -63,6 +65,11 @@ fn source(
     let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let entry = gtk::Entry::new();
     let inspect = gtk::ToggleButton::new();
+    let inspect_icon = gtk::Image::from_icon_name(
+        Some("preferences-system"),
+        gtk::IconSize::SmallToolbar
+    );
+    inspect.set_image(Some(&inspect_icon));
     ibox.pack_start(&entry, true, true, 0);
     ibox.pack_end(&inspect, false, false, 0);
     entry.set_text(&source.borrow().to_string());
@@ -154,6 +161,12 @@ impl Action {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }    
 }
 
 #[derive(Clone, Debug)]
@@ -193,6 +206,12 @@ impl Label {
 
     fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
+    }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
     }
 }
 
@@ -256,6 +275,12 @@ impl Button {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +335,12 @@ impl Toggle {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }    
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +403,12 @@ impl Selector {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+    
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +470,12 @@ impl Entry {
 
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
+    }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
     }
 }
 
@@ -524,6 +567,12 @@ impl BoxChild {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -585,6 +634,12 @@ impl BoxContainer {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    }
+ 
+    fn update_var(&self, name: &str, value: &Value) {
+    }
 }
 
 #[derive(Clone, Debug, GBoxed)]
@@ -605,21 +660,22 @@ enum Widget {
 
 impl Widget {
     fn insert(
+        ctx: WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         spec: view::Widget,
     ) {
         match spec {
-            view::Widget::Action(s) => Action::insert(on_change, store, iter, s),
-            view::Widget::Table(s) => Table::insert(on_change, store, iter, s),
-            view::Widget::Label(s) => Label::insert(on_change, store, iter, s),
-            view::Widget::Button(s) => Button::insert(on_change, store, iter, s),
-            view::Widget::Toggle(s) => Toggle::insert(on_change, store, iter, s),
-            view::Widget::Selector(s) => Selector::insert(on_change, store, iter, s),
-            view::Widget::Entry(s) => Entry::insert(on_change, store, iter, s),
-            view::Widget::Box(s) => BoxContainer::insert(on_change, store, iter, s),
-            view::Widget::BoxChild(s) => BoxChild::insert(on_change, store, iter, s),
+            view::Widget::Action(s) => Action::insert(ctx, on_change, store, iter, s),
+            view::Widget::Table(s) => Table::insert(ctx, on_change, store, iter, s),
+            view::Widget::Label(s) => Label::insert(ctx, on_change, store, iter, s),
+            view::Widget::Button(s) => Button::insert(ctx, on_change, store, iter, s),
+            view::Widget::Toggle(s) => Toggle::insert(ctx, on_change, store, iter, s),
+            view::Widget::Selector(s) => Selector::insert(ctx, on_change, store, iter, s),
+            view::Widget::Entry(s) => Entry::insert(ctx, on_change, store, iter, s),
+            view::Widget::Box(s) => BoxContainer::insert(ctx, on_change, store, iter, s),
+            view::Widget::BoxChild(s) => BoxChild::insert(ctx, on_change, store, iter, s),
             view::Widget::Grid(_) => todo!(),
             view::Widget::GridChild(_) => todo!(),
         }
@@ -656,10 +712,43 @@ impl Widget {
             Widget::GridChild => todo!(),
         }
     }
+
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        match self {
+            Widget::Action(w) => w.update(changed),
+            Widget::Table(w) => w.update(changed),
+            Widget::Label(w) => w.update(changed),
+            Widget::Button(w) => w.update(changed),
+            Widget::Toggle(w) => w.update(changed),
+            Widget::Selector(w) => w.update(changed),
+            Widget::Entry(w) => w.update(changed),
+            Widget::Box(w) => w.update(changed),
+            Widget::BoxChild(w) => w.update(changed),
+            Widget::Grid => todo!(),
+            Widget::GridChild => todo!(),
+        }
+    }
+
+    fn update_var(&self, name: &str, value: &Value) {
+        match self {
+            Widget::Action(w) => w.update_var(name, value),
+            Widget::Table(w) => w.update_var(name, value),
+            Widget::Label(w) => w.update_var(name, value),
+            Widget::Button(w) => w.update_var(name, value),
+            Widget::Toggle(w) => w.update_var(name, value),
+            Widget::Selector(w) => w.update_var(name, value),
+            Widget::Entry(w) => w.update_var(name, value),
+            Widget::Box(w) => w.update_var(name, value),
+            Widget::BoxChild(w) => w.update_var(name, value),
+            Widget::Grid => todo!(),
+            Widget::GridChild => todo!(),
+        }
+    }
 }
 
 pub(super) struct Editor {
     root: gtk::Box,
+    store: gtk::TreeStore,
 }
 
 static KINDS: [&'static str; 11] = [
@@ -678,6 +767,7 @@ static KINDS: [&'static str; 11] = [
 
 impl Editor {
     pub(super) fn new(
+        ctx: WidgetCtx,
         from_gui: mpsc::UnboundedSender<FromGui>,
         to_gui: glib::Sender<ToGui>,
         spec: view::View,
@@ -725,7 +815,7 @@ impl Editor {
                 }
             }
         });
-        Editor::build_tree(&on_change, &store, None, &spec.borrow().root);
+        Editor::build_tree(&ctx, &on_change, &store, None, &spec.borrow().root);
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root.pack_end(&reveal_properties, false, false, 5);
@@ -740,6 +830,7 @@ impl Editor {
             @strong on_change,
             @strong store,
             @strong selected,
+            @strong ctx,
             @weak properties,
             @strong inhibit_change => move |c| {
             if let Some(iter) = selected.borrow().clone() {
@@ -750,7 +841,7 @@ impl Editor {
                     }
                     let id = c.get_active_id();
                     let spec = Editor::default_spec(id.as_ref().map(|s| &**s));
-                    Widget::insert(on_change.clone(), &store, &iter, spec);
+                    Widget::insert(ctx.clone(), on_change.clone(), &store, &iter, spec);
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
                         properties.add(w.root());
@@ -811,26 +902,26 @@ impl Editor {
         menu.append(&new_child);
         menu.append(&delete);
         duplicate.connect_activate(clone!(
-        @strong on_change, @weak store, @strong selected => move |_| {
+        @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
             if let Some(iter) = &*selected.borrow() {
                 let spec = Editor::build_spec(&store, iter);
                 let parent = store.iter_parent(iter);
-                Editor::build_tree(&on_change, &store, parent.as_ref(), &spec);
+                Editor::build_tree(&ctx, &on_change, &store, parent.as_ref(), &spec);
                 on_change()
             }
         }));
         new_sib.connect_activate(clone!(
-            @strong on_change, @weak store, @strong selected => move |_| {
+            @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let spec = Editor::default_spec(Some("Label"));
-            Widget::insert(on_change.clone(), &store, &iter, spec);
+            Widget::insert(ctx.clone(), on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         new_child.connect_activate(clone!(
-            @strong on_change, @weak store, @strong selected  => move |_| {
+            @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let spec = Editor::default_spec(Some("Label"));
-            Widget::insert(on_change.clone(), &store, &iter, spec);
+            Widget::insert(ctx.clone(), on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         delete.connect_activate(clone!(
@@ -859,7 +950,7 @@ impl Editor {
         store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
             on_change();
         }));
-        Editor { root }
+        Editor { root, store }
     }
 
     fn default_spec(name: Option<&str>) -> view::Widget {
@@ -935,13 +1026,14 @@ impl Editor {
     }
 
     fn build_tree(
+        ctx: &WidgetCtx,
         on_change: &OnChange,
         store: &gtk::TreeStore,
         parent: Option<&gtk::TreeIter>,
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(on_change.clone(), store, &iter, w.clone());
+        Widget::insert(ctx.clone(), on_change.clone(), store, &iter, w.clone());
         match w {
             view::Widget::Box(b) => {
                 for w in &b.children {
@@ -1058,6 +1150,32 @@ impl Editor {
                 }
             }
         }
+    }
+
+    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        self.store.for_each(|store, _, iter| {
+            let v = store.get_value(iter, 1);
+            match v.get::<&Widget>() {
+                Err(_) | Ok(None) => false,
+                Ok(Some(w)) => {
+                    w.update(changed);
+                    false
+                }
+            }
+        })
+    }
+
+    pub(super) fn update_var(&self, name: &str, value: &Value) {
+        self.store.for_each(|store, _, iter| {
+            let v = store.get_value(iter, 1);
+            match v.get::<&Widget>() {
+                Err(_) | Ok(None) => false,
+                Ok(Some(w)) => {
+                    w.update_var(name, value);
+                    false
+                }
+            }
+        })
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
