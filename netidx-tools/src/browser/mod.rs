@@ -2,6 +2,7 @@ mod containers;
 mod editor;
 mod formula;
 mod table;
+mod util;
 mod view;
 mod widgets;
 use anyhow::{anyhow, Error, Result};
@@ -44,6 +45,7 @@ use std::{
     time::Duration,
 };
 use tokio::{runtime::Runtime, task};
+use util::{ask_modal, err_modal};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 
@@ -385,26 +387,6 @@ impl Widget {
             },
         }
     }
-}
-
-fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
-    w.get_toplevel()
-        .expect("modal dialog must have a toplevel window")
-        .downcast::<gtk::Window>()
-        .expect("not a window")
-}
-
-fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
-    let d = gtk::MessageDialog::new(
-        Some(&toplevel(w)),
-        gtk::DialogFlags::MODAL,
-        gtk::MessageType::Question,
-        gtk::ButtonsType::YesNo,
-        msg,
-    );
-    let resp = d.run();
-    d.close();
-    resp == gtk::ResponseType::Yes
 }
 
 fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Box {
@@ -870,18 +852,6 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
     };
     d.close();
     res
-}
-
-fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
-    let d = gtk::MessageDialog::new(
-        Some(&toplevel(w)),
-        gtk::DialogFlags::MODAL,
-        gtk::MessageType::Error,
-        gtk::ButtonsType::Ok,
-        msg,
-    );
-    d.run();
-    d.close();
 }
 
 fn save_view(

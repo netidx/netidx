@@ -1,17 +1,19 @@
+mod source_inspector;
 mod util;
-use super::{FromGui, ToGui, WidgetPath};
-use util::{parse_entry, TwoColGrid};
+use super::{util::err_modal, FromGui, ToGui, WidgetPath};
 use futures::channel::mpsc;
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
+use source_inspector::source_inspector;
 use std::{
     boxed,
     cell::{Cell, RefCell},
     rc::Rc,
     result,
 };
+use util::{parse_entry, TwoColGrid};
 
 type OnChange = Rc<dyn Fn()>;
 
@@ -50,6 +52,64 @@ impl Table {
     }
 }
 
+fn source(
+    init: &view::Source,
+    on_change: impl Fn(view::Source) + 'static,
+) -> (gtk::Label, gtk::Box) {
+    let on_change = Rc::new(on_change);
+    let source = Rc::new(RefCell::new(init.clone()));
+    let inspector_win: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
+    let lbl = gtk::Label::new(Some("Source:"));
+    let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let entry = gtk::Entry::new();
+    let inspect = gtk::ToggleButton::new();
+    ibox.pack_start(&entry, true, true, 5);
+    ibox.pack_end(&inspect, false, false, 5);
+    entry.set_text(&source.borrow().to_string());
+    entry.connect_activate(clone!(
+        @strong on_change, @strong source, @weak inspect => move |e| {
+        match e.get_text().parse::<view::Source>() {
+            Err(e) => err_modal(&format!("parse error: {}", e)),
+            Ok(s) => {
+                inspect.set_active(false);
+                *source.borrow_mut() = s.clone();
+                on_change(s);
+            }
+        }
+    }));
+    inspect.connect_toggled(clone!(
+    @strong on_change,
+    @strong inspector_win,
+    @strong source,
+    @weak entry => move |b| {
+        if !b.get_active() {
+            let win = inspector_win.borrow();
+            if let Some(w) = &*win {
+                w.close()
+            }
+        } else {
+            let w = gtk::Window::new(gtk::WindowType::Toplevel);
+            let on_change = {
+                let on_change = on_change.clone();
+                let entry = entry.clone();
+                let source = source.clone();
+                move |s: view::Source| {
+                    entry.set_text(&s.to_string());
+                    *source.borrow_mut() = s.clone();
+                    on_change(s)
+                }
+            };
+            w.add(&source_inspector(on_change, source.borrow().clone()));
+            w.connect_delete_event(clone!(@strong inspector_win, @strong b => move |_, _| {
+                *inspector_win.borrow_mut() = None;
+                b.set_active(false);
+                Inhibit(false)
+            }));
+        }
+    }));
+    (lbl, ibox)
+}
+
 #[derive(Clone, Debug)]
 struct Action {
     root: TwoColGrid,
@@ -65,8 +125,7 @@ impl Action {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
-            "Source:",
+        root.add(source(
             &spec.borrow().source,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().source = s;
