@@ -35,21 +35,21 @@ impl Constant {
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
-        root.add((&typlbl, &typ));
-        root.add((&vallbl, &valent));
+        root.add((typlbl.clone(), typ.clone()));
+        root.add((vallbl.clone(), valent.clone()));
         for typ in &TYPES {
             let name = typ.name();
-            typsel.add(Some(name), name);
+            typsel.append(Some(name), name);
         }
         typsel.set_active_id(Typ::get(&*spec.borrow()).map(|t| t.name()));
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
-            @weak store,
-            @weak iter,
+            @strong iter,
+            @strong store,
             @weak typsel,
             @weak store => move || {
-            if let Some(Ok(typ)) = typsel.get_active_id().parse::<Typ>() {
+            if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
                 match typ.parse(&*valent.get_text()) {
                     Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
                     Ok(value) => {
@@ -98,7 +98,7 @@ impl Variable {
         root.add(&entvar);
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @weak iter, @weak store => move |e|
+        @strong on_change, @strong spec, @strong iter, @weak store => move |e|
         match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
             Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
             Ok(view::Source::Variable(name)) => {
@@ -144,13 +144,13 @@ impl Load {
         root.add(&entvar);
         entvar.set_text(&**spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @weak store, @weak iter => move |e| {
+        @strong on_change, @strong spec, @strong iter, @weak store => move |e| {
             let path = Path::from(String::from(&*e.get_text()));
             if !Path::is_absolute(&*path) {
-                store.set_value(iter, 1, &"Absolute path required".to_value());
+                store.set_value(&iter, 1, &"Absolute path required".to_value());
             } else {
                 *spec.borrow_mut() = path;
-                store.set_value(iter, 1, &"".to_value());
+                store.set_value(&iter, 1, &"".to_value());
                 on_change()
             }
         }));
@@ -188,13 +188,13 @@ impl Map {
         root.add(&lblfun);
         root.add(&cbfun);
         for name in &formula::FORMULAS {
-            cbfun.add(Some(name), name);
+            cbfun.append(Some(name), name);
         }
-        cbfun.set_active_id(Some(spec));
+        cbfun.set_active_id(Some(spec.as_str()));
         let spec = Rc::new(RefCell::new(spec));
         cbfun.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             if let Some(id) = c.get_active_id() {
-                spec.borrow_mut() = String::from(&*id);
+                *spec.borrow_mut() = String::from(&*id);
                 on_change()
             }
         }));
@@ -419,7 +419,7 @@ pub(super) fn source_inspector(
     @weak store,
     @strong selected,
     @weak kind,
-    @strong inbibit => move |s| {
+    @strong inhibit => move |s| {
         let children = properties.get_children();
         if children.len() == 3 {
             properties.remove(&children[2]);
@@ -475,7 +475,7 @@ pub(super) fn source_inspector(
     @strong on_change, @weak store, @strong selected  => move |_| {
         let iter = store.insert_after(selected.borrow().as_ref(), None);
         let src = default_source(Some("Constant"));
-        Properties::insert(on_change.clone(), &store, &iter, spec);
+        Properties::insert(on_change.clone(), &store, &iter, src);
         on_change();
     }));
     delete.connect_activate(clone!(

@@ -67,9 +67,9 @@ fn source(
     ibox.pack_end(&inspect, false, false, 5);
     entry.set_text(&source.borrow().to_string());
     entry.connect_activate(clone!(
-        @strong on_change, @strong source, @weak inspect => move |e| {
+        @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
         match e.get_text().parse::<view::Source>() {
-            Err(e) => err_modal(&format!("parse error: {}", e)),
+            Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
                 inspect.set_active(false);
                 *source.borrow_mut() = s.clone();
