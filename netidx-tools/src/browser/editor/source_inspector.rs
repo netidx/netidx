@@ -1,8 +1,7 @@
 use super::super::formula;
 use super::{util::TwoColGrid, OnChange};
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
+use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use log::warn;
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::{
     value_type::{Typ, TYPES},
@@ -30,12 +29,12 @@ impl Constant {
         spec: Value,
     ) {
         let spec = Rc::new(RefCell::new(spec));
-        let root = TwoColGrid::new();
+        let mut root = TwoColGrid::new();
         let typlbl = gtk::Label::new(Some("Type: "));
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
-        root.add((typlbl.clone(), typ.clone()));
+        root.add((typlbl.clone(), typsel.clone()));
         root.add((vallbl.clone(), valent.clone()));
         for typ in &TYPES {
             let name = typ.name();
@@ -48,13 +47,14 @@ impl Constant {
             @strong iter,
             @strong store,
             @weak typsel,
+            @weak valent,
             @weak store => move || {
             if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
                 match typ.parse(&*valent.get_text()) {
                     Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
                     Ok(value) => {
-                        *spec.borrow_mut() = value;
                         store.set_value(&iter, 1, &format!("{}", value).to_value());
+                        *spec.borrow_mut() = value;
                         on_change()
                     }
                 }
@@ -62,10 +62,13 @@ impl Constant {
         }));
         typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
-        let t = Properties::Constant(Constant { root, spec });
         store.set_value(iter, 0, &"Constant".to_value());
         store.set_value(iter, 1, &format!("{}", &*spec.borrow()).to_value());
-        store.set_value(iter, 2, &t.to_value());
+        store.set_value(
+            iter,
+            2,
+            &Properties::Constant(Constant { root, spec }).to_value(),
+        );
     }
 
     fn spec(&self) -> view::Source {
@@ -108,10 +111,13 @@ impl Variable {
             }
             Ok(_) => unreachable!()
         }));
-        let t = Properties::Variable(Variable { root, spec });
         store.set_value(iter, 0, &"Load Variable".to_value());
         store.set_value(iter, 1, &"".to_value());
-        store.set_value(iter, 2, &t.to_value());
+        store.set_value(
+            iter,
+            2,
+            &Properties::Variable(Variable { root, spec }).to_value(),
+        );
     }
 
     fn spec(&self) -> view::Source {
@@ -154,10 +160,9 @@ impl Load {
                 on_change()
             }
         }));
-        let t = Properties::Load(Load { root, spec });
         store.set_value(iter, 0, &"Load Path".to_value());
         store.set_value(iter, 1, &"".to_value());
-        store.set_value(iter, 2, &t.to_value());
+        store.set_value(iter, 2, &Properties::Load(Load { root, spec }).to_value());
     }
 
     fn spec(&self) -> view::Source {
@@ -198,10 +203,9 @@ impl Map {
                 on_change()
             }
         }));
-        let t = Properties::Map(Map { root, spec });
         store.set_value(iter, 0, &spec.borrow().to_value());
         store.set_value(iter, 1, &"".to_value());
-        store.set_value(iter, 2, &t.to_value());
+        store.set_value(iter, 2, &Properties::Map(Map { root, spec }).to_value());
     }
 
     fn spec(&self) -> view::Source {
@@ -260,8 +264,9 @@ impl Properties {
 
 static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Function"];
 
-fn default_source(id: Option<&'static str>) -> view::Source {
+fn default_source(id: Option<&str>) -> view::Source {
     match id {
+        None => view::Source::Constant(Value::U64(42)),
         Some("Constant") => view::Source::Constant(Value::U64(42)),
         Some("Load Variable") => view::Source::Variable("foo_bar_baz".into()),
         Some("Load Path") => view::Source::Load(Path::from("/some/path")),
@@ -269,6 +274,7 @@ fn default_source(id: Option<&'static str>) -> view::Source {
             let from = vec![view::Source::Constant(Value::U64(42))];
             view::Source::Map { function: "any".into(), from }
         }
+        _ => unreachable!(),
     }
 }
 
@@ -313,7 +319,7 @@ fn build_source(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Source {
                     None => view::Source::Map { from, function },
                     Some(iter) => {
                         loop {
-                            from.push(build_spec(store, &iter));
+                            from.push(build_source(store, &iter));
                             if !store.iter_next(&iter) {
                                 break;
                             }
@@ -327,7 +333,7 @@ fn build_source(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Source {
 }
 
 pub(super) fn source_inspector(
-    on_change: impl Fn(view::Source),
+    on_change: impl Fn(view::Source) + 'static,
     init: view::Source,
 ) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -364,7 +370,7 @@ pub(super) fn source_inspector(
     }
     let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
     let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    let on_change: Rc<Fn()> = Rc::new({
+    let on_change: Rc<dyn Fn()> = Rc::new({
         let store = store.clone();
         let text = text.clone();
         let inhibit = inhibit.clone();
