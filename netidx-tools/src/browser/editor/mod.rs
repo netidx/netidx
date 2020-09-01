@@ -1,10 +1,7 @@
 mod source_inspector;
 mod util;
 use super::{util::err_modal, FromGui, ToGui, WidgetCtx, WidgetPath};
-use futures::channel::mpsc;
-use glib::{
-    clone, idle_add_local, prelude::*, subclass::prelude::*, value::GetError, GString,
-};
+use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use netidx::{
@@ -854,8 +851,8 @@ impl Widget {
             Widget::Toggle(w) => w.update(changed),
             Widget::Selector(w) => w.update(changed),
             Widget::Entry(w) => w.update(changed),
-            Widget::Box(w) => (),
-            Widget::BoxChild(w) => (),
+            Widget::Box(_) => (),
+            Widget::BoxChild(_) => (),
             Widget::Grid => todo!(),
             Widget::GridChild => todo!(),
         }
@@ -870,8 +867,8 @@ impl Widget {
             Widget::Toggle(w) => w.update_var(name, value),
             Widget::Selector(w) => w.update_var(name, value),
             Widget::Entry(w) => w.update_var(name, value),
-            Widget::Box(w) => (),
-            Widget::BoxChild(w) => (),
+            Widget::Box(_) => (),
+            Widget::BoxChild(_) => (),
             Widget::Grid => todo!(),
             Widget::GridChild => todo!(),
         }

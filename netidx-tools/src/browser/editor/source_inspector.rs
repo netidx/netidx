@@ -9,13 +9,11 @@ use netidx_protocols::{
     view,
 };
 use std::{
-    boxed,
     cell::{Cell, RefCell},
     collections::HashMap,
     fmt::Display,
     rc::Rc,
     sync::Arc,
-    result,
 };
 
 fn set_dbg_src(

@@ -1065,7 +1065,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     });
                 }
             }
-            if let Some(editor) = *editor.borrow() {
+            if let Some(editor) = &*editor.borrow() {
                 editor.update(&batch)
             }
             Continue(true)
