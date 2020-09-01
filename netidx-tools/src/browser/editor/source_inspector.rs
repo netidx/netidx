@@ -15,6 +15,24 @@ use std::{
     result,
 };
 
+fn set_dbg_src(
+    ctx: &WidgetCtx,
+    store: &gtk::TreeStore,
+    iter: &gtk::TreeIter,
+    spec: view::Source,
+) -> view::Source {
+    let source = Source::new(ctx, &HashMap::new(), spec.clone());
+    if let Some(v) = source.current() {
+        store.set_value(&iter, 1, &format!("{}", v).to_value());
+    }
+    store.set_value(&iter, 3, &SourceWrap(source));
+    spec
+}
+
+fn err_src(e: impl Display) -> view::Source {
+    view::Source::Constant(Value::Error(Chars::from(format!("{}", e))))
+}
+
 #[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,
@@ -23,6 +41,7 @@ struct Constant {
 
 impl Constant {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -47,14 +66,16 @@ impl Constant {
             @strong spec,
             @strong iter,
             @strong store,
+            @strong ctx,
             @weak typsel,
             @weak valent,
             @weak store => move || {
             if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
                 match typ.parse(&*valent.get_text()) {
-                    Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
+                    Err(e) => set_dbg_src(ctx, store, iter, err_src(e)),
                     Ok(value) => {
-                        store.set_value(&iter, 1, &format!("{}", value).to_value());
+                        let spec = view::Source::Constant(value.clone());
+                        set_dbg_src(ctx, store, iter, spec);
                         *spec.borrow_mut() = value;
                         on_change()
                     }
@@ -64,12 +85,9 @@ impl Constant {
         typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
         store.set_value(iter, 0, &"Constant".to_value());
-        store.set_value(iter, 1, &format!("{}", &*spec.borrow()).to_value());
-        store.set_value(
-            iter,
-            2,
-            &Properties::Constant(Constant { root, spec }).to_value(),
-        );
+        let t = Constant { root, spec };
+        set_dbg_src(ctx, store, iter, t.spec());
+        store.set_value(iter, 2, &Properties::Constant(t).to_value());
     }
 
     fn spec(&self) -> view::Source {
@@ -89,6 +107,7 @@ struct Variable {
 
 impl Variable {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -102,23 +121,25 @@ impl Variable {
         root.add(&entvar);
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @strong iter, @weak store => move |e|
+        @strong ctx,
+        @strong on_change,
+        @strong spec,
+        @strong iter,
+        @weak store => move |e|
         match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
-            Err(e) => store.set_value(&iter, 1, &format!("{}", e).to_value()),
+            Err(e) => set_dbg_src(ctx, store, iter, err_src(e)),
             Ok(view::Source::Variable(name)) => {
+                let spec = view::Source::Variable(name.clone());
+                set_dbg_src(ctx, store, iter, spec);
                 *spec.borrow_mut() = name;
-                store.set_value(&iter, 1, &"".to_value());
                 on_change()
             }
             Ok(_) => unreachable!()
         }));
         store.set_value(iter, 0, &"Load Variable".to_value());
-        store.set_value(iter, 1, &"".to_value());
-        store.set_value(
-            iter,
-            2,
-            &Properties::Variable(Variable { root, spec }).to_value(),
-        );
+        let t = Variable { root, spec };
+        set_dbg_src(ctx, store, iter, t.spec());
+        store.set_value(iter, 2, &Properties::Variable(t).to_value());
     }
 
     fn spec(&self) -> view::Source {
@@ -138,6 +159,7 @@ struct Load {
 
 impl Load {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -151,19 +173,25 @@ impl Load {
         root.add(&entvar);
         entvar.set_text(&**spec.borrow());
         entvar.connect_activate(clone!(
-        @strong on_change, @strong spec, @strong iter, @weak store => move |e| {
+        @strong ctx,
+        @strong on_change,
+        @strong spec,
+        @strong iter,
+        @weak store => move |e| {
             let path = Path::from(String::from(&*e.get_text()));
             if !Path::is_absolute(&*path) {
-                store.set_value(&iter, 1, &"Absolute path required".to_value());
+                set_dbg_src(ctx, store, iter, err_src("Absolute path required!"))
             } else {
+                let spec = view::Source::Load(path.clone());
+                set_dbg_src(ctx, store, iter, spec);
                 *spec.borrow_mut() = path;
-                store.set_value(&iter, 1, &"".to_value());
                 on_change()
             }
         }));
         store.set_value(iter, 0, &"Load Path".to_value());
-        store.set_value(iter, 1, &"".to_value());
-        store.set_value(iter, 2, &Properties::Load(Load { root, spec }).to_value());
+        let t = Load { root, spec };
+        set_dbg_src(ctx, store, iter, t.spec());
+        store.set_value(iter, 2, &Properties::Load(t).to_value());
     }
 
     fn spec(&self) -> view::Source {
@@ -183,10 +211,12 @@ struct Map {
 
 impl Map {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         spec: String,
+        from: Vec<view::Source>,
     ) {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblfun = gtk::Label::new(Some("Function:"));
@@ -199,7 +229,10 @@ impl Map {
         cbfun.set_active_id(Some(spec.as_str()));
         let spec = Rc::new(RefCell::new(spec));
         cbfun.connect_changed(clone!(
-            @strong on_change, @strong spec, @strong store, @strong iter => move |c| {
+        @strong on_change,
+        @strong spec,
+        @strong store,
+        @strong iter => move |c| {
             if let Some(id) = c.get_active_id() {
                 store.set_value(&iter, 0, &id.to_value());
                 *spec.borrow_mut() = String::from(&*id);
@@ -207,7 +240,8 @@ impl Map {
             }
         }));
         store.set_value(iter, 0, &spec.borrow().to_value());
-        store.set_value(iter, 1, &"".to_value());
+        let spec = view::Source::Map { function: spec.borrow().clone(), from };
+        set_dbg_src(ctx, store, iter, spec);
         store.set_value(iter, 2, &Properties::Map(Map { root, spec }).to_value());
     }
 
@@ -231,17 +265,18 @@ enum Properties {
 
 impl Properties {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         spec: view::Source,
     ) {
         match spec {
-            view::Source::Constant(v) => Constant::insert(on_change, store, iter, v),
-            view::Source::Load(p) => Load::insert(on_change, store, iter, p),
-            view::Source::Variable(v) => Variable::insert(on_change, store, iter, v),
-            view::Source::Map { function, from: _ } => {
-                Map::insert(on_change, store, iter, function)
+            view::Source::Constant(v) => Constant::insert(ctx, on_change, store, iter, v),
+            view::Source::Load(p) => Load::insert(ctx, on_change, store, iter, p),
+            view::Source::Variable(v) => Variable::insert(ctx, on_change, store, iter, v),
+            view::Source::Map { function, from } => {
+                Map::insert(ctx, on_change, store, iter, function, from)
             }
         }
     }
@@ -264,6 +299,10 @@ impl Properties {
         }
     }
 }
+
+#[derive(Clone, Debug, GBoxed)]
+#[gboxed(type_name = "NetidxSourceInspectorProps")]
+struct SourceWrap(Source);
 
 static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Function"];
 
@@ -289,7 +328,7 @@ fn build_tree(
     s: &view::Source,
 ) {
     let iter = store.insert_before(parent, None);
-    Properties::insert(on_change.clone(), store, &iter, s.clone());
+    Properties::insert(ctx, on_change.clone(), store, &iter, s.clone());
     match s {
         view::Source::Constant(_) | view::Source::Load(_) | view::Source::Variable(_) => {
             ()
@@ -302,16 +341,20 @@ fn build_tree(
     }
 }
 
-fn build_source(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Source {
+fn build_source(
+    ctx: &WidgetCtx,
+    store: &gtk::TreeStore,
+    root: &gtk::TreeIter,
+) -> view::Source {
     let v = store.get_value(root, 2);
     match v.get::<&Properties>() {
         Err(e) => {
             let v = Value::String(Chars::from(format!("tree error: {}", e)));
-            view::Source::Constant(v)
+            set_dbg_src(ctx, store, root, view::Source::Constant(v))
         }
         Ok(None) => {
             let v = Value::String(Chars::from("tree error: missing widget"));
-            view::Source::Constant(v)
+            set_dbg_src(ctx, store, root, view::Source::Constant(v))
         }
         Ok(Some(p)) => match p.spec() {
             v @ view::Source::Constant(_)
@@ -328,7 +371,12 @@ fn build_source(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Source {
                                 break;
                             }
                         }
-                        view::Source::Map { from, function }
+                        set_dbg_src(
+                            ctx,
+                            store,
+                            root,
+                            view::Source::Map { from, function },
+                        )
                     }
                 }
             }
@@ -352,6 +400,7 @@ impl SourceInspector {
             String::static_type(),
             String::static_type(),
             Properties::static_type(),
+            SourceWrap::static_type(),
         ]);
         let view = gtk::TreeView::new();
         let treewin =
@@ -390,6 +439,7 @@ impl SourceInspector {
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let inhibit: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let on_change: Rc<dyn Fn()> = Rc::new({
+            let ctx = ctx.clone();
             let store = store.clone();
             let inhibit = inhibit.clone();
             let scheduled = Rc::new(Cell::new(false));
@@ -398,12 +448,13 @@ impl SourceInspector {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
+                        @strong ctx,
                         @strong store,
                         @strong inhibit,
                         @strong scheduled,
                         @strong on_change => move || {
                             if let Some(root) = store.get_iter_first() {
-                                let src = build_source(&store, &root);
+                                let src = build_source(&ctx, &store, &root);
                                 on_change(src)
                             }
                             scheduled.set(false);
@@ -413,8 +464,9 @@ impl SourceInspector {
                 }
             }
         });
-        build_tree(&on_change, &store, None, &init);
+        build_tree(&ctx, &on_change, &store, None, &init);
         kind.connect_changed(clone!(
+        @strong ctx,
         @strong on_change,
         @strong store,
         @strong selected,
@@ -428,7 +480,7 @@ impl SourceInspector {
                     }
                     let id = c.get_active_id();
                     let src = default_source(id.as_ref().map(|s| &**s));
-                    Properties::insert(on_change.clone(), &store, &iter, src);
+                    Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
                     let pv = store.get_value(&iter, 2);
                     if let Ok(Some(p)) = pv.get::<&Properties>() {
                         properties.add(p.root());
@@ -481,26 +533,26 @@ impl SourceInspector {
         menu.append(&new_child);
         menu.append(&delete);
         duplicate.connect_activate(clone!(
-        @strong on_change, @weak store, @strong selected => move |_| {
+        @strong ctx, @strong on_change, @weak store, @strong selected => move |_| {
             if let Some(iter) = &*selected.borrow() {
-                let src = build_source(&store, iter);
+                let src = build_source(&ctx, &store, iter);
                 let parent = store.iter_parent(iter);
-                build_tree(&on_change, &store, parent.as_ref(), &src);
+                build_tree(&ctx, &on_change, &store, parent.as_ref(), &src);
                 on_change()
             }
         }));
         new_sib.connect_activate(clone!(
-        @strong on_change, @weak store, @strong selected => move |_| {
+        @strong ctx, @strong on_change, @weak store, @strong selected => move |_| {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let src = default_source(Some("Constant"));
-            Properties::insert(on_change.clone(), &store, &iter, src);
+            Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
             on_change();
         }));
         new_child.connect_activate(clone!(
-        @strong on_change, @weak store, @strong selected => move |_| {
+        @strong ctx, @strong on_change, @weak store, @strong selected => move |_| {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let src = default_source(Some("Constant"));
-            Properties::insert(on_change.clone(), &store, &iter, src);
+            Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
             on_change();
         }));
         delete.connect_activate(clone!(
@@ -534,11 +586,13 @@ impl SourceInspector {
 
     pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
         self.store.for_each(|store, _, iter| {
-            let v = store.get_value(iter, 1);
-            match v.get::<&Properties>() {
+            let v = store.get_value(iter, 3);
+            match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
-                Ok(Some(w)) => {
-                    w.update(changed);
+                Ok(Some(SourceWrap(source))) => {
+                    if let Some(v) = source.update(changed) {
+                        self.store.set_value(iter, 1, &format!("{}", v).to_value());
+                    }
                     false
                 }
             }
@@ -547,11 +601,13 @@ impl SourceInspector {
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
         self.store.for_each(|store, _, iter| {
-            let v = store.get_value(iter, 1);
-            match v.get::<&Properties>() {
+            let v = store.get_value(iter, 3);
+            match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
-                Ok(Some(w)) => {
-                    w.update_var(name, value);
+                Ok(Some(SourceWrap(source))) => {
+                    if let Some(v) = source.update_var(name, value) {
+                        self.store.set_value(iter, 1, &format!("{}", v).to_value());
+                    }
                     false
                 }
             }
