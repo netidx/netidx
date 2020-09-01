@@ -394,7 +394,7 @@ impl SourceInspector {
         ctx: WidgetCtx,
         on_change: impl Fn(view::Source) + 'static,
         init: view::Source,
-    ) -> gtk::Box {
+    ) -> SourceInspector {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let store = gtk::TreeStore::new(&[
             String::static_type(),

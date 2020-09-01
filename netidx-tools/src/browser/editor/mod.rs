@@ -54,20 +54,25 @@ impl Table {
     }
 }
 
+type DbgSrc = Rc<RefCell<Option<(gtk::Window, SourceInspector)>>>;
+
 fn source(
+    ctx: &WidgetCtx,
+    txt: &str,
     init: &view::Source,
     on_change: impl Fn(view::Source) + 'static,
-) -> (gtk::Label, gtk::Box) {
+) -> (gtk::Label, gtk::Box, DbgSrc) {
     let on_change = Rc::new(on_change);
     let source = Rc::new(RefCell::new(init.clone()));
-    let inspector_win: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
-    let lbl = gtk::Label::new(Some("Source:"));
+    let inspector: Rc<RefCell<Option<(gtk::Window, SourceInspector)>>> =
+        Rc::new(RefCell::new(None));
+    let lbl = gtk::Label::new(Some(txt));
     let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let entry = gtk::Entry::new();
     let inspect = gtk::ToggleButton::new();
     let inspect_icon = gtk::Image::from_icon_name(
         Some("preferences-system"),
-        gtk::IconSize::SmallToolbar
+        gtk::IconSize::SmallToolbar,
     );
     inspect.set_image(Some(&inspect_icon));
     ibox.pack_start(&entry, true, true, 0);
@@ -85,13 +90,13 @@ fn source(
         }
     }));
     inspect.connect_toggled(clone!(
+    @strong ctx,
     @strong on_change,
-    @strong inspector_win,
+    @strong inspector,
     @strong source,
     @weak entry => move |b| {
         if !b.get_active() {
-            let win = inspector_win.borrow();
-            if let Some(w) = &*win {
+            if let Some((w, _)) = inspector.borrow_mut().take() {
                 w.close()
             }
         } else {
@@ -106,26 +111,30 @@ fn source(
                     on_change(s)
                 }
             };
-            w.add(&source_inspector(on_change, source.borrow().clone()));
-            w.connect_delete_event(clone!(@strong inspector_win, @strong b => move |_, _| {
-                *inspector_win.borrow_mut() = None;
+            let si = source_inspector(&ctx, on_change, source.borrow().clone());
+            w.add(&si.root());
+            w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
+                *inspector.borrow_mut() = None;
                 b.set_active(false);
                 Inhibit(false)
             }));
             w.show_all();
+            *inspector.borrow_mut() = Some((w, si));
         }
     }));
-    (lbl, ibox)
+    (lbl, ibox, inspector)
 }
 
 #[derive(Clone, Debug)]
 struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Action>>,
+    source: DbgSrc,
 }
 
 impl Action {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -133,13 +142,16 @@ impl Action {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(source(
+        let (srclbl, srcent, source) = source(
+            ctx,
+            "Source:",
             &spec.borrow().source,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().source = s;
                 on_change()
             }),
-        ));
+        );
+        root.add((srclbl, srcent));
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
@@ -148,7 +160,7 @@ impl Action {
                 on_change()
             }),
         ));
-        let t = Widget::Action(Action { root, spec });
+        let t = Widget::Action(Action { root, spec, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Action".to_value());
         store.set_value(iter, 1, &v);
@@ -163,20 +175,28 @@ impl Action {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
-    }    
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<view::Source>>,
+    source: DbgSrc,
 }
 
 impl Label {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -184,7 +204,8 @@ impl Label {
     ) {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e) = parse_entry(
+        let (l, e, source) = source(
+            ctx,
             "Source:",
             &*spec.borrow(),
             clone!(@strong spec => move |s| {
@@ -194,7 +215,7 @@ impl Label {
         );
         root.add(&l);
         root.add(&e);
-        let t = Widget::Label(Label { root, spec });
+        let t = Widget::Label(Label { root, spec, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Label".to_value());
         store.set_value(iter, 1, &v);
@@ -209,9 +230,15 @@ impl Label {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
     }
 }
 
@@ -219,10 +246,14 @@ impl Label {
 struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
+    enabled_source: DbgSrc,
+    label_source: DbgSrc,
+    source: DbgSrc,
 }
 
 impl Button {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -230,30 +261,36 @@ impl Button {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
+        let (l, e, enabled_source) = source(
+            ctx,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
                 on_change();
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, label_source) = source(
+            ctx,
             "Label:",
             &spec.borrow().label,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().label = s;
                 on_change()
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, source) = source(
+            ctx,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().source = s;
                 on_change()
             }),
-        ));
+        );
+        root.add((l, e));
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
@@ -262,7 +299,8 @@ impl Button {
                 on_change()
             }),
         ));
-        let t = Widget::Button(Button { root, spec });
+        let t =
+            Widget::Button(Button { root, spec, enabled_source, label_source, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Button".to_value());
         store.set_value(iter, 1, &v);
@@ -277,9 +315,27 @@ impl Button {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.label_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.label_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
     }
 }
 
@@ -287,10 +343,13 @@ impl Button {
 struct Toggle {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Toggle>>,
+    enabled_source: DbgSrc,
+    source: DbgSrc,
 }
 
 impl Toggle {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -298,22 +357,26 @@ impl Toggle {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
+        let (l, e, enabled_source) = source(
+            ctx,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
                 on_change();
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, source) = source(
+            ctx,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().source = s;
                 on_change();
             }),
-        ));
+        );
+        root.add((l, e));
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
@@ -322,7 +385,7 @@ impl Toggle {
                 on_change();
             }),
         ));
-        let t = Widget::Toggle(Toggle { root, spec });
+        let t = Widget::Toggle(Toggle { root, spec, enabled_source, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Toggle".to_value());
         store.set_value(iter, 1, &v);
@@ -337,20 +400,36 @@ impl Toggle {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
-    }    
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Selector {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Selector>>,
+    enabled_source: DbgSrc,
+    choices_source: DbgSrc,
+    source: DbgSrc,
 }
 
 impl Selector {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -358,30 +437,36 @@ impl Selector {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
+        let (l, e, enabled_source) = source(
+            ctx,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
                 on_change();
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, choices_source) = source(
+            ctx,
             "Choices:",
             &spec.borrow().choices,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().choices = s;
                 on_change();
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, source) = source(
+            ctx,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().source = s;
                 on_change();
             }),
-        ));
+        );
+        root.add((l, e));
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
@@ -390,7 +475,13 @@ impl Selector {
                 on_change()
             }),
         ));
-        let t = Widget::Selector(Selector { root, spec });
+        let t = Widget::Selector(Selector {
+            root,
+            spec,
+            enabled_source,
+            choices_source,
+            source,
+        });
         let v = t.to_value();
         store.set_value(iter, 0, &"Selector".to_value());
         store.set_value(iter, 1, &v);
@@ -403,11 +494,29 @@ impl Selector {
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
-    
+
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.choices_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.choices_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
     }
 }
 
@@ -415,10 +524,14 @@ impl Selector {
 struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
+    enabled_source: DbgSrc,
+    visible_source: DbgSrc,
+    source: DbgSrc,
 }
 
 impl Entry {
     fn insert(
+        ctx: &WidgetCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -426,30 +539,36 @@ impl Entry {
     ) {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
+        let (l, e, enabled_source) = source(
+            ctx,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
                 on_change()
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, visible_source) = source(
+            ctx,
             "Visible:",
             &spec.borrow().visible,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().visible = s;
                 on_change()
             }),
-        ));
-        root.add(parse_entry(
+        );
+        root.add((l, e));
+        let (l, e, source) = source(
+            ctx,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().source = s;
                 on_change()
             }),
-        ));
+        );
+        root.add((l, e));
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
@@ -458,7 +577,8 @@ impl Entry {
                 on_change()
             }),
         ));
-        let t = Widget::Entry(Entry { root, spec });
+        let t =
+            Widget::Entry(Entry { root, spec, enabled_source, visible_source, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Entry".to_value());
         store.set_value(iter, 1, &v);
@@ -473,9 +593,27 @@ impl Entry {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.visible_source.borrow() {
+            si.update(changed);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update(changed);
+        }
     }
- 
+
     fn update_var(&self, name: &str, value: &Value) {
+        if let Some((_, si)) = &*self.enabled_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.visible_source.borrow() {
+            si.update_var(name, value);
+        }
+        if let Some((_, si)) = &*self.source.borrow() {
+            si.update_var(name, value);
+        }
     }
 }
 
@@ -568,11 +706,9 @@ impl BoxChild {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-    }
- 
-    fn update_var(&self, name: &str, value: &Value) {
-    }
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {}
+
+    fn update_var(&self, name: &str, value: &Value) {}
 }
 
 #[derive(Clone, Debug)]
@@ -635,11 +771,9 @@ impl BoxContainer {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-    }
- 
-    fn update_var(&self, name: &str, value: &Value) {
-    }
+    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {}
+
+    fn update_var(&self, name: &str, value: &Value) {}
 }
 
 #[derive(Clone, Debug, GBoxed)]
@@ -674,8 +808,8 @@ impl Widget {
             view::Widget::Toggle(s) => Toggle::insert(ctx, on_change, store, iter, s),
             view::Widget::Selector(s) => Selector::insert(ctx, on_change, store, iter, s),
             view::Widget::Entry(s) => Entry::insert(ctx, on_change, store, iter, s),
-            view::Widget::Box(s) => BoxContainer::insert(ctx, on_change, store, iter, s),
-            view::Widget::BoxChild(s) => BoxChild::insert(ctx, on_change, store, iter, s),
+            view::Widget::Box(s) => BoxContainer::insert(on_change, store, iter, s),
+            view::Widget::BoxChild(s) => BoxChild::insert(on_change, store, iter, s),
             view::Widget::Grid(_) => todo!(),
             view::Widget::GridChild(_) => todo!(),
         }
