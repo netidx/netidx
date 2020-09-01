@@ -1,8 +1,9 @@
-use super::super::{formula, Source};
+use super::super::{formula, Source, WidgetCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use netidx::{chars::Chars, path::Path, subscriber::Value};
+use indexmap::IndexMap;
+use netidx::{chars::Chars, path::Path, subscriber::{SubId, Value}};
 use netidx_protocols::{
     value_type::{Typ, TYPES},
     view,
@@ -10,8 +11,10 @@ use netidx_protocols::{
 use std::{
     boxed,
     cell::{Cell, RefCell},
+    collections::HashMap,
     fmt::Display,
     rc::Rc,
+    sync::Arc,
     result,
 };
 
@@ -25,7 +28,7 @@ fn set_dbg_src(
     if let Some(v) = source.current() {
         store.set_value(&iter, 1, &format!("{}", v).to_value());
     }
-    store.set_value(&iter, 3, &SourceWrap(source));
+    store.set_value(&iter, 3, &SourceWrap(source).to_value());
     spec
 }
 
@@ -72,10 +75,14 @@ impl Constant {
             @weak store => move || {
             if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
                 match typ.parse(&*valent.get_text()) {
-                    Err(e) => set_dbg_src(ctx, store, iter, err_src(e)),
+                    Err(e) => { set_dbg_src(&ctx, &store, &iter, err_src(e)); },
                     Ok(value) => {
-                        let spec = view::Source::Constant(value.clone());
-                        set_dbg_src(ctx, store, iter, spec);
+                        set_dbg_src(
+                            &ctx,
+                            &store,
+                            &iter,
+                            view::Source::Constant(value.clone())
+                        );
                         *spec.borrow_mut() = value;
                         on_change()
                     }
@@ -127,10 +134,9 @@ impl Variable {
         @strong iter,
         @weak store => move |e|
         match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
-            Err(e) => set_dbg_src(ctx, store, iter, err_src(e)),
+            Err(e) => { set_dbg_src(&ctx, &store, &iter, err_src(e)); },
             Ok(view::Source::Variable(name)) => {
-                let spec = view::Source::Variable(name.clone());
-                set_dbg_src(ctx, store, iter, spec);
+                set_dbg_src(&ctx, &store, &iter, view::Source::Variable(name.clone()));
                 *spec.borrow_mut() = name;
                 on_change()
             }
@@ -180,10 +186,9 @@ impl Load {
         @weak store => move |e| {
             let path = Path::from(String::from(&*e.get_text()));
             if !Path::is_absolute(&*path) {
-                set_dbg_src(ctx, store, iter, err_src("Absolute path required!"))
+                set_dbg_src(&ctx, &store, &iter, err_src("Absolute path required!"));
             } else {
-                let spec = view::Source::Load(path.clone());
-                set_dbg_src(ctx, store, iter, spec);
+                set_dbg_src(&ctx, &store, &iter, view::Source::Load(path.clone()));
                 *spec.borrow_mut() = path;
                 on_change()
             }
@@ -240,8 +245,8 @@ impl Map {
             }
         }));
         store.set_value(iter, 0, &spec.borrow().to_value());
-        let spec = view::Source::Map { function: spec.borrow().clone(), from };
-        set_dbg_src(ctx, store, iter, spec);
+        let s = view::Source::Map { function: spec.borrow().clone(), from };
+        set_dbg_src(ctx, store, iter, s);
         store.set_value(iter, 2, &Properties::Map(Map { root, spec }).to_value());
     }
 
@@ -301,7 +306,7 @@ impl Properties {
 }
 
 #[derive(Clone, Debug, GBoxed)]
-#[gboxed(type_name = "NetidxSourceInspectorProps")]
+#[gboxed(type_name = "NetidxSourceInspectorWrap")]
 struct SourceWrap(Source);
 
 static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Function"];
@@ -335,7 +340,7 @@ fn build_tree(
         }
         view::Source::Map { from, function: _ } => {
             for s in from {
-                build_tree(on_change, store, Some(&iter), s)
+                build_tree(ctx, on_change, store, Some(&iter), s)
             }
         }
     }
@@ -366,7 +371,7 @@ fn build_source(
                     None => view::Source::Map { from, function },
                     Some(iter) => {
                         loop {
-                            from.push(build_source(store, &iter));
+                            from.push(build_source(ctx, store, &iter));
                             if !store.iter_next(&iter) {
                                 break;
                             }
@@ -384,6 +389,7 @@ fn build_source(
     }
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct SourceInspector {
     root: gtk::Box,
     store: gtk::TreeStore,
@@ -585,7 +591,7 @@ impl SourceInspector {
     }
 
     pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        self.store.for_each(|store, _, iter| {
+        self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 3);
             match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
@@ -600,7 +606,7 @@ impl SourceInspector {
     }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {
-        self.store.for_each(|store, _, iter| {
+        self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 3);
             match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
@@ -612,5 +618,9 @@ impl SourceInspector {
                 }
             }
         })
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
     }
 }

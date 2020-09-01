@@ -985,7 +985,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             mainbox.remove(editor.root());
         }
         let s = current_spec.borrow().clone();
-        let e = Editor::new(ctx.from_gui.clone(), ctx.to_gui.clone(), s);
+        let e = Editor::new(WidgetCtx::clone(&*ctx), s);
         mainbox.add1(e.root());
         mainbox.show_all();
         *editor.borrow_mut() = Some(e);
@@ -1126,7 +1126,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(root) = &mut *current.borrow_mut() {
                 root.update_var(&name, &value);
             }
-            if let Some(editor) = *editor.borrow() {
+            if let Some(editor) = &*editor.borrow() {
                 editor.update_var(&name, &value);
             }
             Continue(true)
