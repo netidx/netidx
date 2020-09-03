@@ -33,12 +33,17 @@ pub(crate) struct TwoColGrid {
 
 impl TwoColGrid {
     pub(crate) fn new() -> Self {
-        TwoColGrid { root: gtk::Grid::new(), row: 0 }
+        let root = gtk::Grid::new();
+        root.set_halign(gtk::Align::Fill);
+        root.set_hexpand(true);
+        TwoColGrid { root, row: 0 }
     }
 
     pub(crate) fn add<T: IsA<gtk::Widget>, U: IsA<gtk::Widget>>(&mut self, w: (T, U)) {
         self.root.attach(&w.0, 0, self.row, 1, 1);
         self.root.attach(&w.1, 1, self.row, 1, 1);
+        w.1.set_halign(gtk::Align::Fill);
+        w.1.set_hexpand(true);
         self.row += 1;
     }
 

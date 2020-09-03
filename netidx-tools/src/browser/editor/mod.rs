@@ -216,8 +216,8 @@ impl Label {
                 on_change()
             }),
         );
-        root.add(&l);
-        root.add(&e);
+        root.pack_start(&l, false, false, 0);
+        root.pack_start(&e, true, true, 0);
         let t = Widget::Label(Label { root, spec, source });
         let v = t.to_value();
         store.set_value(iter, 0, &"Label".to_value());
@@ -969,14 +969,19 @@ impl Editor {
                     Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
-                        properties.add(w.root());
+                        properties.pack_start(w.root(), true, true, 5);
                     }
                     on_change();
                 }
             }
         }));
-        properties.add(&kind);
-        properties.add(&gtk::Separator::new(gtk::Orientation::Vertical));
+        properties.pack_start(&kind, false, false, 0);
+        properties.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Vertical),
+            false,
+            false,
+            0,
+        );
         let selection = view.get_selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
@@ -1011,7 +1016,7 @@ impl Editor {
                     }
                     let v = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = v.get::<&Widget>() {
-                        properties.add(w.root());
+                        properties.pack_start(w.root(), true, true, 5);
                     }
                     properties.show_all();
                     reveal_properties.set_reveal_child(true);

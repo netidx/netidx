@@ -487,7 +487,7 @@ impl SourceInspector {
                     Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
                     let pv = store.get_value(&iter, 2);
                     if let Ok(Some(p)) = pv.get::<&Properties>() {
-                        properties.add(p.root());
+                        properties.pack_start(p.root(), true, true, 5);
                         properties.show_all();
                     }
                     on_change()
@@ -520,7 +520,7 @@ impl SourceInspector {
                     }
                     let v = store.get_value(&iter, 2);
                     if let Ok(Some(p)) = v.get::<&Properties>() {
-                        properties.add(p.root());
+                        properties.pack_start(p.root(), true, true, 5);
                     }
                     properties.show_all();
                     reveal_properties.set_reveal_child(true);
