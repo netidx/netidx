@@ -899,16 +899,28 @@ impl Editor {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&treebtns, false, false, 0);
-        let addbtnicon =
-            gtk::Image::from_icon_name(Some("list-add"), gtk::IconSize::SmallToolbar);
+        let addbtnicon = gtk::Image::from_icon_name(
+            Some("list-add-symbolic"),
+            gtk::IconSize::SmallToolbar,
+        );
         let addbtn = gtk::ToolButton::new(Some(&addbtnicon), None);
-        let delbtnicon =
-            gtk::Image::from_icon_name(Some("list-remove"), gtk::IconSize::SmallToolbar);
+        let addchbtnicon = gtk::Image::from_icon_name(
+            Some("go-down-symbolic"),
+            gtk::IconSize::SmallToolbar,
+        );
+        let addchbtn = gtk::ToolButton::new(Some(&addchbtnicon), None);
+        let delbtnicon = gtk::Image::from_icon_name(
+            Some("list-remove-symbolic"),
+            gtk::IconSize::SmallToolbar,
+        );
         let delbtn = gtk::ToolButton::new(Some(&delbtnicon), None);
-        let dupbtnicon =
-            gtk::Image::from_icon_name(Some("edit-copy"), gtk::IconSize::SmallToolbar);
+        let dupbtnicon = gtk::Image::from_icon_name(
+            Some("edit-copy-symbolic"),
+            gtk::IconSize::SmallToolbar,
+        );
         let dupbtn = gtk::ToolButton::new(Some(&dupbtnicon), None);
         treebtns.pack_start(&addbtn, false, false, 5);
+        treebtns.pack_start(&addchbtn, false, false, 5);
         treebtns.pack_start(&delbtn, false, false, 5);
         treebtns.pack_start(&dupbtn, false, false, 5);
         let treewin =
@@ -1066,13 +1078,15 @@ impl Editor {
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
-        new_child.connect_activate(clone!(
-            @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
+        let newch = Rc::new(clone!(
+            @strong on_change, @weak store, @strong selected, @strong ctx => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let spec = Editor::default_spec(Some("Label"));
             Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
+        new_child.connect_activate(clone!(@strong newch => move |_| newch()));
+        addchbtn.connect_clicked(clone!(@strong newch => move |_| newch()));
         let del = Rc::new(clone!(
             @weak selection, @strong on_change, @weak store, @strong selected => move || {
             let iter = selected.borrow().clone();
