@@ -897,6 +897,20 @@ static KINDS: [&'static str; 11] = [
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        root.pack_start(&treebtns, false, false, 0);
+        let addbtnicon =
+            gtk::Image::from_icon_name(Some("list-add"), gtk::IconSize::SmallToolbar);
+        let addbtn = gtk::ToolButton::new(Some(&addbtnicon), None);
+        let delbtnicon =
+            gtk::Image::from_icon_name(Some("list-remove"), gtk::IconSize::SmallToolbar);
+        let delbtn = gtk::ToolButton::new(Some(&delbtnicon), None);
+        let dupbtnicon =
+            gtk::Image::from_icon_name(Some("edit-copy"), gtk::IconSize::SmallToolbar);
+        let dupbtn = gtk::ToolButton::new(Some(&dupbtnicon), None);
+        treebtns.pack_start(&addbtn, false, false, 5);
+        treebtns.pack_start(&delbtn, false, false, 5);
+        treebtns.pack_start(&dupbtn, false, false, 5);
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -1032,8 +1046,8 @@ impl Editor {
         menu.append(&new_sib);
         menu.append(&new_child);
         menu.append(&delete);
-        duplicate.connect_activate(clone!(
-        @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
+        let dup = Rc::new(clone!(
+        @strong on_change, @weak store, @strong selected, @strong ctx => move || {
             if let Some(iter) = &*selected.borrow() {
                 let spec = Editor::build_spec(&store, iter);
                 let parent = store.iter_parent(iter);
@@ -1041,13 +1055,17 @@ impl Editor {
                 on_change()
             }
         }));
-        new_sib.connect_activate(clone!(
-            @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
+        duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
+        dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
+        let newsib = Rc::new(clone!(
+            @strong on_change, @weak store, @strong selected, @strong ctx => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let spec = Editor::default_spec(Some("Label"));
             Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
+        new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
+        addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         new_child.connect_activate(clone!(
             @strong on_change, @weak store, @strong selected, @strong ctx => move |_| {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
@@ -1055,8 +1073,8 @@ impl Editor {
             Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
-        delete.connect_activate(clone!(
-            @weak selection, @strong on_change, @weak store, @strong selected => move |_| {
+        let del = Rc::new(clone!(
+            @weak selection, @strong on_change, @weak store, @strong selected => move || {
             let iter = selected.borrow().clone();
             if let Some(iter) = iter {
                 selection.unselect_iter(&iter);
@@ -1064,6 +1082,8 @@ impl Editor {
                 on_change();
             }
         }));
+        delete.connect_activate(clone!(@strong del => move |_| del()));
+        delbtn.connect_clicked(clone!(@strong del => move |_| del()));
         view.connect_button_press_event(move |_, b| {
             let right_click =
                 gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
