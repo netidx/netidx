@@ -180,20 +180,16 @@ pub enum Align {
     Baseline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoxChild {
-    pub expand: bool,
-    pub fill: bool,
-    pub padding: u64,
-    pub halign: Option<Align>,
-    pub valign: Option<Align>,
-    pub widget: boxed::Box<Widget>,
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum Pack {
+    Start,
+    End
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GridChild {
-    pub halign: Option<Align>,
-    pub valign: Option<Align>,
+pub struct BoxChild {
+    pub pack: Pack, 
+    pub padding: u64,
     pub widget: boxed::Box<Widget>,
 }
 
@@ -206,16 +202,24 @@ pub struct Box {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridChild {
+    width: u32,
+    height: u32,
+    widget: boxed::Box<Widget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grid {
     pub homogeneous_columns: bool,
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
+    pub direction: Direction,
     pub children: Vec<Vec<Widget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Widget {
+pub enum WidgetKind {
     Action(Action),
     Table(Path),
     Label(Source),
@@ -227,6 +231,24 @@ pub enum Widget {
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WidgetProps {
+    pub halign: Align,
+    pub valign: Align,
+    pub hexpand: bool,
+    pub vexpand: bool,
+    pub margin_top: u32,
+    pub margin_bottom: u32,
+    pub margin_start: u32,
+    pub margin_end: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Widget {
+    pub props: WidgetProps,
+    pub kind: WidgetKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

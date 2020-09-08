@@ -235,6 +235,17 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
     }
 }
 
+fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: view::WidgetProps, t: &T) {
+    t.set_halign(align_to_gtk(props.halign));
+    t.set_valign(align_to_gtk(props.valign));
+    t.set_hexpand(props.hexpand);
+    t.set_vexpand(props.vexpand);
+    t.set_margin_top(props.margin_top as i32);
+    t.set_margin_bottom(props.margin_bottom as i32);
+    t.set_margin_start(props.margin_start as i32);
+    t.set_margin_end(props.margin_end as i32);
+}
+
 enum Widget {
     Action(widgets::Action),
     Table(table::Table),
@@ -254,7 +265,7 @@ impl Widget {
         spec: view::Widget,
         selected_path: gtk::Label,
     ) -> Widget {
-        match spec {
+        let w = match spec.kind {
             view::Widget::Action(spec) => {
                 Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
             }
@@ -303,10 +314,11 @@ impl Widget {
             view::Widget::Grid(spec) => {
                 Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
             }
-            view::Widget::GridChild(view::GridChild { widget, .. }) => {
-                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
-            }
+        };
+        if let Some(r) = w.root() {
+            set_common_props(spec.props, r);
         }
+        w
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
