@@ -864,10 +864,12 @@ impl Widget {
             view::WidgetKind::GridChild(_) => todo!(),
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let exp = gtk::Expander::new(Some("Widget Config"));
         if let Some(p) = props.as_ref() {
             root.pack_start(p.root(), false, false, 0);
         }
-        root.pack_start(kind.root(), false, false, 0);
+        exp.add(kind.root());
+        root.pack_start(&exp, false, false, 0);
         store.set_value(iter, 0, &name.to_value());
         let t = Widget { root, props, kind };
         store.set_value(iter, 1, &t.to_value());
