@@ -126,8 +126,8 @@ impl Variable {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblvar = gtk::Label::new(Some("Name:"));
         let entvar = gtk::Entry::new();
-        root.add(&lblvar);
-        root.add(&entvar);
+        root.pack_start(&lblvar, false, false, 0);
+        root.pack_start(&entvar, true, true, 0);
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
         @strong ctx,
@@ -177,8 +177,8 @@ impl Load {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblvar = gtk::Label::new(Some("Path:"));
         let entvar = gtk::Entry::new();
-        root.add(&lblvar);
-        root.add(&entvar);
+        root.pack_start(&lblvar, false, false, 0);
+        root.pack_start(&entvar, true, true, 0);
         entvar.set_text(&**spec.borrow());
         entvar.connect_activate(clone!(
         @strong ctx,
@@ -228,8 +228,8 @@ impl Map {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblfun = gtk::Label::new(Some("Function:"));
         let cbfun = gtk::ComboBoxText::new();
-        root.add(&lblfun);
-        root.add(&cbfun);
+        root.pack_start(&lblfun, false, false, 0);
+        root.pack_start(&cbfun, true, true, 0);
         for name in &formula::FORMULAS {
             cbfun.append(Some(name), name);
         }
