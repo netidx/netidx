@@ -100,6 +100,7 @@ fn source(
             }
         } else {
             let w = gtk::Window::new(gtk::WindowType::Toplevel);
+            w.set_default_size(640, 480);
             let on_change = {
                 let on_change = on_change.clone();
                 let entry = entry.clone();
@@ -112,6 +113,7 @@ fn source(
             };
             let si = SourceInspector::new(ctx.clone(), on_change, source.borrow().clone());
             w.add(si.root());
+            si.root().set_property_margin(5);
             w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
                 *inspector.borrow_mut() = None;
                 b.set_active(false);
@@ -952,6 +954,8 @@ static KINDS: [&'static str; 11] = [
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        root.set_margin_start(5);
+        root.set_margin_end(5);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&treebtns, false, false, 0);
         let addbtnicon = gtk::Image::from_icon_name(
