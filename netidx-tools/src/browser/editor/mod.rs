@@ -24,20 +24,24 @@ type OnChange = Rc<dyn Fn()>;
 
 #[derive(Clone, Debug)]
 struct Table {
-    path: gtk::Entry,
+    root: gtk::Box,
     spec: Rc<RefCell<Path>>,
 }
 
 impl Table {
     fn new(on_change: OnChange, path: Path) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let label = gtk::Label::new(Some("Path:"));
         let entry = gtk::Entry::new();
+        root.pack_start(&label, false, false, 0);
+        root.pack_start(&entry, true, true, 0);
         let spec = Rc::new(RefCell::new(path));
         entry.set_text(&**spec.borrow());
         entry.connect_activate(clone!(@strong spec => move |e| {
             *spec.borrow_mut() = Path::from(String::from(&*e.get_text()));
             on_change()
         }));
-        Table { path: entry, spec }
+        Table { root, spec }
     }
 
     fn spec(&self) -> view::WidgetKind {
@@ -45,7 +49,7 @@ impl Table {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.path.upcast_ref()
+        self.root.upcast_ref()
     }
 }
 
@@ -651,14 +655,16 @@ impl BoxContainer {
 
 #[derive(Debug, Clone)]
 struct WidgetProps {
-    root: TwoColGrid,
+    root: gtk::Expander,
     spec: Rc<RefCell<view::WidgetProps>>,
 }
 
 impl WidgetProps {
     fn new(on_change: OnChange, spec: view::WidgetProps) -> Self {
         let spec = Rc::new(RefCell::new(spec));
-        let mut root = TwoColGrid::new();
+        let root = gtk::Expander::new(Some("Layout Properties"));
+        let mut grid = TwoColGrid::new();
+        root.add(grid.root());
         let aligns = ["Fill", "Start", "End", "Center", "Baseline"];
         fn align_to_str(a: view::Align) -> &'static str {
             match a {
@@ -683,8 +689,8 @@ impl WidgetProps {
         let halign = gtk::ComboBoxText::new();
         let valign_lbl = gtk::Label::new(Some("Vertical Alignment:"));
         let valign = gtk::ComboBoxText::new();
-        root.add((halign_lbl.clone(), halign.clone()));
-        root.add((valign_lbl.clone(), valign.clone()));
+        grid.add((halign_lbl.clone(), halign.clone()));
+        grid.add((valign_lbl.clone(), valign.clone()));
         for a in &aligns {
             halign.append(Some(a), a);
             valign.append(Some(a), a);
@@ -701,7 +707,7 @@ impl WidgetProps {
                 c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "Expand Horizontally:",
             &spec.borrow().hexpand,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -709,7 +715,7 @@ impl WidgetProps {
                 on_change()
             }),
         ));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "Expand Vertically:",
             &spec.borrow().vexpand,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -717,7 +723,7 @@ impl WidgetProps {
                 on_change()
             }),
         ));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "Top Margin:",
             &spec.borrow().margin_top,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -725,7 +731,7 @@ impl WidgetProps {
                 on_change()
             }),
         ));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "Bottom Margin:",
             &spec.borrow().margin_bottom,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -733,7 +739,7 @@ impl WidgetProps {
                 on_change()
             }),
         ));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "Start Margin:",
             &spec.borrow().margin_start,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -741,7 +747,7 @@ impl WidgetProps {
                 on_change()
             }),
         ));
-        root.add(parse_entry(
+        grid.add(parse_entry(
             "End Margin:",
             &spec.borrow().margin_end,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -753,7 +759,7 @@ impl WidgetProps {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root().upcast_ref()
+        self.root.upcast_ref()
     }
 
     fn spec(&self) -> view::WidgetProps {

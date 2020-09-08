@@ -171,7 +171,7 @@ pub struct Entry {
     pub sink: Sink,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
 pub enum Align {
     Fill,
     Start,
@@ -180,7 +180,7 @@ pub enum Align {
     Baseline,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
 pub enum Pack {
     Start,
     End

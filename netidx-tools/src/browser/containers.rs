@@ -5,7 +5,7 @@ use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use std::{collections::HashMap, sync::Arc, cmp::max};
+use std::{cmp::max, collections::HashMap, sync::Arc};
 
 pub(super) struct Box {
     root: gtk::Box,
@@ -19,6 +19,12 @@ impl Box {
         spec: view::Box,
         selected_path: gtk::Label,
     ) -> Self {
+        fn is_fill(a: view::Align) -> bool {
+            match a {
+                view::Align::Fill | view::Align::Baseline => true,
+                view::Align::Start | view::Align::Center | view::Align::End => false,
+            }
+        }
         let dir = match spec.direction {
             view::Direction::Horizontal => Orientation::Horizontal,
             view::Direction::Vertical => Orientation::Vertical,
@@ -29,11 +35,7 @@ impl Box {
         let mut children = Vec::new();
         for s in spec.children.iter() {
             match &s.kind {
-                view::WidgetKind::BoxChild(view::BoxChild {
-                    pack,
-                    padding,
-                    widget,
-                }) => {
+                view::WidgetKind::BoxChild(view::BoxChild { pack, padding, widget }) => {
                     let w = Widget::new(
                         ctx.clone(),
                         variables,
@@ -41,12 +43,20 @@ impl Box {
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
+                        let (expand, fill) = match spec.direction {
+                            view::Direction::Horizontal => {
+                                (s.props.hexpand, is_fill(s.props.halign))
+                            }
+                            view::Direction::Vertical => {
+                                (s.props.vexpand, is_fill(s.props.valign))
+                            }
+                        };
                         match pack {
                             view::Pack::Start => {
-                                root.pack_start(r, false, false, *padding as u32)
+                                root.pack_start(r, expand, fill, *padding as u32)
                             }
                             view::Pack::End => {
-                                root.pack_end(r, false, false, *padding as u32)
+                                root.pack_end(r, expand, fill, *padding as u32)
                             }
                         }
                         set_common_props(s.props.clone(), r);
@@ -116,7 +126,8 @@ impl Grid {
             .into_iter()
             .map(|row| {
                 let mut max_height = 1;
-                let row = row.into_iter()
+                let row = row
+                    .into_iter()
                     .map(|spec| match spec.kind {
                         view::WidgetKind::GridChild(view::GridChild {
                             width,
