@@ -75,8 +75,8 @@ impl Constant {
             @weak typsel,
             @weak valent,
             @weak errlbl => move || {
-            if let Some(Ok(typ)) = dbg!(typsel.get_active_id().map(|s| s.parse::<Typ>())) {
-                match dbg!(typ.parse(&*valent.get_text())) {
+            if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
+                match typ.parse(&*valent.get_text()) {
                     Ok(value) => {
                         errlbl.set_markup("");
                         *spec.borrow_mut() = value;
@@ -355,10 +355,15 @@ fn build_source(
             | v @ view::Source::Load(_)
             | v @ view::Source::Variable(_) => set_dbg_src(ctx, store, root, v),
             view::Source::Map { mut from, function } => {
-                store.set_value(root, 0, &function.to_value());
                 from.clear();
+                store.set_value(root, 0, &function.to_value());
                 match store.iter_children(Some(root)) {
-                    None => view::Source::Map { from, function },
+                    None => set_dbg_src(
+                        ctx,
+                        store,
+                        root,
+                        view::Source::Map { from, function },
+                    ),
                     Some(iter) => {
                         loop {
                             from.push(build_source(ctx, store, &iter));
