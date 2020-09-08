@@ -439,7 +439,7 @@ impl SourceInspector {
         let view = gtk::TreeView::new();
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let reveal_properties = gtk::Revealer::new();
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let kind = gtk::ComboBoxText::new();

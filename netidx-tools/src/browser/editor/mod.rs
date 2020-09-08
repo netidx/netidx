@@ -984,7 +984,7 @@ impl Editor {
         treebtns.pack_start(&dupbtn, false, false, 5);
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        treewin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root.pack_start(&treewin, true, true, 5);
         let view = gtk::TreeView::new();
         treewin.add(&view);
