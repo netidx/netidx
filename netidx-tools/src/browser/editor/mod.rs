@@ -1,6 +1,6 @@
 mod source_inspector;
 mod util;
-use super::{util::err_modal, FromGui, ToGui, WidgetCtx, WidgetPath};
+use super::{util::err_modal, FromGui, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
@@ -560,13 +560,13 @@ impl BoxChild {
     fn new(on_change: OnChange, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
-        let packlbl = gtk::Label::new("Pack:");
+        let packlbl = gtk::Label::new(Some("Pack:"));
         let packcb = gtk::ComboBoxText::new();
         packcb.append(Some("Start"), "Start");
         packcb.append(Some("End"), "End");
         packcb.set_active_id(Some(match spec.borrow().pack {
             view::Pack::Start => "Start",
-            view::Pack::End => "End"
+            view::Pack::End => "End",
         }));
         packcb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             spec.borrow_mut().pack = match c.get_active_id() {
@@ -649,17 +649,7 @@ impl BoxContainer {
     }
 }
 
-static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
-    halign: view::Align::Fill,
-    valign: view::Align::Fill,
-    hexpand: false,
-    vexpand: false,
-    margin_top: 0,
-    margin_bottom: 0,
-    margin_start: 0,
-    margin_end: 0,
-};
-
+#[derive(Debug, Clone)]
 struct WidgetProps {
     root: TwoColGrid,
     spec: Rc<RefCell<view::WidgetProps>>,
@@ -668,6 +658,7 @@ struct WidgetProps {
 impl WidgetProps {
     fn new(on_change: OnChange, spec: view::WidgetProps) -> Self {
         let spec = Rc::new(RefCell::new(spec));
+        let mut root = TwoColGrid::new();
         let aligns = ["Fill", "Start", "End", "Center", "Baseline"];
         fn align_to_str(a: view::Align) -> &'static str {
             match a {
@@ -702,12 +693,12 @@ impl WidgetProps {
         valign.set_active_id(Some(align_to_str(spec.borrow().valign)));
         halign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             spec.borrow_mut().halign =
-                c.get_active_id().map(align_from_str).unwrap_or_else(view::Align::Fill);
+                c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
         valign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             spec.borrow_mut().valign =
-                c.get_active_id().map(align_from_str).unwrap_or_else(view::Align::Fill);
+                c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
         root.add(parse_entry(
@@ -762,7 +753,7 @@ impl WidgetProps {
     }
 
     fn root(&self) -> &gtk::Widget {
-        self.root.root()
+        self.root.root().upcast_ref()
     }
 
     fn spec(&self) -> view::WidgetProps {
@@ -785,6 +776,24 @@ enum WidgetKind {
     GridChild,
 }
 
+impl WidgetKind {
+    fn root(&self) -> &gtk::Widget {
+        match self {
+            WidgetKind::Action(w) => w.root(),
+            WidgetKind::Table(w) => w.root(),
+            WidgetKind::Label(w) => w.root(),
+            WidgetKind::Button(w) => w.root(),
+            WidgetKind::Toggle(w) => w.root(),
+            WidgetKind::Selector(w) => w.root(),
+            WidgetKind::Entry(w) => w.root(),
+            WidgetKind::Box(w) => w.root(),
+            WidgetKind::BoxChild(w) => w.root(),
+            WidgetKind::Grid => todo!(),
+            WidgetKind::GridChild => todo!(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, GBoxed)]
 #[gboxed(type_name = "NetidxEditorWidget")]
 struct Widget {
@@ -802,45 +811,51 @@ impl Widget {
         spec: view::Widget,
     ) {
         let (name, kind, props) = match spec.kind {
-            view::Widget::Action(s) => ("Action", Action::new(ctx, on_change, s), None),
-            view::Widget::Table(s) => (
+            view::WidgetKind::Action(s) => (
+                "Action",
+                WidgetKind::Action(Action::new(ctx, on_change.clone(), s)),
+                None,
+            ),
+            view::WidgetKind::Table(s) => (
                 "Table",
-                Table::new(on_change, s),
+                WidgetKind::Table(Table::new(on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Label(s) => (
+            view::WidgetKind::Label(s) => (
                 "Label",
-                Label(ctx, on_change, s),
+                WidgetKind::Label(Label::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Button(s) => (
+            view::WidgetKind::Button(s) => (
                 "Button",
-                Button::new(ctx, on_change, s),
+                WidgetKind::Button(Button::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Toggle(s) => (
+            view::WidgetKind::Toggle(s) => (
                 "Toggle",
-                Toggle::new(ctx, on_change, s),
+                WidgetKind::Toggle(Toggle::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Selector(s) => (
+            view::WidgetKind::Selector(s) => (
                 "Selector",
-                Selector::new(ctx, on_change, s),
+                WidgetKind::Selector(Selector::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Entry(s) => (
+            view::WidgetKind::Entry(s) => (
                 "Entry",
-                Entry::new(ctx, on_change, s),
+                WidgetKind::Entry(Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::Box(s) => (
+            view::WidgetKind::Box(s) => (
                 "Box",
-                BoxContainer::new(on_change, s),
+                WidgetKind::Box(BoxContainer::new(on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, spec.props)),
             ),
-            view::Widget::BoxChild(s) => ("BoxChild", BoxChild::new(on_change, s), None),
-            view::Widget::Grid(_) => todo!(),
-            view::Widget::GridChild(_) => todo!(),
+            view::WidgetKind::BoxChild(s) => {
+                ("BoxChild", WidgetKind::BoxChild(BoxChild::new(on_change, s)), None)
+            }
+            view::WidgetKind::Grid(_) => todo!(),
+            view::WidgetKind::GridChild(_) => todo!(),
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(p) = props.as_ref() {
@@ -853,19 +868,19 @@ impl Widget {
     }
 
     fn spec(&self) -> view::Widget {
-        let props = self.props.map(|p| p.spec()).unwrap_or(DEFAULT_PROPS);
-        let kind = match self {
-            Widget::Action(w) => w.spec(),
-            Widget::Table(w) => w.spec(),
-            Widget::Label(w) => w.spec(),
-            Widget::Button(w) => w.spec(),
-            Widget::Toggle(w) => w.spec(),
-            Widget::Selector(w) => w.spec(),
-            Widget::Entry(w) => w.spec(),
-            Widget::Box(w) => w.spec(),
-            Widget::BoxChild(w) => w.spec(),
-            Widget::Grid => todo!(),
-            Widget::GridChild => todo!(),
+        let props = self.props.as_ref().map(|p| p.spec()).unwrap_or(DEFAULT_PROPS);
+        let kind = match &self.kind {
+            WidgetKind::Action(w) => w.spec(),
+            WidgetKind::Table(w) => w.spec(),
+            WidgetKind::Label(w) => w.spec(),
+            WidgetKind::Button(w) => w.spec(),
+            WidgetKind::Toggle(w) => w.spec(),
+            WidgetKind::Selector(w) => w.spec(),
+            WidgetKind::Entry(w) => w.spec(),
+            WidgetKind::Box(w) => w.spec(),
+            WidgetKind::BoxChild(w) => w.spec(),
+            WidgetKind::Grid => todo!(),
+            WidgetKind::GridChild => todo!(),
         };
         view::Widget { props, kind }
     }
@@ -875,34 +890,34 @@ impl Widget {
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        match self.kind {
-            Widget::Action(w) => w.update(changed),
-            Widget::Table(_) => (),
-            Widget::Label(w) => w.update(changed),
-            Widget::Button(w) => w.update(changed),
-            Widget::Toggle(w) => w.update(changed),
-            Widget::Selector(w) => w.update(changed),
-            Widget::Entry(w) => w.update(changed),
-            Widget::Box(_) => (),
-            Widget::BoxChild(_) => (),
-            Widget::Grid => todo!(),
-            Widget::GridChild => todo!(),
+        match &self.kind {
+            WidgetKind::Action(w) => w.update(changed),
+            WidgetKind::Table(_) => (),
+            WidgetKind::Label(w) => w.update(changed),
+            WidgetKind::Button(w) => w.update(changed),
+            WidgetKind::Toggle(w) => w.update(changed),
+            WidgetKind::Selector(w) => w.update(changed),
+            WidgetKind::Entry(w) => w.update(changed),
+            WidgetKind::Box(_) => (),
+            WidgetKind::BoxChild(_) => (),
+            WidgetKind::Grid => todo!(),
+            WidgetKind::GridChild => todo!(),
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) {
-        match self.kind {
-            Widget::Action(w) => w.update_var(name, value),
-            Widget::Table(_) => (),
-            Widget::Label(w) => w.update_var(name, value),
-            Widget::Button(w) => w.update_var(name, value),
-            Widget::Toggle(w) => w.update_var(name, value),
-            Widget::Selector(w) => w.update_var(name, value),
-            Widget::Entry(w) => w.update_var(name, value),
-            Widget::Box(_) => (),
-            Widget::BoxChild(_) => (),
-            Widget::Grid => todo!(),
-            Widget::GridChild => todo!(),
+        match &self.kind {
+            WidgetKind::Action(w) => w.update_var(name, value),
+            WidgetKind::Table(_) => (),
+            WidgetKind::Label(w) => w.update_var(name, value),
+            WidgetKind::Button(w) => w.update_var(name, value),
+            WidgetKind::Toggle(w) => w.update_var(name, value),
+            WidgetKind::Selector(w) => w.update_var(name, value),
+            WidgetKind::Entry(w) => w.update_var(name, value),
+            WidgetKind::Box(_) => (),
+            WidgetKind::BoxChild(_) => (),
+            WidgetKind::Grid => todo!(),
+            WidgetKind::GridChild => todo!(),
         }
     }
 }
@@ -1209,15 +1224,13 @@ impl Editor {
             Some("BoxChild") => view::WidgetKind::BoxChild(view::BoxChild {
                 pack: view::Pack::Start,
                 padding: 0,
-                widget: boxed::Box::new(view::Widget::Label(view::Source::Constant(
-                    Value::U64(42),
-                ))),
+                widget: boxed::Box::new(Editor::default_spec(Some("Label"))),
             }),
             Some("Grid") => todo!(),
             Some("GridChild") => todo!(),
             _ => unreachable!(),
         };
-        Widget { kind, props: DEFAULT_PROPS }
+        view::Widget { kind, props: DEFAULT_PROPS }
     }
 
     fn build_tree(
@@ -1229,7 +1242,7 @@ impl Editor {
     ) {
         let iter = store.insert_before(parent, None);
         Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
-        match w.kind {
+        match &w.kind {
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
@@ -1267,33 +1280,31 @@ impl Editor {
                     props: DEFAULT_PROPS,
                 }
             }
-            Ok(Some(w)) => match w.spec() {
-                spec @ view::Widget { kind: view::Widget::Box(ref mut b), .. } => {
-                    b.children.clear();
-                    if let Some(iter) = store.iter_children(Some(root)) {
-                        loop {
-                            b.children.push(Editor::build_spec(store, &iter));
-                            if !store.iter_next(&iter) {
-                                break;
+            Ok(Some(w)) => {
+                let mut spec = w.spec();
+                match &mut spec.kind {
+                    view::WidgetKind::Box(ref mut b) => {
+                        b.children.clear();
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            loop {
+                                b.children.push(Editor::build_spec(store, &iter));
+                                if !store.iter_next(&iter) {
+                                    break;
+                                }
                             }
                         }
                     }
-                    spec
-                }
-                spec
-                @
-                view::Widget {
-                    kind: view::Widget::BoxChild(ref mut b), ..
-                } => {
-                    if let Some(iter) = store.iter_children(Some(root)) {
-                        b.widget = boxed::Box::new(Editor::build_spec(store, &iter));
+                    view::WidgetKind::BoxChild(ref mut b) => {
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            b.widget = boxed::Box::new(Editor::build_spec(store, &iter));
+                        }
                     }
-                    spec
-                }
-                view::Widget { kind: view::Widget::Grid(_), .. } => todo!(),
-                view::Widget { kind: view::Widget::GridChild(_), ..} => todo!(),
-                spec => spec,
-            },
+                    view::WidgetKind::Grid(_) => todo!(),
+                    view::WidgetKind::GridChild(_) => todo!(),
+                    _ => (),
+                };
+                spec
+            }
         }
     }
 

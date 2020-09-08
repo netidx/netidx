@@ -203,9 +203,9 @@ pub struct Box {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridChild {
-    width: u32,
-    height: u32,
-    widget: boxed::Box<Widget>,
+    pub width: u32,
+    pub height: u32,
+    pub widget: boxed::Box<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

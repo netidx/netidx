@@ -266,53 +266,56 @@ impl Widget {
         selected_path: gtk::Label,
     ) -> Widget {
         let w = match spec.kind {
-            view::Widget::Action(spec) => {
+            view::WidgetKind::Action(spec) => {
                 Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
             }
-            view::Widget::Table(base_path, spec) => Widget::Table(table::Table::new(
+            view::WidgetKind::Table(base_path, spec) => Widget::Table(table::Table::new(
                 ctx.clone(),
                 base_path,
                 spec,
                 selected_path,
             )),
-            view::Widget::Label(spec) => Widget::Label(widgets::Label::new(
+            view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Button(spec) => Widget::Button(widgets::Button::new(
+            view::WidgetKind::Button(spec) => Widget::Button(widgets::Button::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
+            view::WidgetKind::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Selector(spec) => Widget::Selector(widgets::Selector::new(
+            view::WidgetKind::Selector(spec) => Widget::Selector(widgets::Selector::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Entry(spec) => Widget::Entry(widgets::Entry::new(
+            view::WidgetKind::Entry(spec) => Widget::Entry(widgets::Entry::new(
                 ctx.clone(),
                 variables,
                 spec,
                 selected_path,
             )),
-            view::Widget::Box(s) => {
+            view::WidgetKind::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
             }
-            view::Widget::BoxChild(view::BoxChild { widget, .. }) => {
+            view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
                 Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
-            view::Widget::Grid(spec) => {
+            view::WidgetKind::Grid(spec) => {
                 Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
+            }
+            view::WidgetKind::GridChild(spec) => {
+                todo!()
             }
         };
         if let Some(r) = w.root() {
@@ -545,11 +548,25 @@ macro_rules! break_err {
     };
 }
 
+static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
+    halign: view::Align::Fill,
+    valign: view::Align::Fill,
+    hexpand: false,
+    vexpand: false,
+    margin_top: 0,
+    margin_bottom: 0,
+    margin_start: 0,
+    margin_end: 0,
+};
+
 fn default_view(path: Path) -> protocol_view::View {
     protocol_view::View {
         variables: HashMap::new(),
         keybinds: Vec::new(),
-        root: protocol_view::Widget::Table(path),
+        root: protocol_view::Widget {
+            kind: protocol_view::WidgetKind::Table(path),
+            props: DEFAULT_PROPS,
+        },
     }
 }
 
@@ -665,7 +682,10 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         Ok(spec) => {
                             let raeified_default = view::View {
                                 variables: HashMap::new(),
-                                root: view::Widget::Table(base_path.clone(), spec)
+                                root: view::Widget {
+                                    props: DEFAULT_PROPS,
+                                    kind: view::WidgetKind::Table(base_path.clone(), spec)
+                                }
                             };
                             let m = ToGui::View {
                                 loc: Some(ViewLoc::Netidx(base_path.clone())),

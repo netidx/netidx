@@ -28,8 +28,8 @@ impl Box {
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
         for s in spec.children.iter() {
-            match s.kind {
-                view::Widget::BoxChild(view::BoxChild {
+            match &s.kind {
+                view::WidgetKind::BoxChild(view::BoxChild {
                     pack,
                     padding,
                     widget,
@@ -53,11 +53,11 @@ impl Box {
                     }
                     children.push(w);
                 }
-                k => {
+                _ => {
                     let w = Widget::new(
                         ctx.clone(),
                         variables,
-                        k.clone(),
+                        s.clone(),
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
@@ -109,8 +109,8 @@ impl Grid {
         root.set_row_homogeneous(spec.homogeneous_rows);
         root.set_column_spacing(spec.column_spacing);
         root.set_row_spacing(spec.row_spacing);
-        let mut i = 0;
-        let mut j = 0;
+        let mut i = 0i32;
+        let mut j = 0i32;
         let children = spec
             .children
             .into_iter()
@@ -118,11 +118,13 @@ impl Grid {
                 let mut max_height = 1;
                 let row = row.into_iter()
                     .map(|spec| match spec.kind {
-                        view::Widget::GridChild(view::GridChild {
+                        view::WidgetKind::GridChild(view::GridChild {
                             width,
                             height,
                             widget,
                         }) => {
+                            let height = height as i32;
+                            let width = width as i32;
                             let w = Widget::new(
                                 ctx.clone(),
                                 variables,
@@ -130,22 +132,22 @@ impl Grid {
                                 selected_path.clone(),
                             );
                             if let Some(r) = w.root() {
-                                root.attach(r, i as i32, j as i32, width, height);
+                                root.attach(r, i, j, width, height);
                                 set_common_props(spec.props.clone(), r);
                             }
                             i += width;
                             max_height = max(max_height, height);
                             w
                         }
-                        widget => {
+                        _ => {
                             let w = Widget::new(
                                 ctx.clone(),
                                 variables,
-                                widget.clone(),
+                                spec.clone(),
                                 selected_path.clone(),
                             );
                             if let Some(r) = w.root() {
-                                root.attach(r, i as i32, j as i32, 1, 1);
+                                root.attach(r, i, j, 1, 1);
                                 set_common_props(spec.props.clone(), r);
                             }
                             i += 1;

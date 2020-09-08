@@ -22,7 +22,6 @@ impl Button {
     pub(super) fn new(
         ctx: WidgetCtx,
         variables: &HashMap<String, Value>,
-        widget: view::Widget,
         spec: view::Button,
         selected_path: gtk::Label,
     ) -> Self {
