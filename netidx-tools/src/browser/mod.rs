@@ -314,8 +314,8 @@ impl Widget {
             view::WidgetKind::Grid(spec) => {
                 Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
             }
-            view::WidgetKind::GridChild(spec) => {
-                todo!()
+            view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
+                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
         };
         if let Some(r) = w.root() {

@@ -602,6 +602,27 @@ impl BoxChild {
     }
 }
 
+fn dirselect(
+    cur: view::Direction,
+    on_change: impl Fn(view::Direction) + 'static,
+) -> gtk::ComboBoxText {
+    let dircb = gtk::ComboBoxText::new();
+    dircb.append(Some("Horizontal"), "Horizontal");
+    dircb.append(Some("Vertical"), "Vertical");
+    match cur {
+        view::Direction::Horizontal => dircb.set_active_id(Some("Horizontal")),
+        view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
+    };
+    dircb.connect_changed(move |c| {
+        on_change(match c.get_active_id() {
+            Some(s) if &*s == "Horizontal" => view::Direction::Horizontal,
+            Some(s) if &*s == "Vertical" => view::Direction::Vertical,
+            _ => view::Direction::Horizontal,
+        })
+    });
+    dircb
+}
+
 #[derive(Clone, Debug)]
 struct BoxContainer {
     root: TwoColGrid,
@@ -612,21 +633,13 @@ impl BoxContainer {
     fn new(on_change: OnChange, spec: view::Box) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let dircb = gtk::ComboBoxText::new();
-        dircb.append(Some("Horizontal"), "Horizontal");
-        dircb.append(Some("Vertical"), "Vertical");
-        match spec.borrow().direction {
-            view::Direction::Horizontal => dircb.set_active_id(Some("Horizontal")),
-            view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
-        };
-        dircb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            spec.borrow_mut().direction = match c.get_active_id() {
-                Some(s) if &*s == "Horizontal" => view::Direction::Horizontal,
-                Some(s) if &*s == "Vertical" => view::Direction::Vertical,
-                _ => view::Direction::Horizontal,
-            };
-            on_change();
-        }));
+        let dircb = dirselect(
+            spec.borrow().direction,
+            clone!(@strong on_change, @strong spec => move |d| {
+                spec.borrow_mut().direction = d;
+                on_change()
+            }),
+        );
         let dirlbl = gtk::Label::new(Some("Direction:"));
         root.add((dirlbl, dircb));
         let homo = gtk::CheckButton::with_label("Homogeneous:");
@@ -652,6 +665,61 @@ impl BoxContainer {
 
     fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Grid {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Grid>>,
+}
+
+impl Grid {
+    fn new(on_change: OnChange, spec: view::Grid) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        root.add(parse_entry(
+            "Homogeneous Columns:",
+            &spec.borrow().homogeneous_columns,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().homogeneous_columns = s;
+                on_change()
+            }),
+        ));
+        root.add(parse_entry(
+            "Homogeneous Rows:",
+            &spec.borrow().homogeneous_rows,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().homegeneous_rows = s;
+                on_change()
+            }),
+        ));
+        root.add(parse_entry(
+            "Column Spacing:",
+            &spec.borrow().column_spacing,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().column_spacing = s;
+                on_change()
+            }),
+        ));
+        root.add(parse_entry(
+            "Row Spacing:",
+            &spec.borrow().row_spacing,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().row_spacing = s;
+                on_change()
+            }),
+        ));
+        let dirlbl = gtk::Label::new(Some("Directoin: "));
+        let dircb = dirselect(
+            spec.borrow().direction,
+            clone!(@strong spec, @strong on_change => move |d| {
+                spec.borrow_mut().direction = d;
+                on_change()
+            }),
+        );
+        root.add((dirlbl, dircb));
+        Grid { root, spec }
     }
 }
 
@@ -780,8 +848,8 @@ enum WidgetKind {
     Entry(Entry),
     Box(BoxContainer),
     BoxChild(BoxChild),
-    Grid,
-    GridChild,
+    Grid(Grid),
+    GridChild(GridChild),
 }
 
 impl WidgetKind {
@@ -796,8 +864,8 @@ impl WidgetKind {
             WidgetKind::Entry(w) => w.root(),
             WidgetKind::Box(w) => w.root(),
             WidgetKind::BoxChild(w) => w.root(),
-            WidgetKind::Grid => todo!(),
-            WidgetKind::GridChild => todo!(),
+            WidgetKind::Grid => w.root(),
+            WidgetKind::GridChild => w.root(),
         }
     }
 }
@@ -862,8 +930,14 @@ impl Widget {
             view::WidgetKind::BoxChild(s) => {
                 ("BoxChild", WidgetKind::BoxChild(BoxChild::new(on_change, s)), None)
             }
-            view::WidgetKind::Grid(_) => todo!(),
-            view::WidgetKind::GridChild(_) => todo!(),
+            view::WidgetKind::Grid(s) => (
+                "Grid",
+                WidgetKind::Grid(Grid::new(on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, spec.props)),
+            ),
+            view::WidgetKind::GridChild(s) => {
+                ("GridChild", WidgetKind::GridChild(GridChild::new(on_change, s)), None)
+            }
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let exp = gtk::Expander::new(Some("Widget Config"));
@@ -889,8 +963,8 @@ impl Widget {
             WidgetKind::Entry(w) => w.spec(),
             WidgetKind::Box(w) => w.spec(),
             WidgetKind::BoxChild(w) => w.spec(),
-            WidgetKind::Grid => todo!(),
-            WidgetKind::GridChild => todo!(),
+            WidgetKind::Grid(w) => w.spec(),
+            WidgetKind::GridChild(w) => w.spec(),
         };
         view::Widget { props, kind }
     }
@@ -908,10 +982,10 @@ impl Widget {
             WidgetKind::Toggle(w) => w.update(changed),
             WidgetKind::Selector(w) => w.update(changed),
             WidgetKind::Entry(w) => w.update(changed),
-            WidgetKind::Box(_) => (),
-            WidgetKind::BoxChild(_) => (),
-            WidgetKind::Grid => todo!(),
-            WidgetKind::GridChild => todo!(),
+            WidgetKind::Box(_)
+            | WidgetKind::BoxChild(_)
+            | WidgetKind::Grid(_)
+            | WidgetKind::GridChild(_) => (),
         }
     }
 
@@ -924,10 +998,10 @@ impl Widget {
             WidgetKind::Toggle(w) => w.update_var(name, value),
             WidgetKind::Selector(w) => w.update_var(name, value),
             WidgetKind::Entry(w) => w.update_var(name, value),
-            WidgetKind::Box(_) => (),
-            WidgetKind::BoxChild(_) => (),
-            WidgetKind::Grid => todo!(),
-            WidgetKind::GridChild => todo!(),
+            WidgetKind::Box(_)
+            | WidgetKind::BoxChild(_)
+            | WidgetKind::Grid(_)
+            | WidgetKind::GridChild(_) => (),
         }
     }
 }
