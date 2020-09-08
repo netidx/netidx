@@ -560,16 +560,20 @@ impl BoxChild {
     fn new(on_change: OnChange, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
-        let expand = gtk::CheckButton::with_label("Expand:");
-        root.attach(&expand, 0, 2, 1);
-        expand.connect_toggled(clone!(@strong on_change, @strong spec => move |cb| {
-            spec.borrow_mut().expand = cb.get_active();
-            on_change();
+        let packlbl = gtk::Label::new("Pack:");
+        let packcb = gtk::ComboBoxText::new();
+        packcb.append(Some("Start"), "Start");
+        packcb.append(Some("End"), "End");
+        packcb.set_active_id(Some(match spec.borrow().pack {
+            view::Pack::Start => "Start",
+            view::Pack::End => "End"
         }));
-        let fill = gtk::CheckButton::with_label("Fill:");
-        root.attach(&fill, 0, 2, 1);
-        fill.connect_toggled(clone!(@strong on_change, @strong spec => move |cb| {
-            spec.borrow_mut().fill = cb.get_active();
+        packcb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+            spec.borrow_mut().pack = match c.get_active_id() {
+                Some(s) if &*s == "Start" => view::Pack::Start,
+                Some(s) if &*s == "End" => view::Pack::End,
+                _ => view::Pack::Start
+            };
             on_change()
         }));
         root.add(parse_entry(

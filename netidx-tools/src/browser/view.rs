@@ -10,22 +10,16 @@ use std::{boxed, collections::HashMap, pin::Pin};
 
 #[derive(Debug, Clone)]
 pub(super) struct BoxChild {
-    pub expand: bool,
-    pub fill: bool,
+    pub pack: view::Pack,
     pub padding: u64,
-    pub halign: Option<view::Align>,
-    pub valign: Option<view::Align>,
     pub widget: boxed::Box<Widget>,
 }
 
 impl BoxChild {
     async fn new(resolver: &ResolverRead, c: view::BoxChild) -> Result<Self> {
         Ok(BoxChild {
-            expand: c.expand,
-            fill: c.fill,
+            pack: c.pack,
             padding: c.padding,
-            halign: c.halign,
-            valign: c.valign,
             widget: boxed::Box::new(Widget::new(resolver, (&*c.widget).clone()).await?),
         })
     }
@@ -33,16 +27,16 @@ impl BoxChild {
 
 #[derive(Debug, Clone)]
 pub(super) struct GridChild {
-    pub halign: Option<Align>,
-    pub valign: Option<Align>,
+    pub width: u32,
+    pub height: u32,
     pub widget: boxed::Box<Widget>,
 }
 
 impl GridChild {
     async fn new(resolver: &ResolverRead, c: view::GridChild) -> Result<Self> {
         Ok(GridChild {
-            halign: c.halign,
-            valign: c.valign,
+            width: c.width,
+            height: c.height,
             widget: boxed::Box::new(Widget::new(resolver, (&*c.widget).clone()).await?),
         })
     }
@@ -66,7 +60,7 @@ pub(super) struct Grid {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Widget {
+pub(super) enum WidgetKind {
     Action(view::Action),
     Table(Path, resolver::Table),
     Label(view::Source),
@@ -80,41 +74,47 @@ pub(super) enum Widget {
     GridChild(GridChild),
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct Widget {
+    pub(super) props: view::WidgetProps,
+    pub(super) kind: WidgetKind,
+}
+
 impl Widget {
     fn new<'a>(
         resolver: &'a ResolverRead,
         widget: view::Widget,
     ) -> Pin<boxed::Box<dyn Future<Output = Result<Self>> + 'a + Send>> {
         boxed::Box::pin(async move {
-            match widget {
-                view::Widget::Action(a) => Ok(Widget::Action(a)),
-                view::Widget::Table(path) => {
+            let kind = match widget.kind {
+                view::WidgetKind::Action(a) => WidgetKind::Action(a),
+                view::WidgetKind::Table(path) => {
                     let spec = resolver.table(path.clone()).await?;
-                    Ok(Widget::Table(path, spec))
+                    WidgetKind::Table(path, spec)
                 }
-                view::Widget::Label(s) => Ok(Widget::Label(s)),
-                view::Widget::Button(b) => Ok(Widget::Button(b)),
-                view::Widget::Toggle(t) => Ok(Widget::Toggle(t)),
-                view::Widget::Selector(c) => Ok(Widget::Selector(c)),
-                view::Widget::Entry(e) => Ok(Widget::Entry(e)),
-                view::Widget::Box(c) => {
+                view::WidgetKind::Label(s) => WidgetKind::Label(s),
+                view::WidgetKind::Button(b) => WidgetKind::Button(b),
+                view::WidgetKind::Toggle(t) => WidgetKind::Toggle(t),
+                view::WidgetKind::Selector(c) => WidgetKind::Selector(c),
+                view::WidgetKind::Entry(e) => WidgetKind::Entry(e),
+                view::WidgetKind::Box(c) => {
                     let children = join_all(
                         c.children.into_iter().map(|c| Widget::new(resolver, c)),
                     )
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
-                    Ok(Widget::Box(Box {
+                    WidgetKind::Box(Box {
                         direction: c.direction,
                         homogeneous: c.homogeneous,
                         spacing: c.spacing,
                         children,
-                    }))
+                    })
                 }
-                view::Widget::BoxChild(c) => {
-                    Ok(Widget::BoxChild(BoxChild::new(resolver, c).await?))
+                view::WidgetKind::BoxChild(c) => {
+                    WidgetKind::BoxChild(BoxChild::new(resolver, c).await?)
                 }
-                view::Widget::Grid(c) => {
+                view::WidgetKind::Grid(c) => {
                     let children = join_all(c.children.into_iter().map(|c| async {
                         join_all(c.into_iter().map(|c| Widget::new(resolver, c)))
                             .await
@@ -124,18 +124,19 @@ impl Widget {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>>>()?;
-                    Ok(Widget::Grid(Grid {
+                    WidgetKind::Grid(Grid {
                         homogeneous_columns: c.homogeneous_columns,
                         homogeneous_rows: c.homogeneous_rows,
                         column_spacing: c.column_spacing,
                         row_spacing: c.row_spacing,
                         children,
-                    }))
+                    })
                 }
-                view::Widget::GridChild(c) => {
-                    Ok(Widget::GridChild(GridChild::new(resolver, c).await?))
+                view::WidgetKind::GridChild(c) => {
+                    WidgetKind::GridChild(GridChild::new(resolver, c).await?)
                 }
-            }
+            };
+            Ok(Widget { kind, props: widget.props })
         })
     }
 }
