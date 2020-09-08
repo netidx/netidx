@@ -58,8 +58,11 @@ impl Constant {
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
+        let errlbl = gtk::Label::new(None);
+        errlbl.set_use_markup(true);
         root.add((typlbl.clone(), typsel.clone()));
         root.add((vallbl.clone(), valent.clone()));
+        root.attach(&errlbl, 0, 2, 1);
         for typ in &TYPES {
             let name = typ.name();
             typsel.append(Some(name), name);
@@ -69,26 +72,21 @@ impl Constant {
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
-            @strong iter,
-            @strong store,
-            @strong ctx,
             @weak typsel,
             @weak valent,
-            @weak store => move || {
-            if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
-                match typ.parse(&*valent.get_text()) {
-                    Err(e) => { set_dbg_src(&ctx, &store, &iter, err_src(e)); },
+            @weak errlbl => move || {
+            if let Some(Ok(typ)) = dbg!(typsel.get_active_id().map(|s| s.parse::<Typ>())) {
+                match dbg!(typ.parse(&*valent.get_text())) {
                     Ok(value) => {
-                        set_dbg_src(
-                            &ctx,
-                            &store,
-                            &iter,
-                            view::Source::Constant(value.clone())
-                        );
+                        errlbl.set_markup("");
                         *spec.borrow_mut() = value;
                         on_change()
-                    }
-                }
+                    },
+                    Err(e) => {
+                        let msg = format!(r#"<span foreground="red">{}</span>"#, e);
+                        errlbl.set_markup(&msg);
+                    },
+                };
             }
         }));
         typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
@@ -123,26 +121,31 @@ impl Variable {
         spec: String,
     ) {
         let spec = Rc::new(RefCell::new(spec));
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let lblvar = gtk::Label::new(Some("Name:"));
         let entvar = gtk::Entry::new();
-        root.pack_start(&lblvar, false, false, 0);
-        root.pack_start(&entvar, true, true, 0);
+        let errlbl = gtk::Label::new(None);
+        errlbl.set_use_markup(true);
+        root.pack_start(&entbox, false, false, 0);
+        root.pack_start(&errlbl, false, false, 0);
+        entbox.pack_start(&lblvar, false, false, 0);
+        entbox.pack_start(&entvar, true, true, 0);
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
-        @strong ctx,
-        @strong on_change,
-        @strong spec,
-        @strong iter,
-        @weak store => move |e|
-        match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
-            Err(e) => { set_dbg_src(&ctx, &store, &iter, err_src(e)); },
-            Ok(view::Source::Variable(name)) => {
-                set_dbg_src(&ctx, &store, &iter, view::Source::Variable(name.clone()));
-                *spec.borrow_mut() = name;
-                on_change()
+            @strong on_change, @strong spec, @weak errlbl => move |e| {
+            match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
+                Err(e) => {
+                    let msg = format!(r#"<span foreground="red">{}</span>"#, e);
+                    errlbl.set_markup(&msg);
+                },
+                Ok(view::Source::Variable(name)) => {
+                    errlbl.set_markup("");
+                    *spec.borrow_mut() = name;
+                    on_change()
+                },
+                Ok(_) => unreachable!()
             }
-            Ok(_) => unreachable!()
         }));
         store.set_value(iter, 0, &"Load Variable".to_value());
         let t = Variable { root, spec };
@@ -180,20 +183,9 @@ impl Load {
         root.pack_start(&lblvar, false, false, 0);
         root.pack_start(&entvar, true, true, 0);
         entvar.set_text(&**spec.borrow());
-        entvar.connect_activate(clone!(
-        @strong ctx,
-        @strong on_change,
-        @strong spec,
-        @strong iter,
-        @weak store => move |e| {
-            let path = Path::from(String::from(&*e.get_text()));
-            if !Path::is_absolute(&*path) {
-                set_dbg_src(&ctx, &store, &iter, err_src("Absolute path required!"));
-            } else {
-                set_dbg_src(&ctx, &store, &iter, view::Source::Load(path.clone()));
-                *spec.borrow_mut() = path;
-                on_change()
-            }
+        entvar.connect_activate(clone!(@strong on_change, @strong spec => move |e| {
+            *spec.borrow_mut() = Path::from(String::from(&*e.get_text()));
+            on_change()
         }));
         store.set_value(iter, 0, &"Load Path".to_value());
         let t = Load { root, spec };
@@ -235,13 +227,8 @@ impl Map {
         }
         cbfun.set_active_id(Some(spec.as_str()));
         let spec = Rc::new(RefCell::new(spec));
-        cbfun.connect_changed(clone!(
-        @strong on_change,
-        @strong spec,
-        @strong store,
-        @strong iter => move |c| {
+        cbfun.connect_changed(clone!(@strong on_change, @strong spec  => move |c| {
             if let Some(id) = c.get_active_id() {
-                store.set_value(&iter, 0, &id.to_value());
                 *spec.borrow_mut() = String::from(&*id);
                 on_change()
             }
@@ -366,8 +353,9 @@ fn build_source(
         Ok(Some(p)) => match p.spec() {
             v @ view::Source::Constant(_)
             | v @ view::Source::Load(_)
-            | v @ view::Source::Variable(_) => v,
+            | v @ view::Source::Variable(_) => set_dbg_src(ctx, store, root, v),
             view::Source::Map { mut from, function } => {
+                store.set_value(root, 0, &function.to_value());
                 from.clear();
                 match store.iter_children(Some(root)) {
                     None => view::Source::Map { from, function },
