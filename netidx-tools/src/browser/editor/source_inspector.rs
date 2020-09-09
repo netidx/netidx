@@ -34,10 +34,6 @@ fn set_dbg_src(
     spec
 }
 
-fn err_src(e: impl Display) -> view::Source {
-    view::Source::Constant(Value::Error(Chars::from(format!("{}", e))))
-}
-
 #[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,

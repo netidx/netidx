@@ -582,6 +582,7 @@ impl BoxChild {
             };
             on_change()
         }));
+        root.add((packlbl, packcb));
         root.add(parse_entry(
             "Padding:",
             &spec.borrow().padding,
@@ -1637,7 +1638,7 @@ impl Editor {
                     }
                     false
                 }
-                WidgetKind::Grid(g) => {
+                WidgetKind::Grid(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf)
                     } else {
