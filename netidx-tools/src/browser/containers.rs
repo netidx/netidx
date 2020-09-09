@@ -167,6 +167,7 @@ impl Grid {
                     })
                     .collect::<Vec<_>>();
                 j += max_height;
+                i = 0;
                 row
             })
             .collect::<Vec<_>>();

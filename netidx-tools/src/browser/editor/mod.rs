@@ -1658,6 +1658,9 @@ impl Editor {
                             nrow = *i as usize;
                         }
                     }
+                    if path.len() == 0 {
+                        path.insert(0, WidgetPath::Leaf);
+                    }
                     true
                 }
             },
