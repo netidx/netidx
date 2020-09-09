@@ -931,56 +931,87 @@ impl Widget {
         iter: &gtk::TreeIter,
         spec: WidgetSpec,
     ) {
-        let (name, kind, props) = match spec.kind {
-            WidgetSpec::Widget(view::WidgetKind::Action(s)) => (
+        let (name, kind, props) = match spec {
+            WidgetSpec::Widget(view::Widget {
+                props: _,
+                kind: view::WidgetKind::Action(s),
+            }) => (
                 "Action",
                 WidgetKind::Action(Action::new(ctx, on_change.clone(), s)),
                 None,
             ),
-            WidgetSpec::Widget(view::WidgetKind::Table(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Table(s),
+            }) => (
                 "Table",
                 WidgetKind::Table(Table::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Label(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Label(s),
+            }) => (
                 "Label",
                 WidgetKind::Label(Label::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Button(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Button(s),
+            }) => (
                 "Button",
                 WidgetKind::Button(Button::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Toggle(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Toggle(s),
+            }) => (
                 "Toggle",
                 WidgetKind::Toggle(Toggle::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Selector(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Selector(s),
+            }) => (
                 "Selector",
                 WidgetKind::Selector(Selector::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Entry(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Entry(s),
+            }) => (
                 "Entry",
                 WidgetKind::Entry(Entry::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::Box(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Box(s),
+            }) => (
                 "Box",
                 WidgetKind::Box(BoxContainer::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::BoxChild(s)) => {
-                ("BoxChild", WidgetKind::BoxChild(BoxChild::new(on_change, s)), None)
-            }
-            WidgetSpec::Widget(view::WidgetKind::Grid(s)) => (
+            WidgetSpec::Widget(view::Widget {
+                props: _,
+                kind: view::WidgetKind::BoxChild(s),
+            }) => ("BoxChild", WidgetKind::BoxChild(BoxChild::new(on_change, s)), None),
+            WidgetSpec::Widget(view::Widget {
+                props,
+                kind: view::WidgetKind::Grid(s),
+            }) => (
                 "Grid",
                 WidgetKind::Grid(Grid::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, spec.props)),
+                Some(WidgetProps::new(on_change, props)),
             ),
-            WidgetSpec::Widget(view::WidgetKind::GridChild(s)) => {
+            WidgetSpec::Widget(view::Widget {
+                props: _,
+                kind: view::WidgetKind::GridChild(s),
+            }) => {
                 ("GridChild", WidgetKind::GridChild(GridChild::new(on_change, s)), None)
             }
             WidgetSpec::GridRow => ("GridRow", WidgetKind::GridRow, None),
@@ -1018,22 +1049,23 @@ impl Widget {
     }
 
     fn default_spec(name: Option<&str>) -> WidgetSpec {
-        let kind = match name {
-            None => WidgetSpec::Widget(view::WidgetKind::Table(Path::from("/"))),
-            Some("Action") => {
-                WidgetSpec::Widget(view::WidgetKind::Action(view::Action {
-                    source: view::Source::Constant(Value::U64(42)),
-                    sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo"))),
-                }))
-            }
-            Some("Table") => WidgetSpec::Widget(view::WidgetKind::Table(Path::from("/"))),
+        fn widget(kind: view::WidgetKind) -> WidgetSpec {
+            WidgetSpec::Widget(view::Widget { kind, props: DEFAULT_PROPS })
+        }
+        match name {
+            None => widget(view::WidgetKind::Table(Path::from("/"))),
+            Some("Action") => widget(view::WidgetKind::Action(view::Action {
+                source: view::Source::Constant(Value::U64(42)),
+                sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo"))),
+            })),
+            Some("Table") => widget(view::WidgetKind::Table(Path::from("/"))),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
-                WidgetSpec::Widget(view::WidgetKind::Label(view::Source::Constant(s)))
+                widget(view::WidgetKind::Label(view::Source::Constant(s)))
             }
             Some("Button") => {
                 let l = Chars::from("click me!");
-                WidgetSpec::Widget(view::WidgetKind::Button(view::Button {
+                widget(view::WidgetKind::Button(view::Button {
                     enabled: view::Source::Constant(Value::True),
                     label: view::Source::Constant(Value::String(l)),
                     source: view::Source::Load(Path::from("/somewhere")),
@@ -1042,19 +1074,17 @@ impl Widget {
                     ))),
                 }))
             }
-            Some("Toggle") => {
-                WidgetSpec::Widget(view::WidgetKind::Toggle(view::Toggle {
-                    enabled: view::Source::Constant(Value::True),
-                    source: view::Source::Load(Path::from("/somewhere")),
-                    sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
-                        "/somewhere/else",
-                    ))),
-                }))
-            }
+            Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
+                enabled: view::Source::Constant(Value::True),
+                source: view::Source::Load(Path::from("/somewhere")),
+                sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
+                    "/somewhere/else",
+                ))),
+            })),
             Some("Selector") => {
                 let choices =
                     Chars::from(r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#);
-                WidgetSpec::Widget(view::WidgetKind::Selector(view::Selector {
+                widget(view::WidgetKind::Selector(view::Selector {
                     enabled: view::Source::Constant(Value::True),
                     choices: view::Source::Constant(Value::String(choices)),
                     source: view::Source::Load(Path::from("/somewhere")),
@@ -1063,7 +1093,7 @@ impl Widget {
                     ))),
                 }))
             }
-            Some("Entry") => WidgetSpec::Widget(view::WidgetKind::Entry(view::Entry {
+            Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
                 enabled: view::Source::Constant(Value::True),
                 visible: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
@@ -1071,20 +1101,25 @@ impl Widget {
                     "/somewhere/else",
                 ))),
             })),
-            Some("Box") => WidgetSpec::Widget(view::WidgetKind::Box(view::Box {
+            Some("Box") => widget(view::WidgetKind::Box(view::Box {
                 direction: view::Direction::Vertical,
                 homogeneous: false,
                 spacing: 0,
                 children: Vec::new(),
             })),
             Some("BoxChild") => {
-                WidgetSpec::Widget(view::WidgetKind::BoxChild(view::BoxChild {
+                let s = Value::String(Chars::from("empty box child"));
+                let w = view::Widget {
+                    kind: view::WidgetKind::Label(view::Source::Constant(s)),
+                    props: DEFAULT_PROPS,
+                };
+                widget(view::WidgetKind::BoxChild(view::BoxChild {
                     pack: view::Pack::Start,
                     padding: 0,
-                    widget: boxed::Box::new(Widget::default_spec(Some("Label"))),
+                    widget: boxed::Box::new(w),
                 }))
             }
-            Some("Grid") => WidgetSpec::Widget(view::WidgetKind::Grid(view::Grid {
+            Some("Grid") => widget(view::WidgetKind::Grid(view::Grid {
                 homogeneous_columns: false,
                 homogeneous_rows: false,
                 column_spacing: 0,
@@ -1092,16 +1127,20 @@ impl Widget {
                 children: Vec::new(),
             })),
             Some("GridChild") => {
-                WidgetSpec::Widget(view::WidgetKind::GridChild(view::GridChild {
+                let s = Value::String(Chars::from("empty grid child"));
+                let w = view::Widget {
+                    kind: view::WidgetKind::Label(view::Source::Constant(s)),
+                    props: DEFAULT_PROPS,
+                };
+                widget(view::WidgetKind::GridChild(view::GridChild {
                     width: 0,
                     height: 0,
-                    widget: boxed::Box::new(Widget::default_spec(Some("Label"))),
+                    widget: boxed::Box::new(w),
                 }))
             }
             Some("GridRow") => WidgetSpec::GridRow,
             _ => unreachable!(),
-        };
-        view::Widget { kind, props: DEFAULT_PROPS }
+        }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -1423,14 +1462,8 @@ impl Editor {
                         &grow,
                         WidgetSpec::GridRow,
                     );
-                    for col in &row {
-                        Editor::build_tree(
-                            ctx,
-                            on_change.clone(),
-                            store,
-                            Some(&grow),
-                            col,
-                        )
+                    for col in row {
+                        Editor::build_tree(ctx, on_change, store, Some(&grow), col)
                     }
                 }
             }
@@ -1505,7 +1538,7 @@ impl Editor {
             }
             Ok(Some(w)) => match w.spec() {
                 None => match store.iter_children(Some(root)) {
-                    Some(iter) => Editor::build_spec(store, iter),
+                    Some(iter) => Editor::build_spec(store, &iter),
                     None => {
                         let s = Value::String(Chars::from("empty"));
                         view::Widget {
@@ -1515,7 +1548,7 @@ impl Editor {
                     }
                 },
                 Some(mut spec) => {
-                    match &mut spec {
+                    match &mut spec.kind {
                         view::WidgetKind::Box(ref mut b) => {
                             b.children.clear();
                             if let Some(iter) = store.iter_children(Some(root)) {
@@ -1593,8 +1626,18 @@ impl Editor {
                         path.insert(0, WidgetPath::Leaf);
                     }
                 }
-                WidgetKind::Grid(_) => todo!(),
-                WidgetKind::GridChild(_) => todo!(),
+                WidgetKind::Grid(g) => {
+                    if path.len() == 0 {
+                        path.insert(0, WidgetPath::Leaf)
+                    } else {
+                        path.insert(0, WidgetPath::Box(nchild))
+                    }
+                },
+                WidgetKind::GridChild(_) => {
+                    if path.len() == 0 {
+                        path.insert(0, WidgetPath::Leaf);
+                    }
+                },
             },
         }
         if let Some(parent) = store.iter_parent(start) {

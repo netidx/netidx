@@ -317,6 +317,7 @@ impl Widget {
             view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
                 Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
+            view::WidgetKind::GridRow(_) => 
         };
         if let Some(r) = w.root() {
             set_common_props(spec.props, r);
@@ -387,7 +388,11 @@ impl Widget {
                         w.children[i].set_highlight(path, h)
                     }
                 }
-                (WidgetPath::Grid(_, _), Widget::Grid(_)) => todo!(),
+                (WidgetPath::Grid(i, j), Widget::Grid(w)) => {
+                    if i < w.children.len() && j < w.children[i].len() {
+                        w.children[i][j].set_highlight(path, h)
+                    }
+                },
                 (WidgetPath::Box(_), _) => (),
                 (WidgetPath::Grid(_, _), _) => (),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
