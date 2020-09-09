@@ -104,7 +104,7 @@ impl Box {
 
 pub(super) struct Grid {
     root: gtk::Grid,
-    children: Vec<Vec<Widget>>,
+    pub(super) children: Vec<Vec<Widget>>,
 }
 
 impl Grid {

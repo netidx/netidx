@@ -317,7 +317,6 @@ impl Widget {
             view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
                 Widget::new(ctx, variables, (&*widget).clone(), selected_path)
             }
-            view::WidgetKind::GridRow(_) => 
         };
         if let Some(r) = w.root() {
             set_common_props(spec.props, r);

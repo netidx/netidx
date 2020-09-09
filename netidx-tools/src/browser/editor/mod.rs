@@ -1044,6 +1044,7 @@ impl Widget {
             WidgetKind::BoxChild(w) => Some(w.spec()),
             WidgetKind::Grid(w) => Some(w.spec()),
             WidgetKind::GridChild(w) => Some(w.spec()),
+            WidgetKind::GridRow => None
         };
         kind.map(move |kind| view::Widget { props, kind })
     }
@@ -1342,7 +1343,7 @@ impl Editor {
                 Some((_, iter)) => {
                     *selected.borrow_mut() = Some(iter.clone());
                     let mut path = Vec::new();
-                    Editor::build_widget_path(&store, &iter, 0, &mut path);
+                    Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
                     let _: result::Result<_,_> = ctx.to_gui.send(ToGui::Highlight(path));
                     let v = store.get_value(&iter, 0);
                     if let Ok(Some(id)) = v.get::<&str>() {
@@ -1586,33 +1587,41 @@ impl Editor {
     fn build_widget_path(
         store: &gtk::TreeStore,
         start: &gtk::TreeIter,
+        mut nrow: usize,
         nchild: usize,
         path: &mut Vec<WidgetPath>,
     ) {
         let v = store.get_value(start, 1);
-        match v.get::<&Widget>() {
-            Err(_) | Ok(None) => (),
-            Ok(Some(w)) => match w.kind {
+        let skip_idx = match v.get::<&Widget>() {
+            Err(_) | Ok(None) => false,
+            Ok(Some(w)) => match &w.kind {
                 WidgetKind::Action(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Table(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Label(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Button(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Toggle(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Selector(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Entry(_) => {
                     path.insert(0, WidgetPath::Leaf);
+                    false
                 }
                 WidgetKind::Box(_) => {
                     if path.len() == 0 {
@@ -1620,33 +1629,50 @@ impl Editor {
                     } else {
                         path.insert(0, WidgetPath::Box(nchild));
                     }
+                    false
                 }
                 WidgetKind::BoxChild(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     }
+                    false
                 }
                 WidgetKind::Grid(g) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf)
                     } else {
-                        path.insert(0, WidgetPath::Box(nchild))
+                        path.insert(0, WidgetPath::Grid(nrow, nchild))
                     }
+                    false
                 },
                 WidgetKind::GridChild(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     }
+                    false
                 },
+                WidgetKind::GridRow => {
+                    if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
+                        if let Some(i) = idx.last() {
+                            nrow = *i as usize;
+                        }
+                    }
+                    true
+                }
             },
-        }
+        };
         if let Some(parent) = store.iter_parent(start) {
             if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
                 if let Some(i) = idx.last() {
-                    Editor::build_widget_path(store, &parent, *i as usize, path);
+                    let nchild = if skip_idx {
+                        nchild
+                    } else {
+                        *i as usize
+                    };
+                    Editor::build_widget_path(store, &parent, nrow, nchild, path);
                 }
             }
-        }
+        };
     }
 
     pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
