@@ -1247,5 +1247,6 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         run_gui(ctx, app, rx_to_gui);
     });
     application.run(&[]);
+    drop(application);
     let _ : result::Result<_, _> = jh.join();
 }
