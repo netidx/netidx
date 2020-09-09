@@ -53,7 +53,8 @@ type Batch = Pooled<Vec<(SubId, Value)>>;
 enum WidgetPath {
     Leaf,
     Box(usize),
-    Grid(usize, usize),
+    GridItem(usize, usize),
+    GridRow(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +315,19 @@ impl Widget {
                 )),
                 view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
                     Widget::new(ctx, variables, (&*widget).clone(), selected_path)
+                }
+                view::WidgetKind::GridRow(_) => {
+                    let s = Value::String(Chars::from("orphaned grid row"));
+                    let spec = view::Widget {
+                        kind: view::WidgetKind::Label(view::Source::Constant(s)),
+                        props: DEFAULT_PROPS,
+                    };
+                    Widget::Label(widgets::Label::new(
+                        ctx.clone(),
+                        variables,
+                        spec,
+                        selected_path,
+                    ))
                 }
             };
         if let Some(r) = w.root() {
@@ -948,11 +962,7 @@ fn save_view(
     }
 }
 
-fn run_gui(
-    ctx: WidgetCtx,
-    app: &Application,
-    to_gui: glib::Receiver<ToGui>,
-) {
+fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
     let group = gtk::WindowGroup::new();
@@ -1248,5 +1258,5 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     });
     application.run(&[]);
     drop(application);
-    let _ : result::Result<_, _> = jh.join();
+    let _: result::Result<_, _> = jh.join();
 }

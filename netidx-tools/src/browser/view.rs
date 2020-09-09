@@ -50,13 +50,17 @@ pub(super) struct Box {
     pub children: Vec<Widget>,
 }
 
+pub(super) struct GridRow {
+    pub columns: Vec<Widget>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Grid {
     pub homogeneous_columns: bool,
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
-    pub children: Vec<Vec<Widget>>,
+    pub rows: Vec<Widget>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +76,7 @@ pub(super) enum WidgetKind {
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
+    GridRow(GridRow),
 }
 
 #[derive(Debug, Clone)]
@@ -115,25 +120,29 @@ impl Widget {
                     WidgetKind::BoxChild(BoxChild::new(resolver, c).await?)
                 }
                 view::WidgetKind::Grid(c) => {
-                    let children = join_all(c.children.into_iter().map(|c| async {
-                        join_all(c.into_iter().map(|c| Widget::new(resolver, c)))
+                    let rows =
+                        join_all(c.rows.into_iter().map(|c| Widget::new(resolver, c)))
                             .await
                             .into_iter()
-                            .collect::<Result<Vec<_>>>()
-                    }))
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>()?;
+                            .collect::<Result<Vec<_>>>()?;
                     WidgetKind::Grid(Grid {
                         homogeneous_columns: c.homogeneous_columns,
                         homogeneous_rows: c.homogeneous_rows,
                         column_spacing: c.column_spacing,
                         row_spacing: c.row_spacing,
-                        children,
+                        rows,
                     })
                 }
                 view::WidgetKind::GridChild(c) => {
                     WidgetKind::GridChild(GridChild::new(resolver, c).await?)
+                }
+                view::WidgetKind::GridRow(c) => {
+                    let columns =
+                        join_all(c.columns.into_iter().map(|c| Widget::new(resolver, c)))
+                            .await
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?;
+                    WidgetKind::GridRow(GridRow { columns })
                 }
             };
             Ok(Widget { kind, props: widget.props })

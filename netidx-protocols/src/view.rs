@@ -209,12 +209,17 @@ pub struct GridChild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GridRow {
+    pub columns: Vec<Widget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grid {
     pub homogeneous_columns: bool,
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
-    pub children: Vec<Vec<Widget>>,
+    pub rows: Vec<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +235,7 @@ pub enum WidgetKind {
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
+    GridRow(GridRow),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

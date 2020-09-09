@@ -115,6 +115,37 @@ impl Grid {
         selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Grid::new();
+        let attach_child = |props: view::WidgetProps,
+                            spec: view::GridChild,
+                            max_height: &mut i32,
+                            i: &mut i32,
+                            j: i32| {
+            let height = spec.height as i32;
+            let width = spec.width as i32;
+            let w = Widget::new(
+                ctx.clone(),
+                variables,
+                (&*spec.widget).clone(),
+                selected_path.clone(),
+            );
+            if let Some(r) = w.root() {
+                root.attach(r, i, j, width, height);
+                set_common_props(props, r);
+            }
+            *i += width;
+            *max_height = max(max_height, height);
+            w
+        };
+        let attach_normal = |props: view::Widget, i: &mut i32| {
+            let w =
+                Widget::new(ctx.clone(), variables, spec.clone(), selected_path.clone());
+            if let Some(r) = w.root() {
+                root.attach(r, i, j, 1, 1);
+                set_common_props(spec.props.clone(), r);
+            }
+            i += 1;
+            w
+        };
         root.set_column_homogeneous(spec.homogeneous_columns);
         root.set_row_homogeneous(spec.homogeneous_rows);
         root.set_column_spacing(spec.column_spacing);
@@ -122,50 +153,34 @@ impl Grid {
         let mut i = 0i32;
         let mut j = 0i32;
         let children = spec
-            .children
+            .rows
             .into_iter()
-            .map(|row| {
+            .map(|spec| {
                 let mut max_height = 1;
-                let row = row
-                    .into_iter()
-                    .map(|spec| match spec.kind {
-                        view::WidgetKind::GridChild(view::GridChild {
-                            width,
-                            height,
-                            widget,
-                        }) => {
-                            let height = height as i32;
-                            let width = width as i32;
-                            let w = Widget::new(
-                                ctx.clone(),
-                                variables,
-                                (&*widget).clone(),
-                                selected_path.clone(),
-                            );
-                            if let Some(r) = w.root() {
-                                root.attach(r, i, j, width, height);
-                                set_common_props(spec.props.clone(), r);
-                            }
-                            i += width;
-                            max_height = max(max_height, height);
-                            w
-                        }
-                        _ => {
-                            let w = Widget::new(
-                                ctx.clone(),
-                                variables,
-                                spec.clone(),
-                                selected_path.clone(),
-                            );
-                            if let Some(r) = w.root() {
-                                root.attach(r, i, j, 1, 1);
-                                set_common_props(spec.props.clone(), r);
-                            }
-                            i += 1;
-                            w
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let row = match spec.kind {
+                    view::WidgetKind::GridChild(c) => vec![attach_child(
+                        &root,
+                        spec.props,
+                        c,
+                        &mut max_height,
+                        &mut i,
+                        j,
+                    )],
+                    view::WidgetKind::GridRow(view::GridRow { columns }) => {
+                        columns.into_iter().map(|spec| match spec.kind {
+                            view::WidgetKind::GridChild(c) => attach_child(
+                                &root,
+                                spec.props,
+                                c,
+                                &mut max_height,
+                                &mut i,
+                                j,
+                            ),
+                            _ => attach_normal(spec, &mut i),
+                        })
+                    }
+                    _ => vec![attach_normal(spec, &mut i)],
+                };
                 j += max_height;
                 i = 0;
                 row
