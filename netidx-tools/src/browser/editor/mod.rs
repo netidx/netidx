@@ -680,7 +680,7 @@ impl GridChild {
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
             "Width:",
-            spec.borrow().width,
+            &spec.borrow().width,
             clone!(@strong on_change, @strong spec => move |w| {
                 spec.borrow_mut().width = w;
                 on_change()
@@ -688,7 +688,7 @@ impl GridChild {
         ));
         root.add(parse_entry(
             "Height:",
-            spec.borrow().height,
+            &spec.borrow().height,
             clone!(@strong on_change, @strong spec => move |h| {
                 spec.borrow_mut().height = h;
                 on_change()
@@ -728,7 +728,7 @@ impl Grid {
             "Homogeneous Rows:",
             &spec.borrow().homogeneous_rows,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().homegeneous_rows = s;
+                spec.borrow_mut().homogeneous_rows = s;
                 on_change()
             }),
         ));
@@ -910,8 +910,8 @@ impl WidgetKind {
             WidgetKind::Entry(w) => w.root(),
             WidgetKind::Box(w) => w.root(),
             WidgetKind::BoxChild(w) => w.root(),
-            WidgetKind::Grid => w.root(),
-            WidgetKind::GridChild => w.root(),
+            WidgetKind::Grid(w) => w.root(),
+            WidgetKind::GridChild(w) => w.root(),
         }
     }
 }
@@ -1483,8 +1483,8 @@ impl Editor {
                         path.insert(0, WidgetPath::Leaf);
                     }
                 }
-                WidgetKind::Grid => todo!(),
-                WidgetKind::GridChild => todo!(),
+                WidgetKind::Grid(_) => todo!(),
+                WidgetKind::GridChild(_) => todo!(),
             },
         }
         if let Some(parent) = store.iter_parent(start) {
