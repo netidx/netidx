@@ -669,6 +669,44 @@ impl BoxContainer {
 }
 
 #[derive(Clone, Debug)]
+struct GridChild {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::GridChild>>,
+}
+
+impl GridChild {
+    fn new(on_change: OnChange, spec: view::GridChild) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        root.add(parse_entry(
+            "Width:",
+            spec.borrow().width,
+            clone!(@strong on_change, @strong spec => move |w| {
+                spec.borrow_mut().width = w;
+                on_change()
+            })
+        ));
+        root.add(parse_entry(
+            "Height:",
+            spec.borrow().height,
+            clone!(@strong on_change, @strong spec => move |h| {
+                spec.borrow_mut().height = h;
+                on_change()
+            })
+        ));
+        GridChild {root, spec}
+    }
+
+    fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::GridChild(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Grid {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Grid>>,
@@ -720,6 +758,14 @@ impl Grid {
         );
         root.add((dirlbl, dircb));
         Grid { root, spec }
+    }
+
+    fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Grid(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
     }
 }
 
