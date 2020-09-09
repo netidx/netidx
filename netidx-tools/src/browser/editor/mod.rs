@@ -896,24 +896,22 @@ enum WidgetKind {
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
-    GridRow,
 }
 
 impl WidgetKind {
-    fn root(&self) -> Option<&gtk::Widget> {
+    fn root(&self) -> &gtk::Widget {
         match self {
-            WidgetKind::Action(w) => Some(w.root()),
-            WidgetKind::Table(w) => Some(w.root()),
-            WidgetKind::Label(w) => Some(w.root()),
-            WidgetKind::Button(w) => Some(w.root()),
-            WidgetKind::Toggle(w) => Some(w.root()),
-            WidgetKind::Selector(w) => Some(w.root()),
-            WidgetKind::Entry(w) => Some(w.root()),
-            WidgetKind::Box(w) => Some(w.root()),
-            WidgetKind::BoxChild(w) => Some(w.root()),
-            WidgetKind::Grid(w) => Some(w.root()),
-            WidgetKind::GridChild(w) => Some(w.root()),
-            WidgetKind::GridRow => None
+            WidgetKind::Action(w) => w.root(),
+            WidgetKind::Table(w) => w.root(),
+            WidgetKind::Label(w) => w.root(),
+            WidgetKind::Button(w) => w.root(),
+            WidgetKind::Toggle(w) => w.root(),
+            WidgetKind::Selector(w) => w.root(),
+            WidgetKind::Entry(w) => w.root(),
+            WidgetKind::Box(w) => w.root(),
+            WidgetKind::BoxChild(w) => w.root(),
+            WidgetKind::Grid(w) => w.root(),
+            WidgetKind::GridChild(w) => w.root(),
         }
     }
 }
@@ -1360,19 +1358,8 @@ impl Editor {
                 padding: 0,
                 widget: boxed::Box::new(Editor::default_spec(Some("Label"))),
             }),
-            Some("Grid") => view::WidgetKind::Grid(view::Grid {
-                homogeneous_columns: false,
-                homogeneous_rows: false,
-                column_spacing: 0,
-                row_spacing: 0,
-                direction: view::Direction::Vertical,
-                children: Vec::new()
-            }),
-            Some("GridChild") => view::WidgetKind::GridChild(view::GridChild {
-                width: 1,
-                height: 1,
-                widget: boxed::Box::new(Editor::default_spec(Some("Label")))
-            }),
+            Some("Grid") => todo!(),
+            Some("GridChild") => todo!(),
             _ => unreachable!(),
         };
         view::Widget { kind, props: DEFAULT_PROPS }
@@ -1396,9 +1383,7 @@ impl Editor {
             view::WidgetKind::BoxChild(b) => {
                 Editor::build_tree(ctx, on_change, store, Some(&iter), &*b.widget)
             }
-            view::WidgetKind::Grid(g) => {
-                
-            },
+            view::WidgetKind::Grid(_) => todo!(),
             view::WidgetKind::GridChild(_) => todo!(),
             view::WidgetKind::Action(_)
             | view::WidgetKind::Table(_)

@@ -215,7 +215,7 @@ pub struct Grid {
     pub column_spacing: u32,
     pub row_spacing: u32,
     pub direction: Direction,
-    pub children: Vec<Widget>,
+    pub children: Vec<Vec<Widget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,7 +231,6 @@ pub enum WidgetKind {
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
-    GridRow(GridRow),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
