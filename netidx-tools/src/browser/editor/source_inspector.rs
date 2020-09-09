@@ -15,7 +15,6 @@ use netidx_protocols::{
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    fmt::Display,
     rc::Rc,
     sync::Arc,
 };

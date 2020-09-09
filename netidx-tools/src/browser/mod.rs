@@ -265,59 +265,57 @@ impl Widget {
         spec: view::Widget,
         selected_path: gtk::Label,
     ) -> Widget {
-        let w = match spec.kind {
-            view::WidgetKind::Action(spec) => {
-                Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
-            }
-            view::WidgetKind::Table(base_path, spec) => Widget::Table(table::Table::new(
-                ctx.clone(),
-                base_path,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Button(spec) => Widget::Button(widgets::Button::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Selector(spec) => Widget::Selector(widgets::Selector::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Entry(spec) => Widget::Entry(widgets::Entry::new(
-                ctx.clone(),
-                variables,
-                spec,
-                selected_path,
-            )),
-            view::WidgetKind::Box(s) => {
-                Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
-            }
-            view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
-                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
-            }
-            view::WidgetKind::Grid(spec) => {
-                Widget::Grid(containers::Grid::new(ctx, variables, spec, selected_path))
-            }
-            view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
-                Widget::new(ctx, variables, (&*widget).clone(), selected_path)
-            }
-        };
+        let w =
+            match spec.kind {
+                view::WidgetKind::Action(spec) => {
+                    Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
+                }
+                view::WidgetKind::Table(base_path, spec) => Widget::Table(
+                    table::Table::new(ctx.clone(), base_path, spec, selected_path),
+                ),
+                view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
+                    ctx.clone(),
+                    variables,
+                    spec,
+                    selected_path,
+                )),
+                view::WidgetKind::Button(spec) => Widget::Button(widgets::Button::new(
+                    ctx.clone(),
+                    variables,
+                    spec,
+                    selected_path,
+                )),
+                view::WidgetKind::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
+                    ctx.clone(),
+                    variables,
+                    spec,
+                    selected_path,
+                )),
+                view::WidgetKind::Selector(spec) => Widget::Selector(
+                    widgets::Selector::new(ctx.clone(), variables, spec, selected_path),
+                ),
+                view::WidgetKind::Entry(spec) => Widget::Entry(widgets::Entry::new(
+                    ctx.clone(),
+                    variables,
+                    spec,
+                    selected_path,
+                )),
+                view::WidgetKind::Box(s) => {
+                    Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
+                }
+                view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
+                    Widget::new(ctx, variables, (&*widget).clone(), selected_path)
+                }
+                view::WidgetKind::Grid(spec) => Widget::Grid(containers::Grid::new(
+                    ctx,
+                    variables,
+                    spec,
+                    selected_path,
+                )),
+                view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
+                    Widget::new(ctx, variables, (&*widget).clone(), selected_path)
+                }
+            };
         if let Some(r) = w.root() {
             set_common_props(spec.props, r);
         }
@@ -391,7 +389,7 @@ impl Widget {
                     if i < w.children.len() && j < w.children[i].len() {
                         w.children[i][j].set_highlight(path, h)
                     }
-                },
+                }
                 (WidgetPath::Box(_), _) => (),
                 (WidgetPath::Grid(_, _), _) => (),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
@@ -797,7 +795,9 @@ async fn netidx_main(mut ctx: StartNetidx) {
     let _: result::Result<_, _> = ctx.to_gui.send(ToGui::Terminate);
 }
 
-fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
+fn run_tokio(
+    mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut rt = Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async move {
@@ -805,7 +805,7 @@ fn run_tokio(mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>) {
                 task::spawn(netidx_main(ctx));
             }
         });
-    });
+    })
 }
 
 fn setup_css(screen: &gdk::Screen) {
@@ -948,7 +948,11 @@ fn save_view(
     }
 }
 
-fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
+fn run_gui(
+    ctx: WidgetCtx,
+    app: &Application,
+    to_gui: glib::Receiver<ToGui>,
+) {
     let app = app.clone();
     let window = ApplicationWindow::new(&app);
     let group = gtk::WindowGroup::new();
@@ -1205,7 +1209,7 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
     .expect("failed to initialize GTK application");
     let subscriber = Arc::new(OnceCell::new());
     let (tx_tokio, rx_tokio) = mpsc::unbounded();
-    run_tokio(rx_tokio);
+    let jh = run_tokio(rx_tokio);
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
@@ -1243,4 +1247,5 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         run_gui(ctx, app, rx_to_gui);
     });
     application.run(&[]);
+    let _ : result::Result<_, _> = jh.join();
 }
