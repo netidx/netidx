@@ -50,6 +50,7 @@ pub(super) struct Box {
     pub children: Vec<Widget>,
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct GridRow {
     pub columns: Vec<Widget>,
 }

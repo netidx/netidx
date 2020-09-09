@@ -318,10 +318,7 @@ impl Widget {
                 }
                 view::WidgetKind::GridRow(_) => {
                     let s = Value::String(Chars::from("orphaned grid row"));
-                    let spec = view::Widget {
-                        kind: view::WidgetKind::Label(view::Source::Constant(s)),
-                        props: DEFAULT_PROPS,
-                    };
+                    let spec = view::Source::Constant(s);
                     Widget::Label(widgets::Label::new(
                         ctx.clone(),
                         variables,
@@ -399,13 +396,23 @@ impl Widget {
                         w.children[i].set_highlight(path, h)
                     }
                 }
-                (WidgetPath::Grid(i, j), Widget::Grid(w)) => {
+                (WidgetPath::GridItem(i, j), Widget::Grid(w)) => {
                     if i < w.children.len() && j < w.children[i].len() {
                         w.children[i][j].set_highlight(path, h)
                     }
                 }
+                (WidgetPath::GridRow(i), Widget::Grid(w)) => {
+                    if i < w.children.len() {
+                        for c in &w.children[i] {
+                            if let Some(r) = c.root() {
+                                set(r, h);
+                            }
+                        }
+                    }
+                }
                 (WidgetPath::Box(_), _) => (),
-                (WidgetPath::Grid(_, _), _) => (),
+                (WidgetPath::GridItem(_, _), _) => (),
+                (WidgetPath::GridRow(_), _) => (),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Action(_)) => (),

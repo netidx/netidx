@@ -1093,7 +1093,7 @@ impl Widget {
                 homogeneous_rows: false,
                 column_spacing: 0,
                 row_spacing: 0,
-                children: Vec::new(),
+                rows: Vec::new(),
             })),
             Some("GridChild") => {
                 let s = Value::String(Chars::from("empty grid child"));
@@ -1407,13 +1407,7 @@ impl Editor {
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(
-            ctx,
-            on_change.clone(),
-            store,
-            &iter,
-            WidgetSpec::Widget(w.clone()),
-        );
+        Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
         match &w.kind {
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
@@ -1479,14 +1473,12 @@ impl Editor {
                     }
                     view::WidgetKind::BoxChild(ref mut b) => {
                         if let Some(iter) = store.iter_children(Some(root)) {
-                            b.widget =
-                                boxed::Box::new(Editor::build_spec(store, &iter));
+                            b.widget = boxed::Box::new(Editor::build_spec(store, &iter));
                         }
                     }
                     view::WidgetKind::GridChild(ref mut g) => {
                         if let Some(iter) = store.iter_children(Some(root)) {
-                            g.widget =
-                                boxed::Box::new(Editor::build_spec(store, &iter));
+                            g.widget = boxed::Box::new(Editor::build_spec(store, &iter));
                         }
                     }
                     view::WidgetKind::Grid(ref mut g) => {
@@ -1574,6 +1566,11 @@ impl Editor {
                 WidgetKind::Grid(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf)
+                    } else if path.len() == 1 {
+                        match path[0] {
+                            WidgetPath::GridRow(_) => (),
+                            _ => path.insert(0, WidgetPath::GridItem(nrow, nchild)),
+                        }
                     } else {
                         path.insert(0, WidgetPath::GridItem(nrow, nchild))
                     }
