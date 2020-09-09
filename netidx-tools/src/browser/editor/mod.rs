@@ -989,6 +989,7 @@ impl Widget {
         if let Some(r) = kind.root() {
             let exp = gtk::Expander::new(Some("Widget Config"));
             exp.add(r);
+            exp.set_expanded(true);
             root.pack_start(&exp, false, false, 0);
         }
         store.set_value(iter, 0, &name.to_value());
