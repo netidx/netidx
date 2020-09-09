@@ -214,7 +214,6 @@ pub struct Grid {
     pub homogeneous_rows: bool,
     pub column_spacing: u32,
     pub row_spacing: u32,
-    pub direction: Direction,
     pub children: Vec<Vec<Widget>>,
 }
 
