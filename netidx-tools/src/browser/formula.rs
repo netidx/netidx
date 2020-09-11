@@ -1,13 +1,15 @@
-use super::Source;
+use super::{Source, WidgetCtx};
 use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
-use netidx_protocols::value_type::Typ;
+use netidx_protocols::{value_type::Typ, view};
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
+    collections::HashMap,
+    result::Result,
     sync::Arc,
 };
 
@@ -683,6 +685,71 @@ fn eval_isa(from: &CachedVals) -> Option<Value> {
     })
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct Eval {
+    ctx: WidgetCtx,
+    cached: CachedVals,
+    current: RefCell<Result<Source, Value>>,
+}
+
+impl Eval {
+    fn new(ctx: &WidgetCtx, from: &[Source]) -> Self {
+        Eval {
+            ctx: ctx.clone(),
+            cached: CachedVals::new(from),
+            current: RefCell::new(Err(Value::Null)),
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        match &*self.current.borrow() {
+            Ok(s) => s.current(),
+            Err(v) => Some(v.clone()),
+        }
+    }
+
+    fn compile(&self) {
+        *self.current.borrow_mut() = match &**self.cached.0.borrow() {
+            [None] => Err(Value::Null),
+            [Some(v)] => match v {
+                Value::String(s) => match s.parse::<view::Source>() {
+                    Ok(spec) => Ok(Source::new(&self.ctx, &HashMap::new(), spec)),
+                    Err(e) => {
+                        let e = format!("eval(src), error parsing formula {}", e);
+                        Err(Value::Error(Chars::from(e)))
+                    }
+                },
+                v => {
+                    let e = format!("eval(src) expected 1 string argument, not {}", v);
+                    Err(Value::Error(Chars::from(e)))
+                }
+            },
+            _ => Err(Value::Error(Chars::from("eval(src) expected 1 argument"))),
+        }
+    }
+
+    fn update(
+        &self,
+        from: &[Source],
+        changed: &Arc<IndexMap<SubId, Value>>,
+    ) -> Option<Value> {
+        if self.cached.update(from, changed) {
+            self.compile();
+            self.eval()
+        } else {
+            None
+        }
+    }
+
+    fn update_var(&self, from: &[Source], name: &str, value: &Value) -> Option<Value> {
+        if self.cached.update_var(from, name, value) {
+            self.compile();
+            self.eval()
+        } else {
+            None
+        }
+    }
+}
 fn update_cached(
     eval: impl Fn(&CachedVals) -> Option<Value>,
     cached: &CachedVals,
@@ -728,16 +795,17 @@ pub(super) enum Formula {
     Filter(CachedVals),
     Cast(CachedVals),
     IsA(CachedVals),
+    Eval(Eval),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 16] = [
+pub(super) static FORMULAS: [&'static str; 17] = [
     "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
-    "cmp", "if", "filter", "cast", "isa",
+    "cmp", "if", "filter", "cast", "isa", "eval",
 ];
 
 impl Formula {
-    pub(super) fn new(name: String, from: &[Source]) -> Formula {
+    pub(super) fn new(ctx: &WidgetCtx, name: String, from: &[Source]) -> Formula {
         match name.as_str() {
             "any" => Formula::Any(RefCell::new(None)),
             "all" => Formula::All(CachedVals::new(from)),
@@ -755,6 +823,7 @@ impl Formula {
             "filter" => Formula::Filter(CachedVals::new(from)),
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
+            "eval" => Formula::Eval(Eval::new(ctx, from)),
             _ => Formula::Unknown(name),
         }
     }
@@ -777,6 +846,7 @@ impl Formula {
             Formula::Filter(c) => eval_filter(c),
             Formula::Cast(c) => eval_cast(c),
             Formula::IsA(c) => eval_isa(c),
+            Formula::Eval(e) => e.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -815,6 +885,7 @@ impl Formula {
             Formula::Filter(c) => update_cached(eval_filter, c, from, changed),
             Formula::Cast(c) => update_cached(eval_cast, c, from, changed),
             Formula::IsA(c) => update_cached(eval_isa, c, from, changed),
+            Formula::Eval(e) => e.update(from, changed),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -854,6 +925,7 @@ impl Formula {
             Formula::Filter(c) => update_var_cached(eval_filter, c, from, name, value),
             Formula::Cast(c) => update_var_cached(eval_cast, c, from, name, value),
             Formula::IsA(c) => update_var_cached(eval_isa, c, from, name, value),
+            Formula::Eval(e) => e.update_var(from, name, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

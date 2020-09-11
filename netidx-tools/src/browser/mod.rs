@@ -43,6 +43,7 @@ use std::{
     },
     thread,
     time::Duration,
+    boxed::Box,
 };
 use tokio::{runtime::Runtime, task};
 use util::{ask_modal, err_modal};
@@ -113,7 +114,7 @@ enum Source {
     Constant(Value),
     Load(Dval),
     Variable(String, Rc<RefCell<Value>>),
-    Map { from: Vec<Source>, function: Formula },
+    Map { from: Vec<Source>, function: Box<Formula> },
 }
 
 impl Source {
@@ -139,7 +140,7 @@ impl Source {
                     .into_iter()
                     .map(|spec| Source::new(ctx, variables, spec))
                     .collect();
-                let function = Formula::new(function, &*from);
+                let function = Box::new(Formula::new(ctx, function, &*from));
                 Source::Map { from, function }
             }
         }
