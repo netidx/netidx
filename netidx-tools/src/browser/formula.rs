@@ -694,11 +694,13 @@ pub(super) struct Eval {
 
 impl Eval {
     fn new(ctx: &WidgetCtx, from: &[Source]) -> Self {
-        Eval {
+        let t = Eval {
             ctx: ctx.clone(),
             cached: CachedVals::new(from),
             current: RefCell::new(Err(Value::Null)),
-        }
+        };
+        t.compile();
+        t
     }
 
     fn eval(&self) -> Option<Value> {
@@ -715,7 +717,7 @@ impl Eval {
                 Value::String(s) => match s.parse::<view::Source>() {
                     Ok(spec) => Ok(Source::new(&self.ctx, &HashMap::new(), spec)),
                     Err(e) => {
-                        let e = format!("eval(src), error parsing formula {}", e);
+                        let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
                     }
                 },
@@ -735,18 +737,20 @@ impl Eval {
     ) -> Option<Value> {
         if self.cached.update(from, changed) {
             self.compile();
-            self.eval()
-        } else {
-            None
+        }
+        match &*self.current.borrow() {
+            Ok(s) => s.update(changed),
+            Err(v) => Some(v.clone())
         }
     }
 
     fn update_var(&self, from: &[Source], name: &str, value: &Value) -> Option<Value> {
         if self.cached.update_var(from, name, value) {
             self.compile();
-            self.eval()
-        } else {
-            None
+        }
+        match &*self.current.borrow() {
+            Ok(s) => s.update(changed),
+            Err(v) => Some(v.clone())
         }
     }
 }
