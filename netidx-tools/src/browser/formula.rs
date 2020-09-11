@@ -602,9 +602,13 @@ fn eval_if(from: &CachedVals) -> Option<Value> {
             None => None,
             Some(Value::True) => b1.clone(),
             Some(Value::False) => b2.clone(),
-            _ => Some(Value::Error(Chars::from("if: expected boolean condition"))),
+            _ => Some(Value::Error(Chars::from(
+                "if(predicate, caseIf, caseElse): expected boolean condition",
+            ))),
         },
-        _ => Some(Value::Error(Chars::from("if: expected 3 arguments"))),
+        _ => Some(Value::Error(Chars::from(
+            "if(predicate, caseIf, caseElse): expected 3 arguments",
+        ))),
     }
 }
 
@@ -633,26 +637,19 @@ fn with_typ_prefix(
 }
 
 fn eval_filter(from: &CachedVals) -> Option<Value> {
-    with_typ_prefix(from, "filter(typ, src)", |typ, v| match (typ, v) {
-        (_, None) => None,
-        (Typ::U32, v @ Some(Value::U32(_))) => v.clone(),
-        (Typ::V32, v @ Some(Value::V32(_))) => v.clone(),
-        (Typ::I32, v @ Some(Value::I32(_))) => v.clone(),
-        (Typ::Z32, v @ Some(Value::Z32(_))) => v.clone(),
-        (Typ::U64, v @ Some(Value::U64(_))) => v.clone(),
-        (Typ::V64, v @ Some(Value::V64(_))) => v.clone(),
-        (Typ::I64, v @ Some(Value::I64(_))) => v.clone(),
-        (Typ::Z64, v @ Some(Value::Z64(_))) => v.clone(),
-        (Typ::F32, v @ Some(Value::F32(_))) => v.clone(),
-        (Typ::F64, v @ Some(Value::F64(_))) => v.clone(),
-        (Typ::Bool, v @ Some(Value::True)) => v.clone(),
-        (Typ::Bool, v @ Some(Value::False)) => v.clone(),
-        (Typ::String, v @ Some(Value::String(_))) => v.clone(),
-        (Typ::Bytes, v @ Some(Value::Bytes(_))) => v.clone(),
-        (Typ::Result, v @ Some(Value::Ok)) => v.clone(),
-        (Typ::Result, v @ Some(Value::Error(_))) => v.clone(),
-        (_, _) => None,
-    })
+    match &**from.0.borrow() {
+        [pred, s] => match pred {
+            None => None,
+            Some(Value::True) => s.clone(),
+            Some(Value::False) => None,
+            _ => Some(Value::Error(Chars::from(
+                "filter(predicate, source) expected boolean predicate",
+            ))),
+        },
+        _ => Some(Value::Error(Chars::from(
+            "filter(predicate, source): expected 2 arguments",
+        ))),
+    }
 }
 
 fn eval_cast(from: &CachedVals) -> Option<Value> {
@@ -740,7 +737,7 @@ impl Eval {
         }
         match &*self.current.borrow() {
             Ok(s) => s.update(changed),
-            Err(v) => Some(v.clone())
+            Err(v) => Some(v.clone()),
         }
     }
 
@@ -750,7 +747,7 @@ impl Eval {
         }
         match &*self.current.borrow() {
             Ok(s) => s.update_var(name, value),
-            Err(v) => Some(v.clone())
+            Err(v) => Some(v.clone()),
         }
     }
 }
