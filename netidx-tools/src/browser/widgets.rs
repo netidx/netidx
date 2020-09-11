@@ -147,6 +147,9 @@ impl Action {
     ) -> Self {
         let source = Source::new(&ctx, variables, spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
+        if let Some(cur) = source.current() {
+            sink.set(&ctx, cur);
+        }
         Action { source, sink, ctx }
     }
 
