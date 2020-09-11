@@ -749,7 +749,7 @@ impl Eval {
             self.compile();
         }
         match &*self.current.borrow() {
-            Ok(s) => s.update(changed),
+            Ok(s) => s.update_var(name, value),
             Err(v) => Some(v.clone())
         }
     }
