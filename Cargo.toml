@@ -11,7 +11,7 @@ keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
 [features]
-default = ["krb5_iov"]
+default = []
 krb5_iov = ["libgssapi/iov"]
 
 [target.'cfg(unix)'.dependencies]
