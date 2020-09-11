@@ -10,8 +10,12 @@ documentation = "https://docs.rs/netidx"
 keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
+[features]
+default = ["krb5_iov"]
+krb5_iov = ["libgssapi/iov"]
+
 [target.'cfg(unix)'.dependencies]
-libgssapi = "0.4"
+libgssapi = { version = "0.4", default_features = false }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi", "ntsecapi"] }
@@ -31,7 +35,7 @@ bytes = { version = "0.5", features = ["serde"] }
 byteorder = "1"
 pin-utils = "0.1"
 crossbeam = "0.7"
-parking_lot = "0.10"
+parking_lot = "0.11"
 bitflags = "1"
 arc-swap = "0.4"
 get_if_addrs = "0.5"

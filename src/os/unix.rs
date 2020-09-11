@@ -1,6 +1,10 @@
 use super::{Krb5Ctx, Krb5ServerCtx};
 use anyhow::{anyhow, Error, Result};
-use bytes::{Buf as _, BytesMut};
+#[cfg(feature = "krb5_iov")]
+use bytes::Buf as _;
+use bytes::BytesMut;
+#[cfg(feature = "krb5_iov")]
+use libgssapi::util::{GssIov, GssIovFake, GssIovType};
 use libgssapi::{
     context::{
         ClientCtx as GssClientCtx, CtxFlags, SecurityContext, ServerCtx as GssServerCtx,
@@ -9,11 +13,12 @@ use libgssapi::{
     error::{Error as GssError, MajorFlags},
     name::Name,
     oid::{OidSet, GSS_MECH_KRB5, GSS_NT_KRB5_PRINCIPAL},
-    util::{Buf, GssIov, GssIovFake, GssIovType},
+    util::Buf,
 };
 use std::{process::Command, time::Duration};
 use tokio::task;
 
+#[cfg(feature = "krb5_iov")]
 fn wrap_iov(
     ctx: &impl SecurityContext,
     encrypt: bool,
@@ -41,6 +46,21 @@ fn wrap_iov(
     Ok(ctx.wrap_iov(encrypt, &mut iovs)?)
 }
 
+#[cfg(not(feature = "krb5_iov"))]
+fn wrap_iov(
+    ctx: &impl SecurityContext,
+    encrypt: bool,
+    _header: &mut BytesMut,
+    data: &mut BytesMut,
+    _padding: &mut BytesMut,
+    _trailer: &mut BytesMut,
+) -> Result<()> {
+    let token = ctx.wrap(encrypt, &**data)?;
+    data.clear();
+    Ok(data.extend_from_slice(&*token))
+}
+
+#[cfg(feature = "krb5_iov")]
 fn unwrap_iov(
     ctx: &impl SecurityContext,
     len: usize,
@@ -60,6 +80,19 @@ fn unwrap_iov(
     let data = msg.split_to(data_len);
     msg.advance(len - hdr_len - data_len);
     Ok(data) // return the decrypted contents
+}
+
+#[cfg(not(feature = "krb5_iov"))]
+fn unwrap_iov(
+    ctx: &impl SecurityContext,
+    len: usize,
+    msg: &mut BytesMut,
+) -> Result<BytesMut> {
+    let mut msg = msg.split_to(len);
+    let decrypted = ctx.unwrap(&*msg)?;
+    msg.clear();
+    msg.extend_from_slice(&*decrypted);
+    Ok(msg)
 }
 
 #[derive(Debug, Clone)]
@@ -164,8 +197,9 @@ pub(crate) fn create_client_ctx(
                     .canonicalize(Some(&GSS_MECH_KRB5))
             })
             .transpose()?;
-        let target = Name::new(target_principal.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
-            .canonicalize(Some(&GSS_MECH_KRB5))?;
+        let target =
+            Name::new(target_principal.as_bytes(), Some(&GSS_NT_KRB5_PRINCIPAL))?
+                .canonicalize(Some(&GSS_MECH_KRB5))?;
         let cred = {
             let mut s = OidSet::new()?;
             s.add(&GSS_MECH_KRB5)?;

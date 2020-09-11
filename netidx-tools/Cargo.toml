@@ -21,7 +21,7 @@ lto = true
 debug = false
 
 [profile.dev]
-opt-level = "s"
+opt-level = "z"
 lto = "thin"
 debug = 1
 
@@ -29,8 +29,9 @@ debug = 1
 daemonize = "0.4"
 
 [features]
-default = ["browser"]
+default = ["browser", "krb5_iov"]
 browser = ["gtk/v3_24", "gio", "glib", "gdk"]
+krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 futures = "0.3"
