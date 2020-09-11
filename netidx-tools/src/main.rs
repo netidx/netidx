@@ -2,6 +2,7 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate netidx;
 #[macro_use] extern crate anyhow;
+#[cfg(feature = "browser")]
 #[macro_use] extern crate glib;
 
 use log::warn;
