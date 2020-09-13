@@ -165,8 +165,8 @@ impl Pack for To {
             To::Write(id, v, reply) => {
                 buf.put_u8(2);
                 Id::encode(id, buf)?;
-                <bool as Pack>::encode(reply, buf)?;
-                Value::encode(v, buf)
+                Value::encode(v, buf)?
+                <bool as Pack>::encode(reply, buf)
             }
         }
     }
