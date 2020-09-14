@@ -815,22 +815,18 @@ impl WidgetProps {
                 c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
-        grid.add(parse_entry(
-            "Expand Horizontally:",
-            &spec.borrow().hexpand,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().hexpand = s;
-                on_change()
-            }),
-        ));
-        grid.add(parse_entry(
-            "Expand Vertically:",
-            &spec.borrow().vexpand,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().vexpand = s;
-                on_change()
-            }),
-        ));
+        let hexp = gtk::CheckButton::with_label("Expand Horizontally:");
+        grid.attach(&hexp, 0, 2, 1);
+        hexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
+            spec.borrow_mut().hexpand = b.get_active();
+            on_change()
+        }));
+        let vexp = gtk::CheckButton::with_label("Expand Vertically:");
+        grid.attach(&vexp, 0, 2, 1);
+        vexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
+            spec.borrow_mut().vexpand = b.get_active();
+            on_change()
+        }));
         grid.add(parse_entry(
             "Top Margin:",
             &spec.borrow().margin_top,
@@ -1095,8 +1091,8 @@ impl Widget {
                     props: DEFAULT_PROPS,
                 };
                 widget(view::WidgetKind::GridChild(view::GridChild {
-                    width: 0,
-                    height: 0,
+                    width: 1,
+                    height: 1,
                     widget: boxed::Box::new(w),
                 }))
             }
