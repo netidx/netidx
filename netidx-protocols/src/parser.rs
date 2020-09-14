@@ -1,12 +1,12 @@
 use crate::view::{Sink, SinkLeaf, Source};
 use base64;
+use bytes::Bytes;
 use combine::{
     attempt, between, choice,
-    error::{Commit, StreamError},
     from_str, many1, optional,
     parser::{
         char::{digit, spaces, string},
-        combinator::{parser, recognize},
+        combinator::recognize,
         range::{take_while, take_while1},
         repeat::escaped,
     },
@@ -15,6 +15,7 @@ use combine::{
     token, EasyParser, ParseError, Parser, RangeStream,
 };
 use netidx::{chars::Chars, path::Path, publisher::Value};
+use std::{result::Result, str::FromStr};
 
 fn unescape(s: String, esc: char) -> String {
     if !s.contains(esc) {
@@ -41,7 +42,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize(escaped(take_while1(|c| c != cq && c != '\\'), '\\', token(cq)))
+    recognize(escaped(take_while1(move |c| c != cq && c != '\\'), '\\', token(cq)))
         .map(|s| unescape(s, '\\'))
 }
 
@@ -81,24 +82,26 @@ where
     recognize((digit(), optional(token('.')), take_while(|c: char| c.is_digit(10))))
 }
 
-fn base64<I>() -> impl Parser<I, Output = Vec<u8>>
+struct Base64Encoded(Vec<u8>);
+
+impl FromStr for Base64Encoded {
+    type Err = base64::DecodeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        base64::decode(s).map(Base64Encoded)
+    }
+}
+
+fn base64str<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    parser(|input| {
-        let position = input.position();
-        let (b64, committed) = take_while(|c: char| {
-            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
-        })
-        .parse_stream(input)
-        .into_result()?;
-        match base64::decode(b64) {
-            Ok(v) => Ok((v, committed)),
-            Err(e) => Err(Commit::Commit(StreamError::expected("valid base64"))),
-        }
-    })
+    recognize((
+        take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
+        take_while(|c: char| c == '='),
+    ))
 }
 
 fn fname<I>() -> impl Parser<I, Output = String>
@@ -113,7 +116,7 @@ where
     ))
 }
 
-fn constant<I>(typ: &'static str) -> impl Parser<I, Output = String>
+fn constant<I>(typ: &'static str) -> impl Parser<I, Output = char>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -145,7 +148,7 @@ where
             constant("v32")
                 .with(spaces().with(from_str(uint())))
                 .and(spaces().with(token(')')))
-                .map(|(v,)| Source::Constant(Value::V32(v))),
+                .map(|(v, _)| Source::Constant(Value::V32(v))),
         ),
         attempt(
             constant("i32")
@@ -197,15 +200,17 @@ where
         ),
         attempt(
             constant("string")
-                .with(quoted_string(')'))
+                .with(escaped_string(')'))
                 .and(spaces().with(token(')')))
                 .map(|(v, _)| Source::Constant(Value::String(Chars::from(v)))),
         ),
         attempt(
-            constant("binary")
-                .with(base64())
+            constant("bytes")
+                .with(from_str(base64str()))
                 .and(spaces().with(token(')')))
-                .map(|(v, _)| Source::Constant(Value::Binary(Bytes::from(v)))),
+                .map(|(Base64Encoded(v), _)| {
+                    Source::Constant(Value::Bytes(Bytes::from(v)))
+                }),
         ),
         attempt(
             constant("bool")
@@ -239,7 +244,7 @@ where
             constant("result")
                 .with(escaped_string(')'))
                 .and(spaces().with(token(')')))
-                .map(|(s, _)| Source::Constant(Value::Err(Chars::from(s)))),
+                .map(|(s, _)| Source::Constant(Value::Error(Chars::from(s)))),
         ),
         attempt(
             string("load_path")
@@ -301,7 +306,7 @@ where
                     spaces().with(token(')')),
                     spaces().with(fname()),
                 ))
-                .map(|(_, s)| SinkLeaf::Variable(s)),
+                .map(|s| SinkLeaf::Variable(s)),
         ),
     )))
 }

@@ -118,7 +118,7 @@ impl ToString for Sink {
                 let mut s = format!("{}(", function);
                 for i in 0..from.len() {
                     s.push_str(&from[i].to_string());
-                    if i < lv.len() - 1 {
+                    if i < from.len() - 1 {
                         s.push_str(", ");
                     }
                 }
