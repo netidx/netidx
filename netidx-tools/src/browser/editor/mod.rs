@@ -815,13 +815,13 @@ impl WidgetProps {
                 c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
-        let hexp = gtk::CheckButton::with_label("Expand Horizontally:");
+        let hexp = gtk::CheckButton::with_label("Expand Horizontally");
         grid.attach(&hexp, 0, 2, 1);
         hexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
             spec.borrow_mut().hexpand = b.get_active();
             on_change()
         }));
-        let vexp = gtk::CheckButton::with_label("Expand Vertically:");
+        let vexp = gtk::CheckButton::with_label("Expand Vertically");
         grid.attach(&vexp, 0, 2, 1);
         vexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
             spec.borrow_mut().vexpand = b.get_active();
