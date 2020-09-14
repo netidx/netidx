@@ -1,9 +1,8 @@
-use crate::view::{Sink, SinkLeaf, Source};
+use crate::view::{Sink, Source};
 use base64;
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice,
-    from_str, many1, optional,
+    attempt, between, choice, from_str, many1, optional,
     parser::{
         char::{digit, spaces, string},
         combinator::recognize,
@@ -287,7 +286,7 @@ pub fn parse_source(s: &str) -> anyhow::Result<Source> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-fn sink_leaf<I>() -> impl Parser<I, Output = SinkLeaf>
+fn sink_<I>() -> impl Parser<I, Output = Sink>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -297,7 +296,7 @@ where
         attempt(
             string("store_path")
                 .with(quoted('(', ')'))
-                .map(|s| SinkLeaf::Store(Path::from(s))),
+                .map(|s| Sink::Store(Path::from(s))),
         ),
         attempt(
             string("store_var")
@@ -306,28 +305,19 @@ where
                     spaces().with(token(')')),
                     spaces().with(fname()),
                 ))
-                .map(|s| SinkLeaf::Variable(s)),
+                .map(|s| Sink::Variable(s)),
         ),
-    )))
-}
-
-fn sink_<I>() -> impl Parser<I, Output = Sink>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spaces().with(choice((
-        sink_leaf().map(Sink::Leaf),
-        (
-            fname(),
-            between(
-                spaces().with(token('(')),
-                spaces().with(token(')')),
-                spaces().with(sep_by1(sink(), spaces().with(token(',')))),
-            ),
-        )
-            .map(|(function, from)| Sink::Map { function, from }),
+        attempt(
+            (
+                fname(),
+                between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    spaces().with(sep_by1(sink(), spaces().with(token(',')))),
+                ),
+            )
+                .map(|(function, from)| Sink::Map { function, from }),
+        ),
     )))
 }
 

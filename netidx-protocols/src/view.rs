@@ -77,23 +77,9 @@ impl ToString for Source {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum SinkLeaf {
+pub enum Sink {
     Store(Path),
     Variable(String),
-}
-
-impl ToString for SinkLeaf {
-    fn to_string(&self) -> String {
-        match self {
-            SinkLeaf::Store(p) => format!("store_path({})", p),
-            SinkLeaf::Variable(v) => format!("store_var({})", v),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum Sink {
-    Leaf(SinkLeaf),
     Map {
         /// the sinks we are mapping from
         from: Vec<Sink>,
@@ -113,7 +99,8 @@ impl FromStr for Sink {
 impl ToString for Sink {
     fn to_string(&self) -> String {
         match self {
-            Sink::Leaf(l) => l.to_string(),
+            Sink::Store(p) => format!("store_path({})", p),
+            Sink::Variable(v) => format!("store_var({})", v),
             Sink::Map { from, function } => {
                 let mut s = format!("{}(", function);
                 for i in 0..from.len() {
