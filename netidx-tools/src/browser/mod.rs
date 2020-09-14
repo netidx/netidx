@@ -31,6 +31,7 @@ use netidx::{
 use netidx_protocols::view as protocol_view;
 use once_cell::sync::OnceCell;
 use std::{
+    boxed::Box,
     cell::{Cell, RefCell},
     collections::HashMap,
     fmt, fs, mem,
@@ -43,7 +44,6 @@ use std::{
     },
     thread,
     time::Duration,
-    boxed::Box,
 };
 use tokio::{runtime::Runtime, task};
 use util::{ask_modal, err_modal};
@@ -180,25 +180,37 @@ impl Source {
 }
 
 #[derive(Clone)]
+enum SinkAction {
+    All,
+    Confirm,
+    Navigate,
+    Unknown(String),
+}
+
+#[derive(Clone)]
 enum Sink {
     Store(Dval),
     Variable(String),
-    Map {from: Vec<Sink>, function: SinkFormula }
+    Map { from: Vec<Sink>, function: SinkAction },
 }
 
 impl Sink {
     fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
         match spec {
-            view::Sink::Leaf(view::SinkLeaf::Variable(name)) => Sink::Variable(name),
-            view::Sink::Leaf(view::SinkLeaf::Store(path)) => {
+            view::Sink::Variable(name) => Sink::Variable(name),
+            view::Sink::Store(path) => {
                 Sink::Store(ctx.subscriber.durable_subscribe(path))
             }
-            view::Sink::All(sinks) => Sink::All(
-                sinks
-                    .into_iter()
-                    .map(|spec| Sink::new(ctx, view::Sink::Leaf(spec)))
-                    .collect(),
-            ),
+            view::Sink::Map { from, function } => {
+                let function = match function.as_str() {
+                    "all" => SinkAction::All,
+                    "confirm" => SinkAction::Confirm,
+                    "navigate" => SinkAction::Navigate,
+                    _ => SinkAction::Unknown(function),
+                };
+                let from = from.into_iter().map(|spec| Sink::new(ctx, spec)).collect();
+                Sink::Map { function, from }
+            }
         }
     }
 

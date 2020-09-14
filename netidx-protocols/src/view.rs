@@ -82,12 +82,9 @@ impl ToString for Source {
 pub enum Sink {
     Store(Path),
     Variable(String),
-    Map {
-        /// the sinks we are mapping from
-        from: Vec<Sink>,
-        /// the name of the built in function to be applied
-        function: String,
-    },
+    Navigate,
+    All(Vec<Sink>),
+    Confirm(boxed::Box<Sink>),
 }
 
 impl FromStr for Sink {
@@ -105,11 +102,13 @@ impl ToString for Sink {
                 format!(r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
             }
             Sink::Variable(v) => format!("store_var({})", v),
-            Sink::Map { from, function } => {
-                let mut s = format!("{}(", function);
-                for i in 0..from.len() {
-                    s.push_str(&from[i].to_string());
-                    if i < from.len() - 1 {
+            Sink::Navigate => format!("navigate()"),
+            Sink::Confirm(sink) => format!("confirm({})", sink.to_string()),
+            Sink::All(sinks) => {
+                let mut s = String::from("all(");
+                for i in 0..sinks.len() {
+                    s.push_str(&sinks[i].to_string());
+                    if i < sinks.len() - 1 {
                         s.push_str(", ");
                     }
                 }
@@ -271,14 +270,15 @@ mod tests {
     fn sink_round_trip() {
         let s = Sink::Store(Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#));
         assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
-        let s = Sink::Map {
-            from: vec![
-                Sink::Store(Path::from("/foo/bar")),
-                Sink::Variable(String::from("foo")),
-            ],
-            function: String::from("all"),
-        };
-        assert_eq!(s, s.to_string().parse::<Sink>().unwrap())
+        let s = Sink::All(vec![
+            Sink::Store(Path::from("/foo/bar")),
+            Sink::Variable(String::from("foo")),
+        ]);
+        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
+        let s = Sink::Navigate;
+        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
+        let s = Sink::Confirm(boxed::Box::new(Sink::Navigate));
+        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
     }
 
     fn check(s: Source) {

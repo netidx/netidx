@@ -14,7 +14,7 @@ use combine::{
     token, EasyParser, ParseError, Parser, RangeStream,
 };
 use netidx::{chars::Chars, path::Path, publisher::Value};
-use std::{result::Result, str::FromStr};
+use std::{result::Result, str::FromStr, boxed};
 
 fn unescape(s: String, esc: char) -> String {
     if !s.contains(esc) {
@@ -316,15 +316,30 @@ where
                 .map(|s| Sink::Variable(s)),
         ),
         attempt(
-            (
-                fname(),
-                between(
+            string("navigate")
+                .with(spaces())
+                .with(token('('))
+                .with(spaces())
+                .with(token(')'))
+                .map(|_| Sink::Navigate),
+        ),
+        attempt(
+            string("all")
+                .with(between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
                     spaces().with(sep_by1(sink(), spaces().with(token(',')))),
-                ),
-            )
-                .map(|(function, from)| Sink::Map { function, from }),
+                ))
+                .map(|sinks| Sink::All(sinks)),
+        ),
+        attempt(
+            string("confirm")
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    spaces().with(sink()),
+                ))
+                .map(|s| Sink::Confirm(boxed::Box::new(s))),
         ),
     )))
 }
@@ -347,6 +362,7 @@ pub fn parse_sink(s: &str) -> anyhow::Result<Sink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::boxed;
 
     #[test]
     fn sink_parse() {
@@ -357,15 +373,18 @@ mod tests {
             Sink::Variable(String::from("foo")),
             parse_sink("store_var(foo)").unwrap()
         );
-        let snk = Sink::Map {
-            from: vec![
-                Sink::Store(Path::from("/foo/bar")),
-                Sink::Variable(String::from("foo")),
-            ],
-            function: String::from("all"),
-        };
+
+        let snk = Sink::All(vec![
+            Sink::Store(Path::from("/foo/bar")),
+            Sink::Variable(String::from("foo")),
+        ]);
         let chs = r#"all(store_path("/foo/bar"), store_var(foo))"#;
         assert_eq!(snk, parse_sink(chs).unwrap());
+        assert_eq!(Sink::Navigate, parse_sink("navigate()").unwrap());
+        assert_eq!(
+            Sink::Confirm(boxed::Box::new(Sink::Navigate)),
+            parse_sink("confirm(navigate())").unwrap()
+        );
     }
 
     #[test]
