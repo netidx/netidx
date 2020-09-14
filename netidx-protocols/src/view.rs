@@ -48,7 +48,7 @@ impl ToString for Source {
                 Value::F32(v) => format!("constant(f32, {})", v),
                 Value::F64(v) => format!("constant(f64, {})", v),
                 Value::String(s) => {
-                    format!(r#"constant(string, {})"#, utils::escape(&*s, '\\', ')'))
+                    format!(r#"constant(string, "{}")"#, utils::escape(&*s, '\\', '"'))
                 }
                 Value::Bytes(b) => format!("constant(binary, {})", base64::encode(&*b)),
                 Value::True => String::from("constant(bool, true)"),
@@ -56,10 +56,12 @@ impl ToString for Source {
                 Value::Null => String::from("constant(null)"),
                 Value::Ok => String::from("constant(result, ok)"),
                 Value::Error(v) => {
-                    format!("constant(result, {})", utils::escape(&*v, '\\', ')'))
+                    format!(r#"constant(result, "{}")"#, utils::escape(&*v, '\\', '"'))
                 }
             },
-            Source::Load(p) => format!("load_path({})", utils::escape(&*p, '\\', ')')),
+            Source::Load(p) => {
+                format!(r#"load_path("{}")"#, utils::escape(&*p, '\\', '"'))
+            }
             Source::Variable(v) => format!("load_var({})", v),
             Source::Map { from, function } => {
                 let mut res = format!("{}(", function);
@@ -99,7 +101,9 @@ impl FromStr for Sink {
 impl ToString for Sink {
     fn to_string(&self) -> String {
         match self {
-            Sink::Store(p) => format!("store_path({})", p),
+            Sink::Store(p) => {
+                format!(r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
+            }
             Sink::Variable(v) => format!("store_var({})", v),
             Sink::Map { from, function } => {
                 let mut s = format!("{}(", function);
@@ -256,4 +260,72 @@ pub struct View {
     pub variables: HashMap<String, Value>,
     pub keybinds: Vec<Keybind>,
     pub root: Widget,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netidx::chars::Chars;
+
+    #[test]
+    fn sink_round_trip() {
+        let s = Sink::Store(Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#));
+        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
+        let s = Sink::Map {
+            from: vec![
+                Sink::Store(Path::from("/foo/bar")),
+                Sink::Variable(String::from("foo")),
+            ],
+            function: String::from("all"),
+        };
+        assert_eq!(s, s.to_string().parse::<Sink>().unwrap())
+    }
+
+    fn check(s: Source) {
+        assert_eq!(s, s.to_string().parse::<Source>().unwrap())
+    }
+
+    #[test]
+    fn source_round_trip() {
+        check(Source::Constant(Value::U32(23)));
+        check(Source::Constant(Value::V32(42)));
+        check(Source::Constant(Value::I32(-10)));
+        check(Source::Constant(Value::I32(12321)));
+        check(Source::Constant(Value::Z32(-99)));
+        check(Source::Constant(Value::U64(100)));
+        check(Source::Constant(Value::V64(100)));
+        check(Source::Constant(Value::I64(-100)));
+        check(Source::Constant(Value::I64(100)));
+        check(Source::Constant(Value::Z64(-100)));
+        check(Source::Constant(Value::Z64(100)));
+        check(Source::Constant(Value::F32(3.1415)));
+        check(Source::Constant(Value::F32(3.)));
+        check(Source::Constant(Value::F32(3.)));
+        check(Source::Constant(Value::F64(3.1415)));
+        check(Source::Constant(Value::F64(3.)));
+        check(Source::Constant(Value::F64(3.)));
+        let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
+        check(Source::Constant(Value::String(c)));
+        check(Source::Constant(Value::True));
+        check(Source::Constant(Value::False));
+        check(Source::Constant(Value::Null));
+        check(Source::Constant(Value::Ok));
+        check(Source::Constant(Value::Error(Chars::from("error"))));
+        check(Source::Load(Path::from(r#"/foo bar baz/"zam"/)_ xyz+ "#)));
+        check(Source::Variable(String::from("sum")));
+        check(Source::Map {
+            from: vec![
+                Source::Constant(Value::F32(1.)),
+                Source::Load(Path::from("/foo/bar")),
+                Source::Map {
+                    from: vec![
+                        Source::Constant(Value::F32(0.)),
+                        Source::Load(Path::from("/foo/baz")),
+                    ],
+                    function: String::from("max"),
+                },
+            ],
+            function: String::from("sum"),
+        });
+    }
 }

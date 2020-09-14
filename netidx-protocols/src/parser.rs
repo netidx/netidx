@@ -299,7 +299,11 @@ where
     spaces().with(choice((
         attempt(
             string("store_path")
-                .with(quoted('(', ')'))
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    quoted('"', '"'),
+                ))
                 .map(|s| Sink::Store(Path::from(s))),
         ),
         attempt(
@@ -346,8 +350,8 @@ mod tests {
 
     #[test]
     fn sink_parse() {
-        let p = Path::from(r#"/foo bar baz/(zam)/_ xyz+ "#);
-        let s = r#"store_path(/foo bar baz/(zam\)/_ xyz+ )"#;
+        let p = Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#);
+        let s = r#"store_path("/foo bar baz/\"(zam)\"/_ xyz+ ")"#;
         assert_eq!(Sink::Store(p), parse_sink(s).unwrap());
         assert_eq!(
             Sink::Variable(String::from("foo")),
@@ -360,7 +364,7 @@ mod tests {
             ],
             function: String::from("all"),
         };
-        let chs = "all(store_path(/foo/bar), store_var(foo))";
+        let chs = r#"all(store_path("/foo/bar"), store_var(foo))"#;
         assert_eq!(snk, parse_sink(chs).unwrap());
     }
 
