@@ -84,6 +84,8 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Arc<IndexMap<SubId, Value>>),
     UpdateVar(String, Value),
+    Confirm(String, Sink, Value),
+    TryNavigate(Value),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -180,36 +182,27 @@ impl Source {
 }
 
 #[derive(Clone)]
-enum SinkAction {
-    All,
-    Confirm,
-    Navigate,
-    Unknown(String),
-}
-
-#[derive(Clone)]
 enum Sink {
-    Store(Dval),
-    Variable(String),
-    Map { from: Vec<Sink>, function: SinkAction },
+    Store(view::Sink, Dval),
+    Variable(view::Sink, String),
+    Navigate(view::Sink),
+    All(view::Sink, Vec<Sink>),
+    Confirm(view::Sink, boxed::Box<Sink>),
 }
 
 impl Sink {
     fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
-        match spec {
-            view::Sink::Variable(name) => Sink::Variable(name),
+        match &spec {
+            view::Sink::Variable(name) => Sink::Variable(spec, name.clone()),
             view::Sink::Store(path) => {
-                Sink::Store(ctx.subscriber.durable_subscribe(path))
+                Sink::Store(spec, ctx.subscriber.durable_subscribe(path.clone()))
             }
-            view::Sink::Map { from, function } => {
-                let function = match function.as_str() {
-                    "all" => SinkAction::All,
-                    "confirm" => SinkAction::Confirm,
-                    "navigate" => SinkAction::Navigate,
-                    _ => SinkAction::Unknown(function),
-                };
-                let from = from.into_iter().map(|spec| Sink::new(ctx, spec)).collect();
-                Sink::Map { function, from }
+            view::Sink::Navigate => Sink::Navigate(spec),
+            view::Sink::All(sinks) => {
+                Sink::All(spec, from.into_iter().map(|s| Sink::new(ctx, s)).collect())
+            }
+            view::Sink::Confirm(sink) => {
+                Sink::Confirm(spec, boxed::Box::new(Sink::new(ctx, sink.clone())))
             }
         }
     }
@@ -223,10 +216,30 @@ impl Sink {
                 let _: result::Result<_, _> =
                     ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
+            Sink::Navigate => {
+                let _: result::Result<_, _> = ctx.to_gui.send(ToGui::TryNavigate(v));
+            }
             Sink::All(sinks) => {
                 for sink in sinks {
                     sink.set(ctx, v.clone())
                 }
+            }
+            Sink::Confirm(sink) => {
+                let sink = sink.clone();
+                let spec = match &sink {
+                    Sink::Store(spec, _) => spec,
+                    Sink::Variable(spec, _) => spec,
+                    Sink::Navigate(spec) => spec,
+                    Sink::All(spec, _) => spec,
+                    Sink::Confirm(spec, _) => spec,
+                };
+                let msg = format!(
+                    "Are you sure you want to send {} to the sink {}",
+                    v,
+                    spec.to_string()
+                );
+                let _: result::Result<_, _> =
+                    ctx.to_gui.send(ToGui::Confirm(msg, sink, v));
             }
         }
     }
@@ -1198,6 +1211,25 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             if let Some(editor) = &*editor.borrow() {
                 editor.update_var(&name, &value);
+            }
+            Continue(true)
+        }
+        ToGui::Confirm(msg, sink, v) => {
+            if ask_modal(&window, &msg) {
+                sink.set(ctx, v)
+            }
+            Continue(true)
+        }
+        ToGui::TryNavigate(v) => {
+            match v {
+                Value::String(path) => {
+                    let m = FromGui::Navigate(Path::from(path));
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                }
+                v => err_modal(
+                    &window,
+                    format!("can't navigate to {}, expected string", v),
+                ),
             }
             Continue(true)
         }
