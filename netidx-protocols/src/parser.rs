@@ -361,53 +361,110 @@ mod tests {
             ],
             function: String::from("all"),
         };
-        let chs = r#"all(store_path(/foo/bar), store_var(foo))"#;
+        let chs = "all(store_path(/foo/bar), store_var(foo))";
         assert_eq!(snk, parse_sink(chs).unwrap());
     }
 
     #[test]
     fn source_parse() {
-        assert_eq!(Source::Constant(Value::U32(23)), parse_source(" u32:23 ").unwrap());
-        assert_eq!(Source::Constant(Value::V32(42)), parse_source("v32:42").unwrap());
-        assert_eq!(Source::Constant(Value::I32(-10)), parse_source("i32:-10").unwrap());
+        assert_eq!(
+            Source::Constant(Value::U32(23)),
+            parse_source("constant( u32, 23 )").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::V32(42)),
+            parse_source("constant(v32, 42)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::I32(-10)),
+            parse_source("constant(i32, -10)").unwrap()
+        );
         assert_eq!(
             Source::Constant(Value::I32(12321)),
             parse_source("i32:12321").unwrap()
         );
-        assert_eq!(Source::Constant(Value::Z32(-99)), parse_source("z32:-99").unwrap());
-        assert_eq!(Source::Constant(Value::U64(100)), parse_source("u64:100").unwrap());
-        assert_eq!(Source::Constant(Value::V64(100)), parse_source("v64:100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(-100)), parse_source("i64:-100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(100)), parse_source("i64:100").unwrap());
-        assert_eq!(Source::Constant(Value::Z64(-100)), parse_source("z64:-100").unwrap());
-        assert_eq!(Source::Constant(Value::Z64(100)), parse_source("z64:100").unwrap());
+        assert_eq!(
+            Source::Constant(Value::Z32(-99)),
+            parse_source("constant(z32, -99)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::U64(100)),
+            parse_source("constant(u64, 100)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::V64(100)),
+            parse_source("constant(v64, 100)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::I64(-100)),
+            parse_source("constant(i64, -100)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::I64(100)),
+            parse_source("constant(i64, 100)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::Z64(-100)),
+            parse_source("constant(z64, -100)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::Z64(100)),
+            parse_source("constant(z64, 100)").unwrap()
+        );
         assert_eq!(
             Source::Constant(Value::F32(3.1415)),
-            parse_source("f32:3.1415").unwrap()
+            parse_source("constant(f32, 3.1415)").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F32(3.)), parse_source("f32:3").unwrap());
-        assert_eq!(Source::Constant(Value::F32(3.)), parse_source("f32:3.").unwrap());
+        assert_eq!(
+            Source::Constant(Value::F32(3.)),
+            parse_source("constant(f32, 3)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::F32(3.)),
+            parse_source("constant(f32, 3.)").unwrap()
+        );
         assert_eq!(
             Source::Constant(Value::F64(3.1415)),
-            parse_source("f64:3.1415").unwrap()
+            parse_source("constant(f64, 3.1415)").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F64(3.)), parse_source("f64:3.").unwrap());
-        assert_eq!(Source::Constant(Value::F64(3.)), parse_source("f64:3").unwrap());
-        let c = Chars::from(r#"I've got a lovely "bunch" of coconuts"#);
-        let s = r#"string:"I've got a lovely \"bunch\" of coconuts""#;
+        assert_eq!(
+            Source::Constant(Value::F64(3.)),
+            parse_source("constant(f64, 3.)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::F64(3.)),
+            parse_source("constant(f64, 3)").unwrap()
+        );
+        let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
+        let s = r#"constant(string, I've got a lovely "bunch" of (coconuts\))"#;
         assert_eq!(Source::Constant(Value::String(c)), parse_source(s).unwrap());
-        assert_eq!(Source::Constant(Value::True), parse_source("true").unwrap());
-        assert_eq!(Source::Constant(Value::False), parse_source("false").unwrap());
-        assert_eq!(Source::Constant(Value::Null), parse_source("null").unwrap());
-        assert_eq!(Source::Constant(Value::Ok), parse_source("ok").unwrap());
+        assert_eq!(
+            Source::Constant(Value::True),
+            parse_source("constant(bool, true)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::False),
+            parse_source("constant(bool, false)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::Null),
+            parse_source("constant(null)").unwrap()
+        );
+        assert_eq!(
+            Source::Constant(Value::Ok),
+            parse_source("constant(result, ok)").unwrap()
+        );
         assert_eq!(
             Source::Constant(Value::Error(Chars::from("error"))),
-            parse_source(r#"err:"error""#).unwrap()
+            parse_source("constant(result, error)").unwrap()
         );
-        let p = Path::from(r#"/foo bar baz/"zam"/_ xyz+ "#);
-        let s = r#"n:"/foo bar baz/\"zam\"/_ xyz+ ""#;
+        let p = Path::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
+        let s = r#"load_path(/foo bar baz/\"zam\"/\)_ xyz+ )"#;
         assert_eq!(Source::Load(p), parse_source(s).unwrap());
-        assert_eq!(Source::Variable(String::from("sum")), parse_source("v:sum").unwrap());
+        assert_eq!(
+            Source::Variable(String::from("sum")),
+            parse_source("load_var(sum)").unwrap()
+        );
         let src = Source::Map {
             from: vec![
                 Source::Constant(Value::F32(1.)),
@@ -422,7 +479,7 @@ mod tests {
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(f32:1, n:"/foo/bar", max(f32:0, n:"/foo/baz"))"#;
+        let chs = r#"sum(constant(f32, 1), load_path(/foo/bar), max(constant(f32, 0), load_path(/foo/baz)))"#;
         assert_eq!(src, parse_source(chs).unwrap());
     }
 }
