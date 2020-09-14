@@ -199,13 +199,13 @@ where
         ),
         attempt(
             constant("string")
-                .with(escaped_string(')'))
+                .with(quoted('"', '"'))
                 .and(spaces().with(token(')')))
                 .map(|(v, _)| Source::Constant(Value::String(Chars::from(v)))),
         ),
         attempt(
             constant("bytes")
-                .with(from_str(base64str()))
+                .with(spaces().with(from_str(base64str())))
                 .and(spaces().with(token(')')))
                 .map(|(Base64Encoded(v), _)| {
                     Source::Constant(Value::Bytes(Bytes::from(v)))
@@ -241,13 +241,17 @@ where
         ),
         attempt(
             constant("result")
-                .with(escaped_string(')'))
+                .with(quoted('"', '"'))
                 .and(spaces().with(token(')')))
                 .map(|(s, _)| Source::Constant(Value::Error(Chars::from(s)))),
         ),
         attempt(
             string("load_path")
-                .with(quoted('(', ')'))
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    quoted('"', '"'),
+                ))
                 .map(|s| Source::Load(Path::from(s))),
         ),
         attempt(
@@ -343,7 +347,7 @@ mod tests {
     #[test]
     fn sink_parse() {
         let p = Path::from(r#"/foo bar baz/(zam)/_ xyz+ "#);
-        let s = r#"store_path(/foo bar baz/(zam\)_ xyz+ )"#;
+        let s = r#"store_path(/foo bar baz/(zam\)/_ xyz+ )"#;
         assert_eq!(Sink::Store(p), parse_sink(s).unwrap());
         assert_eq!(
             Sink::Variable(String::from("foo")),
@@ -376,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             Source::Constant(Value::I32(12321)),
-            parse_source("i32:12321").unwrap()
+            parse_source("constant(i32, 12321)").unwrap()
         );
         assert_eq!(
             Source::Constant(Value::Z32(-99)),
@@ -431,7 +435,7 @@ mod tests {
             parse_source("constant(f64, 3)").unwrap()
         );
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
-        let s = r#"constant(string, I've got a lovely "bunch" of (coconuts\))"#;
+        let s = r#"constant(string, "I've got a lovely \"bunch\" of (coconuts)")"#;
         assert_eq!(Source::Constant(Value::String(c)), parse_source(s).unwrap());
         assert_eq!(
             Source::Constant(Value::True),
@@ -451,10 +455,10 @@ mod tests {
         );
         assert_eq!(
             Source::Constant(Value::Error(Chars::from("error"))),
-            parse_source("constant(result, error)").unwrap()
+            parse_source(r#"constant(result, "error")"#).unwrap()
         );
         let p = Path::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
-        let s = r#"load_path(/foo bar baz/\"zam\"/\)_ xyz+ )"#;
+        let s = r#"load_path("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(Source::Load(p), parse_source(s).unwrap());
         assert_eq!(
             Source::Variable(String::from("sum")),
@@ -474,7 +478,7 @@ mod tests {
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(constant(f32, 1), load_path(/foo/bar), max(constant(f32, 0), load_path(/foo/baz)))"#;
+        let chs = r#"sum(constant(f32, 1), load_path("/foo/bar"), max(constant(f32, 0), load_path("/foo/baz")))"#;
         assert_eq!(src, parse_source(chs).unwrap());
     }
 }
