@@ -1026,7 +1026,7 @@ impl Widget {
             None => widget(view::WidgetKind::Table(Path::from("/"))),
             Some("Action") => widget(view::WidgetKind::Action(view::Action {
                 source: view::Source::Constant(Value::U64(42)),
-                sink: view::Sink::Leaf(view::SinkLeaf::Variable(String::from("foo"))),
+                sink: view::Sink::Variable(String::from("foo")),
             })),
             Some("Table") => widget(view::WidgetKind::Table(Path::from("/"))),
             Some("Label") => {
@@ -1039,17 +1039,13 @@ impl Widget {
                     enabled: view::Source::Constant(Value::True),
                     label: view::Source::Constant(Value::String(l)),
                     source: view::Source::Load(Path::from("/somewhere")),
-                    sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
-                        "/somewhere/else",
-                    ))),
+                    sink: view::Sink::Store(Path::from("/somewhere/else")),
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
                 enabled: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
-                sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
-                    "/somewhere/else",
-                ))),
+                sink: view::Sink::Store(Path::from("/somewhere/else")),
             })),
             Some("Selector") => {
                 let choices =
@@ -1058,18 +1054,14 @@ impl Widget {
                     enabled: view::Source::Constant(Value::True),
                     choices: view::Source::Constant(Value::String(choices)),
                     source: view::Source::Load(Path::from("/somewhere")),
-                    sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
-                        "/somewhere/else",
-                    ))),
+                    sink: view::Sink::Store(Path::from("/somewhere/else")),
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
                 enabled: view::Source::Constant(Value::True),
                 visible: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
-                sink: view::Sink::Leaf(view::SinkLeaf::Store(Path::from(
-                    "/somewhere/else",
-                ))),
+                sink: view::Sink::Store(Path::from("/somewhere/else")),
             })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
                 direction: view::Direction::Vertical,

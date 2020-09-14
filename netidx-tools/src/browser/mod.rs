@@ -181,51 +181,57 @@ impl Source {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum Sink {
     Store(view::Sink, Dval),
     Variable(view::Sink, String),
     Navigate(view::Sink),
     All(view::Sink, Vec<Sink>),
-    Confirm(view::Sink, boxed::Box<Sink>),
+    Confirm(view::Sink, Box<Sink>),
 }
 
 impl Sink {
     fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
         match &spec {
-            view::Sink::Variable(name) => Sink::Variable(spec, name.clone()),
+            view::Sink::Variable(name) => {
+                let name = name.clone();
+                Sink::Variable(spec, name)
+            },
             view::Sink::Store(path) => {
-                Sink::Store(spec, ctx.subscriber.durable_subscribe(path.clone()))
+                let dv = ctx.subscriber.durable_subscribe(path.clone());
+                Sink::Store(spec, dv)
             }
             view::Sink::Navigate => Sink::Navigate(spec),
             view::Sink::All(sinks) => {
-                Sink::All(spec, from.into_iter().map(|s| Sink::new(ctx, s)).collect())
+                let sinks = sinks.iter().map(|s| Sink::new(ctx, s.clone())).collect();
+                Sink::All(spec, sinks)
             }
             view::Sink::Confirm(sink) => {
-                Sink::Confirm(spec, boxed::Box::new(Sink::new(ctx, sink.clone())))
+                let sink = Box::new(Sink::new(ctx, view::Sink::clone(&*sink)));
+                Sink::Confirm(spec, sink)
             }
         }
     }
 
     fn set(&self, ctx: &WidgetCtx, v: Value) {
         match self {
-            Sink::Store(dv) => {
+            Sink::Store(_, dv) => {
                 dv.write(v);
             }
-            Sink::Variable(name) => {
+            Sink::Variable(_, name) => {
                 let _: result::Result<_, _> =
                     ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
-            Sink::Navigate => {
+            Sink::Navigate(_) => {
                 let _: result::Result<_, _> = ctx.to_gui.send(ToGui::TryNavigate(v));
             }
-            Sink::All(sinks) => {
+            Sink::All(_, sinks) => {
                 for sink in sinks {
                     sink.set(ctx, v.clone())
                 }
             }
-            Sink::Confirm(sink) => {
-                let sink = sink.clone();
+            Sink::Confirm(_, sink) => {
+                let sink = Sink::clone(&*sink);
                 let spec = match &sink {
                     Sink::Store(spec, _) => spec,
                     Sink::Variable(spec, _) => spec,
@@ -1216,19 +1222,19 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::Confirm(msg, sink, v) => {
             if ask_modal(&window, &msg) {
-                sink.set(ctx, v)
+                sink.set(&*ctx, v)
             }
             Continue(true)
         }
         ToGui::TryNavigate(v) => {
             match v {
                 Value::String(path) => {
-                    let m = FromGui::Navigate(Path::from(path));
+                    let m = FromGui::Navigate(ViewLoc::Netidx(Path::from(path)));
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
                 v => err_modal(
                     &window,
-                    format!("can't navigate to {}, expected string", v),
+                    &format!("can't navigate to {}, expected string", v),
                 ),
             }
             Continue(true)
