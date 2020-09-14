@@ -1,9 +1,12 @@
 use crate::view::{Sink, SinkLeaf, Source};
+use base64;
 use combine::{
-    attempt, between, choice, from_str, many1, optional,
+    attempt, between, choice,
+    error::{Commit, StreamError},
+    from_str, many1, optional,
     parser::{
         char::{digit, spaces, string},
-        combinator::recognize,
+        combinator::{parser, recognize},
         range::{take_while, take_while1},
         repeat::escaped,
     },
@@ -32,19 +35,23 @@ fn unescape(s: String, esc: char) -> String {
     }
 }
 
-fn quoted<I>() -> impl Parser<I, Output = String>
+fn escaped_string<I>(cq: char) -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces()
-        .with(between(
-            token('"'),
-            token('"'),
-            recognize(escaped(take_while1(|c| c != '"' && c != '\\'), '\\', token('"'))),
-        ))
+    recognize(escaped(take_while1(|c| c != cq && c != '\\'), '\\', token(cq)))
         .map(|s| unescape(s, '\\'))
+}
+
+fn quoted<I>(oq: char, cq: char) -> impl Parser<I, Output = String>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(between(token(oq), token(cq), escaped_string(cq)))
 }
 
 fn uint<I>() -> impl Parser<I, Output = String>
@@ -74,6 +81,26 @@ where
     recognize((digit(), optional(token('.')), take_while(|c: char| c.is_digit(10))))
 }
 
+fn base64<I>() -> impl Parser<I, Output = Vec<u8>>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    parser(|input| {
+        let position = input.position();
+        let (b64, committed) = take_while(|c: char| {
+            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
+        })
+        .parse_stream(input)
+        .into_result()?;
+        match base64::decode(b64) {
+            Ok(v) => Ok((v, committed)),
+            Err(e) => Err(Commit::Commit(StreamError::expected("valid base64"))),
+        }
+    })
+}
+
 fn fname<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
@@ -86,6 +113,21 @@ where
     ))
 }
 
+fn constant<I>(typ: &'static str) -> impl Parser<I, Output = String>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    string("constant")
+        .with(spaces())
+        .with(token('('))
+        .with(spaces())
+        .with(string(typ))
+        .with(spaces())
+        .with(token(','))
+}
+
 fn source_<I>() -> impl Parser<I, Output = Source>
 where
     I: RangeStream<Token = char>,
@@ -94,55 +136,125 @@ where
 {
     spaces().with(choice((
         attempt(
-            string("u32:")
-                .with(from_str(uint()).map(|v| Source::Constant(Value::U32(v)))),
+            constant("u32")
+                .with(spaces().with(from_str(uint())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::U32(v))),
         ),
         attempt(
-            string("v32:")
-                .with(from_str(uint()).map(|v| Source::Constant(Value::V32(v)))),
+            constant("v32")
+                .with(spaces().with(from_str(uint())))
+                .and(spaces().with(token(')')))
+                .map(|(v,)| Source::Constant(Value::V32(v))),
         ),
         attempt(
-            string("i32:").with(from_str(int()).map(|v| Source::Constant(Value::I32(v)))),
+            constant("i32")
+                .with(spaces().with(from_str(int())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::I32(v))),
         ),
         attempt(
-            string("z32:").with(from_str(int()).map(|v| Source::Constant(Value::Z32(v)))),
+            constant("z32")
+                .with(spaces().with(from_str(int())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::Z32(v))),
         ),
         attempt(
-            string("u64:")
-                .with(from_str(uint()).map(|v| Source::Constant(Value::U64(v)))),
+            constant("u64")
+                .with(spaces().with(from_str(uint())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::U64(v))),
         ),
         attempt(
-            string("v64:")
-                .with(from_str(uint()).map(|v| Source::Constant(Value::V64(v)))),
+            constant("v64")
+                .with(spaces().with(from_str(uint())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::V64(v))),
         ),
         attempt(
-            string("i64:").with(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
+            constant("i64")
+                .with(spaces().with(from_str(int())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::I64(v))),
         ),
         attempt(
-            string("z64:").with(from_str(int()).map(|v| Source::Constant(Value::Z64(v)))),
+            constant("z64")
+                .with(spaces().with(from_str(int())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::Z64(v))),
         ),
         attempt(
-            string("f32:").with(from_str(flt()).map(|v| Source::Constant(Value::F32(v)))),
+            constant("f32")
+                .with(spaces().with(from_str(flt())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::F32(v))),
         ),
         attempt(
-            string("f64:").with(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
+            constant("f64")
+                .with(spaces().with(from_str(flt())))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::F64(v))),
         ),
         attempt(
-            string("string:")
-                .with(quoted())
-                .map(|v| Source::Constant(Value::String(Chars::from(v)))),
+            constant("string")
+                .with(quoted_string(')'))
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::String(Chars::from(v)))),
         ),
-        attempt(string("true").map(|_| Source::Constant(Value::True))),
-        attempt(string("false").map(|_| Source::Constant(Value::False))),
-        attempt(string("null").map(|_| Source::Constant(Value::Null))),
-        attempt(string("ok").map(|_| Source::Constant(Value::Ok))),
         attempt(
-            string("err:")
-                .with(quoted())
-                .map(|s| Source::Constant(Value::Error(Chars::from(s)))),
+            constant("binary")
+                .with(base64())
+                .and(spaces().with(token(')')))
+                .map(|(v, _)| Source::Constant(Value::Binary(Bytes::from(v)))),
         ),
-        attempt(string("n:").with(quoted().map(|s| Source::Load(Path::from(s))))),
-        attempt(string("v:").with(fname()).map(|s| Source::Variable(s))),
+        attempt(
+            constant("bool")
+                .with(spaces().with(string("true")))
+                .and(spaces().with(token(')')))
+                .map(|(_, _)| Source::Constant(Value::True)),
+        ),
+        attempt(
+            constant("bool")
+                .with(spaces().with(string("false")))
+                .and(spaces().with(token(')')))
+                .map(|(_, _)| Source::Constant(Value::False)),
+        ),
+        attempt(
+            string("constant")
+                .with(spaces())
+                .with(between(
+                    token('('),
+                    token(')'),
+                    spaces().with(string("null")).with(spaces()),
+                ))
+                .map(|_| Source::Constant(Value::Null)),
+        ),
+        attempt(
+            constant("result")
+                .with(spaces().with(string("ok")))
+                .and(spaces().with(token(')')))
+                .map(|(_, _)| Source::Constant(Value::Ok)),
+        ),
+        attempt(
+            constant("result")
+                .with(escaped_string(')'))
+                .and(spaces().with(token(')')))
+                .map(|(s, _)| Source::Constant(Value::Err(Chars::from(s)))),
+        ),
+        attempt(
+            string("load_path")
+                .with(quoted('(', ')'))
+                .map(|s| Source::Load(Path::from(s))),
+        ),
+        attempt(
+            string("load_var")
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    spaces().with(fname()),
+                ))
+                .map(|s| Source::Variable(s)),
+        ),
         (
             fname(),
             between(
@@ -177,12 +289,24 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        string("n:").with(quoted()).map(|s| SinkLeaf::Store(Path::from(s))),
-        string("v:").with(fname()).map(|s| SinkLeaf::Variable(s)),
+        attempt(
+            string("store_path")
+                .with(quoted('(', ')'))
+                .map(|s| SinkLeaf::Store(Path::from(s))),
+        ),
+        attempt(
+            string("store_var")
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    spaces().with(fname()),
+                ))
+                .map(|(_, s)| SinkLeaf::Variable(s)),
+        ),
     )))
 }
 
-fn sink<I>() -> impl Parser<I, Output = Sink>
+fn sink_<I>() -> impl Parser<I, Output = Sink>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -190,13 +314,24 @@ where
 {
     spaces().with(choice((
         sink_leaf().map(Sink::Leaf),
-        between(
-            spaces().with(token('[')),
-            spaces().with(token(']')),
-            spaces().with(sep_by1(sink_leaf(), spaces().with(token(',')))),
+        (
+            fname(),
+            between(
+                spaces().with(token('(')),
+                spaces().with(token(')')),
+                spaces().with(sep_by1(sink(), spaces().with(token(',')))),
+            ),
         )
-        .map(Sink::All),
+            .map(|(function, from)| Sink::Map { function, from }),
     )))
+}
+
+parser! {
+    fn sink[I]()(I) -> Sink
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        sink_()
+    }
 }
 
 pub fn parse_sink(s: &str) -> anyhow::Result<Sink> {
@@ -212,15 +347,21 @@ mod tests {
 
     #[test]
     fn sink_parse() {
-        let p = Path::from(r#"/foo bar baz/"zam"/_ xyz+ "#);
-        let s = r#"n:"/foo bar baz/\"zam\"/_ xyz+ ""#;
+        let p = Path::from(r#"/foo bar baz/(zam)/_ xyz+ "#);
+        let s = r#"store_path(/foo bar baz/(zam\)_ xyz+ )"#;
         assert_eq!(Sink::Store(p), parse_sink(s).unwrap());
-        assert_eq!(Sink::Variable(String::from("foo")), parse_sink("v:foo").unwrap());
-        let snk = Sink::All(vec![
-            Sink::Store(Path::from("/foo/bar")),
+        assert_eq!(
             Sink::Variable(String::from("foo")),
-        ]);
-        let chs = r#"[n:"/foo/bar", v:foo]"#;
+            parse_sink("store_var(foo)").unwrap()
+        );
+        let snk = Sink::Map {
+            from: vec![
+                Sink::Store(Path::from("/foo/bar")),
+                Sink::Variable(String::from("foo")),
+            ],
+            function: String::from("all"),
+        };
+        let chs = r#"all(store_path(/foo/bar), store_var(foo))"#;
         assert_eq!(snk, parse_sink(chs).unwrap());
     }
 

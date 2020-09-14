@@ -183,7 +183,7 @@ impl Source {
 enum Sink {
     Store(Dval),
     Variable(String),
-    All(Vec<Sink>),
+    Map {from: Vec<Sink>, function: SinkFormula }
 }
 
 impl Sink {
