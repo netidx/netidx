@@ -113,10 +113,22 @@ struct WidgetCtx {
 
 #[derive(Debug, Clone)]
 enum Source {
-    Constant(Value),
-    Load(Dval),
-    Variable(String, Rc<RefCell<Value>>),
-    Map { from: Vec<Source>, function: Box<Formula> },
+    Constant(view::Source, Value),
+    Load(view::Source, Dval),
+    Variable(view::Source, String, Rc<RefCell<Value>>),
+    Map { spec: view::Source, from: Vec<Source>, function: Box<Formula> },
+}
+
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Source::Constant(s, _) => s,
+            Source::Load(s, _) => s,
+            Source::Variable(s, _, _) => s,
+            Source::Map { spec, .. } => spec,
+        };
+        write!(f, "{}", s.to_string())
+    }
 }
 
 impl Source {
@@ -125,51 +137,57 @@ impl Source {
         variables: &HashMap<String, Value>,
         spec: view::Source,
     ) -> Self {
-        match spec {
-            view::Source::Constant(v) => Source::Constant(v),
+        match &spec {
+            view::Source::Constant(v) => {
+                let v = v.clone();
+                Source::Constant(spec, v)
+            }
             view::Source::Load(path) => {
-                let dv = ctx.subscriber.durable_subscribe(path);
+                let dv = ctx.subscriber.durable_subscribe(path.clone());
                 dv.updates(true, ctx.updates.clone());
                 dv.state_updates(true, ctx.state_updates.clone());
-                Source::Load(dv)
+                Source::Load(spec, dv)
             }
             view::Source::Variable(name) => {
-                let v = variables.get(&name).cloned().unwrap_or(Value::Null);
-                Source::Variable(name, Rc::new(RefCell::new(v)))
+                let v = variables.get(name).cloned().unwrap_or(Value::Null);
+                let name = name.clone();
+                Source::Variable(spec, name, Rc::new(RefCell::new(v)))
             }
             view::Source::Map { from, function } => {
                 let from: Vec<Source> = from
-                    .into_iter()
-                    .map(|spec| Source::new(ctx, variables, spec))
+                    .iter()
+                    .map(|spec| Source::new(ctx, variables, spec.clone()))
                     .collect();
                 let function = Box::new(Formula::new(ctx, function, &*from));
-                Source::Map { from, function }
+                Source::Map { spec, from, function }
             }
         }
     }
 
     fn current(&self) -> Option<Value> {
         match self {
-            Source::Constant(v) => Some(v.clone()),
-            Source::Load(dv) => dv.last(),
-            Source::Variable(_, v) => Some(v.borrow().clone()),
-            Source::Map { from: _, function } => function.current(),
+            Source::Constant(_, v) => Some(v.clone()),
+            Source::Load(_, dv) => dv.last(),
+            Source::Variable(_, _, v) => Some(v.borrow().clone()),
+            Source::Map { spec: _, from: _, function } => function.current(),
         }
     }
 
     fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) -> Option<Value> {
         match self {
-            Source::Constant(_) | Source::Variable(_, _) => None,
-            Source::Load(dv) => changed.get(&dv.id()).cloned(),
-            Source::Map { from, function } => function.update(from, changed),
+            Source::Constant(_, _) | Source::Variable(_, _, _) => None,
+            Source::Load(_, dv) => changed.get(&dv.id()).cloned(),
+            Source::Map { spec: _, from, function } => function.update(from, changed),
         }
     }
 
     fn update_var(&self, name: &str, value: &Value) -> Option<Value> {
         match self {
-            Source::Load(_) | Source::Constant(_) => None,
-            Source::Map { from, function } => function.update_var(from, name, value),
-            Source::Variable(our_name, cur) => {
+            Source::Load(_, _) | Source::Constant(_, _) => None,
+            Source::Map { spec: _, from, function } => {
+                function.update_var(from, name, value)
+            }
+            Source::Variable(_, our_name, cur) => {
                 if name == our_name {
                     *cur.borrow_mut() = value.clone();
                     Some(value.clone())
@@ -190,13 +208,26 @@ enum Sink {
     Confirm(view::Sink, Box<Sink>),
 }
 
+impl fmt::Display for Sink {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Sink::Store(s, _) => s,
+            Sink::Variable(s, _) => s,
+            Sink::Navigate(s) => s,
+            Sink::All(s, _) => s,
+            Sink::Confirm(s, _) => s,
+        };
+        write!(f, "{}", s.to_string())
+    }
+}
+
 impl Sink {
     fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
         match &spec {
             view::Sink::Variable(name) => {
                 let name = name.clone();
                 Sink::Variable(spec, name)
-            },
+            }
             view::Sink::Store(path) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
                 Sink::Store(spec, dv)

@@ -806,8 +806,8 @@ pub(super) static FORMULAS: [&'static str; 17] = [
 ];
 
 impl Formula {
-    pub(super) fn new(ctx: &WidgetCtx, name: String, from: &[Source]) -> Formula {
-        match name.as_str() {
+    pub(super) fn new(ctx: &WidgetCtx, name: &str, from: &[Source]) -> Formula {
+        match name {
             "any" => Formula::Any(RefCell::new(None)),
             "all" => Formula::All(CachedVals::new(from)),
             "sum" => Formula::Sum(CachedVals::new(from)),
@@ -825,7 +825,7 @@ impl Formula {
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
             "eval" => Formula::Eval(Eval::new(ctx, from)),
-            _ => Formula::Unknown(name),
+            _ => Formula::Unknown(String::from(name))
         }
     }
 

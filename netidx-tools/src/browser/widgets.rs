@@ -44,14 +44,14 @@ impl Button {
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
-                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                &format!("source: {}, sink: {}", spec.source, spec.sink)
             );
             Inhibit(false)
         }));
         button.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
-                    &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                    &format!("source: {}, sink: {}", spec.source, spec.sink)
                 );
                 Inhibit(false)
             }),
@@ -105,12 +105,12 @@ impl Label {
         label.set_single_line_mode(true);
         label.connect_button_press_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("{:?}", spec));
+                selected_path.set_label(&format!("{}", spec));
                 Inhibit(false)
             }),
         );
         label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("{:?}", spec));
+            selected_path.set_label(&format!("{}", spec));
             Inhibit(false)
         }));
         Label { source, label }
@@ -188,7 +188,7 @@ impl Selector {
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
                 &format!(
-                    "source: {:?}, sink: {:?}, choices: {:?}",
+                    "source: {}, sink: {}, choices: {}",
                     spec.source, spec.sink, spec.choices
                 )
             );
@@ -198,7 +198,7 @@ impl Selector {
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
                     &format!(
-                        "source: {:?}, sink: {:?}, choices: {:?}",
+                        "source: {}, sink: {}, choices: {}",
                         spec.source, spec.sink, spec.choices
                     )
                 );
@@ -357,14 +357,14 @@ impl Toggle {
         }));
         switch.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
-                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                &format!("source: {}, sink: {}", spec.source, spec.sink)
             );
             Inhibit(false)
         }));
         switch.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
-                    &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                    &format!("source: {}, sink: {}", spec.source, spec.sink)
                 );
                 Inhibit(false)
             }),
@@ -456,7 +456,7 @@ impl Entry {
         );
         entry.connect_focus(clone!(@strong spec, @strong selected_path => move |_, _| {
             selected_path.set_label(
-                &format!("source: {:?}, sink: {:?}", spec.source, spec.sink)
+                &format!("source: {}, sink: {}", spec.source, spec.sink)
             );
             Inhibit(false)
         }));

@@ -1,7 +1,7 @@
 use crate::parser;
 use base64;
 use netidx::{path::Path, publisher::Value, utils};
-use std::{boxed, collections::HashMap, result, str::FromStr, string::ToString};
+use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Source {
@@ -25,56 +25,55 @@ pub enum Source {
     },
 }
 
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Source::Constant(v) => match v {
+                Value::U32(v) => write!(f, "constant(u32, {})", v),
+                Value::V32(v) => write!(f, "constant(v32, {})", v),
+                Value::I32(v) => write!(f, "constant(i32, {})", v),
+                Value::Z32(v) => write!(f, "constant(z32, {})", v),
+                Value::U64(v) => write!(f, "constant(u64, {})", v),
+                Value::V64(v) => write!(f, "constant(v64, {})", v),
+                Value::I64(v) => write!(f, "constant(i64, {})", v),
+                Value::Z64(v) => write!(f, "constant(z64, {})", v),
+                Value::F32(v) => write!(f, "constant(f32, {})", v),
+                Value::F64(v) => write!(f, "constant(f64, {})", v),
+                Value::String(s) => {
+                    write!(f, r#"constant(string, "{}")"#, utils::escape(&*s, '\\', '"'))
+                }
+                Value::Bytes(b) => write!(f, "constant(binary, {})", base64::encode(&*b)),
+                Value::True => write!(f, "constant(bool, true)"),
+                Value::False => write!(f, "constant(bool, false)"),
+                Value::Null => write!(f, "constant(null)"),
+                Value::Ok => write!(f, "constant(result, ok)"),
+                Value::Error(v) => {
+                    write!(f, r#"constant(result, "{}")"#, utils::escape(&*v, '\\', '"'))
+                }
+            },
+            Source::Load(p) => {
+                write!(f, r#"load_path("{}")"#, utils::escape(&*p, '\\', '"'))
+            }
+            Source::Variable(v) => write!(f, "load_var({})", v),
+            Source::Map { from, function } => {
+                write!(f, "{}(", function)?;
+                for i in 0..from.len() {
+                    write!(f, "{}", &from[i])?;
+                    if i < from.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 impl FromStr for Source {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         parser::parse_source(s)
-    }
-}
-
-impl ToString for Source {
-    fn to_string(&self) -> String {
-        match self {
-            Source::Constant(v) => match v {
-                Value::U32(v) => format!("constant(u32, {})", v),
-                Value::V32(v) => format!("constant(v32, {})", v),
-                Value::I32(v) => format!("constant(i32, {})", v),
-                Value::Z32(v) => format!("constant(z32, {})", v),
-                Value::U64(v) => format!("constant(u64, {})", v),
-                Value::V64(v) => format!("constant(v64, {})", v),
-                Value::I64(v) => format!("constant(i64, {})", v),
-                Value::Z64(v) => format!("constant(z64, {})", v),
-                Value::F32(v) => format!("constant(f32, {})", v),
-                Value::F64(v) => format!("constant(f64, {})", v),
-                Value::String(s) => {
-                    format!(r#"constant(string, "{}")"#, utils::escape(&*s, '\\', '"'))
-                }
-                Value::Bytes(b) => format!("constant(binary, {})", base64::encode(&*b)),
-                Value::True => String::from("constant(bool, true)"),
-                Value::False => String::from("constant(bool, false)"),
-                Value::Null => String::from("constant(null)"),
-                Value::Ok => String::from("constant(result, ok)"),
-                Value::Error(v) => {
-                    format!(r#"constant(result, "{}")"#, utils::escape(&*v, '\\', '"'))
-                }
-            },
-            Source::Load(p) => {
-                format!(r#"load_path("{}")"#, utils::escape(&*p, '\\', '"'))
-            }
-            Source::Variable(v) => format!("load_var({})", v),
-            Source::Map { from, function } => {
-                let mut res = format!("{}(", function);
-                for i in 0..from.len() {
-                    res.push_str(&from[i].to_string());
-                    if i < from.len() - 1 {
-                        res.push_str(", ")
-                    }
-                }
-                res.push(')');
-                res
-            }
-        }
     }
 }
 
@@ -87,35 +86,34 @@ pub enum Sink {
     Confirm(boxed::Box<Sink>),
 }
 
+impl fmt::Display for Sink {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Sink::Store(p) => {
+                write!(f, r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
+            }
+            Sink::Variable(v) => write!(f, "store_var({})", v),
+            Sink::Navigate => write!(f, "navigate()"),
+            Sink::Confirm(sink) => write!(f, "confirm({})", sink),
+            Sink::All(sinks) => {
+                write!(f, "all(")?;
+                for i in 0..sinks.len() {
+                    write!(f, "{}", &sinks[i])?;
+                    if i < sinks.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 impl FromStr for Sink {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         parser::parse_sink(s)
-    }
-}
-
-impl ToString for Sink {
-    fn to_string(&self) -> String {
-        match self {
-            Sink::Store(p) => {
-                format!(r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
-            }
-            Sink::Variable(v) => format!("store_var({})", v),
-            Sink::Navigate => format!("navigate()"),
-            Sink::Confirm(sink) => format!("confirm({})", sink.to_string()),
-            Sink::All(sinks) => {
-                let mut s = String::from("all(");
-                for i in 0..sinks.len() {
-                    s.push_str(&sinks[i].to_string());
-                    if i < sinks.len() - 1 {
-                        s.push_str(", ");
-                    }
-                }
-                s.push(')');
-                s
-            }
-        }
     }
 }
 
