@@ -86,7 +86,7 @@ impl Constant {
         }));
         typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
-        store.set_value(iter, 0, &"Constant".to_value());
+        store.set_value(iter, 0, &"constant".to_value());
         let t = Constant { root, spec };
         set_dbg_src(ctx, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Constant(t).to_value());
@@ -129,7 +129,7 @@ impl Variable {
         entvar.set_text(&*spec.borrow());
         entvar.connect_activate(clone!(
             @strong on_change, @strong spec, @weak errlbl => move |e| {
-            match format!("v:{}", &*e.get_text()).parse::<view::Source>() {
+            match format!("load_var({})", &*e.get_text()).parse::<view::Source>() {
                 Err(e) => {
                     let msg = format!(r#"<span foreground="red">{}</span>"#, e);
                     errlbl.set_markup(&msg);
@@ -305,7 +305,7 @@ fn default_source(id: Option<&str>) -> view::Source {
             let from = vec![view::Source::Constant(Value::U64(42))];
             view::Source::Map { function: "any".into(), from }
         }
-        _ => unreachable!(),
+        e => unreachable!("{:?}", e),
     }
 }
 
@@ -568,7 +568,7 @@ impl SourceInspector {
         let add = Rc::new(clone!(
         @strong ctx, @strong on_change, @weak store, @strong selected => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
-            let src = default_source(Some("Constant"));
+            let src = default_source(Some("constant"));
             Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
             on_change();
         }));
@@ -577,7 +577,7 @@ impl SourceInspector {
         let addch = Rc::new(clone!(
         @strong ctx, @strong on_change, @weak store, @strong selected => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
-            let src = default_source(Some("Constant"));
+            let src = default_source(Some("constant"));
             Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
             on_change();
         }));
