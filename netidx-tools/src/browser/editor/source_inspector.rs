@@ -142,7 +142,7 @@ impl Variable {
                 Ok(_) => unreachable!()
             }
         }));
-        store.set_value(iter, 0, &"Load Variable".to_value());
+        store.set_value(iter, 0, &"load_var".to_value());
         let t = Variable { root, spec };
         set_dbg_src(ctx, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Variable(t).to_value());
@@ -182,7 +182,7 @@ impl Load {
             *spec.borrow_mut() = Path::from(String::from(&*e.get_text()));
             on_change()
         }));
-        store.set_value(iter, 0, &"Load Path".to_value());
+        store.set_value(iter, 0, &"load_path".to_value());
         let t = Load { root, spec };
         set_dbg_src(ctx, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Load(t).to_value());
@@ -293,15 +293,15 @@ impl Properties {
 #[gboxed(type_name = "NetidxSourceInspectorWrap")]
 struct SourceWrap(Source);
 
-static KINDS: [&'static str; 4] = ["Constant", "Load Variable", "Load Path", "Function"];
+static KINDS: [&'static str; 4] = ["constant", "load_var", "load_path", "function"];
 
 fn default_source(id: Option<&str>) -> view::Source {
     match id {
         None => view::Source::Constant(Value::U64(42)),
-        Some("Constant") => view::Source::Constant(Value::U64(42)),
-        Some("Load Variable") => view::Source::Variable("foo_bar_baz".into()),
-        Some("Load Path") => view::Source::Load(Path::from("/some/path")),
-        Some("Function") => {
+        Some("constant") => view::Source::Constant(Value::U64(42)),
+        Some("load_var") => view::Source::Variable("foo_bar_baz".into()),
+        Some("load_path") => view::Source::Load(Path::from("/some/path")),
+        Some("function") => {
             let from = vec![view::Source::Constant(Value::U64(42))];
             view::Source::Map { function: "any".into(), from }
         }
