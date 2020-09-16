@@ -4,14 +4,14 @@ version = "0.3.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
-description = "Cross platform secure messaging framework, \"like DNS for values\""
+description = "A graphical browser/ui creator for netidx"
 homepage = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
-keywords = ["networking", "networking", "distributed", "kerberos", "tool"]
-categories = ["network-programming"]
+keywords = ["networking", "distributed", "kerberos", "tool"]
+categories = ["gui"]
 
 [[bin]]
-name = "netidx"
+name = "netidx-browser"
 path = "src/main.rs"
 
 [profile.release]
@@ -47,3 +47,9 @@ log = "0.4"
 env_logger = "0.7"
 base64 = "0.12"
 parking_lot = "0.11"
+indexmap = "1"
+once_cell = "1"
+gtk = { version = "0.9", features = ["v3_24"] }
+gio = { version = "0.9" }
+glib = { version = "0.10" }
+gdk = { version = "0.13" }
