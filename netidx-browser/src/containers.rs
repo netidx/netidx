@@ -1,5 +1,5 @@
 use super::{set_common_props, Widget, WidgetCtx};
-use crate::browser::view;
+use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};

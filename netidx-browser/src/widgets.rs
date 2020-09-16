@@ -1,5 +1,5 @@
 use super::{val_to_bool, Sink, Source, WidgetCtx};
-use crate::browser::view;
+use crate::view;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};

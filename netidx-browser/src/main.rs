@@ -1,3 +1,6 @@
+#![recursion_limit = "2048"]
+#[macro_use]
+extern crate glib;
 mod containers;
 mod editor;
 mod formula;
@@ -16,13 +19,13 @@ use futures::{
 };
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
-use glib::{self, clone, idle_add_local, source::PRIORITY_LOW};
+use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexMap;
 use log::{info, warn};
 use netidx::{
     chars::Chars,
-    config::Config,
+    config::{self, Config},
     path::Path,
     pool::Pooled,
     resolver::{Auth, ResolverRead},
@@ -45,6 +48,7 @@ use std::{
     thread,
     time::Duration,
 };
+use structopt::StructOpt;
 use tokio::{runtime::Runtime, task};
 use util::{ask_modal, err_modal};
 
@@ -1300,7 +1304,40 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     });
 }
 
-pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
+#[derive(StructOpt, Debug)]
+#[structopt(name = "netidx")]
+struct Opt {
+    #[structopt(
+        short = "c",
+        long = "config",
+        help = "override the default config file location (~/.config/netidx.json)"
+    )]
+    config: Option<String>,
+    #[structopt(short = "a", long = "anonymous", help = "disable Kerberos 5")]
+    anon: bool,
+    #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
+    upn: Option<String>,
+    #[structopt(long = "path", help = "navigate to <path> on startup")]
+    path: Option<Path>,
+    #[structopt(long = "file", help = "navigate to view file on startup")]
+    file: Option<PathBuf>,
+}
+
+fn main() {
+    env_logger::init();
+    let opt = Opt::from_args();
+    let cfg = match &opt.config {
+        None => Config::load_default().unwrap(),
+        Some(path) => Config::load(path).unwrap(),
+    };
+    let auth = if opt.anon {
+        Auth::Anonymous
+    } else {
+        match cfg.auth {
+            config::Auth::Anonymous => Auth::Anonymous,
+            config::Auth::Krb5(_) => Auth::Krb5 { upn: opt.upn.clone(), spn: None },
+        }
+    };
     let application = Application::new(
         Some("org.netidx.browser"),
         gio::ApplicationFlags::NON_UNIQUE | Default::default(),
@@ -1317,9 +1354,14 @@ pub(crate) fn run(cfg: Config, auth: Auth, path: Path) {
         let (tx_init, rx_init) = smpsc::channel();
         let raw_view = Arc::new(AtomicBool::new(false));
         // navigate to the initial location
-        tx_from_gui
-            .unbounded_send(FromGui::Navigate(ViewLoc::Netidx(path.clone())))
-            .unwrap();
+        let loc = match &opt.path {
+            Some(path) => ViewLoc::Netidx(path.clone()),
+            None => match &opt.file {
+                Some(file) => ViewLoc::File(file.clone()),
+                None => ViewLoc::Netidx(Path::from("/")),
+            },
+        };
+        tx_from_gui.unbounded_send(FromGui::Navigate(loc)).unwrap();
         tx_tokio
             .unbounded_send(StartNetidx {
                 cfg: cfg.clone(),
