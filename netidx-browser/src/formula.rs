@@ -112,7 +112,7 @@ fn eval_divide(from: &CachedVals) -> Option<Value> {
     })
 }
 
-fn cast_val(typ: Typ, v: Value) -> Option<Value> {
+pub(crate) fn cast_val(typ: Typ, v: Value) -> Option<Value> {
     match typ {
         Typ::U32 => match v {
             Value::U32(v) => Some(Value::U32(v)),

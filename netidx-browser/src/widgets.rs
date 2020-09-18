@@ -1,5 +1,6 @@
 use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::view;
+use cairo;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
@@ -9,7 +10,13 @@ use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
-use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::Cell,
+    cmp::{max, min},
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    sync::Arc,
+};
 
 pub(super) struct Button {
     enabled: Source,
@@ -503,10 +510,13 @@ struct Series {
     title: Source,
     x: Source,
     y: Source,
+    x_data: VecDeque<Value>,
+    y_data: VecDeque<Value>,
 }
 
 pub(super) struct LinePlot {
     root: gtk::DrawingArea,
+    series: Rc<RefCell<Vec<Series>>>,
 }
 
 impl LinePlot {
@@ -516,20 +526,78 @@ impl LinePlot {
         spec: view::LinePlot,
         selected_path: gtk::Label,
     ) -> Self {
-        use plotters::prelude::*;
-        use plotters_cairo::CairoBackend;
         let root = gtk::DrawingArea::new();
         let title = Source::new(&ctx, variables, spec.title.clone());
         let x_label = Source::new(&ctx, variables, spec.x_label.clone());
         let y_label = Source::new(&ctx, variables, spec.y_label.clone());
         let timeseries = Source::new(&ctx, variables, spec.timeseries.clone());
         let keep_points = Source::new(&ctx, variables, spec.keep_points.clone());
-        let series = spec.series.iter().map(|series| Series {
-            title: Source::new(&ctx, variables, series.title.clone()),
-            x: Source::new(&ctx, variables, series.x.clone()),
-            y: Source::new(&ctx, variables, series.y.clone()),
-        });
-        LinePlot { root }
+        let series = Rc::new(RefCell::new(
+            spec.series
+                .iter()
+                .map(|series| Series {
+                    title: Source::new(&ctx, variables, series.title.clone()),
+                    x: Source::new(&ctx, variables, series.x.clone()),
+                    y: Source::new(&ctx, variables, series.y.clone()),
+                    x_data: VecDeque::new(),
+                    y_data: VecDeque::new(),
+                })
+                .collect::<Vec<_>>(),
+        ));
+        root.connect_draw(clone!(@strong series => move |area, context| {
+            match LinePlot::draw(series, area, context) {
+                Ok(()) => (),
+                Err(e) => warn!("failed to draw lineplot {}", e),
+            }
+        }));
+        LinePlot { root, series }
+    }
+
+    fn draw(
+        series: Rc<RefCell<Vec<Series>>>,
+        area: &gtk::DrawingArea,
+        context: &cairo::Context,
+    ) -> Result<()> {
+        use crate::formula::cast_val;
+        use netidx_protocols::value_type::Typ;
+        use plotters::prelude::*;
+        use plotters_cairo::CairoBackend;
+        let width = area.get_preferred_width().1;
+        let height = area.get_preferred_height().1;
+        let mut x_min;
+        let mut x_max;
+        let mut y_min;
+        let mut y_max;
+        for s in series.borrow().iter() {
+            for x in s.x_data.iter() {
+                x_min = min(x_min, x);
+                x_max = max(x_max, x);
+            }
+            for y in s.y_data.iter() {
+                y_min = min(y_min, y);
+                y_max = max(y_max, y);
+            }
+        }
+        let back = CairoBackend::new(context, (width as u32, height as u32))?
+            .into_drawing_area();
+        root.fill(&WHITE)?;
+        let mut chart = ChartBuilder::on(&root)
+            .caption("This is a test", ("sans-sherif", 14))
+            .build_cartesian_2d(min(x_min, 0)..x_max, min(y_min, 0)..y_max);
+        let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
+        for (i, s) in series.borrow().iter().enumerate() {
+            let data = s.x_data.iter().zip(s.y_data.iter()).filter_map(|(v0, v1)| {
+                let pair = cast_val(Typ::F64, v0).zip(cast_val(Typ::F64, v1));
+                pair.and_then(|(v0, v1)| match (v0, v1) {
+                    (Value::F64(v0), Value::F64(v1)) => Some((v0, v1)),
+                    (_, _) => {
+                        warn!("values not f64s after cast said they would be");
+                        None
+                    },
+                });
+            });
+            chart.draw_series(LineSeries::new(data, styles[i % 8]))?
+        }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
