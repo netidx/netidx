@@ -219,6 +219,17 @@ pub struct Grid {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Series {
+    x: Source,
+    y: Source,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineChart {
+    series: Vec<(Series, Vec<Series>)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
     Action(Action),
     Table(Path),
@@ -232,6 +243,7 @@ pub enum WidgetKind {
     Grid(Grid),
     GridChild(GridChild),
     GridRow(GridRow),
+    LineChart(LineChart),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

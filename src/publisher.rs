@@ -271,16 +271,35 @@ impl Val {
         }
     }
 
-    /// Register `tx` to receive a message when a new client subscribes to this value.
-    pub fn subscribers(&self, tx: fmpsc::UnboundedSender<(Id, SocketAddr)>) {
+    /// Register `tx` to receive a message when a new client
+    /// subscribes to this value. If `include_existing` is true, then
+    /// current subscribers will be sent to the channel immediatly,
+    /// otherwise it will only receive new subscribers.
+    pub fn subscribers(
+        &self,
+        include_existing: bool,
+        tx: fmpsc::UnboundedSender<(Id, SocketAddr)>,
+    ) {
         if let Some(publisher) = self.0.publisher.upgrade() {
-            publisher
-                .0
-                .lock()
+            let mut inner = publisher.0.lock();
+            inner
                 .on_subscribe_chans
                 .entry(self.0.id)
                 .or_insert_with(Vec::new)
-                .push(tx);
+                .push(tx.clone());
+            if include_existing {
+                for a in self.0.locked.lock().subscribed.keys() {
+                    let _: result::Result<_, _> = tx.unbounded_send((self.0.id, a.0));
+                }
+            }
+        }
+    }
+
+    /// Unsubscribe the specified client.
+    pub fn unsubscribe(&self, subscriber: &SocketAddr) {
+        let inner = self.0.locked.lock();
+        if let Some(q) = inner.subscribed.get(subscriber) {
+            q.push(ToClientMsg::Unpublish(self.0.id));
         }
     }
 
@@ -1000,6 +1019,7 @@ async fn handle_batch(
         for msg in msgs {
             match msg {
                 Subscribe { path, resolver, timestamp, permissions, mut token } => {
+                    gc = true;
                     match auth {
                         Auth::Anonymous => subscribe(
                             &mut *pb,
@@ -1269,10 +1289,21 @@ async fn client_loop(
                                 con.queue_send(&publisher::v1::From::Update(id, v))?;
                             }
                             ToClientMsg::Unpublish(id) => {
-                                con.queue_send(&publisher::v1::From::Unsubscribed(id))?;
+                                // handle this as if the client had requested it
+                                batch.push(publisher::v1::To::Unsubscribe(id));
                             }
                             ToClientMsg::Flush => break,
                         }
+                    }
+                    if batch.len() > 0 {
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)?
+                            .as_secs();
+                        handle_batch(
+                            &t, &updates, &addr, batch.drain(..),
+                            &mut con, &mut write_batches, &secrets,
+                            &desired_auth, now, &mut deferred_subs,
+                        ).await?;
                     }
                     let f = con.flush();
                     match timeout {
