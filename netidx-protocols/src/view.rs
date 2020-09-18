@@ -220,13 +220,19 @@ pub struct Grid {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Series {
-    x: Source,
-    y: Source,
+    pub title: Source,
+    pub x: Source,
+    pub y: Source,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LineChart {
-    series: Vec<(Series, Vec<Series>)>,
+pub struct LinePlot {
+    pub title: Source,
+    pub x_label: Source,
+    pub y_label: Source,
+    pub timeseries: Source,
+    pub keep_points: Source,
+    pub series: Vec<Series>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,7 +249,7 @@ pub enum WidgetKind {
     Grid(Grid),
     GridChild(GridChild),
     GridRow(GridRow),
-    LineChart(LineChart),
+    LinePlot(LinePlot),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

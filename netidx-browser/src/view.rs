@@ -78,6 +78,7 @@ pub(super) enum WidgetKind {
     Grid(Grid),
     GridChild(GridChild),
     GridRow(GridRow),
+    LinePlot(view::LinePlot),
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +104,7 @@ impl Widget {
                 view::WidgetKind::Toggle(t) => WidgetKind::Toggle(t),
                 view::WidgetKind::Selector(c) => WidgetKind::Selector(c),
                 view::WidgetKind::Entry(e) => WidgetKind::Entry(e),
+                view::WidgetKind::LinePlot(p) => WidgetKind::LinePlot(p),
                 view::WidgetKind::Box(c) => {
                     let children = join_all(
                         c.children.into_iter().map(|c| Widget::new(resolver, c)),

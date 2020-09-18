@@ -498,3 +498,45 @@ impl Entry {
         }
     }
 }
+
+struct Series {
+    title: Source,
+    x: Source,
+    y: Source,
+}
+
+pub(super) struct LinePlot {
+    root: gtk::DrawingArea,
+}
+
+impl LinePlot {
+    pub(super) fn new(
+        ctx: WidgetCtx,
+        variables: &HashMap<String, Value>,
+        spec: view::LinePlot,
+        selected_path: gtk::Label,
+    ) -> Self {
+        use plotters::prelude::*;
+        use plotters_cairo::CairoBackend;
+        let root = gtk::DrawingArea::new();
+        let title = Source::new(&ctx, variables, spec.title.clone());
+        let x_label = Source::new(&ctx, variables, spec.x_label.clone());
+        let y_label = Source::new(&ctx, variables, spec.y_label.clone());
+        let timeseries = Source::new(&ctx, variables, spec.timeseries.clone());
+        let keep_points = Source::new(&ctx, variables, spec.keep_points.clone());
+        let series = spec.series.iter().map(|series| Series {
+            title: Source::new(&ctx, variables, series.title.clone()),
+            x: Source::new(&ctx, variables, series.x.clone()),
+            y: Source::new(&ctx, variables, series.y.clone()),
+        });
+        LinePlot { root }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+
+    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {}
+
+    pub(super) fn update_var(&self, name: &str, value: &Value) {}
+}

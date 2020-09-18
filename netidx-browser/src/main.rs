@@ -36,7 +36,7 @@ use once_cell::sync::OnceCell;
 use std::{
     boxed::Box,
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt, fs, mem,
     path::PathBuf,
     rc::Rc,
@@ -78,6 +78,30 @@ impl fmt::Display for ViewLoc {
 }
 
 #[derive(Debug, Clone)]
+struct UpdateSet(VecDeque<IndexMap<SubId, Value>>);
+
+impl UpdateSet {
+    fn new() -> Self {
+        UpdateSet(VecDeque::new())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.len() == 0
+    }
+
+    fn push(&mut self, id: SubId, value: Value) {
+        if self.0.len() == 0 || self.0.back().unwrap().contains_key(&id) {
+            self.0.push_back(IndexMap::new());
+        }
+        self.0.back_mut().unwrap().insert(id, value);
+    }
+
+    fn pop(&mut self) -> Option<IndexMap<SubId, Value>> {
+        self.0.pop_front()
+    }
+}
+
+#[derive(Debug, Clone)]
 enum ToGui {
     View {
         loc: Option<ViewLoc>,
@@ -86,7 +110,7 @@ enum ToGui {
         generated: bool,
     },
     Highlight(Vec<WidgetPath>),
-    Update(Arc<IndexMap<SubId, Value>>),
+    Update(UpdateSet),
     UpdateVar(String, Value),
     Confirm(String, Sink, Value),
     TryNavigate(Value),
@@ -324,6 +348,7 @@ enum Widget {
     Entry(widgets::Entry),
     Box(containers::Box),
     Grid(containers::Grid),
+    LinePlot(widgets::LinePlot),
 }
 
 impl Widget {
@@ -393,6 +418,9 @@ impl Widget {
                         selected_path,
                     ))
                 }
+                view::WidgetKind::LinePlot(spec) => Widget::LinePlot(
+                    widgets::LinePlot::new(ctx, variables, spec, selected_path),
+                ),
             };
         if let Some(r) = w.root() {
             set_common_props(spec.props, r);
@@ -411,6 +439,7 @@ impl Widget {
             Widget::Entry(t) => Some(t.root()),
             Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
+            Widget::LinePlot(t) => Some(t.root()),
         }
     }
 
@@ -429,6 +458,7 @@ impl Widget {
             Widget::Entry(t) => t.update(changed),
             Widget::Box(t) => t.update(waits, changed),
             Widget::Grid(t) => t.update(waits, changed),
+            Widget::LinePlot(t) => t.update(changed),
         }
     }
 
@@ -443,6 +473,7 @@ impl Widget {
             Widget::Entry(t) => t.update_var(name, value),
             Widget::Box(t) => t.update_var(name, value),
             Widget::Grid(t) => t.update_var(name, value),
+            Widget::LinePlot(t) => t.update_var(name, value),
         }
     }
 
@@ -489,6 +520,7 @@ impl Widget {
                 (WidgetPath::Leaf, Widget::Toggle(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Selector(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Entry(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::LinePlot(w)) => set(w.root(), h),
             },
         }
     }
@@ -690,17 +722,16 @@ async fn netidx_main(mut ctx: StartNetidx) {
     let mut view_path: Option<Path> = None;
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut _dv_view: Option<Dval> = None;
-    let mut changed = IndexMap::new();
+    let mut changed = UpdateSet::new();
     let mut refreshing = false;
     fn refresh(
         refreshing: &mut bool,
-        changed: &mut IndexMap<SubId, Value>,
+        changed: &mut UpdateSet,
         to_gui: &glib::Sender<ToGui>,
     ) -> Result<()> {
-        if !*refreshing && changed.len() > 0 {
+        if !*refreshing && !changed.is_empty() {
             *refreshing = true;
-            let b = Arc::new(mem::replace(changed, IndexMap::new()));
-            to_gui.send(ToGui::Update(b))?
+            to_gui.send(ToGui::Update(mem::replace(changed, UpdateSet::new())))?
         }
         Ok(())
     }
@@ -829,7 +860,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
             },
             b = ctx.updates.next() => if let Some(mut batch) = b {
                 for (id, v) in batch.drain(..) {
-                    changed.insert(id, v);
+                    changed.push(id, v);
                 }
                 break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
             },
@@ -869,11 +900,11 @@ async fn netidx_main(mut ctx: StartNetidx) {
                 match st {
                     DvState::Subscribed => (),
                     DvState::Unsubscribed => {
-                        changed.insert(id, Value::String(Chars::from("#SUB")));
+                        changed.push(id, Value::String(Chars::from("#SUB")));
                         break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
                     }
                     DvState::FatalError(_) => {
-                        changed.insert(id, Value::String(Chars::from("#ERR")));
+                        changed.push(id, Value::String(Chars::from("#ERR")));
                         break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
                     }
                 }
@@ -1171,10 +1202,24 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
-        ToGui::Update(batch) => {
+        ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = Vec::new();
-                root.update(&mut waits, &batch);
+                if batch.is_empty() {
+                    let batch = Arc::new(IndexMap::new());
+                    root.update(&mut waits, &batch);
+                    if let Some(editor) = &*editor.borrow() {
+                        editor.update(&batch)
+                    }
+                } else {
+                    while let Some(batch) = batch.pop() {
+                        let batch = Arc::new(batch);
+                        root.update(&mut waits, &batch);
+                        if let Some(editor) = &*editor.borrow() {
+                            editor.update(&batch)
+                        }
+                    }
+                }
                 if waits.len() == 0 {
                     let _: result::Result<_, _> =
                         ctx.from_gui.unbounded_send(FromGui::Updated);
@@ -1188,9 +1233,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                             from_gui.unbounded_send(FromGui::Updated);
                     });
                 }
-            }
-            if let Some(editor) = &*editor.borrow() {
-                editor.update(&batch)
             }
             Continue(true)
         }
@@ -1233,7 +1275,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter().copied(), true);
             *current.borrow_mut() = Some(cur);
-            let m = ToGui::Update(Arc::new(IndexMap::new()));
+            // CR: estokes is this needed?
+            let m = ToGui::Update(UpdateSet::new());
             let _: result::Result<_, _> = ctx.to_gui.send(m);
             Continue(true)
         }
