@@ -9,8 +9,8 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
     collections::HashMap,
+    rc::Rc,
     result::Result,
-    sync::Arc,
 };
 
 #[derive(Debug, Clone)]

@@ -958,6 +958,7 @@ impl Widget {
                 WidgetKind::Entry(Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
+            view::Widget { props: _, kind: view::WidgetKind::LinePlot(_) } => todo!(),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(BoxContainer::new(on_change.clone(), s)),
@@ -1425,7 +1426,8 @@ impl Editor {
             | view::WidgetKind::Button(_)
             | view::WidgetKind::Toggle(_)
             | view::WidgetKind::Selector(_)
-            | view::WidgetKind::Entry(_) => (),
+            | view::WidgetKind::Entry(_)
+            | view::WidgetKind::LinePlot(_) => (),
         }
     }
 

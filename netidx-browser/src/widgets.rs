@@ -6,16 +6,16 @@ use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use log::warn;
+use anyhow::Result;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     cmp::{max, min},
     collections::{HashMap, VecDeque},
     rc::Rc,
-    sync::Arc,
 };
 
 pub(super) struct Button {
@@ -287,13 +287,13 @@ impl Selector {
         Selector::update_active(combo, source)
     }
 
-    pub(super) fn update(&self, updates: &Arc<IndexMap<SubId, Value>>) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
         self.we_set.set(true);
-        if let Some(new) = self.enabled.update(updates) {
+        if let Some(new) = self.enabled.update(id, value) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        Selector::update_active(&self.combo, &self.source.update(updates));
-        if let Some(new) = self.choices.update(updates) {
+        Selector::update_active(&self.combo, &self.source.update(id, value));
+        if let Some(new) = self.choices.update(id, value) {
             Selector::update_choices(&self.combo, &new, &self.source.current());
         }
         self.we_set.set(false);
@@ -612,8 +612,8 @@ impl LinePlot {
         }
         let back = CairoBackend::new(context, (width as u32, height as u32))?
             .into_drawing_area();
-        root.fill(&WHITE)?;
-        let mut chart = ChartBuilder::on(&root)
+        back.fill(&WHITE)?;
+        let mut chart = ChartBuilder::on(&back)
             .caption(title, ("sans-sherif", 14))
             .build_cartesian_2d(min(x_min, 0)..x_max, min(y_min, 0)..y_max);
         chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;

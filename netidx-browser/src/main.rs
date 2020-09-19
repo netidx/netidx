@@ -1,6 +1,8 @@
 #![recursion_limit = "2048"]
 #[macro_use]
 extern crate glib;
+#[macro_use]
+extern crate lazy_static;
 mod containers;
 mod editor;
 mod formula;
@@ -884,7 +886,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                 }
             },
             s = state_updates.next() => match s {
-                BatchItem::InBatch(Some((id, st))) => match st {
+                Some(BatchItem::InBatch((id, st))) => match st {
                     DvState::Subscribed => (),
                     DvState::Unsubscribed => {
                         changed.push((id, Value::String(Chars::from("#SUB"))));
@@ -893,10 +895,10 @@ async fn netidx_main(mut ctx: StartNetidx) {
                         changed.push((id, Value::String(Chars::from("#ERR"))));
                     }
                 }
-                BatchItem::InBatch(None) => (),
-                BatchItem::EndBatch => {
+                Some(BatchItem::EndBatch) => {
                     break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui));
                 }
+                None => ()
             }
         }
     }
