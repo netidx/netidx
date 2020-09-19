@@ -860,7 +860,7 @@ impl Formula {
     ) -> Option<Value> {
         match self {
             Formula::Any(c) => {
-                let res = from.into_iter().filter_map(|s| s.update(*id, value)).fold(
+                let res = from.into_iter().filter_map(|s| s.update(id, value)).fold(
                     None,
                     |res, v| match res {
                         None => Some(v),

@@ -47,7 +47,7 @@ struct TableInner {
     base_path: Path,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
-    update_in_progress: RefCell<IndexMap<SubId, Value>>,
+    update: RefCell<IndexMap<SubId, Value>>,
 }
 
 impl Drop for TableInner {
@@ -157,7 +157,7 @@ impl Table {
             focus_row: RefCell::new(None),
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
-            update_in_progress: RefCell::new(IndexMap::new()),
+            update: RefCell::new(IndexMap::new()),
         }));
         t.view().append_column(&{
             let column = TreeViewColumn::new();
@@ -436,42 +436,47 @@ impl Table {
         &self.0.store
     }
 
+    fn start_update_task(
+        &self,
+        tx: oneshot::Sender<()>,
+        sctx: Option<(SortColumn, SortType)>,
+    ) {
+        let mut tx = Some(tx);
+        let t = self;
+        idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
+            for _ in 0..1000 {
+                match t.0.update.borrow_mut().pop() {
+                    None => break,
+                    Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(&id) {
+                        let s = &format!("{}", v).to_value();
+                        t.store().set_value(&sub.row, sub.col, s);
+                    }
+                }
+            }
+            if t.0.update.borrow().len() > 0 {
+                Continue(true)
+            } else {
+                if let Some(tx) = tx.take() {
+                    let _: result::Result<_, _> = tx.send(());
+                }
+                t.enable_sort(sctx);
+                t.update_subscriptions();
+                Continue(false)
+            }
+        }));
+    }
+
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
         id: SubId,
         value: &Value,
     ) {
-        let mut up = self.update_in_progress.borrow_mut();
-        up.insert(id, value);
-        if up.len() == 1 {
+        self.0.update.borrow_mut().insert(id, value.clone());
+        if self.0.update.borrow().len() == 1 {
             let (tx, rx) = oneshot::channel();
-            let mut tx = Some(tx);
             waits.push(rx);
-            let sctx = self.disable_sort();
-            let t = self;
-            idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
-                let up = &self.update_in_progress;
-                for _ in 0..1000 {
-                    match up.borrow_mut().pop() {
-                        None => break,
-                        Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(id) {
-                            let s = &format!("{}", v).to_value();
-                            t.store().set_value(&sub.row, sub.col, s);
-                        }
-                    }
-                }
-                if up.borrow().len() > 0 {
-                    Continue(true)
-                } else {
-                    if let Some(tx) = tx.take() {
-                        let _: result::Result<_, _> = tx.send(());
-                    }
-                    t.enable_sort(sctx);
-                    t.update_subscriptions();
-                    Continue(false)
-                }
-            }));
+            self.start_update_task(tx, self.disable_sort());
         }
     }
 }
