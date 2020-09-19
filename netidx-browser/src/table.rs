@@ -22,7 +22,6 @@ use std::{
     ops::Drop,
     rc::{Rc, Weak},
     result,
-    sync::Arc,
 };
 
 struct Subscription {

@@ -23,7 +23,6 @@ use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
-use indexmap::IndexMap;
 use log::{info, warn};
 use netidx::{
     chars::Chars,
@@ -39,7 +38,7 @@ use once_cell::sync::OnceCell;
 use std::{
     boxed::Box,
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fmt, fs, mem,
     path::PathBuf,
     rc::Rc,

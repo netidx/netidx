@@ -2,21 +2,16 @@ use super::super::{formula, Source, WidgetCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{SubId, Value},
+    subscriber::{SubId, Typ, Value},
 };
-use netidx_protocols::{
-    value_type::{Typ, TYPES},
-    view,
-};
+use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    sync::Arc,
 };
 
 fn set_dbg_src(
@@ -32,6 +27,23 @@ fn set_dbg_src(
     store.set_value(&iter, 3, &SourceWrap(source).to_value());
     spec
 }
+
+static TYPES: [Typ; 14] = [
+    Typ::U32,
+    Typ::V32,
+    Typ::I32,
+    Typ::Z32,
+    Typ::U64,
+    Typ::V64,
+    Typ::I64,
+    Typ::Z64,
+    Typ::F32,
+    Typ::F64,
+    Typ::Bool,
+    Typ::String,
+    Typ::Bytes,
+    Typ::Result,
+];
 
 #[derive(Clone, Debug)]
 struct Constant {

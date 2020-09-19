@@ -3,9 +3,8 @@ use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
-use indexmap::IndexMap;
 use netidx::subscriber::{SubId, Value};
-use std::{cmp::max, collections::HashMap, sync::Arc};
+use std::{cmp::max, collections::HashMap};
 
 pub(super) struct Box {
     root: gtk::Box,

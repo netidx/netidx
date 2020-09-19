@@ -1,5 +1,4 @@
 use super::{Source, WidgetCtx};
-use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Typ, Value},

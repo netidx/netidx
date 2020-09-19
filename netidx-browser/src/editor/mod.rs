@@ -3,7 +3,6 @@ mod util;
 use super::{util::err_modal, FromGui, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
-use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -16,7 +15,6 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     result,
-    sync::Arc,
 };
 use util::{parse_entry, TwoColGrid};
 
