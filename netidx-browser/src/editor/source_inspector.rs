@@ -5,7 +5,7 @@ use gtk::{self, prelude::*};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{SubId, Typ, Value},
+    subscriber::{Typ, Value},
 };
 use netidx_protocols::view;
 use std::{

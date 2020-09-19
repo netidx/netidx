@@ -1,7 +1,7 @@
 use super::{Source, WidgetCtx, Target};
 use netidx::{
     chars::Chars,
-    subscriber::{SubId, Typ, Value},
+    subscriber::{Typ, Value},
 };
 use netidx_protocols::view;
 use std::{

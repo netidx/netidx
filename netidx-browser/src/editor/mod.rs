@@ -8,7 +8,7 @@ use gtk::{self, prelude::*};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{SubId, Value},
+    subscriber::Value,
 };
 use netidx_protocols::view;
 use source_inspector::SourceInspector;

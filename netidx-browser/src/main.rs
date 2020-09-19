@@ -1246,7 +1246,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::UpdateVar(name, value) => {
             if let Some(root) = &mut *current.borrow_mut() {
-                root.update(Target::Variable(&name), &value);
+                let mut waits = Vec::new();
+                root.update(&mut waits, Target::Variable(&name), &value);
             }
             if let Some(editor) = &*editor.borrow() {
                 editor.update(Target::Variable(&name), &value);

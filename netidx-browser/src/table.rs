@@ -1,4 +1,4 @@
-use super::{FromGui, ViewLoc, WidgetCtx};
+use super::{FromGui, ViewLoc, WidgetCtx, Target};
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
@@ -468,14 +468,19 @@ impl Table {
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        id: SubId,
+        tgt: Target,
         value: &Value,
     ) {
-        self.0.update.borrow_mut().insert(id, value.clone());
-        if self.0.update.borrow().len() == 1 {
-            let (tx, rx) = oneshot::channel();
-            waits.push(rx);
-            self.start_update_task(tx, self.disable_sort());
+        match tgt {
+            Target::Variable(_) => (),
+            Target::Netidx(id) => {
+                self.0.update.borrow_mut().insert(id, value.clone());
+                if self.0.update.borrow().len() == 1 {
+                    let (tx, rx) = oneshot::channel();
+                    waits.push(rx);
+                    self.start_update_task(tx, self.disable_sort());
+                }
+            }
         }
     }
 }

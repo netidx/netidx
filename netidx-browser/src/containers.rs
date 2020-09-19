@@ -1,9 +1,9 @@
-use super::{set_common_props, Widget, WidgetCtx};
+use super::{set_common_props, Widget, WidgetCtx, Target};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
-use netidx::subscriber::{SubId, Value};
+use netidx::subscriber::Value;
 use std::{cmp::max, collections::HashMap};
 
 pub(super) struct Box {
@@ -83,17 +83,11 @@ impl Box {
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        id: SubId,
+        tgt: Target,
         value: &Value,
     ) {
         for c in &self.children {
-            c.update(waits, id, value);
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        for c in &self.children {
-            c.update_var(name, value);
+            c.update(waits, tgt, value);
         }
     }
 
@@ -184,20 +178,12 @@ impl Grid {
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        id: SubId,
+        tgt: Target,
         value: &Value,
     ) {
         for row in &self.children {
             for child in row {
-                child.update(waits, id, value);
-            }
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        for row in &self.children {
-            for child in row {
-                child.update_var(name, value);
+                child.update(waits, tgt, value);
             }
         }
     }

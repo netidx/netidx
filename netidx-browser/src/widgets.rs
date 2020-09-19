@@ -8,7 +8,7 @@ use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{
     chars::Chars,
-    subscriber::{SubId, Value},
+    subscriber::Value,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -69,6 +69,7 @@ impl Button {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        let _: Option<Value> = self.source.update(tgt, value);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.button.set_sensitive(val_to_bool(&new));
         }
@@ -268,7 +269,7 @@ impl Selector {
         if let Some(new) = self.enabled.update(tgt, value) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        Selector::update_active(&self.combo, &self.source.update(id, value));
+        Selector::update_active(&self.combo, &self.source.update(tgt, value));
         if let Some(new) = self.choices.update(tgt, value) {
             Selector::update_choices(&self.combo, &new, &self.source.current());
         }
