@@ -452,7 +452,7 @@ impl Table {
             let t = self;
             idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                 let up = &self.update_in_progress;
-                for _ in 0..10000 {
+                for _ in 0..1000 {
                     match up.borrow_mut().pop() {
                         None => break,
                         Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(id) {
