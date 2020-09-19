@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::v1::Value;
+pub use crate::protocol::publisher::v1::{Typ, Value};
 use crate::{
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,

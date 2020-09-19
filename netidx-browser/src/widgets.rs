@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use log::warn;
 use netidx::{
     chars::Chars,
-    subscriber::{SubId, Value},
+    subscriber::{SubId, Typ, Value},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -511,10 +511,6 @@ struct Series {
     y: Source,
     x_data: VecDeque<f64>,
     y_data: VecDeque<f64>,
-    x_min: f64,
-    x_max: f64,
-    y_min: f64,
-    y_max: f64,
 }
 
 pub(super) struct LinePlot {
@@ -584,6 +580,7 @@ impl LinePlot {
         area: &gtk::DrawingArea,
         context: &cairo::Context,
     ) -> Result<()> {
+        use f64::{min, max};
         use plotters::prelude::*;
         use plotters_cairo::CairoBackend;
         let get_str = |v: &Option<Value>| match v {
@@ -640,14 +637,6 @@ impl LinePlot {
     }
 
     pub(super) fn update(&self, id: SubId, value: &Value) {
-        fn cast_f64(v: Value) -> Option<f64> {
-            use crate::formula::cast_val;
-            use netidx_protocols::value_type::Typ;
-            cast_val(Typ::F64, v).and_then(|v| match v {
-                Value::F64(v) => Some(v),
-                _ => None
-            })
-        }
         let mut queue_draw = false;
         if self.title.update(id, value).is_some() {
             queue_draw = true;
@@ -662,16 +651,22 @@ impl LinePlot {
             queue_draw = true;
         }
         for s in self.series.borrow_mut() {
-            if let Some(v) = s.x.update(id, value) {
+            if let Some(v) = s.x.update(id, value).and_then(|v| v.cast_f64()) {
                 s.x_data.push_back(v);
                 queue_draw = true;
             }
-            if let Some(v) = s.y.update(id, value) {
+            if let Some(v) = s.y.update(id, value).and_then(|v| v.cast_f64()) {
                 s.y_data.push_back(v);
                 queue_draw = true;
             }
             if s.title.update(id, value).is_some() {
                 queue_draw = true;
+            }
+            if let Some(keep) = self.keep_points.current().and_then(|v| v.cast_u64()) {
+                if s.x_data.len() > keep as usize || s.y_data.len() > keep as usize {
+                    s.x_data.pop_front();
+                    x.y_data.pop_front();
+                }
             }
         }
         if queue_draw {

@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::v1::{Id, Value};
+pub use crate::protocol::publisher::v1::{Id, Typ, Value};
 use crate::{
     auth::Permissions,
     channel::Channel,

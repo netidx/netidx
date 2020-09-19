@@ -642,6 +642,7 @@ impl Pack for Value {
 }
 
 impl Value {
+    /// Whatever value is attempt to turn it into the type specified
     pub fn cast(self, typ: Typ) -> Option<Value> {
         match typ {
             Typ::U32 => match self {
@@ -927,56 +928,64 @@ impl Value {
         }
     }
 
-    pub fn cast_to_u32(self) -> Option<u32> {
+    /// cast value to a u32 and then unwrap it
+    pub fn cast_u32(self) -> Option<u32> {
         self.cast(Typ::U32).and_then(|v| match v {
             Value::U32(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_i32(self) -> Option<i32> {
+    /// cast value to an i32 and then unwrap it
+    pub fn cast_i32(self) -> Option<i32> {
         self.cast(Typ::I32).and_then(|v| match v {
             Value::I32(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_u64(self) -> Option<u64> {
+    /// cast value to a u64 and then unwrap it
+    pub fn cast_u64(self) -> Option<u64> {
         self.cast(Typ::U64).and_then(|v| match v {
             Value::U64(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_i64(self) -> Option<i64> {
+    /// cast value to an i64 and then unwrap it
+    pub fn cast_i64(self) -> Option<i64> {
         self.cast(Typ::I64).and_then(|v| match v {
             Value::I64(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_f32(self) -> Option<f32> {
+    /// cast value to an f32 and then unwrap it
+    pub fn cast_f32(self) -> Option<f32> {
         self.cast(Typ::F32).and_then(|v| match v {
             Value::F32(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_f64(self) -> Option<f64> {
+    /// cast value to an f64 and then unwrap it
+    pub fn cast_f64(self) -> Option<f64> {
         self.cast(Typ::F64).and_then(|v| match v {
             Value::F64(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_string(self) -> Option<Chars> {
+    /// cast value to a string and then unwrap it
+    pub fn cast_string(self) -> Option<Chars> {
         self.cast(Typ::String).and_then(|v| match v {
             Value::String(v) => Some(v),
             _ => None,
         })
     }
 
-    pub fn cast_to_bool(self) -> Option<bool> {
+    /// cast value to a bool and then unwrap it
+    pub fn cast_bool(self) -> Option<bool> {
         self.cast(Typ::Bool).and_then(|v| match v {
             Value::True => Some(true),
             Value::False => Some(false),

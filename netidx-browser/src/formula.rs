@@ -2,8 +2,7 @@ use super::{Source, WidgetCtx};
 use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
-    subscriber::{SubId, Value},
-    protocol::publisher::v1::Typ,
+    subscriber::{SubId, Typ, Value},
 };
 use netidx_protocols::view;
 use std::{
@@ -148,7 +147,7 @@ impl Mean {
     fn eval(&self) -> Option<Value> {
         for v in &*self.from.0.borrow() {
             if let Some(v) = v {
-                if let Some(v) = v.clone().cast_to_f64() {
+                if let Some(v) = v.clone().cast_f64() {
                     self.total.set(self.total.get() + v);
                     self.samples.set(self.samples.get() + 1);
                 }
