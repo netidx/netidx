@@ -212,23 +212,6 @@ pub enum Typ {
     Result,
 }
 
-pub static TYPES: [Typ; 14] = [
-    Typ::U32,
-    Typ::V32,
-    Typ::I32,
-    Typ::Z32,
-    Typ::U64,
-    Typ::V64,
-    Typ::I64,
-    Typ::Z64,
-    Typ::F32,
-    Typ::F64,
-    Typ::Bool,
-    Typ::String,
-    Typ::Bytes,
-    Typ::Result,
-];
-
 impl Typ {
     pub fn name(&self) -> &'static str {
         match self {
