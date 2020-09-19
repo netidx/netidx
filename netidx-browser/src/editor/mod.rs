@@ -166,9 +166,9 @@ impl Action {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -212,9 +212,9 @@ impl Label {
         self.root.upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -287,15 +287,15 @@ impl Button {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.label_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -363,12 +363,12 @@ impl Toggle {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -444,15 +444,15 @@ impl Selector {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.choices_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -531,15 +531,15 @@ impl Entry {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.visible_source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(changed);
+            si.update(id, value);
         }
     }
 
@@ -1107,15 +1107,15 @@ impl Widget {
         self.root.upcast_ref()
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    fn update(&self, id: SubId, value: &Value) {
         match &self.kind {
-            WidgetKind::Action(w) => w.update(changed),
+            WidgetKind::Action(w) => w.update(id, value),
             WidgetKind::Table(_) => (),
-            WidgetKind::Label(w) => w.update(changed),
-            WidgetKind::Button(w) => w.update(changed),
-            WidgetKind::Toggle(w) => w.update(changed),
-            WidgetKind::Selector(w) => w.update(changed),
-            WidgetKind::Entry(w) => w.update(changed),
+            WidgetKind::Label(w) => w.update(id, value),
+            WidgetKind::Button(w) => w.update(id, value),
+            WidgetKind::Toggle(w) => w.update(id, value),
+            WidgetKind::Selector(w) => w.update(id, value),
+            WidgetKind::Entry(w) => w.update(id, value),
             WidgetKind::Box(_)
             | WidgetKind::BoxChild(_)
             | WidgetKind::Grid(_)
@@ -1594,13 +1594,13 @@ impl Editor {
         };
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
         self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 1);
             match v.get::<&Widget>() {
                 Err(_) | Ok(None) => false,
                 Ok(Some(w)) => {
-                    w.update(changed);
+                    w.update(id, value);
                     false
                 }
             }

@@ -84,10 +84,11 @@ impl Box {
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        updates: &Arc<IndexMap<SubId, Value>>,
+        id: SubId,
+        value: &Value,
     ) {
         for c in &self.children {
-            c.update(waits, updates);
+            c.update(waits, id, value);
         }
     }
 
@@ -184,11 +185,12 @@ impl Grid {
     pub(super) fn update(
         &self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        updates: &Arc<IndexMap<SubId, Value>>,
+        id: SubId,
+        value: &Value,
     ) {
         for row in &self.children {
             for child in row {
-                child.update(waits, updates);
+                child.update(waits, id, value);
             }
         }
     }

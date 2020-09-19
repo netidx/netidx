@@ -70,11 +70,11 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.enabled.update(changed) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        if let Some(new) = self.enabled.update(id, value) {
             self.button.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.label.update(changed) {
+        if let Some(new) = self.label.update(id, value) {
             self.button.set_label(&format!("{}", new));
         }
     }
@@ -127,8 +127,8 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.source.update(changed) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        if let Some(new) = self.source.update(id, value) {
             self.label.set_label(&format!("{}", new));
         }
     }
@@ -160,8 +160,8 @@ impl Action {
         Action { source, sink, ctx }
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.source.update(changed) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        if let Some(new) = self.source.update(id, value) {
             self.sink.set(&self.ctx, new);
         }
     }
@@ -383,11 +383,11 @@ impl Toggle {
         self.switch.upcast_ref()
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.enabled.update(changed) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        if let Some(new) = self.enabled.update(id, value) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(changed) {
+        if let Some(new) = self.source.update(id, value) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
             self.switch.set_state(val_to_bool(&new));
@@ -475,14 +475,14 @@ impl Entry {
         self.entry.upcast_ref()
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
-        if let Some(new) = self.enabled.update(changed) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        if let Some(new) = self.enabled.update(id, value) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.visible.update(changed) {
+        if let Some(new) = self.visible.update(id, value) {
             self.entry.set_visibility(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(changed) {
+        if let Some(new) = self.source.update(id, value) {
             match new {
                 Value::String(s) => self.entry.set_text(&*s),
                 v => self.entry.set_text(&format!("{}", v)),
@@ -516,6 +516,10 @@ struct Series {
 
 pub(super) struct LinePlot {
     root: gtk::DrawingArea,
+    title: Rc<Source>,
+    x_label: Rc<Source>,
+    y_label: Rc<Source>,
+    keep_points: Rc<Source>,
     series: Rc<RefCell<Vec<Series>>>,
 }
 
@@ -527,11 +531,11 @@ impl LinePlot {
         selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::DrawingArea::new();
-        let title = Source::new(&ctx, variables, spec.title.clone());
-        let x_label = Source::new(&ctx, variables, spec.x_label.clone());
-        let y_label = Source::new(&ctx, variables, spec.y_label.clone());
-        let timeseries = Source::new(&ctx, variables, spec.timeseries.clone());
-        let keep_points = Source::new(&ctx, variables, spec.keep_points.clone());
+        let title = Rc::new(Source::new(&ctx, variables, spec.title.clone()));
+        let x_label = Rc::new(Source::new(&ctx, variables, spec.x_label.clone()));
+        let y_label = Rc::new(Source::new(&ctx, variables, spec.y_label.clone()));
+        let timeseries = Rc::new(Source::new(&ctx, variables, spec.timeseries.clone()));
+        let keep_points = Rc::new(Source::new(&ctx, variables, spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
@@ -544,16 +548,34 @@ impl LinePlot {
                 })
                 .collect::<Vec<_>>(),
         ));
-        root.connect_draw(clone!(@strong series => move |area, context| {
-            match LinePlot::draw(series, area, context) {
+        root.connect_draw(clone!(
+            @strong title,
+            @strong x_label,
+            @strong y_label,
+            @strong timeseries,
+            @strong series => move |area, context| {
+            let res = LinePlot::draw(
+                title,
+                x_label,
+                y_label,
+                timeseries,
+                series,
+                area,
+                context
+            );
+            match res {
                 Ok(()) => (),
                 Err(e) => warn!("failed to draw lineplot {}", e),
             }
         }));
-        LinePlot { root, series }
+        LinePlot { root, title, x_label, y_label, keep_points, series }
     }
 
     fn draw(
+        title: Rc<Source>,
+        x_label: Rc<Source>,
+        y_label: Rc<Source>,
+        timeseries: Rc<Source>,
         series: Rc<RefCell<Vec<Series>>>,
         area: &gtk::DrawingArea,
         context: &cairo::Context,
@@ -562,6 +584,16 @@ impl LinePlot {
         use netidx_protocols::value_type::Typ;
         use plotters::prelude::*;
         use plotters_cairo::CairoBackend;
+        let get_str = |v: &Value| match v {
+            Some(Value::String(c)) => &*c,
+            Some(_) | None => "",
+        };
+        let title = title.current();
+        let title = get_str(&title);
+        let x_label = x_label.current();
+        let x_label = get_str(&x_label);
+        let y_label = y_label.current();
+        let y_label = get_str(&y_label);
         let width = area.get_preferred_width().1;
         let height = area.get_preferred_height().1;
         let mut x_min;
@@ -582,8 +614,9 @@ impl LinePlot {
             .into_drawing_area();
         root.fill(&WHITE)?;
         let mut chart = ChartBuilder::on(&root)
-            .caption("This is a test", ("sans-sherif", 14))
+            .caption(title, ("sans-sherif", 14))
             .build_cartesian_2d(min(x_min, 0)..x_max, min(y_min, 0)..y_max);
+        chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
         let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
         for (i, s) in series.borrow().iter().enumerate() {
             let data = s.x_data.iter().zip(s.y_data.iter()).filter_map(|(v0, v1)| {
@@ -593,7 +626,7 @@ impl LinePlot {
                     (_, _) => {
                         warn!("values not f64s after cast said they would be");
                         None
-                    },
+                    }
                 });
             });
             chart.draw_series(LineSeries::new(data, styles[i % 8]))?
@@ -604,7 +637,37 @@ impl LinePlot {
         self.root.upcast_ref()
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {}
+    pub(super) fn update(&self, id: SubId, value: &Value) {
+        let mut queue_draw = false;
+        if self.title.update(id, value).is_some() {
+            queue_draw = true;
+        }
+        if self.x_label.update(id, value).is_some() {
+            queue_draw = true;
+        }
+        if self.y_label.update(id, value).is_some() {
+            queue_draw = true;
+        }
+        if self.keep_points.update(id, value).is_some() {
+            queue_draw = true;
+        }
+        for s in self.series.borrow_mut() {
+            if let Some(v) = s.x.update(id, value) {
+                s.x_data.push_back(v);
+                queue_draw = true;
+            }
+            if let Some(v) = s.y.update(id, value) {
+                s.y_data.push_back(v);
+                queue_draw = true;
+            }
+            if s.title.update(id, value).is_some() {
+                queue_draw = true;
+            }
+        }
+        if queue_draw {
+            self.root.queue_draw();
+        }
+    }
 
     pub(super) fn update_var(&self, name: &str, value: &Value) {}
 }

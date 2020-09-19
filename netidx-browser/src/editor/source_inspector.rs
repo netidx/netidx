@@ -614,13 +614,13 @@ impl SourceInspector {
         SourceInspector { root, store }
     }
 
-    pub(super) fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) {
+    pub(super) fn update(&self, id: SubId, value: &Value) {
         self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 3);
             match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
                 Ok(Some(SourceWrap(source))) => {
-                    if let Some(v) = source.update(changed) {
+                    if let Some(v) = source.update(id, value) {
                         self.store.set_value(iter, 1, &format!("{}", v).to_value());
                     }
                     false

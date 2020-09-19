@@ -27,9 +27,10 @@ use netidx::{
     chars::Chars,
     config::{self, Config},
     path::Path,
-    pool::Pooled,
+    pool::{Pool, Pooled},
     resolver::{Auth, ResolverRead},
     subscriber::{DvState, Dval, SubId, Subscriber, Value},
+    utils::{BatchItem, Batched},
 };
 use netidx_protocols::view as protocol_view;
 use once_cell::sync::OnceCell;
@@ -78,30 +79,6 @@ impl fmt::Display for ViewLoc {
 }
 
 #[derive(Debug, Clone)]
-struct UpdateSet(VecDeque<IndexMap<SubId, Value>>);
-
-impl UpdateSet {
-    fn new() -> Self {
-        UpdateSet(VecDeque::new())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.len() == 0
-    }
-
-    fn push(&mut self, id: SubId, value: Value) {
-        if self.0.len() == 0 || self.0.back().unwrap().contains_key(&id) {
-            self.0.push_back(IndexMap::new());
-        }
-        self.0.back_mut().unwrap().insert(id, value);
-    }
-
-    fn pop(&mut self) -> Option<IndexMap<SubId, Value>> {
-        self.0.pop_front()
-    }
-}
-
-#[derive(Debug, Clone)]
 enum ToGui {
     View {
         loc: Option<ViewLoc>,
@@ -110,7 +87,7 @@ enum ToGui {
         generated: bool,
     },
     Highlight(Vec<WidgetPath>),
-    Update(UpdateSet),
+    Update(Batch),
     UpdateVar(String, Value),
     Confirm(String, Sink, Value),
     TryNavigate(Value),
@@ -201,11 +178,17 @@ impl Source {
         }
     }
 
-    fn update(&self, changed: &Arc<IndexMap<SubId, Value>>) -> Option<Value> {
+    fn update(&self, id: SubId, value: &Value) -> Option<Value> {
         match self {
             Source::Constant(_, _) | Source::Variable(_, _, _) => None,
-            Source::Load(_, dv) => changed.get(&dv.id()).cloned(),
-            Source::Map { spec: _, from, function } => function.update(from, changed),
+            Source::Map { spec: _, from, function } => function.update(from, id, value),
+            Source::Load(_, dv) => {
+                if dv.id() == id {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -446,19 +429,20 @@ impl Widget {
     fn update<'a, 'b: 'a>(
         &'a self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        changed: &'b Arc<IndexMap<SubId, Value>>,
+        id: SubId,
+        value: &Value,
     ) {
         match self {
-            Widget::Action(t) => t.update(changed),
-            Widget::Table(t) => t.update(waits, changed),
-            Widget::Label(t) => t.update(changed),
-            Widget::Button(t) => t.update(changed),
-            Widget::Toggle(t) => t.update(changed),
-            Widget::Selector(t) => t.update(changed),
-            Widget::Entry(t) => t.update(changed),
-            Widget::Box(t) => t.update(waits, changed),
-            Widget::Grid(t) => t.update(waits, changed),
-            Widget::LinePlot(t) => t.update(changed),
+            Widget::Action(t) => t.update(id, value),
+            Widget::Table(t) => t.update(waits, id, value),
+            Widget::Label(t) => t.update(id, value),
+            Widget::Button(t) => t.update(id, value),
+            Widget::Toggle(t) => t.update(id, value),
+            Widget::Selector(t) => t.update(id, value),
+            Widget::Entry(t) => t.update(id, value),
+            Widget::Box(t) => t.update(waits, id, value),
+            Widget::Grid(t) => t.update(waits, id, value),
+            Widget::LinePlot(t) => t.update(id, value),
         }
     }
 
@@ -648,12 +632,8 @@ impl View {
         self.root.upcast_ref()
     }
 
-    fn update(
-        &self,
-        waits: &mut Vec<oneshot::Receiver<()>>,
-        changed: &Arc<IndexMap<SubId, Value>>,
-    ) {
-        self.widget.update(waits, changed);
+    fn update(&self, waits: &mut Vec<oneshot::Receiver<()>>, id: SubId, value: &Value) {
+        self.widget.update(waits, id, value);
     }
 
     fn update_var(&self, name: &str, value: &Value) {
@@ -705,6 +685,10 @@ struct StartNetidx {
     raw_view: Arc<AtomicBool>,
 }
 
+lazy_static! {
+    static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5);
+}
+
 async fn netidx_main(mut ctx: StartNetidx) {
     async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
         match rx_view {
@@ -722,16 +706,17 @@ async fn netidx_main(mut ctx: StartNetidx) {
     let mut view_path: Option<Path> = None;
     let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
     let mut _dv_view: Option<Dval> = None;
-    let mut changed = UpdateSet::new();
+    let mut changed = UPDATES.take();
     let mut refreshing = false;
+    let mut state_updates = Batched::new(ctx.state_updates, 100_000);
     fn refresh(
         refreshing: &mut bool,
-        changed: &mut UpdateSet,
+        changed: &mut Batch,
         to_gui: &glib::Sender<ToGui>,
     ) -> Result<()> {
         if !*refreshing && !changed.is_empty() {
             *refreshing = true;
-            to_gui.send(ToGui::Update(mem::replace(changed, UpdateSet::new())))?
+            to_gui.send(ToGui::Update(mem::replace(changed, UPDATES.take())))?
         }
         Ok(())
     }
@@ -859,10 +844,12 @@ async fn netidx_main(mut ctx: StartNetidx) {
                 },
             },
             b = ctx.updates.next() => if let Some(mut batch) = b {
-                for (id, v) in batch.drain(..) {
-                    changed.push(id, v);
+                if changed.len() > 0 {
+                    changed.extend(batch.drain(..));
+                    break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
+                } else {
+                    break_err!(refresh(&mut refreshing, &mut batch, &ctx.to_gui))
                 }
-                break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
             },
             m = read_view(&mut rx_view).fuse() => match m {
                 None => {
@@ -896,17 +883,19 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     }
                 }
             },
-            s = ctx.state_updates.next() => if let Some((id, st)) = s {
-                match st {
+            s = state_updates.next() => match s {
+                BatchItem::InBatch(Some((id, st))) => match st {
                     DvState::Subscribed => (),
                     DvState::Unsubscribed => {
-                        changed.push(id, Value::String(Chars::from("#SUB")));
-                        break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
+                        changed.push((id, Value::String(Chars::from("#SUB"))));
                     }
                     DvState::FatalError(_) => {
-                        changed.push(id, Value::String(Chars::from("#ERR")));
-                        break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
+                        changed.push((id, Value::String(Chars::from("#ERR"))));
                     }
+                }
+                BatchItem::InBatch(None) => (),
+                BatchItem::EndBatch => {
+                    break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui));
                 }
             }
         }
@@ -1205,19 +1194,11 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = Vec::new();
-                if batch.is_empty() {
-                    let batch = Arc::new(IndexMap::new());
-                    root.update(&mut waits, &batch);
-                    if let Some(editor) = &*editor.borrow() {
-                        editor.update(&batch)
-                    }
-                } else {
-                    while let Some(batch) = batch.pop() {
-                        let batch = Arc::new(batch);
-                        root.update(&mut waits, &batch);
-                        if let Some(editor) = &*editor.borrow() {
-                            editor.update(&batch)
-                        }
+                let ed = editor.borrow();
+                for (id, value) in batch.drain(..) {
+                    root.update(&mut waits, id, &value);
+                    if let Some(editor) = &*ed {
+                        editor.update(id, &value)
                     }
                 }
                 if waits.len() == 0 {
@@ -1275,9 +1256,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter().copied(), true);
             *current.borrow_mut() = Some(cur);
-            // CR: estokes is this needed?
-            let m = ToGui::Update(UpdateSet::new());
-            let _: result::Result<_, _> = ctx.to_gui.send(m);
             Continue(true)
         }
         ToGui::Highlight(path) => {

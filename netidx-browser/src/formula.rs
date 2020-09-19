@@ -14,17 +14,17 @@ use std::{
 };
 
 #[derive(Debug, Clone)]
-pub struct CachedVals(RefCell<Vec<Option<Value>>>);
+pub struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);
 
 impl CachedVals {
     fn new(from: &[Source]) -> CachedVals {
-        CachedVals(RefCell::new(from.into_iter().map(|s| s.current()).collect()))
+        CachedVals(Rc::new(RefCell::new(from.into_iter().map(|s| s.current()).collect())))
     }
 
-    fn update(&self, from: &[Source], changed: &Arc<IndexMap<SubId, Value>>) -> bool {
+    fn update(&self, from: &[Source], id: SubId, value: &Value) -> bool {
         let mut vals = self.0.borrow_mut();
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
-            match src.update(changed) {
+            match src.update(id, value) {
                 None => res,
                 v @ Some(_) => {
                     vals[i] = v;
@@ -400,21 +400,21 @@ pub(crate) fn cast_val(typ: Typ, v: Value) -> Option<Value> {
 #[derive(Debug, Clone)]
 pub(super) struct Mean {
     from: CachedVals,
-    total: Cell<f64>,
-    samples: Cell<usize>,
+    total: Rc<Cell<f64>>,
+    samples: Rc<Cell<usize>>,
 }
 
 impl Mean {
     fn new(from: &[Source]) -> Self {
-        Mean { from: CachedVals::new(from), total: Cell::new(0.), samples: Cell::new(0) }
+        Mean {
+            from: CachedVals::new(from),
+            total: Rc::new(Cell::new(0.)),
+            samples: Rc::new(Cell::new(0)),
+        }
     }
 
-    fn update(
-        &self,
-        from: &[Source],
-        changed: &Arc<IndexMap<SubId, Value>>,
-    ) -> Option<Value> {
-        if self.from.update(from, changed) {
+    fn update(&self, from: &[Source], id: SubId, value: &Value) -> Option<Value> {
+        if self.from.update(from, id, value) {
             self.eval()
         } else {
             None
@@ -727,16 +727,12 @@ impl Eval {
         }
     }
 
-    fn update(
-        &self,
-        from: &[Source],
-        changed: &Arc<IndexMap<SubId, Value>>,
-    ) -> Option<Value> {
-        if self.cached.update(from, changed) {
+    fn update(&self, from: &[Source], id: SubId, value: &Value) -> Option<Value> {
+        if self.cached.update(from, id, value) {
             self.compile();
         }
         match &*self.current.borrow() {
-            Ok(s) => s.update(changed),
+            Ok(s) => s.update(id, value),
             Err(v) => Some(v.clone()),
         }
     }
@@ -751,13 +747,15 @@ impl Eval {
         }
     }
 }
+
 fn update_cached(
     eval: impl Fn(&CachedVals) -> Option<Value>,
     cached: &CachedVals,
     from: &[Source],
-    changed: &Arc<IndexMap<SubId, Value>>,
+    id: SubId,
+    value: &Value,
 ) -> Option<Value> {
-    if cached.update(from, changed) {
+    if cached.update(from, id, value) {
         eval(cached)
     } else {
         None
@@ -825,7 +823,7 @@ impl Formula {
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
             "eval" => Formula::Eval(Eval::new(ctx, from)),
-            _ => Formula::Unknown(String::from(name))
+            _ => Formula::Unknown(String::from(name)),
         }
     }
 
@@ -857,11 +855,12 @@ impl Formula {
     pub(super) fn update(
         &self,
         from: &[Source],
-        changed: &Arc<IndexMap<SubId, Value>>,
+        id: SubId,
+        value: &Value,
     ) -> Option<Value> {
         match self {
             Formula::Any(c) => {
-                let res = from.into_iter().filter_map(|s| s.update(changed)).fold(
+                let res = from.into_iter().filter_map(|s| s.update(*id, value)).fold(
                     None,
                     |res, v| match res {
                         None => Some(v),
@@ -871,22 +870,22 @@ impl Formula {
                 *c.borrow_mut() = res.clone();
                 res
             }
-            Formula::All(c) => update_cached(eval_all, c, from, changed),
-            Formula::Sum(c) => update_cached(eval_sum, c, from, changed),
-            Formula::Product(c) => update_cached(eval_product, c, from, changed),
-            Formula::Divide(c) => update_cached(eval_divide, c, from, changed),
-            Formula::Mean(m) => m.update(from, changed),
-            Formula::Min(c) => update_cached(eval_min, c, from, changed),
-            Formula::Max(c) => update_cached(eval_max, c, from, changed),
-            Formula::And(c) => update_cached(eval_and, c, from, changed),
-            Formula::Or(c) => update_cached(eval_or, c, from, changed),
-            Formula::Not(c) => update_cached(eval_not, c, from, changed),
-            Formula::Cmp(c) => update_cached(eval_cmp, c, from, changed),
-            Formula::If(c) => update_cached(eval_if, c, from, changed),
-            Formula::Filter(c) => update_cached(eval_filter, c, from, changed),
-            Formula::Cast(c) => update_cached(eval_cast, c, from, changed),
-            Formula::IsA(c) => update_cached(eval_isa, c, from, changed),
-            Formula::Eval(e) => e.update(from, changed),
+            Formula::All(c) => update_cached(eval_all, c, from, id, value),
+            Formula::Sum(c) => update_cached(eval_sum, c, from, id, value),
+            Formula::Product(c) => update_cached(eval_product, c, from, id, value),
+            Formula::Divide(c) => update_cached(eval_divide, c, from, id, value),
+            Formula::Mean(m) => m.update(from, id, value),
+            Formula::Min(c) => update_cached(eval_min, c, from, id, value),
+            Formula::Max(c) => update_cached(eval_max, c, from, id, value),
+            Formula::And(c) => update_cached(eval_and, c, from, id, value),
+            Formula::Or(c) => update_cached(eval_or, c, from, id, value),
+            Formula::Not(c) => update_cached(eval_not, c, from, id, value),
+            Formula::Cmp(c) => update_cached(eval_cmp, c, from, id, value),
+            Formula::If(c) => update_cached(eval_if, c, from, id, value),
+            Formula::Filter(c) => update_cached(eval_filter, c, from, id, value),
+            Formula::Cast(c) => update_cached(eval_cast, c, from, id, value),
+            Formula::IsA(c) => update_cached(eval_isa, c, from, id, value),
+            Formula::Eval(e) => e.update(from, id, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
