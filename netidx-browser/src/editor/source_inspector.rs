@@ -1,4 +1,4 @@
-use super::super::{formula, Source, WidgetCtx};
+use super::super::{formula, Source, WidgetCtx, Target};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
@@ -626,28 +626,13 @@ impl SourceInspector {
         SourceInspector { root, store }
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 3);
             match v.get::<&SourceWrap>() {
                 Err(_) | Ok(None) => false,
                 Ok(Some(SourceWrap(source))) => {
-                    if let Some(v) = source.update(id, value) {
-                        self.store.set_value(iter, 1, &format!("{}", v).to_value());
-                    }
-                    false
-                }
-            }
-        })
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        self.store.foreach(|store, _, iter| {
-            let v = store.get_value(iter, 3);
-            match v.get::<&SourceWrap>() {
-                Err(_) | Ok(None) => false,
-                Ok(Some(SourceWrap(source))) => {
-                    if let Some(v) = source.update_var(name, value) {
+                    if let Some(v) = source.update(tgt, value) {
                         self.store.set_value(iter, 1, &format!("{}", v).to_value());
                     }
                     false

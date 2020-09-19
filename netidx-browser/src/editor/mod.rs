@@ -1,6 +1,8 @@
 mod source_inspector;
 mod util;
-use super::{util::err_modal, FromGui, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};
+use super::{
+    util::err_modal, FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
+};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{
@@ -164,15 +166,9 @@ impl Action {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -210,15 +206,9 @@ impl Label {
         self.root.upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -285,27 +275,15 @@ impl Button {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.label_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.label_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -361,21 +339,12 @@ impl Toggle {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -442,27 +411,15 @@ impl Selector {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.choices_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.choices_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -529,27 +486,15 @@ impl Entry {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.visible_source.borrow() {
-            si.update(id, value);
+            si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.source.borrow() {
-            si.update(id, value);
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.visible_source.borrow() {
-            si.update_var(name, value);
-        }
-        if let Some((_, si)) = &*self.source.borrow() {
-            si.update_var(name, value);
+            si.update(tgt, value);
         }
     }
 }
@@ -1106,32 +1051,15 @@ impl Widget {
         self.root.upcast_ref()
     }
 
-    fn update(&self, id: SubId, value: &Value) {
+    fn update(&self, tgt: Target, value: &Value) {
         match &self.kind {
-            WidgetKind::Action(w) => w.update(id, value),
+            WidgetKind::Action(w) => w.update(tgt, value),
             WidgetKind::Table(_) => (),
-            WidgetKind::Label(w) => w.update(id, value),
-            WidgetKind::Button(w) => w.update(id, value),
-            WidgetKind::Toggle(w) => w.update(id, value),
-            WidgetKind::Selector(w) => w.update(id, value),
-            WidgetKind::Entry(w) => w.update(id, value),
-            WidgetKind::Box(_)
-            | WidgetKind::BoxChild(_)
-            | WidgetKind::Grid(_)
-            | WidgetKind::GridChild(_)
-            | WidgetKind::GridRow => (),
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        match &self.kind {
-            WidgetKind::Action(w) => w.update_var(name, value),
-            WidgetKind::Table(_) => (),
-            WidgetKind::Label(w) => w.update_var(name, value),
-            WidgetKind::Button(w) => w.update_var(name, value),
-            WidgetKind::Toggle(w) => w.update_var(name, value),
-            WidgetKind::Selector(w) => w.update_var(name, value),
-            WidgetKind::Entry(w) => w.update_var(name, value),
+            WidgetKind::Label(w) => w.update(tgt, value),
+            WidgetKind::Button(w) => w.update(tgt, value),
+            WidgetKind::Toggle(w) => w.update(tgt, value),
+            WidgetKind::Selector(w) => w.update(tgt, value),
+            WidgetKind::Entry(w) => w.update(tgt, value),
             WidgetKind::Box(_)
             | WidgetKind::BoxChild(_)
             | WidgetKind::Grid(_)
@@ -1594,26 +1522,13 @@ impl Editor {
         };
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 1);
             match v.get::<&Widget>() {
                 Err(_) | Ok(None) => false,
                 Ok(Some(w)) => {
-                    w.update(id, value);
-                    false
-                }
-            }
-        })
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        self.store.foreach(|store, _, iter| {
-            let v = store.get_value(iter, 1);
-            match v.get::<&Widget>() {
-                Err(_) | Ok(None) => false,
-                Ok(Some(w)) => {
-                    w.update_var(name, value);
+                    w.update(tgt, value);
                     false
                 }
             }

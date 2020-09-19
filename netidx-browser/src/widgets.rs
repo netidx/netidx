@@ -1,4 +1,4 @@
-use super::{val_to_bool, Sink, Source, WidgetCtx};
+use super::{val_to_bool, Sink, Source, WidgetCtx, Target};
 use crate::view;
 use anyhow::Result;
 use cairo;
@@ -68,23 +68,13 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
-        if let Some(new) = self.enabled.update(id, value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some(new) = self.enabled.update(tgt, value) {
             self.button.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.label.update(id, value) {
+        if let Some(new) = self.label.update(tgt, value) {
             self.button.set_label(&format!("{}", new));
         }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if let Some(value) = self.enabled.update_var(name, value) {
-            self.button.set_sensitive(val_to_bool(&value));
-        }
-        if let Some(value) = self.label.update_var(name, value) {
-            self.button.set_label(&format!("{}", value));
-        }
-        self.source.update_var(name, value);
     }
 }
 
@@ -125,15 +115,9 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
-        if let Some(new) = self.source.update(id, value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some(new) = self.source.update(tgt, value) {
             self.label.set_label(&format!("{}", new));
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if let Some(value) = self.source.update_var(name, value) {
-            self.label.set_label(&format!("{}", value));
         }
     }
 }
@@ -158,15 +142,9 @@ impl Action {
         Action { source, sink, ctx }
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
-        if let Some(new) = self.source.update(id, value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some(new) = self.source.update(tgt, value) {
             self.sink.set(&self.ctx, new);
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if let Some(value) = self.source.update_var(name, value) {
-            self.sink.set(&self.ctx, value);
         }
     }
 }
@@ -285,26 +263,14 @@ impl Selector {
         Selector::update_active(combo, source)
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         self.we_set.set(true);
-        if let Some(new) = self.enabled.update(id, value) {
+        if let Some(new) = self.enabled.update(tgt, value) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
         Selector::update_active(&self.combo, &self.source.update(id, value));
-        if let Some(new) = self.choices.update(id, value) {
+        if let Some(new) = self.choices.update(tgt, value) {
             Selector::update_choices(&self.combo, &new, &self.source.current());
-        }
-        self.we_set.set(false);
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        self.we_set.set(true);
-        if let Some(value) = self.enabled.update_var(name, value) {
-            self.combo.set_sensitive(val_to_bool(&value));
-        }
-        Selector::update_active(&self.combo, &self.source.update_var(name, value));
-        if let Some(value) = self.choices.update_var(name, value) {
-            Selector::update_choices(&self.combo, &value, &self.source.current());
         }
         self.we_set.set(false);
     }
@@ -381,26 +347,14 @@ impl Toggle {
         self.switch.upcast_ref()
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
-        if let Some(new) = self.enabled.update(id, value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some(new) = self.enabled.update(tgt, value) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(id, value) {
+        if let Some(new) = self.source.update(tgt, value) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
             self.switch.set_state(val_to_bool(&new));
-            self.we_set.set(false);
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if let Some(value) = self.enabled.update_var(name, value) {
-            self.switch.set_sensitive(val_to_bool(&value));
-        }
-        if let Some(value) = self.source.update_var(name, value) {
-            self.we_set.set(true);
-            self.switch.set_active(val_to_bool(&value));
-            self.switch.set_state(val_to_bool(&value));
             self.we_set.set(false);
         }
     }
@@ -473,30 +427,15 @@ impl Entry {
         self.entry.upcast_ref()
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
-        if let Some(new) = self.enabled.update(id, value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some(new) = self.enabled.update(tgt, value) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.visible.update(id, value) {
+        if let Some(new) = self.visible.update(tgt, value) {
             self.entry.set_visibility(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(id, value) {
+        if let Some(new) = self.source.update(tgt, value) {
             match new {
-                Value::String(s) => self.entry.set_text(&*s),
-                v => self.entry.set_text(&format!("{}", v)),
-            }
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        if let Some(value) = self.enabled.update_var(name, value) {
-            self.entry.set_sensitive(val_to_bool(&value));
-        }
-        if let Some(value) = self.visible.update_var(name, value) {
-            self.entry.set_visibility(val_to_bool(&value));
-        }
-        if let Some(value) = self.source.update_var(name, value) {
-            match value {
                 Value::String(s) => self.entry.set_text(&*s),
                 v => self.entry.set_text(&format!("{}", v)),
             }
@@ -628,68 +567,30 @@ impl LinePlot {
         self.root.upcast_ref()
     }
 
-    pub(super) fn update(&self, id: SubId, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         let mut queue_draw = false;
-        if self.title.update(id, value).is_some() {
+        if self.title.update(tgt, value).is_some() {
             queue_draw = true;
         }
-        if self.x_label.update(id, value).is_some() {
+        if self.x_label.update(tgt, value).is_some() {
             queue_draw = true;
         }
-        if self.y_label.update(id, value).is_some() {
+        if self.y_label.update(tgt, value).is_some() {
             queue_draw = true;
         }
-        if self.keep_points.update(id, value).is_some() {
+        if self.keep_points.update(tgt, value).is_some() {
             queue_draw = true;
         }
         for s in self.series.borrow_mut().iter_mut() {
-            if let Some(v) = s.x.update(id, value).and_then(|v| v.cast_f64()) {
+            if let Some(v) = s.x.update(tgt, value).and_then(|v| v.cast_f64()) {
                 s.x_data.push_back(v);
                 queue_draw = true;
             }
-            if let Some(v) = s.y.update(id, value).and_then(|v| v.cast_f64()) {
+            if let Some(v) = s.y.update(tgt, value).and_then(|v| v.cast_f64()) {
                 s.y_data.push_back(v);
                 queue_draw = true;
             }
-            if s.title.update(id, value).is_some() {
-                queue_draw = true;
-            }
-            if let Some(keep) = self.keep_points.current().and_then(|v| v.cast_u64()) {
-                if s.x_data.len() > keep as usize || s.y_data.len() > keep as usize {
-                    s.x_data.pop_front();
-                    s.y_data.pop_front();
-                }
-            }
-        }
-        if queue_draw {
-            self.root.queue_draw();
-        }
-    }
-
-    pub(super) fn update_var(&self, name: &str, value: &Value) {
-        let mut queue_draw = false;
-        if self.title.update_var(name, value).is_some() {
-            queue_draw = true;
-        }
-        if self.x_label.update_var(name, value).is_some() {
-            queue_draw = true;
-        }
-        if self.y_label.update_var(name, value).is_some() {
-            queue_draw = true;
-        }
-        if self.keep_points.update_var(name, value).is_some() {
-            queue_draw = true;
-        }
-        for s in self.series.borrow_mut().iter_mut() {
-            if let Some(v) = s.x.update_var(name, value).and_then(|v| v.cast_f64()) {
-                s.x_data.push_back(v);
-                queue_draw = true;
-            }
-            if let Some(v) = s.y.update_var(name, value).and_then(|v| v.cast_f64()) {
-                s.y_data.push_back(v);
-                queue_draw = true;
-            }
-            if s.title.update_var(name, value).is_some() {
+            if s.title.update(tgt, value).is_some() {
                 queue_draw = true;
             }
             if let Some(keep) = self.keep_points.current().and_then(|v| v.cast_u64()) {

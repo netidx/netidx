@@ -117,6 +117,12 @@ struct WidgetCtx {
     raw_view: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Target<'a> {
+    Variable(&'a str),
+    Netidx(SubId),
+}
+
 #[derive(Debug, Clone)]
 enum Source {
     Constant(view::Source, Value),
@@ -179,34 +185,23 @@ impl Source {
         }
     }
 
-    fn update(&self, id: SubId, value: &Value) -> Option<Value> {
+    fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
-            Source::Constant(_, _) | Source::Variable(_, _, _) => None,
-            Source::Map { spec: _, from, function } => function.update(from, id, value),
-            Source::Load(_, dv) => {
-                if dv.id() == id {
-                    Some(value.clone())
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) -> Option<Value> {
-        match self {
-            Source::Load(_, _) | Source::Constant(_, _) => None,
-            Source::Map { spec: _, from, function } => {
-                function.update_var(from, name, value)
-            }
-            Source::Variable(_, our_name, cur) => {
-                if name == our_name {
+            Source::Constant(_, _) => None,
+            Source::Variable(_, name, cur) => match tgt {
+                Target::Netidx(_) => None,
+                Target::Variable(n) if n == name => {
                     *cur.borrow_mut() = value.clone();
                     Some(value.clone())
-                } else {
-                    None
                 }
-            }
+                Target::Variable(_) => None,
+            },
+            Source::Map { spec: _, from, function } => function.update(from, tgt, value),
+            Source::Load(_, dv) => match tgt {
+                Target::Variable(_) => None,
+                Target::Netidx(id) if dv.id() == id => Some(value.clone()),
+                Target::Netidx(_) => None,
+            },
         }
     }
 }
@@ -430,35 +425,20 @@ impl Widget {
     fn update<'a, 'b: 'a>(
         &'a self,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        id: SubId,
+        tgt: Target,
         value: &Value,
     ) {
         match self {
-            Widget::Action(t) => t.update(id, value),
-            Widget::Table(t) => t.update(waits, id, value),
-            Widget::Label(t) => t.update(id, value),
-            Widget::Button(t) => t.update(id, value),
-            Widget::Toggle(t) => t.update(id, value),
-            Widget::Selector(t) => t.update(id, value),
-            Widget::Entry(t) => t.update(id, value),
-            Widget::Box(t) => t.update(waits, id, value),
-            Widget::Grid(t) => t.update(waits, id, value),
-            Widget::LinePlot(t) => t.update(id, value),
-        }
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        match self {
-            Widget::Action(t) => t.update_var(name, value),
-            Widget::Table(_) => (),
-            Widget::Label(t) => t.update_var(name, value),
-            Widget::Button(t) => t.update_var(name, value),
-            Widget::Toggle(t) => t.update_var(name, value),
-            Widget::Selector(t) => t.update_var(name, value),
-            Widget::Entry(t) => t.update_var(name, value),
-            Widget::Box(t) => t.update_var(name, value),
-            Widget::Grid(t) => t.update_var(name, value),
-            Widget::LinePlot(t) => t.update_var(name, value),
+            Widget::Action(t) => t.update(tgt, value),
+            Widget::Table(t) => t.update(waits, tgt, value),
+            Widget::Label(t) => t.update(tgt, value),
+            Widget::Button(t) => t.update(tgt, value),
+            Widget::Toggle(t) => t.update(tgt, value),
+            Widget::Selector(t) => t.update(tgt, value),
+            Widget::Entry(t) => t.update(tgt, value),
+            Widget::Box(t) => t.update(waits, tgt, value),
+            Widget::Grid(t) => t.update(waits, tgt, value),
+            Widget::LinePlot(t) => t.update(tgt, value),
         }
     }
 
@@ -633,12 +613,8 @@ impl View {
         self.root.upcast_ref()
     }
 
-    fn update(&self, waits: &mut Vec<oneshot::Receiver<()>>, id: SubId, value: &Value) {
-        self.widget.update(waits, id, value);
-    }
-
-    fn update_var(&self, name: &str, value: &Value) {
-        self.widget.update_var(name, value)
+    fn update(&self, waits: &mut Vec<oneshot::Receiver<()>>, tgt: Target, value: &Value) {
+        self.widget.update(waits, tgt, value);
     }
 }
 
@@ -1197,9 +1173,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 let mut waits = Vec::new();
                 let ed = editor.borrow();
                 for (id, value) in batch.drain(..) {
-                    root.update(&mut waits, id, &value);
+                    root.update(&mut waits, Target::Netidx(id), &value);
                     if let Some(editor) = &*ed {
-                        editor.update(id, &value)
+                        editor.update(Target::Netidx(id), &value)
                     }
                 }
                 if waits.len() == 0 {
@@ -1270,10 +1246,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::UpdateVar(name, value) => {
             if let Some(root) = &mut *current.borrow_mut() {
-                root.update_var(&name, &value);
+                root.update(Target::Variable(&name), &value);
             }
             if let Some(editor) = &*editor.borrow() {
-                editor.update_var(&name, &value);
+                editor.update(Target::Variable(&name), &value);
             }
             Continue(true)
         }
