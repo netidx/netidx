@@ -1,19 +1,18 @@
 use super::{val_to_bool, Sink, Source, WidgetCtx};
 use crate::view;
+use anyhow::Result;
 use cairo;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use log::warn;
-use anyhow::Result;
 use netidx::{
     chars::Chars,
     subscriber::{SubId, Value},
 };
 use std::{
     cell::{Cell, RefCell},
-    cmp::{max, min},
     collections::{HashMap, VecDeque},
     rc::Rc,
 };
@@ -510,8 +509,12 @@ struct Series {
     title: Source,
     x: Source,
     y: Source,
-    x_data: VecDeque<Value>,
-    y_data: VecDeque<Value>,
+    x_data: VecDeque<f64>,
+    y_data: VecDeque<f64>,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
 }
 
 pub(super) struct LinePlot {
@@ -567,6 +570,7 @@ impl LinePlot {
                 Ok(()) => (),
                 Err(e) => warn!("failed to draw lineplot {}", e),
             }
+            gtk::Inhibit(true)
         }));
         LinePlot { root, title, x_label, y_label, keep_points, series }
     }
@@ -580,11 +584,9 @@ impl LinePlot {
         area: &gtk::DrawingArea,
         context: &cairo::Context,
     ) -> Result<()> {
-        use crate::formula::cast_val;
-        use netidx_protocols::value_type::Typ;
         use plotters::prelude::*;
         use plotters_cairo::CairoBackend;
-        let get_str = |v: &Value| match v {
+        let get_str = |v: &Option<Value>| match v {
             Some(Value::String(c)) => &*c,
             Some(_) | None => "",
         };
@@ -638,6 +640,14 @@ impl LinePlot {
     }
 
     pub(super) fn update(&self, id: SubId, value: &Value) {
+        fn cast_f64(v: Value) -> Option<f64> {
+            use crate::formula::cast_val;
+            use netidx_protocols::value_type::Typ;
+            cast_val(Typ::F64, v).and_then(|v| match v {
+                Value::F64(v) => Some(v),
+                _ => None
+            })
+        }
         let mut queue_draw = false;
         if self.title.update(id, value).is_some() {
             queue_draw = true;

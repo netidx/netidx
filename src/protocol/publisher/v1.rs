@@ -7,8 +7,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
     fmt, mem,
     net::SocketAddr,
-    ops::{Add, Sub, Div, Mul, Not},
+    ops::{Add, Div, Mul, Not, Sub},
     result,
+    str::FromStr,
 };
 
 type Result<T> = result::Result<T, PackError>;
@@ -189,6 +190,142 @@ impl Pack for To {
                 Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Typ {
+    U32,
+    V32,
+    I32,
+    Z32,
+    U64,
+    V64,
+    I64,
+    Z64,
+    F32,
+    F64,
+    Bool,
+    String,
+    Bytes,
+    Result,
+}
+
+pub static TYPES: [Typ; 14] = [
+    Typ::U32,
+    Typ::V32,
+    Typ::I32,
+    Typ::Z32,
+    Typ::U64,
+    Typ::V64,
+    Typ::I64,
+    Typ::Z64,
+    Typ::F32,
+    Typ::F64,
+    Typ::Bool,
+    Typ::String,
+    Typ::Bytes,
+    Typ::Result,
+];
+
+impl Typ {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Typ::U32 => "u32",
+            Typ::V32 => "v32",
+            Typ::I32 => "i32",
+            Typ::Z32 => "z32",
+            Typ::U64 => "u64",
+            Typ::I64 => "i64",
+            Typ::V64 => "v64",
+            Typ::Z64 => "z64",
+            Typ::F32 => "f32",
+            Typ::F64 => "f64",
+            Typ::Bool => "bool",
+            Typ::String => "string",
+            Typ::Bytes => "bytes",
+            Typ::Result => "result",
+        }
+    }
+
+    pub fn get(v: &Value) -> Option<Self> {
+        match v {
+            Value::U32(_) => Some(Typ::U32),
+            Value::V32(_) => Some(Typ::V32),
+            Value::I32(_) => Some(Typ::I32),
+            Value::Z32(_) => Some(Typ::Z32),
+            Value::U64(_) => Some(Typ::U64),
+            Value::V64(_) => Some(Typ::V64),
+            Value::I64(_) => Some(Typ::I64),
+            Value::Z64(_) => Some(Typ::Z64),
+            Value::F32(_) => Some(Typ::F32),
+            Value::F64(_) => Some(Typ::F64),
+            Value::String(_) => Some(Typ::String),
+            Value::Bytes(_) => Some(Typ::Bytes),
+            Value::True | Value::False => Some(Typ::Bool),
+            Value::Null => None,
+            Value::Ok | Value::Error(_) => Some(Typ::Result),
+        }
+    }
+
+    pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
+        Ok(match s {
+            "null" => Value::Null,
+            s => match self {
+                Typ::U32 => Value::U32(s.parse::<u32>()?),
+                Typ::V32 => Value::V32(s.parse::<u32>()?),
+                Typ::I32 => Value::I32(s.parse::<i32>()?),
+                Typ::Z32 => Value::Z32(s.parse::<i32>()?),
+                Typ::U64 => Value::U64(s.parse::<u64>()?),
+                Typ::V64 => Value::V64(s.parse::<u64>()?),
+                Typ::I64 => Value::I64(s.parse::<i64>()?),
+                Typ::Z64 => Value::Z64(s.parse::<i64>()?),
+                Typ::F32 => Value::F32(s.parse::<f32>()?),
+                Typ::F64 => Value::F64(s.parse::<f64>()?),
+                Typ::Bool => match s.parse::<bool>()? {
+                    true => Value::True,
+                    false => Value::False,
+                },
+                Typ::String => Value::String(Chars::from(String::from(s))),
+                Typ::Bytes => Value::Bytes(Bytes::from(base64::decode(s)?)),
+                Typ::Result => {
+                    if s == "ok" {
+                        Value::Ok
+                    } else if s == "error" {
+                        Value::Error(Chars::from(""))
+                    } else if s.starts_with("error:") {
+                        Value::Error(Chars::from(String::from(s[6..].trim())))
+                    } else {
+                        bail!("invalid error type, must start with 'ok' or 'error:'")
+                    }
+                }
+            },
+        })
+    }
+}
+
+impl FromStr for Typ {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        match s {
+            "u32" => Ok(Typ::U32),
+            "v32" => Ok(Typ::V32),
+            "i32" => Ok(Typ::I32),
+            "z32" => Ok(Typ::Z32),
+            "u64" => Ok(Typ::U64),
+            "v64" => Ok(Typ::V64),
+            "i64" => Ok(Typ::I64),
+            "z64" => Ok(Typ::Z64),
+            "f32" => Ok(Typ::F32),
+            "f64" => Ok(Typ::F64),
+            "bool" => Ok(Typ::Bool),
+            "string" => Ok(Typ::String),
+            "bytes" => Ok(Typ::Bytes),
+            "result" => Ok(Typ::Result),
+            s => Err(anyhow!(
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result", s))
         }
     }
 }
@@ -518,6 +655,350 @@ impl Pack for Value {
             16 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
+    }
+}
+
+impl Value {
+    pub fn cast(self, typ: Typ) -> Option<Value> {
+        match typ {
+            Typ::U32 => match self {
+                Value::U32(v) => Some(Value::U32(v)),
+                Value::V32(v) => Some(Value::U32(v)),
+                Value::I32(v) => Some(Value::U32(v as u32)),
+                Value::Z32(v) => Some(Value::U32(v as u32)),
+                Value::U64(v) => Some(Value::U32(v as u32)),
+                Value::V64(v) => Some(Value::U32(v as u32)),
+                Value::I64(v) => Some(Value::U32(v as u32)),
+                Value::Z64(v) => Some(Value::U32(v as u32)),
+                Value::F32(v) => Some(Value::U32(v as u32)),
+                Value::F64(v) => Some(Value::U32(v as u32)),
+                Value::String(s) => match s.parse::<u32>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::U32(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::U32(1)),
+                Value::False => Some(Value::U32(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::V32 => match self {
+                Value::U32(v) => Some(Value::V32(v)),
+                Value::V32(v) => Some(Value::V32(v)),
+                Value::I32(v) => Some(Value::V32(v as u32)),
+                Value::Z32(v) => Some(Value::V32(v as u32)),
+                Value::U64(v) => Some(Value::V32(v as u32)),
+                Value::V64(v) => Some(Value::V32(v as u32)),
+                Value::I64(v) => Some(Value::V32(v as u32)),
+                Value::Z64(v) => Some(Value::V32(v as u32)),
+                Value::F32(v) => Some(Value::V32(v as u32)),
+                Value::F64(v) => Some(Value::V32(v as u32)),
+                Value::String(s) => match s.parse::<u32>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::V32(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::V32(1)),
+                Value::False => Some(Value::V32(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::I32 => match self {
+                Value::U32(v) => Some(Value::I32(v as i32)),
+                Value::V32(v) => Some(Value::I32(v as i32)),
+                Value::I32(v) => Some(Value::I32(v)),
+                Value::Z32(v) => Some(Value::I32(v)),
+                Value::U64(v) => Some(Value::I32(v as i32)),
+                Value::V64(v) => Some(Value::I32(v as i32)),
+                Value::I64(v) => Some(Value::I32(v as i32)),
+                Value::Z64(v) => Some(Value::I32(v as i32)),
+                Value::F32(v) => Some(Value::I32(v as i32)),
+                Value::F64(v) => Some(Value::I32(v as i32)),
+                Value::String(s) => match s.parse::<i32>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::I32(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::I32(1)),
+                Value::False => Some(Value::I32(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::Z32 => match self {
+                Value::U32(v) => Some(Value::Z32(v as i32)),
+                Value::V32(v) => Some(Value::Z32(v as i32)),
+                Value::I32(v) => Some(Value::Z32(v)),
+                Value::Z32(v) => Some(Value::Z32(v)),
+                Value::U64(v) => Some(Value::Z32(v as i32)),
+                Value::V64(v) => Some(Value::Z32(v as i32)),
+                Value::I64(v) => Some(Value::Z32(v as i32)),
+                Value::Z64(v) => Some(Value::Z32(v as i32)),
+                Value::F32(v) => Some(Value::Z32(v as i32)),
+                Value::F64(v) => Some(Value::Z32(v as i32)),
+                Value::String(s) => match s.parse::<i32>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::Z32(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::Z32(1)),
+                Value::False => Some(Value::Z32(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::U64 => match self {
+                Value::U32(v) => Some(Value::U64(v as u64)),
+                Value::V32(v) => Some(Value::U64(v as u64)),
+                Value::I32(v) => Some(Value::U64(v as u64)),
+                Value::Z32(v) => Some(Value::U64(v as u64)),
+                Value::U64(v) => Some(Value::U64(v)),
+                Value::V64(v) => Some(Value::U64(v)),
+                Value::I64(v) => Some(Value::U64(v as u64)),
+                Value::Z64(v) => Some(Value::U64(v as u64)),
+                Value::F32(v) => Some(Value::U64(v as u64)),
+                Value::F64(v) => Some(Value::U64(v as u64)),
+                Value::String(s) => match s.parse::<u64>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::U64(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::U64(1)),
+                Value::False => Some(Value::U64(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::V64 => match self {
+                Value::U32(v) => Some(Value::V64(v as u64)),
+                Value::V32(v) => Some(Value::V64(v as u64)),
+                Value::I32(v) => Some(Value::V64(v as u64)),
+                Value::Z32(v) => Some(Value::V64(v as u64)),
+                Value::U64(v) => Some(Value::V64(v)),
+                Value::V64(v) => Some(Value::V64(v)),
+                Value::I64(v) => Some(Value::V64(v as u64)),
+                Value::Z64(v) => Some(Value::V64(v as u64)),
+                Value::F32(v) => Some(Value::V64(v as u64)),
+                Value::F64(v) => Some(Value::V64(v as u64)),
+                Value::String(s) => match s.parse::<u64>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::V64(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::V64(1)),
+                Value::False => Some(Value::V64(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::I64 => match self {
+                Value::U32(v) => Some(Value::I64(v as i64)),
+                Value::V32(v) => Some(Value::I64(v as i64)),
+                Value::I32(v) => Some(Value::I64(v as i64)),
+                Value::Z32(v) => Some(Value::I64(v as i64)),
+                Value::U64(v) => Some(Value::I64(v as i64)),
+                Value::V64(v) => Some(Value::I64(v as i64)),
+                Value::I64(v) => Some(Value::I64(v)),
+                Value::Z64(v) => Some(Value::I64(v)),
+                Value::F32(v) => Some(Value::I64(v as i64)),
+                Value::F64(v) => Some(Value::I64(v as i64)),
+                Value::String(s) => match s.parse::<i64>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::I64(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::I64(1)),
+                Value::False => Some(Value::I64(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::Z64 => match self {
+                Value::U32(v) => Some(Value::Z64(v as i64)),
+                Value::V32(v) => Some(Value::Z64(v as i64)),
+                Value::I32(v) => Some(Value::Z64(v as i64)),
+                Value::Z32(v) => Some(Value::Z64(v as i64)),
+                Value::U64(v) => Some(Value::Z64(v as i64)),
+                Value::V64(v) => Some(Value::Z64(v as i64)),
+                Value::I64(v) => Some(Value::Z64(v)),
+                Value::Z64(v) => Some(Value::Z64(v)),
+                Value::F32(v) => Some(Value::Z64(v as i64)),
+                Value::F64(v) => Some(Value::Z64(v as i64)),
+                Value::String(s) => match s.parse::<i64>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::Z64(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::Z64(1)),
+                Value::False => Some(Value::Z64(0)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::F32 => match self {
+                Value::U32(v) => Some(Value::F32(v as f32)),
+                Value::V32(v) => Some(Value::F32(v as f32)),
+                Value::I32(v) => Some(Value::F32(v as f32)),
+                Value::Z32(v) => Some(Value::F32(v as f32)),
+                Value::U64(v) => Some(Value::F32(v as f32)),
+                Value::V64(v) => Some(Value::F32(v as f32)),
+                Value::I64(v) => Some(Value::F32(v as f32)),
+                Value::Z64(v) => Some(Value::F32(v as f32)),
+                Value::F32(v) => Some(Value::F32(v)),
+                Value::F64(v) => Some(Value::F32(v as f32)),
+                Value::String(s) => match s.parse::<f32>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::F32(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::F32(1.)),
+                Value::False => Some(Value::F32(0.)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::F64 => match self {
+                Value::U32(v) => Some(Value::F64(v as f64)),
+                Value::V32(v) => Some(Value::F64(v as f64)),
+                Value::I32(v) => Some(Value::F64(v as f64)),
+                Value::Z32(v) => Some(Value::F64(v as f64)),
+                Value::U64(v) => Some(Value::F64(v as f64)),
+                Value::V64(v) => Some(Value::F64(v as f64)),
+                Value::I64(v) => Some(Value::F64(v as f64)),
+                Value::Z64(v) => Some(Value::F64(v as f64)),
+                Value::F32(v) => Some(Value::F64(v as f64)),
+                Value::F64(v) => Some(Value::F64(v)),
+                Value::String(s) => match s.parse::<f64>() {
+                    Err(_) => None,
+                    Ok(v) => Some(Value::F64(v)),
+                },
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::F64(1.)),
+                Value::False => Some(Value::F64(0.)),
+                Value::Null => None,
+                Value::Ok => None,
+                Value::Error(_) => None,
+            },
+            Typ::Bool => match self {
+                Value::U32(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::V32(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::I32(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::Z32(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::U64(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::V64(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::I64(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::Z64(v) => Some(if v > 0 { Value::True } else { Value::False }),
+                Value::F32(v) => Some(if v > 0. { Value::True } else { Value::False }),
+                Value::F64(v) => Some(if v > 0. { Value::True } else { Value::False }),
+                Value::String(s) => {
+                    Some(if s.len() > 0 { Value::True } else { Value::False })
+                }
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::True),
+                Value::False => Some(Value::False),
+                Value::Null => Some(Value::False),
+                Value::Ok => Some(Value::True),
+                Value::Error(_) => Some(Value::False),
+            },
+            Typ::String => match self {
+                Value::U32(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::V32(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::I32(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::Z32(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::U64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::V64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::I64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::Z64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::F32(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::F64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::String(s) => Some(Value::String(s)),
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::String(Chars::from("true"))),
+                Value::False => Some(Value::String(Chars::from("false"))),
+                Value::Null => Some(Value::String(Chars::from("null"))),
+                Value::Ok => Some(Value::String(Chars::from("ok"))),
+                Value::Error(s) => Some(Value::String(s)),
+            },
+            Typ::Bytes => None,
+            Typ::Result => match self {
+                Value::U32(_) => Some(Value::Ok),
+                Value::V32(_) => Some(Value::Ok),
+                Value::I32(_) => Some(Value::Ok),
+                Value::Z32(_) => Some(Value::Ok),
+                Value::U64(_) => Some(Value::Ok),
+                Value::V64(_) => Some(Value::Ok),
+                Value::I64(_) => Some(Value::Ok),
+                Value::Z64(_) => Some(Value::Ok),
+                Value::F32(_) => Some(Value::Ok),
+                Value::F64(_) => Some(Value::Ok),
+                Value::String(_) => Some(Value::Ok),
+                Value::Bytes(_) => None,
+                Value::True => Some(Value::Ok),
+                Value::False => Some(Value::Ok),
+                Value::Null => Some(Value::Ok),
+                Value::Ok => Some(Value::Ok),
+                Value::Error(s) => Some(Value::Error(s)),
+            },
+        }
+    }
+
+    pub fn cast_to_u32(self) -> Option<u32> {
+        self.cast(Typ::U32).and_then(|v| match v {
+            Value::U32(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_i32(self) -> Option<i32> {
+        self.cast(Typ::I32).and_then(|v| match v {
+            Value::I32(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_u64(self) -> Option<u64> {
+        self.cast(Typ::U64).and_then(|v| match v {
+            Value::U64(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_i64(self) -> Option<i64> {
+        self.cast(Typ::I64).and_then(|v| match v {
+            Value::I64(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_f32(self) -> Option<f32> {
+        self.cast(Typ::F32).and_then(|v| match v {
+            Value::F32(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_f64(self) -> Option<f64> {
+        self.cast(Typ::F64).and_then(|v| match v {
+            Value::F64(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_string(self) -> Option<Chars> {
+        self.cast(Typ::String).and_then(|v| match v {
+            Value::String(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_to_bool(self) -> Option<bool> {
+        self.cast(Typ::Bool).and_then(|v| match v {
+            Value::True => Some(true),
+            Value::False => Some(false),
+            _ => None,
+        })
     }
 }
 
