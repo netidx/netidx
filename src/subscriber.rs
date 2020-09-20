@@ -90,9 +90,15 @@ struct SubscribeValRequest {
 enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
-    Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Value)>>>, last: bool },
+    Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Event)>>>, last: bool },
     Write(Id, Value, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Unsubscribed,
+    Update(Value),
 }
 
 #[derive(Debug)]
@@ -101,7 +107,7 @@ struct ValInner {
     id: Id,
     addr: SocketAddr,
     connection: UnboundedSender<ToCon>,
-    last: Arc<Mutex<Value>>,
+    last: Arc<Mutex<Event>>,
 }
 
 impl Drop for ValInner {
@@ -130,10 +136,8 @@ impl Val {
         ValWeak(Arc::downgrade(&self.0))
     }
 
-    /// Get the last published value, or None if the subscription is
-    /// dead. Will only return `None` if the subscription is dead,
-    /// otherwise there WILL be a value.
-    pub fn last(&self) -> Value {
+    /// Get the last event value.
+    pub fn last(&self) -> Event {
         self.0.last.lock().clone()
     }
 
@@ -147,7 +151,7 @@ impl Val {
     pub fn updates(
         &self,
         begin_with_last: bool,
-        tx: Sender<Pooled<Vec<(SubId, Value)>>>,
+        tx: Sender<Pooled<Vec<(SubId, Event)>>>,
     ) {
         let m = ToCon::Stream {
             tx,
@@ -192,31 +196,11 @@ impl Val {
     }
 }
 
-/// The durable subsiption state
-#[derive(Debug)]
-pub enum DvState {
-    /// The Dval is currently subscribed
-    Subscribed,
-    /// The Dval is not currently subscribed
-    Unsubscribed,
-    /// The Dval is permanently dead and will not ever resubscribe
-    FatalError(String),
-}
-
-#[derive(Debug)]
-enum SubState {
-    Unsubscribed,
-    Subscribed(Val),
-    #[allow(dead_code)] // I want the future option
-    FatalError(Error),
-}
-
 #[derive(Debug)]
 struct DvalInner {
     sub_id: SubId,
-    sub: SubState,
-    streams: Vec<Sender<Pooled<Vec<(SubId, Value)>>>>,
-    states: Vec<UnboundedSender<(SubId, DvState)>>,
+    sub: Option<Val>,
+    streams: Vec<Sender<Pooled<Vec<(SubId, Event)>>>>,
     tries: usize,
     next_try: Instant,
 }
@@ -271,42 +255,10 @@ impl Dval {
 
     /// Get the last value published by the publisher, or None if the
     /// subscription is currently dead.
-    pub fn last(&self) -> Option<Value> {
-        let sub = match self.0.lock().sub {
-            SubState::Unsubscribed | SubState::FatalError(_) => return None,
-            SubState::Subscribed(ref sub) => sub.clone(),
-        };
-        Some(sub.last())
-    }
-
-    /// Register `tx` to receive messages about subscription state
-    /// changes of this `Dval`. You can register multiple channels to
-    /// receive state updates, and you can register one channel to
-    /// receive updates about multiple `Dval`s.
-    pub fn state_updates(
-        &self,
-        include_current: bool,
-        tx: UnboundedSender<(SubId, DvState)>,
-    ) {
-        let mut t = self.0.lock();
-        t.states.retain(|c| !c.is_closed());
-        if include_current {
-            let current = match t.sub {
-                SubState::Unsubscribed => DvState::Unsubscribed,
-                SubState::Subscribed(_) => DvState::Subscribed,
-                SubState::FatalError(ref e) => DvState::FatalError(format!("{}", e)),
-            };
-            let _ = tx.unbounded_send((t.sub_id, current));
-        }
-        t.states.push(tx);
-    }
-
-    /// return the current subscription state
-    pub fn state(&self) -> DvState {
-        match self.0.lock().sub {
-            SubState::Unsubscribed => DvState::Unsubscribed,
-            SubState::Subscribed(_) => DvState::Subscribed,
-            SubState::FatalError(ref e) => DvState::FatalError(format!("{}", e)),
+    pub fn last(&self) -> Event {
+        match &self.0.lock().sub {
+            None => Event::Unsubscribed,
+            Some(val) => val.last(),
         }
     }
 
@@ -320,15 +272,12 @@ impl Dval {
     pub fn updates(
         &self,
         begin_with_last: bool,
-        tx: mpsc::Sender<Pooled<Vec<(SubId, Value)>>>,
+        tx: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
-        if let SubState::FatalError(_) = t.sub {
-            return;
-        }
         t.streams.push(tx.clone());
-        if let SubState::Subscribed(ref sub) = t.sub {
+        if let Some(ref sub) = t.sub {
             let m = ToCon::Stream {
                 tx,
                 sub_id: t.sub_id,
@@ -345,12 +294,32 @@ impl Dval {
     pub fn write(&self, v: Value) -> bool {
         let t = self.0.lock();
         match t.sub {
-            SubState::Unsubscribed | SubState::FatalError(_) => false,
-            SubState::Subscribed(ref sub) => {
-                sub.write(v);
+            None => false,
+            Some(ref val) => {
+                val.write(v);
                 true
             }
         }
+    }
+
+    /// This does the same thing as `write` except that it requires
+    /// the publisher send a reply indicating the outcome of the
+    /// request. The reply can be read from the returned oneshot
+    /// channel.
+    ///
+    /// Note that compared to `write` this function has higher
+    /// overhead, avoid it in situations where high message volumes
+    /// are required.
+    ///
+    /// If we are not currently subscribed then the channel will close
+    /// immediatly with no result.
+    pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
+        self.0
+            .lock()
+            .sub
+            .as_ref()
+            .map(|val| val.write_with_recipt(v))
+            .unwrap_or_else(|| oneshot::channel().1)
     }
 
     /// return the unique id of this `Dval`
@@ -506,19 +475,6 @@ impl Subscriber {
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
                                 ds.tries = 0;
-                                let mut i = 0;
-                                while i < ds.states.len() {
-                                    match ds.states[i]
-                                        .unbounded_send((ds.sub_id, DvState::Subscribed))
-                                    {
-                                        Ok(()) => {
-                                            i += 1;
-                                        }
-                                        Err(_) => {
-                                            ds.states.remove(i);
-                                        }
-                                    }
-                                }
                                 ds.streams.retain(|c| !c.is_closed());
                                 for tx in ds.streams.iter().cloned() {
                                     let _ =
@@ -529,7 +485,7 @@ impl Subscriber {
                                             id: sub.0.id,
                                         });
                                 }
-                                ds.sub = SubState::Subscribed(sub);
+                                ds.sub = Some(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
                                 subscriber.durable_alive.insert(p.clone(), w.clone());
                             }
@@ -823,9 +779,8 @@ impl Subscriber {
         }
         let s = Dval(Arc::new(Mutex::new(DvalInner {
             sub_id: SubId::new(),
-            sub: SubState::Unsubscribed,
+            sub: None,
             streams: Vec::new(),
-            states: Vec::new(),
             tries: 0,
             next_try: Instant::now(),
         })));
@@ -859,28 +814,35 @@ impl Subscriber {
 
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Value)>>>)>,
-    last: Arc<Mutex<Value>>,
+    streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+    last: Arc<Mutex<Event>>,
 }
 
-fn unsubscribe(subscriber: &mut SubscriberInner, sub: Sub, id: Id, addr: SocketAddr) {
+type ByChan = HashMap<
+    ChanId,
+    (Sender<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
+    FxBuildHasher,
+>;
+
+fn unsubscribe(
+    subscriber: &mut SubscriberInner,
+    by_chan: &mut ByChan,
+    sub: Sub,
+    id: Id,
+    addr: SocketAddr,
+) {
+    for (sub_id, chan_id, c) in sub.streams.iter() {
+        by_chan
+            .entry(*chan_id)
+            .or_insert_with(|| (c.clone(), BATCHES.take()))
+            .1
+            .push((*sub_id, Event::Unsubscribed))
+    }
+    *sub.last.lock() = Event::Unsubscribed;
     if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
-            inner.sub = SubState::Unsubscribed;
-            let mut i = 0;
-            while i < inner.states.len() {
-                match inner.states[i]
-                    .unbounded_send((inner.sub_id, DvState::Unsubscribed))
-                {
-                    Ok(()) => {
-                        i += 1;
-                    }
-                    Err(_) => {
-                        inner.states.remove(i);
-                    }
-                }
-            }
+            inner.sub = None;
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
             let _ = subscriber.trigger_resub.unbounded_send(());
         }
@@ -948,7 +910,7 @@ const PERIOD: Duration = Duration::from_secs(100);
 const FLUSH: Duration = Duration::from_secs(1);
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<(SubId, Value)>> = Pool::new(1000);
+    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(1000);
     static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(1000);
 }
 
@@ -956,11 +918,7 @@ lazy_static! {
 // only updates. As of 2020-04-30, sending to an mpsc channel is
 // pretty slow, about 250ns, so we go to great lengths to avoid it.
 async fn process_updates_batch(
-    by_chan: &mut HashMap<
-        ChanId,
-        (Sender<Pooled<Vec<(SubId, Value)>>>, Pooled<Vec<(SubId, Value)>>),
-        FxBuildHasher,
-    >,
+    by_chan: &mut ByChan,
     mut batch: Pooled<Vec<From>>,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
@@ -972,9 +930,9 @@ async fn process_updates_batch(
                         .entry(*chan_id)
                         .or_insert_with(|| (c.clone(), BATCHES.take()))
                         .1
-                        .push((*sub_id, m.clone()))
+                        .push((*sub_id, Event::Update(m.clone())))
                 }
-                *sub.last.lock() = m;
+                *sub.last.lock() = Event::Update(m);
             }
         }
     }
@@ -985,6 +943,7 @@ async fn process_updates_batch(
 
 async fn process_batch(
     mut batch: Pooled<Vec<From>>,
+    by_chan: &mut ByChan,
     subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
     pending_writes: &mut HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher>,
@@ -996,12 +955,14 @@ async fn process_batch(
         match m {
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
-                    for (id, _, c) in sub.streams.iter_mut() {
-                        let mut b = BATCHES.take();
-                        b.push((*id, m.clone()));
-                        let _ = c.send(b).await;
+                    for (sub_id, chan_id, c) in sub.streams.iter_mut() {
+                        by_chan
+                            .entry(*chan_id)
+                            .or_insert_with(|| (c.clone(), BATCHES.take()))
+                            .1
+                            .push((*sub_id, Event::Update(m.clone())));
                     }
-                    *sub.last.lock() = m;
+                    *sub.last.lock() = Event::Update(m);
                 }
                 None => con.queue_send(&To::Unsubscribe(i))?,
             },
@@ -1031,14 +992,14 @@ async fn process_batch(
             From::Unsubscribed(id) => {
                 if let Some(s) = subscriptions.remove(&id) {
                     let mut t = subscriber.0.lock();
-                    unsubscribe(&mut *t, s, id, addr);
+                    unsubscribe(&mut *t, by_chan, s, id, addr);
                 }
             }
             From::Subscribed(p, id, m) => match pending.remove(&p) {
                 None => con.queue_send(&To::Unsubscribe(id))?,
                 Some(req) => {
                     let sub_id = SubId::new();
-                    let last = Arc::new(Mutex::new(m));
+                    let last = Arc::new(Mutex::new(Event::Update(m)));
                     let s = Ok(Val(Arc::new(ValInner {
                         sub_id,
                         id,
@@ -1058,6 +1019,9 @@ async fn process_batch(
                 }
             },
         }
+    }
+    for (_, (mut c, batch)) in by_chan.drain() {
+        let _ = c.send(batch).await;
     }
     Ok(())
 }
@@ -1129,13 +1093,9 @@ async fn connection(
         HashMap::with_hasher(FxBuildHasher::default());
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
-    let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Value)>>>, ChanId> =
+    let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
         HashMap::new();
-    let mut by_chan: HashMap<
-        ChanId,
-        (Sender<Pooled<Vec<(SubId, Value)>>>, Pooled<Vec<(SubId, Value)>>),
-        FxBuildHasher,
-    > = HashMap::with_hasher(FxBuildHasher::default());
+    let mut by_chan: ByChan = HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {
             now = periodic.next() => if let Some(now) = now {
@@ -1241,6 +1201,7 @@ async fn connection(
                         msg_recvd = true;
                         try_cf!(process_batch(
                             batch,
+                            &mut by_chan,
                             &mut subscriptions,
                             &mut pending,
                             &mut pending_writes,
@@ -1255,11 +1216,20 @@ async fn connection(
         }
     };
     if let Some(subscriber) = subscriber.upgrade() {
-        let mut t = subscriber.0.lock();
-        t.connections.remove(&addr);
-        for (id, sub) in subscriptions {
-            unsubscribe(&mut *t, sub, id, addr);
-        }
+        let mut batch = DECODE_BATCHES.take();
+        batch.extend(subscriptions.keys().map(|id| From::Unsubscribed(*id)));
+        let _ = process_batch(
+            batch,
+            &mut by_chan,
+            &mut subscriptions,
+            &mut pending,
+            &mut pending_writes,
+            &mut write_con,
+            &subscriber,
+            addr,
+        )
+        .await;
+        subscriber.0.lock().connections.remove(&addr);
         for (_, req) in pending {
             let _ = req.finished.send(Err(anyhow!("connection died")));
         }
