@@ -368,7 +368,6 @@ impl Table {
                 };
                 let s = self.0.ctx.subscriber.durable_subscribe(p);
                 s.updates(true, self.0.ctx.updates.clone());
-                s.state_updates(true, self.0.ctx.state_updates.clone());
                 self.0.by_id.borrow_mut().insert(
                     s.id(),
                     Subscription { _sub: s, row: row.clone(), col: id as u32 },

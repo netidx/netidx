@@ -30,8 +30,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     resolver::{Auth, ResolverRead},
-    subscriber::{DvState, Dval, SubId, Subscriber, Value},
-    utils::{BatchItem, Batched},
+    subscriber::{Dval, Event, SubId, Subscriber, Value},
 };
 use netidx_protocols::view as protocol_view;
 use once_cell::sync::OnceCell;
@@ -55,6 +54,7 @@ use tokio::{runtime::Runtime, task};
 use util::{ask_modal, err_modal};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
+type RawBatch = Pooled<Vec<(SubId, Event)>>;
 
 #[derive(Debug, Clone, Copy)]
 enum WidgetPath {
@@ -110,8 +110,7 @@ enum FromGui {
 struct WidgetCtx {
     subscriber: Subscriber,
     resolver: ResolverRead,
-    updates: mpsc::Sender<Batch>,
-    state_updates: mpsc::UnboundedSender<(SubId, DvState)>,
+    updates: mpsc::Sender<RawBatch>,
     to_gui: glib::Sender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
     raw_view: Arc<AtomicBool>,
@@ -157,7 +156,6 @@ impl Source {
             view::Source::Load(path) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
                 dv.updates(true, ctx.updates.clone());
-                dv.state_updates(true, ctx.state_updates.clone());
                 Source::Load(spec, dv)
             }
             view::Source::Variable(name) => {
@@ -179,7 +177,10 @@ impl Source {
     fn current(&self) -> Option<Value> {
         match self {
             Source::Constant(_, v) => Some(v.clone()),
-            Source::Load(_, dv) => dv.last(),
+            Source::Load(_, dv) => match dv.last() {
+                Event::Unsubscribed => None,
+                Event::Update(v) => Some(v),
+            },
             Source::Variable(_, _, v) => Some(v.borrow().clone()),
             Source::Map { spec: _, from: _, function } => function.current(),
         }
@@ -654,8 +655,7 @@ struct StartNetidx {
     cfg: Config,
     auth: Auth,
     subscriber: Arc<OnceCell<Subscriber>>,
-    updates: mpsc::Receiver<Batch>,
-    state_updates: mpsc::UnboundedReceiver<(SubId, DvState)>,
+    updates: mpsc::Receiver<RawBatch>,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
     to_gui: glib::Sender<ToGui>,
     to_init: smpsc::Sender<(Subscriber, ResolverRead)>,
@@ -667,7 +667,9 @@ lazy_static! {
 }
 
 async fn netidx_main(mut ctx: StartNetidx) {
-    async fn read_view(rx_view: &mut Option<mpsc::Receiver<Batch>>) -> Option<Batch> {
+    async fn read_view(
+        rx_view: &mut Option<mpsc::Receiver<RawBatch>>,
+    ) -> Option<RawBatch> {
         match rx_view {
             None => pending().await,
             Some(rx_view) => rx_view.next().await,
@@ -681,11 +683,10 @@ async fn netidx_main(mut ctx: StartNetidx) {
     let _: result::Result<_, _> =
         ctx.to_init.send((subscriber.clone(), resolver.clone()));
     let mut view_path: Option<Path> = None;
-    let mut rx_view: Option<mpsc::Receiver<Batch>> = None;
+    let mut rx_view: Option<mpsc::Receiver<RawBatch>> = None;
     let mut _dv_view: Option<Dval> = None;
     let mut changed = UPDATES.take();
     let mut refreshing = false;
-    let mut state_updates = Batched::new(ctx.state_updates, 100_000);
     fn refresh(
         refreshing: &mut bool,
         changed: &mut Batch,
@@ -821,12 +822,14 @@ async fn netidx_main(mut ctx: StartNetidx) {
                 },
             },
             b = ctx.updates.next() => if let Some(mut batch) = b {
-                if changed.len() > 0 {
-                    changed.extend(batch.drain(..));
-                    break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
-                } else {
-                    break_err!(refresh(&mut refreshing, &mut batch, &ctx.to_gui))
+                for (id, ev) in batch.drain(..) {
+                    match ev {
+                        Event::Update(v) => changed.push((id, v)),
+                        Event::Unsubscribed =>
+                            changed.push((id, Value::String(Chars::from("#LOST")))),
+                    }
                 }
+                break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
             },
             m = read_view(&mut rx_view).fuse() => match m {
                 None => {
@@ -836,7 +839,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                 },
                 Some(mut batch) => if let Some((_, view)) = batch.pop() {
                     match view {
-                        Value::String(s) => {
+                        Event::Update(Value::String(s)) => {
                             match serde_json::from_str::<protocol_view::View>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
                                 Ok(view) => if let Some(path) = &view_path {
@@ -856,25 +859,10 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 }
                             }
                         }
-                        v => warn!("unexpected type of view definition {}", v),
+                        v => warn!("unexpected type of view definition {:?}", v),
                     }
                 }
             },
-            s = state_updates.next() => match s {
-                Some(BatchItem::InBatch((id, st))) => match st {
-                    DvState::Subscribed => (),
-                    DvState::Unsubscribed => {
-                        changed.push((id, Value::String(Chars::from("#SUB"))));
-                    }
-                    DvState::FatalError(_) => {
-                        changed.push((id, Value::String(Chars::from("#ERR"))));
-                    }
-                }
-                Some(BatchItem::EndBatch) => {
-                    break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui));
-                }
-                None => ()
-            }
         }
     }
     let _: result::Result<_, _> = ctx.to_gui.send(ToGui::Terminate);
@@ -1347,7 +1335,6 @@ fn main() {
     let jh = run_tokio(rx_tokio);
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
-        let (tx_state_updates, rx_state_updates) = mpsc::unbounded();
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         let (tx_init, rx_init) = smpsc::channel();
@@ -1367,7 +1354,6 @@ fn main() {
                 auth: auth.clone(),
                 subscriber: Arc::clone(&subscriber),
                 updates: rx_updates,
-                state_updates: rx_state_updates,
                 from_gui: rx_from_gui,
                 to_gui: tx_to_gui.clone(),
                 to_init: tx_init,
@@ -1379,7 +1365,6 @@ fn main() {
             subscriber,
             resolver,
             updates: tx_updates,
-            state_updates: tx_state_updates,
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
             raw_view,
