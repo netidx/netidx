@@ -1,10 +1,9 @@
 use anyhow::anyhow;
-use netidx_protocols::value_type::Typ;
 use futures::prelude::*;
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, Publisher, Val},
+    publisher::{BindCfg, Typ, Publisher, Val},
     resolver::Auth,
     utils::{self, BatchItem, Batched},
 };

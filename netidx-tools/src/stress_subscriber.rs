@@ -4,7 +4,7 @@ use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
-    subscriber::{DvState, Subscriber},
+    subscriber::{Event, Subscriber},
 };
 use std::time::Duration;
 use tokio::{
@@ -47,25 +47,20 @@ pub(crate) fn run(config: Config, auth: Auth) {
                         let since_start = now - start;
                         let mut subscribed = 0;
                         let mut unsubscribed = 0;
-                        let mut fatal = 0;
                         for s in subs.iter() {
-                            match s.state() {
-                                DvState::Unsubscribed => {
+                            match s.last() {
+                                Event::Unsubscribed => {
                                     unsubscribed += 1;
                                 }
-                                DvState::Subscribed => {
+                                Event::Update(_) => {
                                     subscribed += 1;
-                                }
-                                DvState::FatalError(_) => {
-                                    fatal += 1;
                                 }
                             }
                         }
                         println!(
-                            "sub: {} !sub: {}({}) rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
+                            "sub: {} !sub: {} rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
                             subscribed,
                             unsubscribed,
-                            fatal,
                             n as f64 / elapsed.as_secs_f64(),
                             total as f64 / since_start.as_secs_f64(),
                             batch_size as f64 / nbatches as f64

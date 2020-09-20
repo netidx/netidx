@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use futures::{
-    channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    channel::mpsc::{self, Receiver, Sender},
     prelude::*,
     select_biased,
     stream::{self, FusedStream},
@@ -11,10 +11,9 @@ use netidx::{
     path::Path,
     pool::Pooled,
     resolver::Auth,
-    subscriber::{DvState, Dval, SubId, Subscriber, Value},
+    subscriber::{Dval, Event, SubId, Typ, Subscriber, Value},
     utils::{BatchItem, Batched},
 };
-use netidx_protocols::value_type::Typ;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -25,7 +24,7 @@ use tokio::{
     runtime::Runtime,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 enum In {
     Add(String),
     Drop(String),
@@ -71,51 +70,39 @@ impl Write for BytesWriter<'_> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct Out<'a> {
     path: &'a str,
-    value: Value,
+    value: Event,
 }
 
 impl<'a> Out<'a> {
     fn write(&self, to_stdout: &mut BytesMut) {
         to_stdout.extend_from_slice(self.path.as_bytes());
         to_stdout.extend_from_slice(b"|");
-        to_stdout.extend_from_slice(match Typ::get(&self.value) {
-            None => b"none",
-            Some(typ) => typ.name().as_bytes(),
-        });
-        to_stdout.extend_from_slice(b"|");
-        let mut w = BytesWriter(to_stdout);
         match &self.value {
-            Value::U32(v) | Value::V32(v) => write!(&mut w, "{}", v),
-            Value::I32(v) | Value::Z32(v) => write!(&mut w, "{}", v),
-            Value::U64(v) | Value::V64(v) => write!(&mut w, "{}", v),
-            Value::I64(v) | Value::Z64(v) => write!(&mut w, "{}", v),
-            Value::F32(v) => write!(&mut w, "{}", v),
-            Value::F64(v) => write!(&mut w, "{}", v),
-            Value::String(v) => write!(&mut w, "{}", &*v),
-            Value::Bytes(v) => write!(&mut w, "{}", &*base64::encode(v)),
-            Value::True => write!(&mut w, "true"),
-            Value::False => write!(&mut w, "false"),
-            Value::Null => write!(&mut w, "null"),
-            Value::Ok => write!(&mut w, "ok"),
-            Value::Error(v) => write!(&mut w, "error {}", v),
+            Event::Unsubscribed => {
+                to_stdout.extend_from_slice(b"Unsubscribed\n");
+            }
+            Event::Update(v) => {
+                to_stdout.extend_from_slice(match Typ::get(&v) {
+                    None => b"none",
+                    Some(typ) => typ.name().as_bytes(),
+                });
+                to_stdout.extend_from_slice(b"|");
+                write!(&mut BytesWriter(to_stdout), "{}\n", v).unwrap();
+            }
         }
-        .unwrap(); // this can't fail
-        write!(w, "\n").unwrap();
     }
 }
 
 struct Ctx {
-    sender_updates: Sender<Pooled<Vec<(SubId, Value)>>>,
-    sender_states: UnboundedSender<(SubId, DvState)>,
+    sender_updates: Sender<Pooled<Vec<(SubId, Event)>>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = BatchItem<Result<String>>> + Unpin>,
-    updates: Batched<Receiver<Pooled<Vec<(SubId, Value)>>>>,
-    states: UnboundedReceiver<(SubId, DvState)>,
+    updates: Batched<Receiver<Pooled<Vec<(SubId, Event)>>>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -128,10 +115,8 @@ struct Ctx {
 impl Ctx {
     fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
-        let (sender_states, states) = mpsc::unbounded();
         Ctx {
             sender_updates,
-            sender_states,
             paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
@@ -148,7 +133,6 @@ impl Ctx {
                 ))
             },
             updates: Batched::new(updates, 100_000),
-            states,
             stdout: io::stdout(),
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
@@ -200,12 +184,10 @@ impl Ctx {
                     let paths = &mut self.paths;
                     let subscriber = &self.subscriber;
                     let sender_updates = self.sender_updates.clone();
-                    let sender_states = self.sender_states.clone();
                     subscriptions.entry(p.clone()).or_insert_with(|| {
                         let s = subscriber.durable_subscribe(p.clone());
                         paths.insert(s.id(), p.clone());
                         s.updates(true, sender_updates);
-                        s.state_updates(true, sender_states);
                         s
                     });
                 }
@@ -215,15 +197,14 @@ impl Ctx {
                         None => {
                             eprintln!("write to unknown path {}, subscribe first?", p)
                         }
-                        Some(dv) => match dv.state() {
-                            DvState::Subscribed => {
-                                dv.write(v.into());
+                        Some(dv) => {
+                            if !dv.write(v.into()) {
+                                eprintln!(
+                                    "write to failed subscription {} ignored retry later?",
+                                    p
+                                )
                             }
-                            DvState::Unsubscribed | DvState::FatalError(_) => eprintln!(
-                                "write to failed subscription {} ignored retry later?",
-                                p
-                            ),
-                        },
+                        }
                     }
                 }
             }
@@ -232,7 +213,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<Pooled<Vec<(SubId, Value)>>>>,
+        u: Option<BatchItem<Pooled<Vec<(SubId, Event)>>>>,
     ) -> Result<()> {
         Ok(match u {
             None => unreachable!(), // channel will never close
@@ -255,26 +236,6 @@ impl Ctx {
             }
         })
     }
-
-    fn process_state_change(&mut self, u: Option<(SubId, DvState)>) {
-        match u {
-            None => unreachable!(), // channel will never close
-            Some((id, DvState::Unsubscribed)) => eprintln!(
-                "subscription to {} now Unsubscribed",
-                self.paths.get(&id).map(|p| p.as_ref()).unwrap_or("{unknown}")
-            ),
-            Some((id, DvState::Subscribed)) => eprintln!(
-                "subscription to {} now Subscribed",
-                self.paths.get(&id).map(|p| p.as_ref()).unwrap_or("{unknown}")
-            ),
-            Some((id, DvState::FatalError(e))) => {
-                if let Some(path) = self.paths.remove(&id) {
-                    self.subscriptions.remove(&path);
-                    eprintln!("subscription to {} is dead {}", path, e);
-                }
-            }
-        }
-    }
 }
 
 async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
@@ -288,7 +249,6 @@ async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
                     Err(_) => break,
                 }
             },
-            u = ctx.states.next() => ctx.process_state_change(u),
             r = ctx.requests.next() => ctx.process_request(r).await
         }
     }
