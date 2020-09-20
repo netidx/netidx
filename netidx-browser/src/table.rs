@@ -1,4 +1,4 @@
-use super::{FromGui, ViewLoc, WidgetCtx, Target};
+use super::{FromGui, Target, ViewLoc, WidgetCtx};
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
@@ -434,12 +434,11 @@ impl Table {
         &self.0.store
     }
 
-    fn start_update_task(
+    pub(super) fn start_update_task(
         &self,
-        tx: oneshot::Sender<()>,
+        mut tx: Option<oneshot::Sender<()>>,
         sctx: Option<(SortColumn, SortType)>,
     ) {
-        let mut tx = Some(tx);
         let t = self;
         idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
             for _ in 0..1000 {
@@ -477,7 +476,7 @@ impl Table {
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();
                     waits.push(rx);
-                    self.start_update_task(tx, self.disable_sort());
+                    self.start_update_task(Some(tx), self.disable_sort());
                 }
             }
         }

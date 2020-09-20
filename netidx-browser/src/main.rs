@@ -343,9 +343,13 @@ impl Widget {
                 view::WidgetKind::Action(spec) => {
                     Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
                 }
-                view::WidgetKind::Table(base_path, spec) => Widget::Table(
-                    table::Table::new(ctx.clone(), base_path, spec, selected_path),
-                ),
+                view::WidgetKind::Table(base_path, spec) => {
+                    let tbl =
+                        table::Table::new(ctx.clone(), base_path, spec, selected_path);
+                    // force the initial update/subscribe
+                    tbl.start_update_task(None, None);
+                    Widget::Table(tbl)
+                }
                 view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
                     ctx.clone(),
                     variables,
