@@ -3,6 +3,9 @@
   - allow publisher to unicast to specific subscribers
   - writes return success or failure instead of silently eating errors
   - netidx browser "views", publishable and editable custom guis
+  - subscriber will notify explicitly when a subscription is unsubscribed
+  - simplify durable subscriber, shrink it's memory usage
+  - eliminate a race between durable subscriber subscription state and updates
 
 * 0.3.2:
   - minor api enhancement. add update_changed, and current to publisher::Val
