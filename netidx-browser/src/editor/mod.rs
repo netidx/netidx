@@ -519,7 +519,7 @@ impl LinePlot {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let mut common = TwoColGrid::new();
-        root.pack_start(&common.root(), false, false, 0);
+        root.pack_start(common.root(), false, false, 0);
         let (l, e, title) = source(
             ctx,
             "Title:",
@@ -587,10 +587,10 @@ impl LinePlot {
             @strong series => move |i: usize| {
                 let mut grid = TwoColGrid::new();
                 seriesbox.pack_start(grid.root(), false, false, 0);
-                let sep = gtk::Seperator::new(gtk::Orientation::Vertical);
+                let sep = gtk::Separator::new(gtk::Orientation::Vertical);
                 grid.attach(&sep, 0, 2, 1);
                 let (l, e, title) = source(
-                    ctx,
+                    &ctx,
                     "Title:",
                     &spec.borrow().series[i].title,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -599,8 +599,8 @@ impl LinePlot {
                     })
                 );
                 grid.add((l, e));
-                let (l, e, x) = series(
-                    ctx,
+                let (l, e, x) = source(
+                    &ctx,
                     "X:",
                     &spec.borrow().series[i].x,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -609,8 +609,8 @@ impl LinePlot {
                     })
                 );
                 grid.add((l, e));
-                let (l, e, y) = series(
-                    ctx,
+                let (l, e, y) = source(
+                    &ctx,
                     "Y:",
                     &spec.borrow().series[i].y,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -1097,7 +1097,6 @@ impl Widget {
                 WidgetKind::LinePlot(LinePlot::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
-            view::Widget { props: _, kind: view::WidgetKind::LinePlot(_) } => todo!(),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(BoxContainer::new(on_change.clone(), s)),
