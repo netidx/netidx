@@ -5,11 +5,7 @@ use super::{
 };
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
-use netidx::{
-    chars::Chars,
-    path::Path,
-    subscriber::Value,
-};
+use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
 use source_inspector::SourceInspector;
 use std::{
@@ -500,6 +496,199 @@ impl Entry {
 }
 
 #[derive(Clone, Debug)]
+struct Series {
+    title: DbgSrc,
+    x: DbgSrc,
+    y: DbgSrc,
+}
+
+#[derive(Clone, Debug)]
+struct LinePlot {
+    root: gtk::Box,
+    spec: Rc<RefCell<view::LinePlot>>,
+    title: DbgSrc,
+    x_label: DbgSrc,
+    y_label: DbgSrc,
+    timeseries: DbgSrc,
+    keep_points: DbgSrc,
+    series: Rc<RefCell<Vec<Series>>>,
+}
+
+impl LinePlot {
+    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::LinePlot) -> Self {
+        let spec = Rc::new(RefCell::new(spec));
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let mut common = TwoColGrid::new();
+        root.pack_start(&common.root(), false, false, 0);
+        let (l, e, title) = source(
+            ctx,
+            "Title:",
+            &spec.borrow().title,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().title = s;
+                on_change()
+            }),
+        );
+        common.add((l, e));
+        let (l, e, x_label) = source(
+            ctx,
+            "X Axis Label:",
+            &spec.borrow().x_label,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().x_label = s;
+                on_change()
+            }),
+        );
+        common.add((l, e));
+        let (l, e, y_label) = source(
+            ctx,
+            "Y Axis Label:",
+            &spec.borrow().y_label,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().y_label = s;
+                on_change()
+            }),
+        );
+        common.add((l, e));
+        let (l, e, timeseries) = source(
+            ctx,
+            "Time Series:",
+            &spec.borrow().timeseries,
+            clone!(@strong on_change, @strong spec => move |b| {
+                spec.borrow_mut().timeseries = b;
+                on_change()
+            }),
+        );
+        common.add((l, e));
+        let (l, e, keep_points) = source(
+            ctx,
+            "Keep Points:",
+            &spec.borrow().keep_points,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().keep_points = s;
+                on_change()
+            }),
+        );
+        common.add((l, e));
+        let addbtn = gtk::Button::with_label("+");
+        root.pack_start(&addbtn, false, false, 0);
+        let series = Rc::new(RefCell::new(Vec::new()));
+        let serieswin =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        serieswin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        serieswin.add(&seriesbox);
+        root.pack_start(&serieswin, true, true, 0);
+        let build_series = Rc::new(clone!(
+            @weak seriesbox,
+            @strong ctx,
+            @strong on_change,
+            @strong spec,
+            @strong series => move |i: usize| {
+                let mut grid = TwoColGrid::new();
+                seriesbox.pack_start(grid.root(), false, false, 0);
+                let sep = gtk::Seperator::new(gtk::Orientation::Vertical);
+                grid.attach(&sep, 0, 2, 1);
+                let (l, e, title) = source(
+                    ctx,
+                    "Title:",
+                    &spec.borrow().series[i].title,
+                    clone!(@strong spec, @strong on_change => move |s| {
+                        spec.borrow_mut().series[i].title = s;
+                        on_change()
+                    })
+                );
+                grid.add((l, e));
+                let (l, e, x) = series(
+                    ctx,
+                    "X:",
+                    &spec.borrow().series[i].x,
+                    clone!(@strong spec, @strong on_change => move |s| {
+                        spec.borrow_mut().series[i].x = s;
+                        on_change()
+                    })
+                );
+                grid.add((l, e));
+                let (l, e, y) = series(
+                    ctx,
+                    "Y:",
+                    &spec.borrow().series[i].y,
+                    clone!(@strong spec, @strong on_change => move |s| {
+                        spec.borrow_mut().series[i].y = s;
+                        on_change()
+                    })
+                );
+                grid.add((l, e));
+                let remove = gtk::Button::with_label("-");
+                grid.attach(&remove, 0, 2, 1);
+                series.borrow_mut().push(Series { title, x, y });
+                seriesbox.show_all();
+                remove.connect_clicked(clone!(
+                    @strong series,
+                    @weak seriesbox,
+                    @strong spec,
+                    @strong on_change => move |_| {
+                        series.borrow_mut().remove(i);
+                        spec.borrow_mut().series.remove(i);
+                        seriesbox.remove(&seriesbox.get_children()[i]);
+                        on_change()
+                    }));
+        }));
+        addbtn.connect_clicked(clone!(
+            @strong spec, @strong build_series => move |_| {
+                spec.borrow_mut().series.push(view::Series {
+                    title: view::Source::Constant(Value::String(Chars::from("Series"))),
+                    x: view::Source::Load(Path::from("/somewhere/in/netidx/x")),
+                    y: view::Source::Load(Path::from("/somewhere/in/netidx/y")),
+                });
+                build_series(spec.borrow().series.len() - 1)
+            }
+        ));
+        for i in 0..spec.borrow().series.len() {
+            build_series(i)
+        }
+        LinePlot { root, spec, title, x_label, y_label, timeseries, keep_points, series }
+    }
+
+    fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::LinePlot(self.spec.borrow().clone())
+    }
+
+    fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+
+    fn update(&self, tgt: Target, value: &Value) {
+        if let Some((_, s)) = &*self.title.borrow() {
+            s.update(tgt, value);
+        }
+        if let Some((_, s)) = &*self.x_label.borrow() {
+            s.update(tgt, value);
+        }
+        if let Some((_, s)) = &*self.y_label.borrow() {
+            s.update(tgt, value);
+        }
+        if let Some((_, s)) = &*self.timeseries.borrow() {
+            s.update(tgt, value);
+        }
+        if let Some((_, s)) = &*self.keep_points.borrow() {
+            s.update(tgt, value);
+        }
+        for s in self.series.borrow().iter() {
+            if let Some((_, s)) = &*s.title.borrow() {
+                s.update(tgt, value);
+            }
+            if let Some((_, s)) = &*s.x.borrow() {
+                s.update(tgt, value);
+            }
+            if let Some((_, s)) = &*s.y.borrow() {
+                s.update(tgt, value);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct BoxChild {
     root: TwoColGrid,
     spec: Rc<RefCell<view::BoxChild>>,
@@ -823,6 +1012,7 @@ enum WidgetKind {
     Toggle(Toggle),
     Selector(Selector),
     Entry(Entry),
+    LinePlot(LinePlot),
     Box(BoxContainer),
     BoxChild(BoxChild),
     Grid(Grid),
@@ -840,6 +1030,7 @@ impl WidgetKind {
             WidgetKind::Toggle(w) => Some(w.root()),
             WidgetKind::Selector(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
+            WidgetKind::LinePlot(w) => Some(w.root()),
             WidgetKind::Box(w) => Some(w.root()),
             WidgetKind::BoxChild(w) => Some(w.root()),
             WidgetKind::Grid(w) => Some(w.root()),
@@ -901,6 +1092,11 @@ impl Widget {
                 WidgetKind::Entry(Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
+            view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
+                "LinePlot",
+                WidgetKind::LinePlot(LinePlot::new(ctx, on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, props)),
+            ),
             view::Widget { props: _, kind: view::WidgetKind::LinePlot(_) } => todo!(),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
@@ -947,6 +1143,7 @@ impl Widget {
             WidgetKind::Toggle(w) => w.spec(),
             WidgetKind::Selector(w) => w.spec(),
             WidgetKind::Entry(w) => w.spec(),
+            WidgetKind::LinePlot(w) => w.spec(),
             WidgetKind::Box(w) => w.spec(),
             WidgetKind::BoxChild(w) => w.spec(),
             WidgetKind::Grid(w) => w.spec(),
@@ -1002,6 +1199,14 @@ impl Widget {
                 visible: view::Source::Constant(Value::True),
                 source: view::Source::Load(Path::from("/somewhere")),
                 sink: view::Sink::Store(Path::from("/somewhere/else")),
+            })),
+            Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
+                title: view::Source::Constant(Value::String(Chars::from("Line Plot"))),
+                x_label: view::Source::Constant(Value::String(Chars::from("x axis"))),
+                y_label: view::Source::Constant(Value::String(Chars::from("y axis"))),
+                timeseries: view::Source::Constant(Value::False),
+                keep_points: view::Source::Constant(Value::U64(256)),
+                series: Vec::new(),
             })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
                 direction: view::Direction::Vertical,
@@ -1060,6 +1265,7 @@ impl Widget {
             WidgetKind::Toggle(w) => w.update(tgt, value),
             WidgetKind::Selector(w) => w.update(tgt, value),
             WidgetKind::Entry(w) => w.update(tgt, value),
+            WidgetKind::LinePlot(w) => w.update(tgt, value),
             WidgetKind::Box(_)
             | WidgetKind::BoxChild(_)
             | WidgetKind::Grid(_)
@@ -1074,7 +1280,7 @@ pub(super) struct Editor {
     store: gtk::TreeStore,
 }
 
-static KINDS: [&'static str; 12] = [
+static KINDS: [&'static str; 13] = [
     "Action",
     "Table",
     "Label",
@@ -1082,6 +1288,7 @@ static KINDS: [&'static str; 12] = [
     "Toggle",
     "Selector",
     "Entry",
+    "LinePlot",
     "Box",
     "BoxChild",
     "Grid",
@@ -1463,6 +1670,10 @@ impl Editor {
                     false
                 }
                 WidgetKind::Entry(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                WidgetKind::LinePlot(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
