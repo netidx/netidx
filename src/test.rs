@@ -223,7 +223,7 @@ mod publisher {
         publisher::{BindCfg, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
-        subscriber::{Subscriber, Value},
+        subscriber::{Subscriber, Event, Value},
     };
     use futures::{channel::mpsc, prelude::*};
     use std::{
@@ -297,8 +297,8 @@ mod publisher {
                     vp.update(Value::U64(314159 + c));
                     publisher.flush(None).await.unwrap();
                     if let Some(mut batch) = rx.next().await {
-                        for (_, v) in batch.drain(..) {
-                            match v {
+                        for req in batch.drain(..) {
+                            match req.value {
                                 Value::U64(v) => {
                                     c = v;
                                 }
@@ -312,7 +312,7 @@ mod publisher {
             let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
-            assert_eq!(q.last(), Value::True);
+            assert_eq!(q.last(), Event::Update(Value::True));
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);
@@ -323,7 +323,7 @@ mod publisher {
                     Some(mut batch) => {
                         for (_, v) in batch.drain(..) {
                             match v {
-                                Value::U64(v) => {
+                                Event::Update(Value::U64(v)) => {
                                     if c == 0 {
                                         c = v;
                                         i = v;

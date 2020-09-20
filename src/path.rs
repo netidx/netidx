@@ -303,7 +303,7 @@ impl Path {
     /// ```
     /// use netidx::path::Path;
     /// let p = Path::from("/some/path/ending/in/foo");
-    /// let mut bn = Path::basenames(&p);
+    /// let mut bn = Path::dirnames(&p);
     /// assert_eq!(bn.next(), Some("/"));
     /// assert_eq!(bn.next(), Some("/some"));
     /// assert_eq!(bn.next(), Some("/some/path"));
