@@ -1,4 +1,4 @@
-use super::{Source, WidgetCtx, Target};
+use super::{Source, Target, WidgetCtx};
 use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
@@ -116,6 +116,14 @@ impl Mean {
 
     fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
         if self.from.update(from, tgt, value) {
+            for v in &*self.from.0.borrow() {
+                if let Some(v) = v {
+                    if let Some(v) = v.clone().cast_f64() {
+                        self.total.set(self.total.get() + v);
+                        self.samples.set(self.samples.get() + 1);
+                    }
+                }
+            }
             self.eval()
         } else {
             None
@@ -123,18 +131,49 @@ impl Mean {
     }
 
     fn eval(&self) -> Option<Value> {
-        for v in &*self.from.0.borrow() {
-            if let Some(v) = v {
-                if let Some(v) = v.clone().cast_f64() {
-                    self.total.set(self.total.get() + v);
-                    self.samples.set(self.samples.get() + 1);
+        match &**self.from.0.borrow() {
+            [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
+            [s] => {
+                if self.samples.get() > 0 {
+                    Some(Value::F64(self.total.get() / (self.samples.get() as f64)))
+                } else {
+                    None
                 }
             }
+            _ => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
         }
-        if self.samples.get() > 0 {
-            Some(Value::F64(self.total.get() / (self.samples.get() as f64)))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct Count {
+    from: CachedVals,
+    count: Rc<Cell<u64>>,
+}
+
+impl Count {
+    fn new(from: &[Source]) -> Self {
+        Count { from: CachedVals::new(from), count: Rc::new(Cell::new(0)) }
+    }
+
+    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+        if self.from.update(from, tgt, value) {
+            for v in &*self.from.0.borrow() {
+                if v.is_some() {
+                    self.count.set(self.count.get() + 1);
+                }
+            }
+            self.eval()
         } else {
             None
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        match &**self.from.0.borrow() {
+            [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
+            [_] => Some(Value::U64(self.count.get())),
+            _ => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
         }
     }
 }
@@ -464,12 +503,13 @@ pub(super) enum Formula {
     Cast(CachedVals),
     IsA(CachedVals),
     Eval(Eval),
+    Count(Count),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 17] = [
+pub(super) static FORMULAS: [&'static str; 18] = [
     "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
-    "cmp", "if", "filter", "cast", "isa", "eval",
+    "cmp", "if", "filter", "cast", "isa", "eval", "count",
 ];
 
 impl Formula {
@@ -492,6 +532,7 @@ impl Formula {
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
             "eval" => Formula::Eval(Eval::new(ctx, from)),
+            "count" => Formula::Count(Count::new(from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -515,6 +556,7 @@ impl Formula {
             Formula::Cast(c) => eval_cast(c),
             Formula::IsA(c) => eval_isa(c),
             Formula::Eval(e) => e.eval(),
+            Formula::Count(c) => c.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -555,6 +597,7 @@ impl Formula {
             Formula::Cast(c) => update_cached(eval_cast, c, from, tgt, value),
             Formula::IsA(c) => update_cached(eval_isa, c, from, tgt, value),
             Formula::Eval(e) => e.update(from, tgt, value),
+            Formula::Count(c) => c.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

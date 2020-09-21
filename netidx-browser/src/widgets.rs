@@ -543,10 +543,12 @@ impl LinePlot {
             let x_label = get_str(&x_label);
             let y_label = y_label.current();
             let y_label = get_str(&y_label);
-            let mut x_min = 0.;
-            let mut x_max = 0.;
-            let mut y_min = 0.;
-            let mut y_max = 0.;
+            let mut x_min =
+                *series.borrow().last().and_then(|s| s.x_data.back()).unwrap_or(&0.);
+            let mut x_max = x_min;
+            let mut y_min =
+                *series.borrow().last().and_then(|s| s.y_data.back()).unwrap_or(&0.);
+            let mut y_max = y_min;
             for s in series.borrow().iter() {
                 for x in s.x_data.iter() {
                     x_min = f64::min(x_min, *x);
@@ -564,6 +566,7 @@ impl LinePlot {
             let yr = dbg!(y_min)..dbg!(f64::max(y_min + 1., y_max));
             let mut chart = ChartBuilder::on(&back)
                 .caption(title, ("sans-sherif", 14))
+                .set_all_label_area_size(50)
                 .build_cartesian_2d(xr, yr)?;
             chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
             let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
