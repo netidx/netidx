@@ -276,15 +276,17 @@ impl Dval {
     ) {
         let mut t = self.0.lock();
         t.streams.retain(|c| !c.is_closed());
-        t.streams.push(tx.clone());
-        if let Some(ref sub) = t.sub {
-            let m = ToCon::Stream {
-                tx,
-                sub_id: t.sub_id,
-                last: begin_with_last,
-                id: sub.0.id,
-            };
-            let _ = sub.0.connection.unbounded_send(m);
+        if !t.streams.iter().any(|s| tx.same_receiver(s)) {
+            t.streams.push(tx.clone());
+            if let Some(ref sub) = t.sub {
+                let m = ToCon::Stream {
+                    tx,
+                    sub_id: t.sub_id,
+                    last: begin_with_last,
+                    id: sub.0.id,
+                };
+                let _ = sub.0.connection.unbounded_send(m);
+            }
         }
     }
 
@@ -1159,18 +1161,20 @@ async fn connection(
                                 true
                             }
                         });
-                        if last {
-                            let m = sub.last.lock().clone();
-                            let mut b = BATCHES.take();
-                            b.push((sub_id, m));
-                            match tx.send(b).await {
-                                Err(_) => continue,
-                                Ok(()) => ()
+                        if !sub.streams.iter().any(|(_, _, s)| tx.same_receiver(s)) {
+                            if last {
+                                let m = sub.last.lock().clone();
+                                let mut b = BATCHES.take();
+                                b.push((sub_id, m));
+                                match tx.send(b).await {
+                                    Err(_) => continue,
+                                    Ok(()) => ()
+                                }
                             }
+                            let id = by_receiver.entry(ChanWrap(tx.clone()))
+                                .or_insert_with(ChanId::new);
+                            sub.streams.push((sub_id, *id, tx));
                         }
-                        let id = by_receiver.entry(ChanWrap(tx.clone()))
-                            .or_insert_with(ChanId::new);
-                        sub.streams.push((sub_id, *id, tx));
                     }
                 }
                 Some(BatchItem::InBatch(ToCon::Write(id, v, tx))) => {
