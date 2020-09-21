@@ -1,4 +1,4 @@
-use super::{val_to_bool, Sink, Source, WidgetCtx, Target};
+use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
 use crate::view;
 use anyhow::Result;
 use cairo;
@@ -6,10 +6,7 @@ use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use log::warn;
-use netidx::{
-    chars::Chars,
-    subscriber::Value,
-};
+use netidx::{chars::Chars, subscriber::Value};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
@@ -539,8 +536,10 @@ impl LinePlot {
         let mut x_max = 0.;
         let mut y_min = 0.;
         let mut y_max = 0.;
+        let mut n = 0;
         for s in series.borrow().iter() {
             for x in s.x_data.iter() {
+                n += 1;
                 x_min = f64::min(x_min, *x);
                 x_max = f64::max(x_max, *x);
             }
@@ -549,17 +548,21 @@ impl LinePlot {
                 y_max = f64::max(y_max, *y);
             }
         }
-        let back = CairoBackend::new(context, (width as u32, height as u32))?
-            .into_drawing_area();
-        back.fill(&WHITE)?;
-        let mut chart = ChartBuilder::on(&back)
-            .caption(title, ("sans-sherif", 14))
-            .build_cartesian_2d(f64::min(x_min, 0.)..x_max, f64::min(y_min, 0.)..y_max)?;
-        chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
-        let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
-        for (i, s) in series.borrow().iter().enumerate() {
-            let data = s.x_data.iter().copied().zip(s.y_data.iter().copied());
-            chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+        if n > 0 {
+            let back = CairoBackend::new(context, (width as u32, height as u32))?
+                .into_drawing_area();
+            let mut chart = ChartBuilder::on(&back)
+                .caption(title, ("sans-sherif", 14))
+                .build_cartesian_2d(
+                f64::min(x_min, 0.)..x_max,
+                f64::min(y_min, 0.)..y_max,
+            )?;
+            chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
+            let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
+            for (i, s) in series.borrow().iter().enumerate() {
+                let data = s.x_data.iter().copied().zip(s.y_data.iter().copied());
+                chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+            }
         }
         Ok(())
     }
