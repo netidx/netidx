@@ -562,11 +562,12 @@ impl LinePlot {
             let back = CairoBackend::new(context, (width.get(), height.get()))?
                 .into_drawing_area();
             back.fill(&WHITE)?;
-            let xr = dbg!(x_min)..dbg!(f64::max(x_min + 1., x_max));
-            let yr = dbg!(y_min)..dbg!(f64::max(y_min + 1., y_max));
+            let xr = x_min..f64::max(x_min + 1., x_max);
+            let yr = y_min..f64::max(y_min + 1., y_max);
             let mut chart = ChartBuilder::on(&back)
                 .caption(title, ("sans-sherif", 14))
-                .set_all_label_area_size(50)
+                .margin(5)
+                .set_all_label_area_size(75)
                 .build_cartesian_2d(xr, yr)?;
             chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
             let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
