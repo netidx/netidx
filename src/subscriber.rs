@@ -148,6 +148,9 @@ impl Val {
     /// You may register multiple different channels to receive
     /// updates from a `Val`, and you may register one channel to
     /// receive updates from multiple `Val`s.
+    ///
+    /// If you register multiple channels pointing to the same
+    /// receiver on a subscription you will not get duplicate updates.
     pub fn updates(
         &self,
         begin_with_last: bool,

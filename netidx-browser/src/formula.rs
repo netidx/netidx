@@ -157,7 +157,6 @@ impl Count {
     }
 
     fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
-        dbg!(());
         if self.from.update(from, tgt, value) {
             for v in &*self.from.0.borrow() {
                 if v.is_some() {
