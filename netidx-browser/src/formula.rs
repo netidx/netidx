@@ -133,7 +133,7 @@ impl Mean {
     fn eval(&self) -> Option<Value> {
         match &**self.from.0.borrow() {
             [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
-            [s] => {
+            [_] => {
                 if self.samples.get() > 0 {
                     Some(Value::F64(self.total.get() / (self.samples.get() as f64)))
                 } else {
