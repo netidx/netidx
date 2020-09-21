@@ -483,19 +483,24 @@ impl LinePlot {
                 })
                 .collect::<Vec<_>>(),
         ));
+        let allocated_width = Rc::new(Cell::new(0));
+        let allocated_height = Rc::new(Cell::new(0));
         root.connect_draw(clone!(
             @strong title,
             @strong x_label,
             @strong y_label,
+            @strong allocated_width,
+            @strong allocated_height,
             @strong timeseries,
-            @strong series => move |area, context| {
+            @strong series => move |_, context| {
             let res = LinePlot::draw(
                 &title,
                 &x_label,
                 &y_label,
+                &allocated_width,
+                &allocated_height,
                 &timeseries,
                 &series,
-                area,
                 context
             );
             match res {
@@ -504,6 +509,12 @@ impl LinePlot {
             }
             gtk::Inhibit(true)
         }));
+        root.connect_size_allocate(clone!(
+        @strong allocated_width,
+        @strong allocated_height => move |_, a| {
+            allocated_width.set(i32::abs(a.width) as u32);
+            allocated_height.set(i32::abs(a.height) as u32);
+        }));
         LinePlot { root, title, x_label, y_label, keep_points, series }
     }
 
@@ -511,9 +522,10 @@ impl LinePlot {
         title: &Rc<Source>,
         x_label: &Rc<Source>,
         y_label: &Rc<Source>,
+        width: &Rc<Cell<u32>>,
+        height: &Rc<Cell<u32>>,
         _timeseries: &Rc<Source>,
         series: &Rc<RefCell<Vec<Series>>>,
-        area: &gtk::DrawingArea,
         context: &cairo::Context,
     ) -> Result<()> {
         use plotters::prelude::*;
@@ -524,39 +536,35 @@ impl LinePlot {
                 Some(_) | None => "",
             }
         }
-        let title = title.current();
-        let title = get_str(&title);
-        let x_label = x_label.current();
-        let x_label = get_str(&x_label);
-        let y_label = y_label.current();
-        let y_label = get_str(&y_label);
-        let width = area.get_preferred_width().1;
-        let height = area.get_preferred_height().1;
-        let mut x_min = 0.;
-        let mut x_max = 0.;
-        let mut y_min = 0.;
-        let mut y_max = 0.;
-        let mut n = 0;
-        for s in series.borrow().iter() {
-            for x in s.x_data.iter() {
-                n += 1;
-                x_min = f64::min(x_min, *x);
-                x_max = f64::max(x_max, *x);
+        if width.get() > 0 && height.get() > 0 {
+            let title = title.current();
+            let title = get_str(&title);
+            let x_label = x_label.current();
+            let x_label = get_str(&x_label);
+            let y_label = y_label.current();
+            let y_label = get_str(&y_label);
+            let mut x_min = 0.;
+            let mut x_max = 0.;
+            let mut y_min = 0.;
+            let mut y_max = 0.;
+            for s in series.borrow().iter() {
+                for x in s.x_data.iter() {
+                    x_min = f64::min(x_min, *x);
+                    x_max = f64::max(x_max, *x);
+                }
+                for y in s.y_data.iter() {
+                    y_min = f64::min(y_min, *y);
+                    y_max = f64::max(y_max, *y);
+                }
             }
-            for y in s.y_data.iter() {
-                y_min = f64::min(y_min, *y);
-                y_max = f64::max(y_max, *y);
-            }
-        }
-        if n > 0 {
-            let back = CairoBackend::new(context, (width as u32, height as u32))?
+            let back = CairoBackend::new(context, (width.get(), height.get()))?
                 .into_drawing_area();
+            back.fill(&WHITE)?;
+            let xr = dbg!(x_min)..dbg!(f64::max(x_min + 1., x_max));
+            let yr = dbg!(y_min)..dbg!(f64::max(y_min + 1., y_max));
             let mut chart = ChartBuilder::on(&back)
                 .caption(title, ("sans-sherif", 14))
-                .build_cartesian_2d(
-                f64::min(x_min, 0.)..x_max,
-                f64::min(y_min, 0.)..y_max,
-            )?;
+                .build_cartesian_2d(xr, yr)?;
             chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
             let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
             for (i, s) in series.borrow().iter().enumerate() {
@@ -598,8 +606,10 @@ impl LinePlot {
                 queue_draw = true;
             }
             if let Some(keep) = self.keep_points.current().and_then(|v| v.cast_u64()) {
-                if s.x_data.len() > keep as usize || s.y_data.len() > keep as usize {
+                while s.x_data.len() > keep as usize {
                     s.x_data.pop_front();
+                }
+                while s.y_data.len() > keep as usize {
                     s.y_data.pop_front();
                 }
             }

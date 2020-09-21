@@ -573,12 +573,8 @@ impl LinePlot {
         let addbtn = gtk::Button::with_label("+");
         root.pack_start(&addbtn, false, false, 0);
         let series = Rc::new(RefCell::new(Vec::new()));
-        let serieswin =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        serieswin.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        serieswin.add(&seriesbox);
-        root.pack_start(&serieswin, true, true, 0);
+        root.pack_start(&seriesbox, true, true, 0);
         let build_series = Rc::new(clone!(
             @weak seriesbox,
             @strong ctx,
