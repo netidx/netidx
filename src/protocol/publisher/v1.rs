@@ -566,9 +566,10 @@ impl Not for Value {
             Value::DateTime(v) => {
                 Value::Error(Chars::from(format!("can't apply not to DateTime({})", v)))
             }
-            Value::Duration(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Duration({})", v)))
-            }
+            Value::Duration(v) => Value::Error(Chars::from(format!(
+                "can't apply not to Duration({}s)",
+                v.as_secs_f64()
+            ))),
             Value::String(v) => {
                 Value::Error(Chars::from(format!("can't apply not to String({})", v)))
             }
@@ -1190,6 +1191,20 @@ impl Value {
     pub fn cast_string(self) -> Option<Chars> {
         self.cast(Typ::String).and_then(|v| match v {
             Value::String(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn cast_datetime(self) -> Option<DateTime<Utc>> {
+        self.cast(Typ::DateTime).and_then(|v| match v {
+            Value::DateTime(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    pub fn cast_duration(self) -> Option<Duration> {
+        self.cast(Typ::Duration).and_then(|v| match v {
+            Value::Duration(d) => Some(d),
             _ => None,
         })
     }
