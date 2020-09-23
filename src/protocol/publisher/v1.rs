@@ -275,8 +275,20 @@ impl Typ {
                 Typ::Z64 => Value::Z64(s.parse::<i64>()?),
                 Typ::F32 => Value::F32(s.parse::<f32>()?),
                 Typ::F64 => Value::F64(s.parse::<f64>()?),
-                Typ::DateTime => todo!(),
-                Typ::Duration => todo!(),
+                Typ::DateTime => match DateTime::parse_from_rfc3339(s) {
+                    Err(_) => Value::DateTime(DateTime::<Utc>::from(
+                        DateTime::parse_from_rfc2822(s)?,
+                    )),
+                    Ok(dt) => Value::DateTime(DateTime::<Utc>::from(dt)),
+                },
+                Typ::Duration => {
+                    let f =
+                        s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<f64>()?;
+                    match Value::F64(f).cast(Typ::Duration) {
+                        None => bail!("can't turn {} into a duration", f),
+                        Some(d) => d,
+                    }
+                }
                 Typ::Bool => match s.parse::<bool>()? {
                     true => Value::True,
                     false => Value::False,
@@ -1070,12 +1082,10 @@ impl Value {
                     NaiveDateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()),
                     Utc,
                 ))),
-                Value::String(c) => match DateTime::parse_from_rfc3339(&*c) {
-                    Err(_) => match DateTime::parse_from_rfc2822(&*c) {
-                        Err(_) => None,
-                        Ok(dt) => Some(Value::DateTime(DateTime::<Utc>::from(dt))),
-                    },
-                    Ok(dt) => Some(Value::DateTime(DateTime::<Utc>::from(dt))),
+
+                Value::String(c) => match Typ::DateTime.parse(&*c) {
+                    Err(_) => None,
+                    Ok(dt) => Some(dt),
                 },
                 Value::Bytes(_)
                 | Value::True

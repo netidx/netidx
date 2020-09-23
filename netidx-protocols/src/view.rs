@@ -228,7 +228,7 @@ pub enum PlotColor {
     Cyan,
     White,
     Yellow,
-    RGB(u8, u8, u8)
+    RGB(u8, u8, u8),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,8 +248,10 @@ pub struct LinePlot {
     pub label_area: usize,
     pub x_label: String,
     pub y_label: String,
-    pub x_scale: Option<(f64, f64)>,
-    pub y_scale: Option<(f64, f64)>,
+    pub x_min: Source,
+    pub x_max: Source,
+    pub y_min: Source,
+    pub y_max: Source,
     pub keep_points: Source,
     pub series: Vec<Series>,
 }
