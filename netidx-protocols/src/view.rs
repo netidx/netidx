@@ -219,18 +219,37 @@ pub struct Grid {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PlotColor {
+    Red,
+    Green,
+    Magenta,
+    Blue,
+    Black,
+    Cyan,
+    White,
+    Yellow,
+    RGB(u8, u8, u8)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Series {
-    pub title: Source,
+    pub title: String,
+    pub line_color: PlotColor,
     pub x: Source,
     pub y: Source,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinePlot {
-    pub title: Source,
-    pub x_label: Source,
-    pub y_label: Source,
-    pub timeseries: Source,
+    pub title: String,
+    pub grid: bool,
+    pub fill: Option<PlotColor>,
+    pub margin: usize,
+    pub label_area: usize,
+    pub x_label: String,
+    pub y_label: String,
+    pub x_scale: Option<(f64, f64)>,
+    pub y_scale: Option<(f64, f64)>,
     pub keep_points: Source,
     pub series: Vec<Series>,
 }

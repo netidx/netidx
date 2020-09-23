@@ -4,12 +4,15 @@ use crate::{
     path::Path,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use chrono::{naive::NaiveDateTime, prelude::*};
 use std::{
     fmt, mem,
     net::SocketAddr,
+    num::FpCategory,
     ops::{Add, Div, Mul, Not, Sub},
     result,
     str::FromStr,
+    time::Duration,
 };
 
 type Result<T> = result::Result<T, PackError>;
@@ -206,6 +209,8 @@ pub enum Typ {
     Z64,
     F32,
     F64,
+    DateTime,
+    Duration,
     Bool,
     String,
     Bytes,
@@ -225,6 +230,8 @@ impl Typ {
             Typ::Z64 => "z64",
             Typ::F32 => "f32",
             Typ::F64 => "f64",
+            Typ::DateTime => "datetime",
+            Typ::Duration => "duration",
             Typ::Bool => "bool",
             Typ::String => "string",
             Typ::Bytes => "bytes",
@@ -244,6 +251,8 @@ impl Typ {
             Value::Z64(_) => Some(Typ::Z64),
             Value::F32(_) => Some(Typ::F32),
             Value::F64(_) => Some(Typ::F64),
+            Value::DateTime(_) => Some(Typ::DateTime),
+            Value::Duration(_) => Some(Typ::Duration),
             Value::String(_) => Some(Typ::String),
             Value::Bytes(_) => Some(Typ::Bytes),
             Value::True | Value::False => Some(Typ::Bool),
@@ -266,6 +275,8 @@ impl Typ {
                 Typ::Z64 => Value::Z64(s.parse::<i64>()?),
                 Typ::F32 => Value::F32(s.parse::<f32>()?),
                 Typ::F64 => Value::F64(s.parse::<f64>()?),
+                Typ::DateTime => todo!(),
+                Typ::Duration => todo!(),
                 Typ::Bool => match s.parse::<bool>()? {
                     true => Value::True,
                     false => Value::False,
@@ -303,6 +314,8 @@ impl FromStr for Typ {
             "z64" => Ok(Typ::Z64),
             "f32" => Ok(Typ::F32),
             "f64" => Ok(Typ::F64),
+            "datetime" => Ok(Typ::DateTime),
+            "duration" => Ok(Typ::Duration),
             "bool" => Ok(Typ::Bool),
             "string" => Ok(Typ::String),
             "bytes" => Ok(Typ::Bytes),
@@ -335,6 +348,10 @@ pub enum Value {
     F32(f32),
     /// 8 byte ieee754 double precision float
     F64(f64),
+    /// UTC timestamp
+    DateTime(DateTime<Utc>),
+    /// Duration
+    Duration(Duration),
     /// unicode string, zero copy decode
     String(Chars),
     /// byte array, zero copy decode
@@ -360,6 +377,8 @@ impl fmt::Display for Value {
             Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
+            Value::DateTime(d) => write!(f, "{}", d),
+            Value::Duration(d) => write!(f, "{}s", d.as_secs_f64()),
             Value::String(v) => write!(f, "{}", &*v),
             Value::Bytes(_) => write!(f, "<binary>"),
             Value::True => write!(f, "True"),
@@ -393,6 +412,13 @@ impl Add for Value {
             (Value::Z64(l), Value::I64(r)) => Value::I64(l + r),
             (Value::F32(l), Value::F32(r)) => Value::F32(l + r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l + r),
+            (Value::DateTime(dt), Value::Duration(d)) => {
+                match chrono::Duration::from_std(d) {
+                    Ok(d) => Value::DateTime(dt + d),
+                    Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                }
+            }
+            (Value::Duration(d0), Value::Duration(d1)) => Value::Duration(d0 + d1),
             (l, r) => Value::Error(Chars::from(format!("can't add {:?} and {:?}", l, r))),
         }
     }
@@ -420,6 +446,13 @@ impl Sub for Value {
             (Value::Z64(l), Value::I64(r)) => Value::I64(l - r),
             (Value::F32(l), Value::F32(r)) => Value::F32(l - r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l - r),
+            (Value::DateTime(dt), Value::Duration(d)) => {
+                match chrono::Duration::from_std(d) {
+                    Ok(d) => Value::DateTime(dt - d),
+                    Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                }
+            }
+            (Value::Duration(d0), Value::Duration(d1)) => Value::Duration(d0 - d1),
             (l, r) => Value::Error(Chars::from(format!("can't sub {:?} and {:?}", l, r))),
         }
     }
@@ -447,6 +480,14 @@ impl Mul for Value {
             (Value::Z64(l), Value::I64(r)) => Value::I64(l * r),
             (Value::F32(l), Value::F32(r)) => Value::F32(l * r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l * r),
+            (Value::Duration(d), Value::U32(s)) => Value::Duration(d * s),
+            (Value::U32(s), Value::Duration(d)) => Value::Duration(d * s),
+            (Value::Duration(d), Value::V32(s)) => Value::Duration(d * s),
+            (Value::V32(s), Value::Duration(d)) => Value::Duration(d * s),
+            (Value::Duration(d), Value::F32(s)) => Value::Duration(d.mul_f32(s)),
+            (Value::F32(s), Value::Duration(d)) => Value::Duration(d.mul_f32(s)),
+            (Value::Duration(d), Value::F64(s)) => Value::Duration(d.mul_f64(s)),
+            (Value::F64(s), Value::Duration(d)) => Value::Duration(d.mul_f64(s)),
             (l, r) => {
                 Value::Error(Chars::from(format!("can't multiply {:?} and {:?}", l, r)))
             }
@@ -476,8 +517,12 @@ impl Div for Value {
             (Value::Z64(l), Value::I64(r)) if r > 0 => Value::I64(l / r),
             (Value::F32(l), Value::F32(r)) => Value::F32(l / r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l / r),
+            (Value::Duration(d), Value::U32(s)) => Value::Duration(d / s),
+            (Value::Duration(d), Value::V32(s)) => Value::Duration(d / s),
+            (Value::Duration(d), Value::F32(s)) => Value::Duration(d.div_f32(s)),
+            (Value::Duration(d), Value::F64(s)) => Value::Duration(d.div_f64(s)),
             (l, r) => {
-                Value::Error(Chars::from(format!("can't multiply {:?} and {:?}", l, r)))
+                Value::Error(Chars::from(format!("can't divide {:?} by {:?}", l, r)))
             }
         }
     }
@@ -518,6 +563,12 @@ impl Not for Value {
             Value::F64(v) => {
                 Value::Error(Chars::from(format!("can't apply not to F64({})", v)))
             }
+            Value::DateTime(v) => {
+                Value::Error(Chars::from(format!("can't apply not to DateTime({})", v)))
+            }
+            Value::Duration(v) => {
+                Value::Error(Chars::from(format!("can't apply not to Duration({})", v)))
+            }
             Value::String(v) => {
                 Value::Error(Chars::from(format!("can't apply not to String({})", v)))
             }
@@ -548,6 +599,8 @@ impl Pack for Value {
             Value::Z64(v) => pack::varint_len(pack::i64_zz(*v) as u64),
             Value::F32(_) => mem::size_of::<f32>(),
             Value::F64(_) => mem::size_of::<f64>(),
+            Value::DateTime(_) => 12,
+            Value::Duration(_) => 12,
             Value::String(c) => <Chars as Pack>::len(c),
             Value::Bytes(b) => <Bytes as Pack>::len(b),
             Value::True | Value::False | Value::Null => 0,
@@ -598,20 +651,30 @@ impl Pack for Value {
                 buf.put_u8(9);
                 Ok(buf.put_f64(*i))
             }
-            Value::String(s) => {
+            Value::DateTime(dt) => {
                 buf.put_u8(10);
+                buf.put_i64(dt.timestamp());
+                Ok(buf.put_u32(dt.timestamp_subsec_nanos()))
+            }
+            Value::Duration(d) => {
+                buf.put_u8(11);
+                buf.put_u64(d.as_secs());
+                Ok(buf.put_u32(d.subsec_nanos()))
+            }
+            Value::String(s) => {
+                buf.put_u8(12);
                 <Chars as Pack>::encode(s, buf)
             }
             Value::Bytes(b) => {
-                buf.put_u8(11);
+                buf.put_u8(13);
                 <Bytes as Pack>::encode(b, buf)
             }
-            Value::True => Ok(buf.put_u8(12)),
-            Value::False => Ok(buf.put_u8(13)),
-            Value::Null => Ok(buf.put_u8(14)),
-            Value::Ok => Ok(buf.put_u8(15)),
+            Value::True => Ok(buf.put_u8(14)),
+            Value::False => Ok(buf.put_u8(15)),
+            Value::Null => Ok(buf.put_u8(16)),
+            Value::Ok => Ok(buf.put_u8(17)),
             Value::Error(e) => {
-                buf.put_u8(16);
+                buf.put_u8(18);
                 <Chars as Pack>::encode(e, buf)
             }
         }
@@ -629,13 +692,24 @@ impl Pack for Value {
             7 => Ok(Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?))),
             8 => Ok(Value::F32(buf.get_f32())),
             9 => Ok(Value::F64(buf.get_f64())),
-            10 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
-            11 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
-            12 => Ok(Value::True),
-            13 => Ok(Value::False),
-            14 => Ok(Value::Null),
-            15 => Ok(Value::Ok),
-            16 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
+            10 => {
+                let ts = buf.get_i64();
+                let ns = buf.get_u32();
+                let ndt = NaiveDateTime::from_timestamp(ts, ns);
+                Ok(Value::DateTime(DateTime::from_utc(ndt, Utc)))
+            }
+            11 => {
+                let secs = buf.get_u64();
+                let ns = buf.get_u32();
+                Ok(Value::Duration(Duration::new(secs, ns)))
+            }
+            12 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
+            13 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
+            14 => Ok(Value::True),
+            15 => Ok(Value::False),
+            16 => Ok(Value::Null),
+            17 => Ok(Value::Ok),
+            18 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -656,6 +730,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::U32(v as u32)),
                 Value::F32(v) => Some(Value::U32(v as u32)),
                 Value::F64(v) => Some(Value::U32(v as u32)),
+                Value::DateTime(_) => None,
+                Value::Duration(d) => Some(Value::U32(d.as_secs() as u32)),
                 Value::String(s) => match s.parse::<u32>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::U32(v)),
@@ -678,6 +754,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::V32(v as u32)),
                 Value::F32(v) => Some(Value::V32(v as u32)),
                 Value::F64(v) => Some(Value::V32(v as u32)),
+                Value::DateTime(_) => None,
+                Value::Duration(d) => Some(Value::V32(d.as_secs() as u32)),
                 Value::String(s) => match s.parse::<u32>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::V32(v)),
@@ -700,6 +778,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::I32(v as i32)),
                 Value::F32(v) => Some(Value::I32(v as i32)),
                 Value::F64(v) => Some(Value::I32(v as i32)),
+                Value::DateTime(v) => Some(Value::I32(v.timestamp() as i32)),
+                Value::Duration(v) => Some(Value::I32(v.as_secs() as i32)),
                 Value::String(s) => match s.parse::<i32>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::I32(v)),
@@ -722,6 +802,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::Z32(v as i32)),
                 Value::F32(v) => Some(Value::Z32(v as i32)),
                 Value::F64(v) => Some(Value::Z32(v as i32)),
+                Value::DateTime(v) => Some(Value::Z32(v.timestamp() as i32)),
+                Value::Duration(v) => Some(Value::Z32(v.as_secs() as i32)),
                 Value::String(s) => match s.parse::<i32>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::Z32(v)),
@@ -744,6 +826,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::U64(v as u64)),
                 Value::F32(v) => Some(Value::U64(v as u64)),
                 Value::F64(v) => Some(Value::U64(v as u64)),
+                Value::DateTime(_) => None,
+                Value::Duration(d) => Some(Value::U64(d.as_secs())),
                 Value::String(s) => match s.parse::<u64>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::U64(v)),
@@ -766,6 +850,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::V64(v as u64)),
                 Value::F32(v) => Some(Value::V64(v as u64)),
                 Value::F64(v) => Some(Value::V64(v as u64)),
+                Value::DateTime(_) => None,
+                Value::Duration(d) => Some(Value::V64(d.as_secs())),
                 Value::String(s) => match s.parse::<u64>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::V64(v)),
@@ -788,6 +874,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::I64(v)),
                 Value::F32(v) => Some(Value::I64(v as i64)),
                 Value::F64(v) => Some(Value::I64(v as i64)),
+                Value::DateTime(v) => Some(Value::I64(v.timestamp())),
+                Value::Duration(v) => Some(Value::I64(v.as_secs() as i64)),
                 Value::String(s) => match s.parse::<i64>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::I64(v)),
@@ -810,6 +898,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::Z64(v)),
                 Value::F32(v) => Some(Value::Z64(v as i64)),
                 Value::F64(v) => Some(Value::Z64(v as i64)),
+                Value::DateTime(v) => Some(Value::Z64(v.timestamp())),
+                Value::Duration(v) => Some(Value::Z64(v.as_secs() as i64)),
                 Value::String(s) => match s.parse::<i64>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::Z64(v)),
@@ -832,6 +922,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::F32(v as f32)),
                 Value::F32(v) => Some(Value::F32(v)),
                 Value::F64(v) => Some(Value::F32(v as f32)),
+                Value::DateTime(v) => Some(Value::F32(v.timestamp() as f32)),
+                Value::Duration(v) => Some(Value::F32(v.as_secs() as f32)),
                 Value::String(s) => match s.parse::<f32>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::F32(v)),
@@ -854,6 +946,8 @@ impl Value {
                 Value::Z64(v) => Some(Value::F64(v as f64)),
                 Value::F32(v) => Some(Value::F64(v as f64)),
                 Value::F64(v) => Some(Value::F64(v)),
+                Value::DateTime(v) => Some(Value::F64(v.timestamp() as f64)),
+                Value::Duration(v) => Some(Value::F64(v.as_secs() as f64)),
                 Value::String(s) => match s.parse::<f64>() {
                     Err(_) => None,
                     Ok(v) => Some(Value::F64(v)),
@@ -876,6 +970,8 @@ impl Value {
                 Value::Z64(v) => Some(if v > 0 { Value::True } else { Value::False }),
                 Value::F32(v) => Some(if v > 0. { Value::True } else { Value::False }),
                 Value::F64(v) => Some(if v > 0. { Value::True } else { Value::False }),
+                Value::DateTime(_) => None,
+                Value::Duration(_) => None,
                 Value::String(s) => {
                     Some(if s.len() > 0 { Value::True } else { Value::False })
                 }
@@ -897,6 +993,10 @@ impl Value {
                 Value::Z64(v) => Some(Value::String(Chars::from(v.to_string()))),
                 Value::F32(v) => Some(Value::String(Chars::from(v.to_string()))),
                 Value::F64(v) => Some(Value::String(Chars::from(v.to_string()))),
+                Value::DateTime(d) => Some(Value::String(Chars::from(format!("{}", d)))),
+                Value::Duration(d) => {
+                    Some(Value::String(Chars::from(format!("{}s", d.as_secs_f64()))))
+                }
                 Value::String(s) => Some(Value::String(s)),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::String(Chars::from("true"))),
@@ -917,6 +1017,8 @@ impl Value {
                 Value::Z64(_) => Some(Value::Ok),
                 Value::F32(_) => Some(Value::Ok),
                 Value::F64(_) => Some(Value::Ok),
+                Value::DateTime(_) => Some(Value::Ok),
+                Value::Duration(_) => Some(Value::Ok),
                 Value::String(_) => Some(Value::Ok),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::Ok),
@@ -924,6 +1026,114 @@ impl Value {
                 Value::Null => Some(Value::Ok),
                 Value::Ok => Some(Value::Ok),
                 Value::Error(s) => Some(Value::Error(s)),
+            },
+            Typ::DateTime => match self {
+                Value::U32(v) | Value::V32(v) => Some(Value::DateTime(
+                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
+                )),
+                Value::I32(v) | Value::Z32(v) => Some(Value::DateTime(
+                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
+                )),
+                Value::U64(v) | Value::V64(v) => Some(Value::DateTime(
+                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
+                )),
+                Value::I64(v) | Value::Z64(v) => Some(Value::DateTime(
+                    DateTime::from_utc(NaiveDateTime::from_timestamp(v, 0), Utc),
+                )),
+                Value::F32(v) => match v.classify() {
+                    FpCategory::Nan | FpCategory::Infinite => None,
+                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
+                        Some(Value::DateTime(DateTime::from_utc(
+                            NaiveDateTime::from_timestamp(
+                                v.trunc() as i64,
+                                v.fract().abs() as u32,
+                            ),
+                            Utc,
+                        )))
+                    }
+                },
+                Value::F64(v) => match v.classify() {
+                    FpCategory::Nan | FpCategory::Infinite => None,
+                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
+                        Some(Value::DateTime(DateTime::from_utc(
+                            NaiveDateTime::from_timestamp(
+                                v.trunc() as i64,
+                                v.fract().abs() as u32,
+                            ),
+                            Utc,
+                        )))
+                    }
+                },
+                v @ Value::DateTime(_) => Some(v),
+                Value::Duration(d) => Some(Value::DateTime(DateTime::from_utc(
+                    NaiveDateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()),
+                    Utc,
+                ))),
+                Value::String(c) => match DateTime::parse_from_rfc3339(&*c) {
+                    Err(_) => match DateTime::parse_from_rfc2822(&*c) {
+                        Err(_) => None,
+                        Ok(dt) => Some(Value::DateTime(DateTime::<Utc>::from(dt))),
+                    },
+                    Ok(dt) => Some(Value::DateTime(DateTime::<Utc>::from(dt))),
+                },
+                Value::Bytes(_)
+                | Value::True
+                | Value::False
+                | Value::Null
+                | Value::Ok
+                | Value::Error(_) => None,
+            },
+            Typ::Duration => match self {
+                Value::U32(v) | Value::V32(v) => {
+                    Some(Value::Duration(Duration::from_secs(v as u64)))
+                }
+                Value::I32(v) | Value::Z32(v) => {
+                    Some(Value::Duration(Duration::from_secs(i32::abs(v) as u64)))
+                }
+                Value::U64(v) | Value::V64(v) => {
+                    Some(Value::Duration(Duration::from_secs(v)))
+                }
+                Value::I64(v) | Value::Z64(v) => {
+                    Some(Value::Duration(Duration::from_secs(i64::abs(v) as u64)))
+                }
+                Value::F32(v) => match v.classify() {
+                    FpCategory::Nan | FpCategory::Infinite => None,
+                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
+                        if v < 0. || v > u64::MAX as f32 {
+                            None
+                        } else {
+                            Some(Value::Duration(Duration::from_secs_f32(v)))
+                        }
+                    }
+                },
+                Value::F64(v) => match v.classify() {
+                    FpCategory::Nan | FpCategory::Infinite => None,
+                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
+                        if v < 0. || v > u64::MAX as f64 {
+                            None
+                        } else {
+                            Some(Value::Duration(Duration::from_secs_f64(v)))
+                        }
+                    }
+                },
+                Value::DateTime(d) => {
+                    let dur = d.timestamp() as f64;
+                    let dur = dur + (d.timestamp_nanos() / 1_000_000_000) as f64;
+                    Some(Value::Duration(Duration::from_secs_f64(dur)))
+                }
+                v @ Value::Duration(_) => Some(v),
+                Value::String(c) => {
+                    match c.trim_matches(|c: char| !c.is_ascii_digit()).parse::<f64>() {
+                        Err(_) => None,
+                        Ok(v) => Value::F64(v).cast(Typ::Duration),
+                    }
+                }
+                Value::Bytes(_)
+                | Value::True
+                | Value::False
+                | Value::Null
+                | Value::Ok
+                | Value::Error(_) => None,
             },
         }
     }
