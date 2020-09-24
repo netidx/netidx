@@ -282,12 +282,23 @@ impl Typ {
                     Ok(dt) => Value::DateTime(DateTime::<Utc>::from(dt)),
                 },
                 Typ::Duration => {
-                    let f =
-                        s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<f64>()?;
-                    match Value::F64(f).cast(Typ::Duration) {
-                        None => bail!("can't turn {} into a duration", f),
-                        Some(d) => d,
-                    }
+                    let s = s.trim();
+                    let last = s.chars().next_back().ok_or_else(|| anyhow!("too short"))?;
+                    let n = if last.is_ascii_digit() {
+                        s.parse::<f64>()?
+                    } else {
+                        s.strip_suffix(|c: char| !c.is_ascii_digit())
+                            .ok_or_else(|| anyhow!("duration strip suffix"))
+                            .and_then(|s| s.parse::<f64>().map_err(anyhow::Error::from))?
+                    };
+                    let n = if last == 's' {
+                        n
+                    } else {
+                        bail!("invalid duration suffix {}", last)
+                    };
+                    Value::F64(n).cast(Typ::Duration).ok_or_else(|| {
+                        anyhow!("failed to cast float to duration")
+                    })?
                 }
                 Typ::Bool => match s.parse::<bool>()? {
                     true => Value::True,

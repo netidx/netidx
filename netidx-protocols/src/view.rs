@@ -39,6 +39,10 @@ impl fmt::Display for Source {
                 Value::Z64(v) => write!(f, "constant(z64, {})", v),
                 Value::F32(v) => write!(f, "constant(f32, {})", v),
                 Value::F64(v) => write!(f, "constant(f64, {})", v),
+                Value::DateTime(v) => write!(f, r#"constant(datetime, "{}")"#, v),
+                Value::Duration(v) => {
+                    write!(f, r#"constant(duration, "{}s")"#, v.as_secs_f64())
+                }
                 Value::String(s) => {
                     write!(f, r#"constant(string, "{}")"#, utils::escape(&*s, '\\', '"'))
                 }
