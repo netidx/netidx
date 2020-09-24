@@ -2,6 +2,7 @@ use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
 use crate::view;
 use anyhow::Result;
 use cairo;
+use chrono::prelude::*;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
@@ -442,18 +443,20 @@ impl Entry {
 }
 
 struct Series {
-    title: Source,
+    title: String,
+    line_color: view::PlotColor,
     x: Source,
     y: Source,
-    x_data: VecDeque<f64>,
-    y_data: VecDeque<f64>,
+    x_data: VecDeque<Value>,
+    y_data: VecDeque<Value>,
 }
 
 pub(super) struct LinePlot {
     root: gtk::DrawingArea,
-    title: Rc<Source>,
-    x_label: Rc<Source>,
-    y_label: Rc<Source>,
+    x_min: Rc<Source>,
+    x_max: Rc<Source>,
+    y_min: Rc<Source>,
+    y_max: Rc<Source>,
     keep_points: Rc<Source>,
     series: Rc<RefCell<Vec<Series>>>,
 }
@@ -466,16 +469,17 @@ impl LinePlot {
         _selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::DrawingArea::new();
-        let title = Rc::new(Source::new(&ctx, variables, spec.title.clone()));
-        let x_label = Rc::new(Source::new(&ctx, variables, spec.x_label.clone()));
-        let y_label = Rc::new(Source::new(&ctx, variables, spec.y_label.clone()));
-        let timeseries = Rc::new(Source::new(&ctx, variables, spec.timeseries.clone()));
+        let x_min = Rc::new(Source::new(&ctx, variables, spec.x_min.clone()));
+        let x_max = Rc::new(Source::new(&ctx, variables, spec.x_max.clone()));
+        let y_min = Rc::new(Source::new(&ctx, variables, spec.y_min.clone()));
+        let y_max = Rc::new(Source::new(&ctx, variables, spec.y_max.clone()));
         let keep_points = Rc::new(Source::new(&ctx, variables, spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
-                    title: Source::new(&ctx, variables, series.title.clone()),
+                    title: series.title.clone(),
+                    line_color: series.line_color.clone(),
                     x: Source::new(&ctx, variables, series.x.clone()),
                     y: Source::new(&ctx, variables, series.y.clone()),
                     x_data: VecDeque::new(),
@@ -486,20 +490,22 @@ impl LinePlot {
         let allocated_width = Rc::new(Cell::new(0));
         let allocated_height = Rc::new(Cell::new(0));
         root.connect_draw(clone!(
-            @strong title,
-            @strong x_label,
-            @strong y_label,
             @strong allocated_width,
             @strong allocated_height,
-            @strong timeseries,
+            @strong x_min,
+            @strong x_max,
+            @strong y_min,
+            @strong y_max,
+            @strong keep_points,
             @strong series => move |_, context| {
             let res = LinePlot::draw(
-                &title,
-                &x_label,
-                &y_label,
+                &spec,
                 &allocated_width,
                 &allocated_height,
-                &timeseries,
+                &x_min,
+                &x_max,
+                &y_min,
+                &y_max,
                 &series,
                 context
             );
@@ -515,20 +521,21 @@ impl LinePlot {
             allocated_width.set(i32::abs(a.width) as u32);
             allocated_height.set(i32::abs(a.height) as u32);
         }));
-        LinePlot { root, title, x_label, y_label, keep_points, series }
+        LinePlot { root, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
     fn draw(
-        title: &Rc<Source>,
-        x_label: &Rc<Source>,
-        y_label: &Rc<Source>,
+        spec: &view::LinePlot,
         width: &Rc<Cell<u32>>,
         height: &Rc<Cell<u32>>,
-        _timeseries: &Rc<Source>,
+        x_min: &Rc<Source>,
+        x_max: &Rc<Source>,
+        y_min: &Rc<Source>,
+        y_max: &Rc<Source>,
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
-        use plotters::prelude::*;
+        use plotters::{prelude::*, style::RGBColor};
         use plotters_cairo::CairoBackend;
         fn get_str(v: &Option<Value>) -> &str {
             match v {
@@ -536,44 +543,172 @@ impl LinePlot {
                 Some(_) | None => "",
             }
         }
+        fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
+            match specified {
+                None => computed,
+                Some(v @ Value::DateTime(_)) => v,
+                Some(v @ Value::F64(_)) => v,
+                Some(v) => v.cast(Typ::F64).unwrap_or(computed),
+            }
+        }
+        fn to_style(c: PlotColor) -> RGBColor {
+            match c {
+                PlotColor::Red => RED,
+                PlotColor::Green => GREEN,
+                PlotColor::Magenta => MAGENTA,
+                PlotColor::Blue => BLUE,
+                PlotColor::Black => BLACK,
+                PlotColor::Cyan => CYAN,
+                PlotColor::White => WHITE,
+                PlotColor::Yellow => YELLOW,
+                PlotColor::RGB(r, g, b) => RGBColor(r, g, b),
+            }
+        }
+        fn draw_mesh(spec: &view::LinePlot, chart: &mut ChartContext) -> Result<()> {
+            let mesh = chart
+                .configure_mesh()
+                .x_desc(spec.x_label.as_str())
+                .y_desc(spec.y_label.as_str());
+            let mesh = if !spec.x_grid { mesh.disable_x_mesh() } else { mesh };
+            let mesh = if !spec.y_grid { mesh.disable_y_mesh() } else { mesh };
+            Ok(mesh.draw()?)
+        }
         if width.get() > 0 && height.get() > 0 {
-            let title = title.current();
-            let title = get_str(&title);
-            let x_label = x_label.current();
-            let x_label = get_str(&x_label);
-            let y_label = y_label.current();
-            let y_label = get_str(&y_label);
-            let mut x_min =
-                *series.borrow().last().and_then(|s| s.x_data.back()).unwrap_or(&0.);
-            let mut x_max = x_min;
-            let mut y_min =
-                *series.borrow().last().and_then(|s| s.y_data.back()).unwrap_or(&0.);
-            let mut y_max = y_min;
+            let (x_min, x_max, y_min, y_max) =
+                (x_min.current(), x_max.current(), y_min.current(), y_max.current());
+            let mut computed_x_min = *series
+                .borrow()
+                .last()
+                .and_then(|s| s.x_data.back())
+                .unwrap_or(&Value::F64(0.));
+            let mut computed_x_max = computed_x_min;
+            let mut computed_y_min = *series
+                .borrow()
+                .last()
+                .and_then(|s| s.y_data.back())
+                .unwrap_or(&Value::F64(0.));
+            let mut computed_y_max = computed_y_min;
             for s in series.borrow().iter() {
                 for x in s.x_data.iter() {
-                    x_min = f64::min(x_min, *x);
-                    x_max = f64::max(x_max, *x);
+                    if x < &computed_x_min {
+                        computed_x_min = x.clone();
+                    }
+                    if x > &computed_x_max {
+                        computed_x_max = x.clone();
+                    }
                 }
                 for y in s.y_data.iter() {
-                    y_min = f64::min(y_min, *y);
-                    y_max = f64::max(y_max, *y);
+                    if y < &computed_y_min {
+                        computed_y_min = y.clone();
+                    }
+                    if y > &computed_y_max {
+                        computed_y_max = y.clone();
+                    }
                 }
             }
+            let x_min = get_min_max(x_min, computed_x_min);
+            let x_max = get_min_max(x_max, computed_x_max);
+            let y_min = get_min_max(y_min, computed_y_min);
+            let y_max = get_min_max(y_max, computed_y_max);
             let back = CairoBackend::new(context, (width.get(), height.get()))?
                 .into_drawing_area();
-            back.fill(&WHITE)?;
-            let xr = x_min..f64::max(x_min + 1., x_max);
-            let yr = y_min..f64::max(y_min + 1., y_max);
+            match spec.fill {
+                None => (),
+                Some(c) => back.fill(&to_style(*c))?,
+            }
             let mut chart = ChartBuilder::on(&back)
-                .caption(title, ("sans-sherif", 14))
-                .margin(5)
-                .set_all_label_area_size(75)
-                .build_cartesian_2d(xr, yr)?;
-            chart.configure_mesh().x_desc(x_label).y_desc(y_label).draw()?;
-            let styles = [&RED, &GREEN, &MAGENTA, &BLUE, &BLACK, &CYAN, &WHITE, &YELLOW];
-            for (i, s) in series.borrow().iter().enumerate() {
-                let data = s.x_data.iter().copied().zip(s.y_data.iter().copied());
-                chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                .caption(spec.title, ("sans-sherif", 14))
+                .margin(spec.margin)
+                .set_all_label_area_size(spec.label_area);
+            let xtyp = match (Typ::get(&x_min), Typ::get(&x_max)) {
+                (Some(t0), Some(t1)) if t0 == t1 => Some(t0),
+                (_, _) => None,
+            };
+            let ytyp = match (Typ::get(&y_min), Typ::get(&y_max)) {
+                (Some(t0), Some(t1)) if t0 == t1 => Some(t0),
+                (_, _) => None,
+            };
+            match (xtyp, ytyp) {
+                (Some(Typ::F64), Some(Typ::F64)) => {
+                    let xr = x_min.cast_f64().unwrap()..x_max.cast_f64().unwrap();
+                    let yr = y_min.cast_f64().unwrap()..y_max.cast_f64().unwrap();
+                    let mut chart = chart.build_cartesian_2d(xr, yr)?;
+                    draw_mesh(spec, &mut chart)?;
+                    for (i, s) in series.borrow().iter().enumerate() {
+                        let data =
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_to_f64()).zip(
+                                s.y_data.iter().cloned().filter_map(|v| v.cast_to_f64()),
+                            );
+                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                    }
+                }
+                (Some(Typ::DateTime), Some(Typ::DateTime)) => {
+                    let xr =
+                        x_min.cast_datetime().unwrap()..x_max.cast_datetime().unwrap();
+                    let yr =
+                        y_min.cast_datetime().unwrap()..y_max.cast_datetime().unwrap();
+                    let mut chart = chart.build_cartesian_2d(xr, yr)?;
+                    draw_mesh(spec, &mut chart)?;
+                    for (i, s) in series.borrow().iter().enumerate() {
+                        let data = s
+                            .x_data
+                            .iter()
+                            .cloned()
+                            .filter_map(|v| v.cast_to_datetime())
+                            .zip(
+                                s.y_data
+                                    .iter()
+                                    .cloned()
+                                    .filter_map(|v| v.cast_to_datetime()),
+                            );
+                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                    }
+                }
+                (Some(Typ::DateTime), Some(Typ::F64)) => {
+                    let xr =
+                        x_min.cast_datetime().unwrap()..x_max.cast_datetime().unwrap();
+                    let yr = y_min.cast_f64().unwrap()..y_max.cast_f64().unwrap();
+                    let mut chart = chart.build_cartesian_2d(xr, yr)?;
+                    draw_mesh(spec, &mut chart)?;
+                    for (i, s) in series.borrow().iter().enumerate() {
+                        let data = s
+                            .x_data
+                            .iter()
+                            .cloned()
+                            .filter_map(|v| v.cast_to_datetime())
+                            .zip(
+                                s.y_data.iter().cloned().filter_map(|v| v.cast_to_f64()),
+                            );
+                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                    }
+                }
+                (Some(Typ::F64), Some(Typ::DateTime)) => {
+                    let xr = x_min.cast_f64().unwrap()..x_max.cast_f64().unwrap();
+                    let yr =
+                        y_min.cast_datetime().unwrap()..y_max.cast_datetime().unwrap();
+                    let mut chart = chart.build_cartesian_2d(xr, yr)?;
+                    draw_mesh(spec, &mut chart)?;
+                    for (i, s) in series.borrow().iter().enumerate() {
+                        let data =
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_to_f64()).zip(
+                                s.y_data
+                                    .iter()
+                                    .cloned()
+                                    .filter_map(|v| v.cast_to_datetime()),
+                            );
+                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                    }
+                }
+                (x, y) => {
+                    let x = x.unwrap_or("inconsistant").name();
+                    let y = y.unwrap_or("inconsistant").name();
+                    let m = format!("axis x: {} y: {} expected f64 or datetime", x, y);
+                    back.draw_text(
+                        m.as_str(),
+                        ("sans-sherif", 14),
+                        (0, height.get() / 2),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -585,37 +720,36 @@ impl LinePlot {
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         let mut queue_draw = false;
-        if self.title.update(tgt, value).is_some() {
+        if self.x_min.update(tgt, value).is_some() {
             queue_draw = true;
         }
-        if self.x_label.update(tgt, value).is_some() {
+        if self.x_max.update(tgt, value).is_some() {
             queue_draw = true;
         }
-        if self.y_label.update(tgt, value).is_some() {
+        if self.y_min.update(tgt, value).is_some() {
+            queue_draw = true;
+        }
+        if self.y_max.update(tgt, value).is_some() {
             queue_draw = true;
         }
         if self.keep_points.update(tgt, value).is_some() {
             queue_draw = true;
         }
         for s in self.series.borrow_mut().iter_mut() {
-            if let Some(v) = s.x.update(tgt, value).and_then(|v| v.cast_f64()) {
+            if let Some(v) = s.x.update(tgt, value) {
                 s.x_data.push_back(v);
                 queue_draw = true;
             }
-            if let Some(v) = s.y.update(tgt, value).and_then(|v| v.cast_f64()) {
+            if let Some(v) = s.y.update(tgt, value) {
                 s.y_data.push_back(v);
                 queue_draw = true;
             }
-            if s.title.update(tgt, value).is_some() {
-                queue_draw = true;
+            let keep = self.keep_points.current().and_then(|v| v.cast_u64()).unwrap_or(0);
+            while s.x_data.len() > keep as usize {
+                s.x_data.pop_front();
             }
-            if let Some(keep) = self.keep_points.current().and_then(|v| v.cast_u64()) {
-                while s.x_data.len() > keep as usize {
-                    s.x_data.pop_front();
-                }
-                while s.y_data.len() > keep as usize {
-                    s.y_data.pop_front();
-                }
+            while s.y_data.len() > keep as usize {
+                s.y_data.pop_front();
             }
         }
         if queue_draw {

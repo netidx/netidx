@@ -36,6 +36,7 @@ krb5_iov = ["netidx/krb5_iov"]
 futures = "0.3"
 tokio = { version = "0.2", features = ["full"] }
 serde = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 netidx = { path = "..", version = "0.4" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.3", default_features = false }
 serde_derive = "1.0"

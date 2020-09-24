@@ -197,7 +197,7 @@ impl Pack for To {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Typ {
     U32,
     V32,
@@ -346,6 +346,12 @@ impl FromStr for Typ {
             s => Err(anyhow!(
                 "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result", s))
         }
+    }
+}
+
+impl fmt::Display for Typ {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
