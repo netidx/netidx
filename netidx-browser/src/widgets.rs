@@ -1,13 +1,16 @@
 use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
 use crate::view;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use cairo;
 use chrono::prelude::*;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use log::warn;
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::{
+    chars::Chars,
+    subscriber::{Typ, Value},
+};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
@@ -535,7 +538,7 @@ impl LinePlot {
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
-        use plotters::{prelude::*, style::RGBColor};
+        use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
         use plotters_cairo::CairoBackend;
         fn get_str(v: &Option<Value>) -> &str {
             match v {
@@ -551,27 +554,35 @@ impl LinePlot {
                 Some(v) => v.cast(Typ::F64).unwrap_or(computed),
             }
         }
-        fn to_style(c: PlotColor) -> RGBColor {
+        fn to_style(c: view::PlotColor) -> RGBColor {
             match c {
-                PlotColor::Red => RED,
-                PlotColor::Green => GREEN,
-                PlotColor::Magenta => MAGENTA,
-                PlotColor::Blue => BLUE,
-                PlotColor::Black => BLACK,
-                PlotColor::Cyan => CYAN,
-                PlotColor::White => WHITE,
-                PlotColor::Yellow => YELLOW,
-                PlotColor::RGB(r, g, b) => RGBColor(r, g, b),
+                view::PlotColor::Red => RED,
+                view::PlotColor::Green => GREEN,
+                view::PlotColor::Magenta => MAGENTA,
+                view::PlotColor::Blue => BLUE,
+                view::PlotColor::Black => BLACK,
+                view::PlotColor::Cyan => CYAN,
+                view::PlotColor::White => WHITE,
+                view::PlotColor::Yellow => YELLOW,
+                view::PlotColor::RGB(r, g, b) => RGBColor(r, g, b),
             }
         }
-        fn draw_mesh(spec: &view::LinePlot, chart: &mut ChartContext) -> Result<()> {
+        fn draw_mesh<'a, DB, XT, YT, X, Y>(
+            spec: &view::LinePlot,
+            chart: &mut ChartContext<'a, DB, Cartesian2d<X, Y>>,
+        ) -> Result<()>
+        where
+            DB: DrawingBackend,
+            X: Ranged<ValueType = XT> + ValueFormatter<XT>,
+            Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
+        {
             let mesh = chart
                 .configure_mesh()
                 .x_desc(spec.x_label.as_str())
                 .y_desc(spec.y_label.as_str());
             let mesh = if !spec.x_grid { mesh.disable_x_mesh() } else { mesh };
             let mesh = if !spec.y_grid { mesh.disable_y_mesh() } else { mesh };
-            Ok(mesh.draw()?)
+            mesh.draw().map_err(|e| anyhow!("{}", e))
         }
         if width.get() > 0 && height.get() > 0 {
             let (x_min, x_max, y_min, y_max) =
@@ -614,7 +625,7 @@ impl LinePlot {
                 .into_drawing_area();
             match spec.fill {
                 None => (),
-                Some(c) => back.fill(&to_style(*c))?,
+                Some(c) => back.fill(&to_style(c))?,
             }
             let mut chart = ChartBuilder::on(&back)
                 .caption(spec.title, ("sans-sherif", 14))
@@ -636,10 +647,11 @@ impl LinePlot {
                     draw_mesh(spec, &mut chart)?;
                     for (i, s) in series.borrow().iter().enumerate() {
                         let data =
-                            s.x_data.iter().cloned().filter_map(|v| v.cast_to_f64()).zip(
-                                s.y_data.iter().cloned().filter_map(|v| v.cast_to_f64()),
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
+                                s.y_data.iter().cloned().filter_map(|v| v.cast_f64()),
                             );
-                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                        let style = to_style(s.line_color);
+                        chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
                 (Some(Typ::DateTime), Some(Typ::DateTime)) => {
@@ -654,14 +666,15 @@ impl LinePlot {
                             .x_data
                             .iter()
                             .cloned()
-                            .filter_map(|v| v.cast_to_datetime())
+                            .filter_map(|v| v.cast_datetime())
                             .zip(
                                 s.y_data
                                     .iter()
                                     .cloned()
-                                    .filter_map(|v| v.cast_to_datetime()),
+                                    .filter_map(|v| v.cast_datetime()),
                             );
-                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                        let style = to_style(s.line_color);
+                        chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
                 (Some(Typ::DateTime), Some(Typ::F64)) => {
@@ -675,11 +688,10 @@ impl LinePlot {
                             .x_data
                             .iter()
                             .cloned()
-                            .filter_map(|v| v.cast_to_datetime())
-                            .zip(
-                                s.y_data.iter().cloned().filter_map(|v| v.cast_to_f64()),
-                            );
-                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                            .filter_map(|v| v.cast_datetime())
+                            .zip(s.y_data.iter().cloned().filter_map(|v| v.cast_f64()));
+                        let style = to_style(s.line_color);
+                        chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
                 (Some(Typ::F64), Some(Typ::DateTime)) => {
@@ -690,25 +702,17 @@ impl LinePlot {
                     draw_mesh(spec, &mut chart)?;
                     for (i, s) in series.borrow().iter().enumerate() {
                         let data =
-                            s.x_data.iter().cloned().filter_map(|v| v.cast_to_f64()).zip(
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
                                 s.y_data
                                     .iter()
                                     .cloned()
-                                    .filter_map(|v| v.cast_to_datetime()),
+                                    .filter_map(|v| v.cast_datetime()),
                             );
-                        chart.draw_series(LineSeries::new(data, styles[i % 8]))?;
+                        let style = to_style(s.line_color);
+                        chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
-                (x, y) => {
-                    let x = x.unwrap_or("inconsistant").name();
-                    let y = y.unwrap_or("inconsistant").name();
-                    let m = format!("axis x: {} y: {} expected f64 or datetime", x, y);
-                    back.draw_text(
-                        m.as_str(),
-                        ("sans-sherif", 14),
-                        (0, height.get() / 2),
-                    )?;
-                }
+                (_, _) => (),
             }
         }
         Ok(())
