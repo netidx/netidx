@@ -222,7 +222,7 @@ pub struct Grid {
     pub rows: Vec<Widget>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RGB {
     r: f64,
     g: f64,

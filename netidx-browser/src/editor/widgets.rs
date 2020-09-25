@@ -1,5 +1,6 @@
 mod source_inspector;
 mod util;
+use super::OnChange;
 use super::{
     util::err_modal, FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
 };
@@ -15,7 +16,6 @@ use std::{
     result,
 };
 use util::{parse_entry, TwoColGrid};
-use super::OnChange;
 
 #[derive(Clone, Debug)]
 struct Table {
@@ -544,12 +544,14 @@ impl LinePlot {
             }),
         ));
         let x_grid = gtk::CheckButton::with_label("X Axis Grid:");
+        x_grid.set_active(spec.borrow().x_grid);
         x_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().x_grid = b.get_active();
             on_change()
         }));
         common.attach(&x_grid, 0, 2, 1);
         let y_grid = gtk::CheckButton::with_label("Y Axis Grid:");
+        y_grid.set_active(spec.borrow().y_grid);
         y_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().y_grid = b.get_active();
             on_change()
@@ -561,6 +563,11 @@ impl LinePlot {
         fill_reveal.add(&fill_color);
         common.attach(&has_fill, 0, 1, 1);
         common.attach(&fill_reveal, 1, 1, 1);
+        if let Some(c) = spec.borrow().fill {
+            has_fill.set_active(true);
+            fill_reveal.set_reveal_child(true);
+            fill_color.set_rgba(gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 0. });
+        }
         has_fill.connect_toggled(clone!(
             @strong on_change,
             @strong spec,
@@ -591,7 +598,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().margin = s;
                 on_change()
-            })
+            }),
         ));
         common.add(parse_entry(
             "Label Area:",
@@ -599,7 +606,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().label_area = s;
                 on_change()
-            })
+            }),
         ));
         let (l, e, x_min) = source(
             ctx,
@@ -608,7 +615,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().x_min = s;
                 on_change()
-            })
+            }),
         );
         common.add(l, e);
         let (l, e, x_max) = source(
@@ -618,7 +625,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().x_max = s;
                 on_change()
-            })
+            }),
         );
         common.add(l, e);
         let (l, e, y_min) = source(
@@ -628,7 +635,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().y_min = s;
                 on_change()
-            })
+            }),
         );
         common.add(l, e);
         let (l, e, y_min) = source(
@@ -638,7 +645,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().y_max = s;
                 on_change()
-            })
+            }),
         );
         common.add(l, e);
         let (l, e, keep_points) = source(
@@ -666,16 +673,26 @@ impl LinePlot {
                 seriesbox.pack_start(grid.root(), false, false, 0);
                 let sep = gtk::Separator::new(gtk::Orientation::Vertical);
                 grid.attach(&sep, 0, 2, 1);
-                let (l, e, title) = source(
-                    &ctx,
+                grid.add(parse_entry(
                     "Title:",
                     &spec.borrow().series[i].title,
                     clone!(@strong spec, @strong on_change => move |s| {
                         spec.borrow_mut().series[i].title = s;
                         on_change()
                     })
-                );
-                grid.add((l, e));
+                ));
+                let c = spec.borrow().series[i].line_color;
+                let rgba = gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 0.};
+                let line_color = gtk::ColorButton::with_rgba(rgba);
+                let lbl_line_color = gtk::Label::new("Line Color:");
+                line_color.connect_color_set(clone!(
+                    @strong on_change, @strong spec => move |b| {
+                        let c = b.get_rgba();
+                        let c = view::RGB { r: c.red, g: c.green, b: c.blue };
+                        spec.borrow_mut().series[i].line_color = c;
+                        on_change()
+                    }));
+                grid.add((lbl_line_color, line_color));
                 let (l, e, x) = source(
                     &ctx,
                     "X:",
