@@ -178,6 +178,39 @@ impl Count {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct Sample {
+    current: Rc<RefCell<Option<Value>>>,
+}
+
+impl Sample {
+    fn new(_from: &[Source]) -> Self {
+        Sample { current: Rc::new(RefCell::new(None)) }
+    }
+
+    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [trigger, source] => {
+                source.update(tgt, value);
+                if trigger.update(tgt, value).is_none() {
+                    None
+                } else {
+                    let v = source.current();
+                    *self.current.borrow_mut() = v.clone();
+                    v
+                }
+            }
+            _ => Some(Value::Error(Chars::from(
+                "sample(trigger, source): expected 2 arguments",
+            ))),
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        self.current.borrow().clone()
+    }
+}
+
 fn eval_min(from: &CachedVals) -> Option<Value> {
     from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
         None => Some(v),
@@ -504,12 +537,13 @@ pub(super) enum Formula {
     IsA(CachedVals),
     Eval(Eval),
     Count(Count),
+    Sample(Sample),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 18] = [
+pub(super) static FORMULAS: [&'static str; 19] = [
     "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
-    "cmp", "if", "filter", "cast", "isa", "eval", "count",
+    "cmp", "if", "filter", "cast", "isa", "eval", "count", "sample",
 ];
 
 impl Formula {
@@ -533,6 +567,7 @@ impl Formula {
             "isa" => Formula::IsA(CachedVals::new(from)),
             "eval" => Formula::Eval(Eval::new(ctx, from)),
             "count" => Formula::Count(Count::new(from)),
+            "sample" => Formula::Sample(Sample::new(from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -557,6 +592,7 @@ impl Formula {
             Formula::IsA(c) => eval_isa(c),
             Formula::Eval(e) => e.eval(),
             Formula::Count(c) => c.eval(),
+            Formula::Sample(c) => c.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -598,6 +634,7 @@ impl Formula {
             Formula::IsA(c) => update_cached(eval_isa, c, from, tgt, value),
             Formula::Eval(e) => e.update(from, tgt, value),
             Formula::Count(c) => c.update(from, tgt, value),
+            Formula::Sample(c) => c.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

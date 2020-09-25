@@ -613,7 +613,7 @@ impl LinePlot {
                 .into_drawing_area();
             match spec.fill {
                 None => (),
-                Some(c) => back.fill(&dbg!(to_style(c)))?,
+                Some(c) => back.fill(&to_style(c))?,
             }
             let mut chart = ChartBuilder::on(&back);
             chart
@@ -654,7 +654,7 @@ impl LinePlot {
                         chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
-                (Some(Typ::DateTime), Some(_)) if y_min.cast_f64().is_some() => {
+                (Some(Typ::DateTime), Some(_)) if y_min.clone().cast_f64().is_some() => {
                     let xmin = x_min.cast_datetime().unwrap();
                     let xmax =
                         max(xmin + Duration::seconds(1), x_max.cast_datetime().unwrap());
@@ -673,7 +673,7 @@ impl LinePlot {
                         chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
-                (Some(_), Some(Typ::DateTime)) if x_min.cast_f64().is_some() => {
+                (Some(_), Some(Typ::DateTime)) if x_min.clone().cast_f64().is_some() => {
                     let xmin = x_min.cast_f64().unwrap();
                     let xmax = f64::max(xmin + 1., x_max.cast_f64().unwrap());
                     let ymin = y_min.cast_datetime().unwrap();
@@ -694,7 +694,8 @@ impl LinePlot {
                     }
                 }
                 (Some(_), Some(_))
-                    if x_min.cast_f64().is_some() && y_min.cast_f64().is_some() =>
+                    if x_min.clone().cast_f64().is_some()
+                        && y_min.clone().cast_f64().is_some() =>
                 {
                     let xmin = x_min.cast_f64().unwrap();
                     let xmax = f64::max(xmin + 1., x_max.cast_f64().unwrap());
