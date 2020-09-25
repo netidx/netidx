@@ -546,26 +546,25 @@ impl LinePlot {
                 on_change()
             }),
         ));
-        let x_grid = gtk::CheckButton::with_label("X Axis Grid:");
+        let x_grid = gtk::CheckButton::with_label("X Axis Grid");
         x_grid.set_active(spec.borrow().x_grid);
         x_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().x_grid = b.get_active();
             on_change()
         }));
         common.attach(&x_grid, 0, 2, 1);
-        let y_grid = gtk::CheckButton::with_label("Y Axis Grid:");
+        let y_grid = gtk::CheckButton::with_label("Y Axis Grid");
         y_grid.set_active(spec.borrow().y_grid);
         y_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().y_grid = b.get_active();
             on_change()
         }));
         common.attach(&y_grid, 0, 2, 1);
-        let has_fill = gtk::CheckButton::with_label("Fill:");
+        let has_fill = gtk::CheckButton::with_label("Fill");
         let fill_reveal = gtk::Revealer::new();
         let fill_color = gtk::ColorButton::new();
         fill_reveal.add(&fill_color);
-        common.attach(&has_fill, 0, 1, 1);
-        common.attach(&fill_reveal, 1, 1, 1);
+        common.add((has_fill.clone(), fill_reveal.clone()));
         if let Some(c) = spec.borrow().fill {
             has_fill.set_active(true);
             fill_reveal.set_reveal_child(true);
@@ -573,7 +572,7 @@ impl LinePlot {
                 red: c.r,
                 green: c.g,
                 blue: c.b,
-                alpha: 0.,
+                alpha: 1.,
             });
         }
         has_fill.connect_toggled(clone!(
@@ -594,7 +593,7 @@ impl LinePlot {
         }));
         fill_color.connect_color_set(
             clone!(@strong on_change, @strong spec => move |b| {
-                let c = b.get_rgba();
+                let c = dbg!(b.get_rgba());
                 let c = view::RGB { r: c.red, g: c.green, b: c.blue };
                 spec.borrow_mut().fill = Some(c);
                 on_change()
@@ -690,7 +689,7 @@ impl LinePlot {
                     })
                 ));
                 let c = spec.borrow().series[i].line_color;
-                let rgba = gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 0.};
+                let rgba = gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 1.};
                 let line_color = gtk::ColorButton::with_rgba(&rgba);
                 let lbl_line_color = gtk::Label::new(Some("Line Color:"));
                 line_color.connect_color_set(clone!(
