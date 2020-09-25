@@ -1,30 +1,26 @@
-mod source_inspector;
-mod util;
-use super::OnChange;
+use super::super::{util::err_modal, Target, WidgetCtx};
 use super::{
-    util::err_modal, FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
+    source_inspector::SourceInspector,
+    util::{parse_entry, TwoColGrid},
+    OnChange,
 };
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
+use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
-use netidx::{chars::Chars, path::Path, subscriber::Value};
+use netidx::{path::Path, subscriber::Value};
 use netidx_protocols::view;
-use source_inspector::SourceInspector;
 use std::{
-    boxed,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
-    result,
 };
-use util::{parse_entry, TwoColGrid};
 
 #[derive(Clone, Debug)]
-struct Table {
+pub(super) struct Table {
     root: gtk::Box,
     spec: Rc<RefCell<Path>>,
 }
 
 impl Table {
-    fn new(on_change: OnChange, path: Path) -> Self {
+    pub(super) fn new(on_change: OnChange, path: Path) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let label = gtk::Label::new(Some("Path:"));
         let entry = gtk::Entry::new();
@@ -39,11 +35,11 @@ impl Table {
         Table { root, spec }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Table(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
     }
 }
@@ -122,14 +118,14 @@ fn source(
 }
 
 #[derive(Clone, Debug)]
-struct Action {
+pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Action>>,
     source: DbgSrc,
 }
 
 impl Action {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Action) -> Self {
+    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Action) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (srclbl, srcent, source) = source(
@@ -153,15 +149,15 @@ impl Action {
         Action { root, spec, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Action(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
             si.update(tgt, value);
         }
@@ -169,14 +165,14 @@ impl Action {
 }
 
 #[derive(Clone, Debug)]
-struct Label {
+pub(super) struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<view::Source>>,
     source: DbgSrc,
 }
 
 impl Label {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Source) -> Self {
+    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Source) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, source) = source(
@@ -193,15 +189,15 @@ impl Label {
         Label { root, spec, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Label(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.source.borrow() {
             si.update(tgt, value);
         }
@@ -209,7 +205,7 @@ impl Label {
 }
 
 #[derive(Clone, Debug)]
-struct Button {
+pub(super) struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
     enabled_source: DbgSrc,
@@ -218,7 +214,7 @@ struct Button {
 }
 
 impl Button {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Button) -> Self {
+    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Button) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
@@ -262,15 +258,15 @@ impl Button {
         Button { root, spec, enabled_source, label_source, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Button(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
             si.update(tgt, value);
         }
@@ -284,7 +280,7 @@ impl Button {
 }
 
 #[derive(Clone, Debug)]
-struct Toggle {
+pub(super) struct Toggle {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Toggle>>,
     enabled_source: DbgSrc,
@@ -292,7 +288,7 @@ struct Toggle {
 }
 
 impl Toggle {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Toggle) -> Self {
+    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Toggle) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
@@ -326,15 +322,15 @@ impl Toggle {
         Toggle { root, spec, enabled_source, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Toggle(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
             si.update(tgt, value);
         }
@@ -345,7 +341,7 @@ impl Toggle {
 }
 
 #[derive(Clone, Debug)]
-struct Selector {
+pub(super) struct Selector {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Selector>>,
     enabled_source: DbgSrc,
@@ -354,7 +350,11 @@ struct Selector {
 }
 
 impl Selector {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Selector) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        on_change: OnChange,
+        spec: view::Selector,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
@@ -398,15 +398,15 @@ impl Selector {
         Selector { root, spec, enabled_source, choices_source, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Selector(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
             si.update(tgt, value);
         }
@@ -420,7 +420,7 @@ impl Selector {
 }
 
 #[derive(Clone, Debug)]
-struct Entry {
+pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
     enabled_source: DbgSrc,
@@ -429,7 +429,7 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Entry) -> Self {
+    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Entry) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
@@ -473,15 +473,15 @@ impl Entry {
         Entry { root, spec, enabled_source, visible_source, source }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Entry(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Some((_, si)) = &*self.enabled_source.borrow() {
             si.update(tgt, value);
         }
@@ -496,13 +496,12 @@ impl Entry {
 
 #[derive(Clone, Debug)]
 struct Series {
-    title: DbgSrc,
     x: DbgSrc,
     y: DbgSrc,
 }
 
 #[derive(Clone, Debug)]
-struct LinePlot {
+pub(super) struct LinePlot {
     root: gtk::Box,
     spec: Rc<RefCell<view::LinePlot>>,
     x_min: DbgSrc,
@@ -514,7 +513,11 @@ struct LinePlot {
 }
 
 impl LinePlot {
-    fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::LinePlot) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        on_change: OnChange,
+        spec: view::LinePlot,
+    ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let mut common = TwoColGrid::new();
@@ -566,7 +569,12 @@ impl LinePlot {
         if let Some(c) = spec.borrow().fill {
             has_fill.set_active(true);
             fill_reveal.set_reveal_child(true);
-            fill_color.set_rgba(gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 0. });
+            fill_color.set_rgba(&gdk::RGBA {
+                red: c.r,
+                green: c.g,
+                blue: c.b,
+                alpha: 0.,
+            });
         }
         has_fill.connect_toggled(clone!(
             @strong on_change,
@@ -617,7 +625,7 @@ impl LinePlot {
                 on_change()
             }),
         );
-        common.add(l, e);
+        common.add((l, e));
         let (l, e, x_max) = source(
             ctx,
             "x max:",
@@ -627,7 +635,7 @@ impl LinePlot {
                 on_change()
             }),
         );
-        common.add(l, e);
+        common.add((l, e));
         let (l, e, y_min) = source(
             ctx,
             "y min:",
@@ -637,8 +645,8 @@ impl LinePlot {
                 on_change()
             }),
         );
-        common.add(l, e);
-        let (l, e, y_min) = source(
+        common.add((l, e));
+        let (l, e, y_max) = source(
             ctx,
             "y max:",
             &spec.borrow().y_max,
@@ -647,7 +655,7 @@ impl LinePlot {
                 on_change()
             }),
         );
-        common.add(l, e);
+        common.add((l, e));
         let (l, e, keep_points) = source(
             ctx,
             "Keep Points:",
@@ -683,8 +691,8 @@ impl LinePlot {
                 ));
                 let c = spec.borrow().series[i].line_color;
                 let rgba = gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 0.};
-                let line_color = gtk::ColorButton::with_rgba(rgba);
-                let lbl_line_color = gtk::Label::new("Line Color:");
+                let line_color = gtk::ColorButton::with_rgba(&rgba);
+                let lbl_line_color = gtk::Label::new(Some("Line Color:"));
                 line_color.connect_color_set(clone!(
                     @strong on_change, @strong spec => move |b| {
                         let c = b.get_rgba();
@@ -715,7 +723,7 @@ impl LinePlot {
                 grid.add((l, e));
                 let remove = gtk::Button::with_label("-");
                 grid.attach(&remove, 0, 2, 1);
-                series.borrow_mut().push(Series { title, x, y });
+                series.borrow_mut().push(Series { x, y });
                 seriesbox.show_all();
                 remove.connect_clicked(clone!(
                     @strong series,
@@ -731,7 +739,8 @@ impl LinePlot {
         addbtn.connect_clicked(clone!(
             @strong spec, @strong build_series => move |_| {
                 spec.borrow_mut().series.push(view::Series {
-                    title: view::Source::Constant(Value::String(Chars::from("Series"))),
+                    title: String::from("Series"),
+                    line_color: view::RGB { r: 0., g: 0., b: 0. },
                     x: view::Source::Load(Path::from("/somewhere/in/netidx/x")),
                     y: view::Source::Load(Path::from("/somewhere/in/netidx/y")),
                 });
@@ -741,37 +750,34 @@ impl LinePlot {
         for i in 0..spec.borrow().series.len() {
             build_series(i)
         }
-        LinePlot { root, spec, title, x_label, y_label, timeseries, keep_points, series }
+        LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::LinePlot(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
     }
 
-    fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, s)) = &*self.title.borrow() {
+    pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Some((_, s)) = &*self.x_min.borrow() {
             s.update(tgt, value);
         }
-        if let Some((_, s)) = &*self.x_label.borrow() {
+        if let Some((_, s)) = &*self.x_max.borrow() {
             s.update(tgt, value);
         }
-        if let Some((_, s)) = &*self.y_label.borrow() {
+        if let Some((_, s)) = &*self.y_min.borrow() {
             s.update(tgt, value);
         }
-        if let Some((_, s)) = &*self.timeseries.borrow() {
+        if let Some((_, s)) = &*self.y_max.borrow() {
             s.update(tgt, value);
         }
         if let Some((_, s)) = &*self.keep_points.borrow() {
             s.update(tgt, value);
         }
         for s in self.series.borrow().iter() {
-            if let Some((_, s)) = &*s.title.borrow() {
-                s.update(tgt, value);
-            }
             if let Some((_, s)) = &*s.x.borrow() {
                 s.update(tgt, value);
             }
@@ -783,13 +789,13 @@ impl LinePlot {
 }
 
 #[derive(Clone, Debug)]
-struct BoxChild {
+pub(super) struct BoxChild {
     root: TwoColGrid,
     spec: Rc<RefCell<view::BoxChild>>,
 }
 
 impl BoxChild {
-    fn new(on_change: OnChange, spec: view::BoxChild) -> Self {
+    pub(super) fn new(on_change: OnChange, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
         let packlbl = gtk::Label::new(Some("Pack:"));
@@ -820,11 +826,11 @@ impl BoxChild {
         BoxChild { root, spec }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::BoxChild(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 }
@@ -851,13 +857,13 @@ fn dirselect(
 }
 
 #[derive(Clone, Debug)]
-struct BoxContainer {
+pub(super) struct BoxContainer {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Box>>,
 }
 
 impl BoxContainer {
-    fn new(on_change: OnChange, spec: view::Box) -> Self {
+    pub(super) fn new(on_change: OnChange, spec: view::Box) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = dirselect(
@@ -886,23 +892,23 @@ impl BoxContainer {
         BoxContainer { root, spec }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Box(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 }
 
 #[derive(Clone, Debug)]
-struct GridChild {
+pub(super) struct GridChild {
     root: TwoColGrid,
     spec: Rc<RefCell<view::GridChild>>,
 }
 
 impl GridChild {
-    fn new(on_change: OnChange, spec: view::GridChild) -> Self {
+    pub(super) fn new(on_change: OnChange, spec: view::GridChild) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -924,23 +930,23 @@ impl GridChild {
         GridChild { root, spec }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::GridChild(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 }
 
 #[derive(Clone, Debug)]
-struct Grid {
+pub(super) struct Grid {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Grid>>,
 }
 
 impl Grid {
-    fn new(on_change: OnChange, spec: view::Grid) -> Self {
+    pub(super) fn new(on_change: OnChange, spec: view::Grid) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -978,11 +984,11 @@ impl Grid {
         Grid { root, spec }
     }
 
-    fn spec(&self) -> view::WidgetKind {
+    pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Grid(self.spec.borrow().clone())
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 }

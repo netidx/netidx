@@ -2,7 +2,6 @@ use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
 use crate::view;
 use anyhow::{anyhow, Result};
 use cairo;
-use chrono::prelude::*;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
@@ -446,8 +445,7 @@ impl Entry {
 }
 
 struct Series {
-    title: String,
-    line_color: view::PlotColor,
+    line_color: view::RGB,
     x: Source,
     y: Source,
     x_data: VecDeque<Value>,
@@ -481,8 +479,7 @@ impl LinePlot {
             spec.series
                 .iter()
                 .map(|series| Series {
-                    title: series.title.clone(),
-                    line_color: series.line_color.clone(),
+                    line_color: series.line_color,
                     x: Source::new(&ctx, variables, series.x.clone()),
                     y: Source::new(&ctx, variables, series.y.clone()),
                     x_data: VecDeque::new(),
@@ -540,12 +537,6 @@ impl LinePlot {
     ) -> Result<()> {
         use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
         use plotters_cairo::CairoBackend;
-        fn get_str(v: &Option<Value>) -> &str {
-            match v {
-                Some(Value::String(c)) => &*c,
-                Some(_) | None => "",
-            }
-        }
         fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
             match specified {
                 None => computed,
@@ -567,29 +558,33 @@ impl LinePlot {
             X: Ranged<ValueType = XT> + ValueFormatter<XT>,
             Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
         {
-            let mesh = chart
-                .configure_mesh()
-                .x_desc(spec.x_label.as_str())
-                .y_desc(spec.y_label.as_str());
-            let mesh = if !spec.x_grid { mesh.disable_x_mesh() } else { mesh };
-            let mesh = if !spec.y_grid { mesh.disable_y_mesh() } else { mesh };
+            let mut mesh = chart.configure_mesh();
+            mesh.x_desc(spec.x_label.as_str()).y_desc(spec.y_label.as_str());
+            if !spec.x_grid {
+                mesh.disable_x_mesh();
+            }
+            if !spec.y_grid {
+                mesh.disable_y_mesh();
+            }
             mesh.draw().map_err(|e| anyhow!("{}", e))
         }
         if width.get() > 0 && height.get() > 0 {
             let (x_min, x_max, y_min, y_max) =
                 (x_min.current(), x_max.current(), y_min.current(), y_max.current());
-            let mut computed_x_min = *series
+            let mut computed_x_min = series
                 .borrow()
                 .last()
                 .and_then(|s| s.x_data.back())
-                .unwrap_or(&Value::F64(0.));
-            let mut computed_x_max = computed_x_min;
-            let mut computed_y_min = *series
+                .unwrap_or(&Value::F64(0.))
+                .clone();
+            let mut computed_x_max = computed_x_min.clone();
+            let mut computed_y_min = series
                 .borrow()
                 .last()
                 .and_then(|s| s.y_data.back())
-                .unwrap_or(&Value::F64(0.));
-            let mut computed_y_max = computed_y_min;
+                .unwrap_or(&Value::F64(0.))
+                .clone();
+            let mut computed_y_max = computed_y_min.clone();
             for s in series.borrow().iter() {
                 for x in s.x_data.iter() {
                     if x < &computed_x_min {
@@ -618,8 +613,9 @@ impl LinePlot {
                 None => (),
                 Some(c) => back.fill(&to_style(c))?,
             }
-            let mut chart = ChartBuilder::on(&back)
-                .caption(spec.title, ("sans-sherif", 14))
+            let mut chart = ChartBuilder::on(&back);
+            chart
+                .caption(spec.title.as_str(), ("sans-sherif", 14))
                 .margin(spec.margin)
                 .set_all_label_area_size(spec.label_area);
             let xtyp = match (Typ::get(&x_min), Typ::get(&x_max)) {
@@ -636,7 +632,7 @@ impl LinePlot {
                     let yr = y_min.cast_f64().unwrap()..y_max.cast_f64().unwrap();
                     let mut chart = chart.build_cartesian_2d(xr, yr)?;
                     draw_mesh(spec, &mut chart)?;
-                    for (i, s) in series.borrow().iter().enumerate() {
+                    for s in series.borrow().iter() {
                         let data =
                             s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
                                 s.y_data.iter().cloned().filter_map(|v| v.cast_f64()),
@@ -652,7 +648,7 @@ impl LinePlot {
                         y_min.cast_datetime().unwrap()..y_max.cast_datetime().unwrap();
                     let mut chart = chart.build_cartesian_2d(xr, yr)?;
                     draw_mesh(spec, &mut chart)?;
-                    for (i, s) in series.borrow().iter().enumerate() {
+                    for s in series.borrow().iter() {
                         let data = s
                             .x_data
                             .iter()
@@ -674,7 +670,7 @@ impl LinePlot {
                     let yr = y_min.cast_f64().unwrap()..y_max.cast_f64().unwrap();
                     let mut chart = chart.build_cartesian_2d(xr, yr)?;
                     draw_mesh(spec, &mut chart)?;
-                    for (i, s) in series.borrow().iter().enumerate() {
+                    for s in series.borrow().iter() {
                         let data = s
                             .x_data
                             .iter()
@@ -691,7 +687,7 @@ impl LinePlot {
                         y_min.cast_datetime().unwrap()..y_max.cast_datetime().unwrap();
                     let mut chart = chart.build_cartesian_2d(xr, yr)?;
                     draw_mesh(spec, &mut chart)?;
-                    for (i, s) in series.borrow().iter().enumerate() {
+                    for s in series.borrow().iter() {
                         let data =
                             s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
                                 s.y_data

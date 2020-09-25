@@ -2,13 +2,12 @@ mod source_inspector;
 mod util;
 mod widgets;
 use super::{
-    util::err_modal, FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
+    FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
 };
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_protocols::view;
-use source_inspector::SourceInspector;
 use std::{
     boxed,
     cell::{Cell, RefCell},
@@ -338,10 +337,10 @@ impl Widget {
                 fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
                 margin: 3,
                 label_area: 50,
-                x_min: Source::Constant(View::Null),
-                x_max: Source::Constant(View::Null),
-                y_min: Source::Constant(View::Null),
-                y_max: Source::Constant(View::Null),
+                x_min: view::Source::Constant(Value::Null),
+                x_max: view::Source::Constant(Value::Null),
+                y_min: view::Source::Constant(Value::Null),
+                y_max: view::Source::Constant(Value::Null),
                 keep_points: view::Source::Constant(Value::U64(256)),
                 series: Vec::new(),
             })),
