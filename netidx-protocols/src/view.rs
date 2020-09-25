@@ -242,6 +242,8 @@ pub struct LinePlot {
     pub title: String,
     pub x_label: String,
     pub y_label: String,
+    pub x_labels: usize,
+    pub y_labels: usize,
     pub x_grid: bool,
     pub y_grid: bool,
     pub fill: Option<RGB>,

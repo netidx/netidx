@@ -520,9 +520,11 @@ impl LinePlot {
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let mut common = TwoColGrid::new();
-        root.pack_start(common.root(), false, false, 0);
-        common.add(parse_entry(
+        let axis_exp = gtk::Expander::new(Some("Axis Style"));
+        let mut axis = TwoColGrid::new();
+        root.pack_start(&axis_exp, false, false, 0);
+        axis_exp.add(axis.root());
+        axis.add(parse_entry(
             "Title:",
             &spec.borrow().title,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -530,7 +532,7 @@ impl LinePlot {
                 on_change()
             }),
         ));
-        common.add(parse_entry(
+        axis.add(parse_entry(
             "X Axis Label:",
             &spec.borrow().x_label,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -538,7 +540,7 @@ impl LinePlot {
                 on_change()
             }),
         ));
-        common.add(parse_entry(
+        axis.add(parse_entry(
             "Y Axis Label:",
             &spec.borrow().y_label,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -546,25 +548,99 @@ impl LinePlot {
                 on_change()
             }),
         ));
+        axis.add(parse_entry(
+            "X Labels:",
+            &spec.borrow().x_labels,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().x_labels = s;
+                on_change()
+            })
+        ));
+        axis.add(parse_entry(
+            "Y Labels:",
+            &spec.borrow().y_labels,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().y_labels = s;
+                on_change()
+            })
+        ));
         let x_grid = gtk::CheckButton::with_label("X Axis Grid");
         x_grid.set_active(spec.borrow().x_grid);
         x_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().x_grid = b.get_active();
             on_change()
         }));
-        common.attach(&x_grid, 0, 2, 1);
+        axis.attach(&x_grid, 0, 2, 1);
         let y_grid = gtk::CheckButton::with_label("Y Axis Grid");
         y_grid.set_active(spec.borrow().y_grid);
         y_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().y_grid = b.get_active();
             on_change()
         }));
-        common.attach(&y_grid, 0, 2, 1);
+        axis.attach(&y_grid, 0, 2, 1);
+        let range_exp = gtk::Expander::new(Some("Axis Range"));
+        let mut range = TwoColGrid::new();
+        root.pack_start(&range_exp, false, false, 0);
+        range_exp.add(range.root());
+        let (l, e, x_min) = source(
+            ctx,
+            "x min:",
+            &spec.borrow().x_min,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().x_min = s;
+                on_change()
+            }),
+        );
+        range.add((l, e));
+        let (l, e, x_max) = source(
+            ctx,
+            "x max:",
+            &spec.borrow().x_max,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().x_max = s;
+                on_change()
+            }),
+        );
+        range.add((l, e));
+        let (l, e, y_min) = source(
+            ctx,
+            "y min:",
+            &spec.borrow().y_min,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().y_min = s;
+                on_change()
+            }),
+        );
+        range.add((l, e));
+        let (l, e, y_max) = source(
+            ctx,
+            "y max:",
+            &spec.borrow().y_max,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().y_max = s;
+                on_change()
+            }),
+        );
+        range.add((l, e));
+        let (l, e, keep_points) = source(
+            ctx,
+            "Keep Points:",
+            &spec.borrow().keep_points,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().keep_points = s;
+                on_change()
+            }),
+        );
+        range.add((l, e));
+        let style_exp = gtk::Expander::new(Some("Style"));
+        let mut style = TwoColGrid::new();
+        root.pack_start(&style_exp, false, false, 0);
+        style_exp.add(style.root());
         let has_fill = gtk::CheckButton::with_label("Fill");
         let fill_reveal = gtk::Revealer::new();
         let fill_color = gtk::ColorButton::new();
         fill_reveal.add(&fill_color);
-        common.add((has_fill.clone(), fill_reveal.clone()));
+        style.add((has_fill.clone(), fill_reveal.clone()));
         if let Some(c) = spec.borrow().fill {
             has_fill.set_active(true);
             fill_reveal.set_reveal_child(true);
@@ -599,7 +675,7 @@ impl LinePlot {
                 on_change()
             }),
         );
-        common.add(parse_entry(
+        style.add(parse_entry(
             "Margin:",
             &spec.borrow().margin,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -607,7 +683,7 @@ impl LinePlot {
                 on_change()
             }),
         ));
-        common.add(parse_entry(
+        style.add(parse_entry(
             "Label Area:",
             &spec.borrow().label_area,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -615,61 +691,13 @@ impl LinePlot {
                 on_change()
             }),
         ));
-        let (l, e, x_min) = source(
-            ctx,
-            "x min:",
-            &spec.borrow().x_min,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().x_min = s;
-                on_change()
-            }),
-        );
-        common.add((l, e));
-        let (l, e, x_max) = source(
-            ctx,
-            "x max:",
-            &spec.borrow().x_max,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().x_max = s;
-                on_change()
-            }),
-        );
-        common.add((l, e));
-        let (l, e, y_min) = source(
-            ctx,
-            "y min:",
-            &spec.borrow().y_min,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().y_min = s;
-                on_change()
-            }),
-        );
-        common.add((l, e));
-        let (l, e, y_max) = source(
-            ctx,
-            "y max:",
-            &spec.borrow().y_max,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().y_max = s;
-                on_change()
-            }),
-        );
-        common.add((l, e));
-        let (l, e, keep_points) = source(
-            ctx,
-            "Keep Points:",
-            &spec.borrow().keep_points,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().keep_points = s;
-                on_change()
-            }),
-        );
-        common.add((l, e));
-        let addbtn = gtk::Button::with_label("+");
-        root.pack_start(&addbtn, false, false, 0);
-        let series = Rc::new(RefCell::new(Vec::new()));
+        let series_exp = gtk::Expander::new(Some("Series"));
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.pack_start(&seriesbox, true, true, 0);
+        let addbtn = gtk::Button::with_label("+");
+        series_exp.add(&seriesbox);
+        root.pack_start(&series_exp, false, false, 0);
+        seriesbox.pack_start(&addbtn, false, false, 0);
+        let series = Rc::new(RefCell::new(Vec::new()));
         let build_series = Rc::new(clone!(
             @weak seriesbox,
             @strong ctx,

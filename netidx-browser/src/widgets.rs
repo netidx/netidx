@@ -561,7 +561,10 @@ impl LinePlot {
             Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
         {
             let mut mesh = chart.configure_mesh();
-            mesh.x_desc(spec.x_label.as_str()).y_desc(spec.y_label.as_str());
+            mesh.x_desc(spec.x_label.as_str())
+                .y_desc(spec.y_label.as_str())
+                .x_labels(spec.x_labels)
+                .y_labels(spec.y_labels);
             if !spec.x_grid {
                 mesh.disable_x_mesh();
             }

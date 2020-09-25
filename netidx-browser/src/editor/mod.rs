@@ -332,6 +332,8 @@ impl Widget {
                 title: String::from("Line Plot"),
                 x_label: String::from("x axis"),
                 y_label: String::from("y axis"),
+                x_labels: 4,
+                y_labels: 4,
                 x_grid: true,
                 y_grid: true,
                 fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
