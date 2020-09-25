@@ -554,18 +554,9 @@ impl LinePlot {
                 Some(v) => v.cast(Typ::F64).unwrap_or(computed),
             }
         }
-        fn to_style(c: view::PlotColor) -> RGBColor {
-            match c {
-                view::PlotColor::Red => RED,
-                view::PlotColor::Green => GREEN,
-                view::PlotColor::Magenta => MAGENTA,
-                view::PlotColor::Blue => BLUE,
-                view::PlotColor::Black => BLACK,
-                view::PlotColor::Cyan => CYAN,
-                view::PlotColor::White => WHITE,
-                view::PlotColor::Yellow => YELLOW,
-                view::PlotColor::RGB(r, g, b) => RGBColor(r, g, b),
-            }
+        fn to_style(c: view::RGB) -> RGBColor {
+            let cvt = |f| (f64::max(1., f) * 255.) as u8;
+            RGBColor(cvt(c.r), cvt(c.g), cvt(c.b))
         }
         fn draw_mesh<'a, DB, XT, YT, X, Y>(
             spec: &view::LinePlot,

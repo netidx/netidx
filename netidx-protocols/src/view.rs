@@ -222,23 +222,17 @@ pub struct Grid {
     pub rows: Vec<Widget>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum PlotColor {
-    Red,
-    Green,
-    Magenta,
-    Blue,
-    Black,
-    Cyan,
-    White,
-    Yellow,
-    RGB(u8, u8, u8),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RGB {
+    r: f64,
+    g: f64,
+    b: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Series {
     pub title: String,
-    pub line_color: PlotColor,
+    pub line_color: RGB,
     pub x: Source,
     pub y: Source,
 }
@@ -246,13 +240,13 @@ pub struct Series {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinePlot {
     pub title: String,
-    pub x_grid: bool,
-    pub y_grid: bool,
-    pub fill: Option<PlotColor>,
-    pub margin: u32,
-    pub label_area: u32,
     pub x_label: String,
     pub y_label: String,
+    pub x_grid: bool,
+    pub y_grid: bool,
+    pub fill: Option<RGB>,
+    pub margin: u32,
+    pub label_area: u32,
     pub x_min: Source,
     pub x_max: Source,
     pub y_min: Source,
