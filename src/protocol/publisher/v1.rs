@@ -283,7 +283,8 @@ impl Typ {
                 },
                 Typ::Duration => {
                     let s = s.trim();
-                    let last = s.chars().next_back().ok_or_else(|| anyhow!("too short"))?;
+                    let last =
+                        s.chars().next_back().ok_or_else(|| anyhow!("too short"))?;
                     let n = if last.is_ascii_digit() {
                         s.parse::<f64>()?
                     } else {
@@ -296,9 +297,9 @@ impl Typ {
                     } else {
                         bail!("invalid duration suffix {}", last)
                     };
-                    Value::F64(n).cast(Typ::Duration).ok_or_else(|| {
-                        anyhow!("failed to cast float to duration")
-                    })?
+                    Value::F64(n)
+                        .cast(Typ::Duration)
+                        .ok_or_else(|| anyhow!("failed to cast float to duration"))?
                 }
                 Typ::Bool => match s.parse::<bool>()? {
                     true => Value::True,
@@ -725,7 +726,8 @@ impl Pack for Value {
             10 => {
                 let ts = buf.get_i64();
                 let ns = buf.get_u32();
-                let ndt = NaiveDateTime::from_timestamp(ts, ns);
+                let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
+                    .ok_or_else(|| PackError::InvalidFormat)?;
                 Ok(Value::DateTime(DateTime::from_utc(ndt, Utc)))
             }
             11 => {
@@ -1058,26 +1060,35 @@ impl Value {
                 Value::Error(s) => Some(Value::Error(s)),
             },
             Typ::DateTime => match self {
-                Value::U32(v) | Value::V32(v) => Some(Value::DateTime(
-                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
-                )),
-                Value::I32(v) | Value::Z32(v) => Some(Value::DateTime(
-                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
-                )),
-                Value::U64(v) | Value::V64(v) => Some(Value::DateTime(
-                    DateTime::from_utc(NaiveDateTime::from_timestamp(v as i64, 0), Utc),
-                )),
+                Value::U32(v) | Value::V32(v) => {
+                    Some(Value::DateTime(DateTime::from_utc(
+                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
+                        Utc,
+                    )))
+                }
+                Value::I32(v) | Value::Z32(v) => {
+                    Some(Value::DateTime(DateTime::from_utc(
+                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
+                        Utc,
+                    )))
+                }
+                Value::U64(v) | Value::V64(v) => {
+                    Some(Value::DateTime(DateTime::from_utc(
+                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
+                        Utc,
+                    )))
+                }
                 Value::I64(v) | Value::Z64(v) => Some(Value::DateTime(
-                    DateTime::from_utc(NaiveDateTime::from_timestamp(v, 0), Utc),
+                    DateTime::from_utc(NaiveDateTime::from_timestamp_opt(v, 0)?, Utc),
                 )),
                 Value::F32(v) => match v.classify() {
                     FpCategory::Nan | FpCategory::Infinite => None,
                     FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
                         Some(Value::DateTime(DateTime::from_utc(
-                            NaiveDateTime::from_timestamp(
+                            NaiveDateTime::from_timestamp_opt(
                                 v.trunc() as i64,
                                 v.fract().abs() as u32,
-                            ),
+                            )?,
                             Utc,
                         )))
                     }
@@ -1086,17 +1097,20 @@ impl Value {
                     FpCategory::Nan | FpCategory::Infinite => None,
                     FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
                         Some(Value::DateTime(DateTime::from_utc(
-                            NaiveDateTime::from_timestamp(
+                            NaiveDateTime::from_timestamp_opt(
                                 v.trunc() as i64,
                                 v.fract().abs() as u32,
-                            ),
+                            )?,
                             Utc,
                         )))
                     }
                 },
                 v @ Value::DateTime(_) => Some(v),
                 Value::Duration(d) => Some(Value::DateTime(DateTime::from_utc(
-                    NaiveDateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()),
+                    NaiveDateTime::from_timestamp_opt(
+                        d.as_secs() as i64,
+                        d.subsec_nanos(),
+                    )?,
                     Utc,
                 ))),
 
