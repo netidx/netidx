@@ -593,7 +593,7 @@ impl LinePlot {
         }));
         fill_color.connect_color_set(
             clone!(@strong on_change, @strong spec => move |b| {
-                let c = dbg!(b.get_rgba());
+                let c = b.get_rgba();
                 let c = view::RGB { r: c.red, g: c.green, b: c.blue };
                 spec.borrow_mut().fill = Some(c);
                 on_change()
