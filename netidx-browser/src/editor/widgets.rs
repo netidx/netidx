@@ -585,7 +585,7 @@ impl LinePlot {
     fn build_axis_range_editor(
         root: &gtk::Box,
         spec: &Rc<RefCell<view::LinePlot>>,
-    ) -> (DbgSrc, DbgSrc, DbgSrc, DbgSrc) {
+    ) -> (DbgSrc, DbgSrc, DbgSrc, DbgSrc, DbgSrc) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
