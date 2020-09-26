@@ -6,12 +6,10 @@ use super::{
 };
 use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
+use indexmap::IndexMap;
 use netidx::{path::Path, subscriber::Value};
 use netidx_protocols::view;
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Debug)]
 pub(super) struct Table {
@@ -495,12 +493,6 @@ impl Entry {
 }
 
 #[derive(Clone, Debug)]
-struct Series {
-    x: DbgSrc,
-    y: DbgSrc,
-}
-
-#[derive(Clone, Debug)]
 pub(super) struct LinePlot {
     root: gtk::Box,
     spec: Rc<RefCell<view::LinePlot>>,
@@ -509,7 +501,8 @@ pub(super) struct LinePlot {
     y_min: DbgSrc,
     y_max: DbgSrc,
     keep_points: DbgSrc,
-    series: Rc<RefCell<Vec<Series>>>,
+    x: DbgSrc,
+    series: Rc<RefCell<IndexMap<usize, DbgSrc>>>,
 }
 
 impl LinePlot {
@@ -520,6 +513,14 @@ impl LinePlot {
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        LinePlot::build_chart_style_editor(&root, &spec);
+        LinePlot::build_axis_style_editor(&root, &spec);
+        LinePlot::build_axis_range_editor(&root, &spec);
+        let (x, series) = LinePlot::build_series_editor(&root, &spec);
+        LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
+    }
+
+    fn build_axis_style_editor(root: &gtk::Box) {
         let axis_exp = gtk::Expander::new(Some("Axis Style"));
         let mut axis = TwoColGrid::new();
         root.pack_start(&axis_exp, false, false, 0);
@@ -554,7 +555,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().x_labels = s;
                 on_change()
-            })
+            }),
         ));
         axis.add(parse_entry(
             "Y Labels:",
@@ -562,7 +563,7 @@ impl LinePlot {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().y_labels = s;
                 on_change()
-            })
+            }),
         ));
         let x_grid = gtk::CheckButton::with_label("X Axis Grid");
         x_grid.set_active(spec.borrow().x_grid);
@@ -578,6 +579,9 @@ impl LinePlot {
             on_change()
         }));
         axis.attach(&y_grid, 0, 2, 1);
+    }
+
+    fn build_axis_range_editor(root: &gtk::Box, spec: &Rc<RefCell<view::LinePlot>>) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
@@ -632,7 +636,10 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
-        let style_exp = gtk::Expander::new(Some("Style"));
+    }
+
+    fn build_chart_style_editor(root: &gtk::Box, spec: &Rc<RefCell<view::LinePlot>>) {
+        let style_exp = gtk::Expander::new(Some("Chart Style"));
         let mut style = TwoColGrid::new();
         root.pack_start(&style_exp, false, false, 0);
         style_exp.add(style.root());
@@ -690,20 +697,42 @@ impl LinePlot {
                 spec.borrow_mut().label_area = s;
                 on_change()
             }),
-        ));
+        ))
+    }
+
+    fn build_series_editor(
+        root: &gtk::Box,
+        spec: &Rc<RefCell<view::LinePlot>>,
+    ) -> (DbgSrc, Rc<RefCell<IndexMap<usize, DbgSrc>>>) {
         let series_exp = gtk::Expander::new(Some("Series"));
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let addbtn = gtk::Button::with_label("+");
         series_exp.add(&seriesbox);
         root.pack_start(&series_exp, false, false, 0);
+        let (l, e, x) = source(
+            ctx,
+            "X:",
+            &spec.borrow().x,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().x = s;
+                on_change()
+            }),
+        );
+        let xbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        xbox.pack_start(&l, false, false, 0);
+        xbox.pack_start(&e, false, false, 0);
+        seriesbox.pack_start(&xbox, false, false, 0);
         seriesbox.pack_start(&addbtn, false, false, 0);
-        let series = Rc::new(RefCell::new(Vec::new()));
+        let series_id = Rc::new(Cell::new(0));
+        let series = Rc::new(RefCell::new(IndexMap::new()));
         let build_series = Rc::new(clone!(
             @weak seriesbox,
             @strong ctx,
             @strong on_change,
             @strong spec,
-            @strong series => move |i: usize| {
+            @strong series => move || {
+                let i = series_id.get();
+                series_id.set(i + 1);
                 let mut grid = TwoColGrid::new();
                 seriesbox.pack_start(grid.root(), false, false, 0);
                 let sep = gtk::Separator::new(gtk::Orientation::Vertical);
@@ -750,7 +779,7 @@ impl LinePlot {
                 grid.add((l, e));
                 let remove = gtk::Button::with_label("-");
                 grid.attach(&remove, 0, 2, 1);
-                series.borrow_mut().push(Series { x, y });
+                series.borrow_mut().insert(i, Series { x, y });
                 seriesbox.show_all();
                 remove.connect_clicked(clone!(
                     @strong series,
@@ -777,7 +806,6 @@ impl LinePlot {
         for i in 0..spec.borrow().series.len() {
             build_series(i)
         }
-        LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -804,7 +832,7 @@ impl LinePlot {
         if let Some((_, s)) = &*self.keep_points.borrow() {
             s.update(tgt, value);
         }
-        for s in self.series.borrow().iter() {
+        for s in self.series.borrow().values() {
             if let Some((_, s)) = &*s.x.borrow() {
                 s.update(tgt, value);
             }
