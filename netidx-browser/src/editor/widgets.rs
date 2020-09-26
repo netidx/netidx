@@ -515,7 +515,8 @@ impl LinePlot {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         LinePlot::build_chart_style_editor(&root, &spec);
         LinePlot::build_axis_style_editor(&root, &spec);
-        LinePlot::build_axis_range_editor(&root, &spec);
+        let (x_min, x_max, y_min, y_max, keep_points) =
+            LinePlot::build_axis_range_editor(&root, &spec);
         let (x, series) = LinePlot::build_series_editor(&root, &spec);
         LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
     }
@@ -581,7 +582,10 @@ impl LinePlot {
         axis.attach(&y_grid, 0, 2, 1);
     }
 
-    fn build_axis_range_editor(root: &gtk::Box, spec: &Rc<RefCell<view::LinePlot>>) {
+    fn build_axis_range_editor(
+        root: &gtk::Box,
+        spec: &Rc<RefCell<view::LinePlot>>,
+    ) -> (DbgSrc, DbgSrc, DbgSrc, DbgSrc) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
@@ -636,6 +640,7 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
+        (x_min, x_max, y_min, y_max, keep_points)
     }
 
     fn build_chart_style_editor(root: &gtk::Box, spec: &Rc<RefCell<view::LinePlot>>) {
