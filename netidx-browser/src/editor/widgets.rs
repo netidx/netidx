@@ -540,14 +540,6 @@ impl LinePlot {
         root.pack_start(&axis_exp, false, false, 0);
         axis_exp.add(axis.root());
         axis.add(parse_entry(
-            "Title:",
-            &spec.borrow().title,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().title = s;
-                on_change()
-            }),
-        ));
-        axis.add(parse_entry(
             "X Axis Label:",
             &spec.borrow().x_label,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -667,6 +659,14 @@ impl LinePlot {
         let mut style = TwoColGrid::new();
         root.pack_start(&style_exp, false, false, 0);
         style_exp.add(style.root());
+        style.add(parse_entry(
+            "Title:",
+            &spec.borrow().title,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().title = s;
+                on_change()
+            }),
+        ));
         let has_fill = gtk::CheckButton::with_label("Fill");
         let fill_reveal = gtk::Revealer::new();
         let fill_color = gtk::ColorButton::new();
