@@ -233,6 +233,7 @@ pub struct RGB {
 pub struct Series {
     pub title: String,
     pub line_color: RGB,
+    pub x: Source,
     pub y: Source,
 }
 
@@ -253,7 +254,6 @@ pub struct LinePlot {
     pub y_min: Source,
     pub y_max: Source,
     pub keep_points: Source,
-    pub x: Source,
     pub series: Vec<Series>,
 }
 
