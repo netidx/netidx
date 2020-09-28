@@ -519,7 +519,9 @@ impl Editor {
                     @strong undo_stack,
                     @strong undoing => move || {
                         if let Some(root) = store.get_iter_first() {
-                            if !undoing.get() {
+                            if undoing.get() {
+                                undoing.set(false)
+                            } else {
                                 undo_stack.borrow_mut().push(spec.borrow().clone());
                             }
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
@@ -687,7 +689,6 @@ impl Editor {
                     *spec.borrow_mut() = s.clone();
                     Editor::build_tree(&ctx, &on_change, &store, None, &s.root);
                     on_change();
-                    undoing.set(false);
                 }
         }));
         undo.connect_activate(clone!(@strong und => move |_| und()));
