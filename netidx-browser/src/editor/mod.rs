@@ -432,6 +432,12 @@ static KINDS: [&'static str; 13] = [
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
+        idle_add_local(
+            clone!(@weak root => @default-return glib::Continue(false), move || {
+                root.set_position(root.get_allocated_height() / 2);
+                glib::Continue(false)
+            }),
+        );
         root.set_margin_start(5);
         root.set_margin_end(5);
         let root_upper = gtk::Box::new(gtk::Orientation::Vertical, 5);
