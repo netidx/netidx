@@ -1,9 +1,7 @@
 mod source_inspector;
 mod util;
 mod widgets;
-use super::{
-    FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS,
-};
+use super::{FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -414,7 +412,7 @@ impl Widget {
 }
 
 pub(super) struct Editor {
-    root: gtk::Box,
+    root: gtk::Paned,
     store: gtk::TreeStore,
 }
 
@@ -436,11 +434,19 @@ static KINDS: [&'static str; 13] = [
 
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let root = gtk::Paned::new(gtk::Orientation::Vertical);
         root.set_margin_start(5);
         root.set_margin_end(5);
+        let root_upper = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let win_lower =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        win_lower.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        let root_lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        win_lower.add(&root_lower);
+        root.add1(&root_upper);
+        root.add2(&win_lower);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        root.pack_start(&treebtns, false, false, 0);
+        root_upper.pack_start(&treebtns, false, false, 0);
         let addbtnicon = gtk::Image::from_icon_name(
             Some("list-add-symbolic"),
             gtk::IconSize::SmallToolbar,
@@ -468,7 +474,7 @@ impl Editor {
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.pack_start(&treewin, true, true, 5);
+        root_upper.pack_start(&treewin, true, true, 5);
         let view = gtk::TreeView::new();
         treewin.add(&view);
         view.append_column(&{
@@ -511,7 +517,7 @@ impl Editor {
         Editor::build_tree(&ctx, &on_change, &store, None, &spec.borrow().root);
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
-        root.pack_end(&reveal_properties, false, false, 5);
+        root_lower.pack_start(&reveal_properties, true, true, 5);
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.add(&properties);
         let inhibit_change = Rc::new(Cell::new(false));
@@ -530,6 +536,7 @@ impl Editor {
                 if !inhibit_change.get() {
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
+                        w.root().hide();
                         properties.remove(w.root());
                     }
                     let id = c.get_active_id();
@@ -562,6 +569,7 @@ impl Editor {
         @strong inhibit_change => move |s| {
             let children = properties.get_children();
             if children.len() == 3 {
+                children[2].hide();
                 properties.remove(&children[2]);
             }
             match s.get_selected() {
