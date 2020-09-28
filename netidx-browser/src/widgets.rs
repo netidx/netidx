@@ -453,7 +453,7 @@ struct Series {
 }
 
 pub(super) struct LinePlot {
-    root: gtk::DrawingArea,
+    root: gtk::Box,
     x_min: Rc<Source>,
     x_max: Rc<Source>,
     y_min: Rc<Source>,
@@ -469,7 +469,9 @@ impl LinePlot {
         spec: view::LinePlot,
         _selected_path: gtk::Label,
     ) -> Self {
-        let root = gtk::DrawingArea::new();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let canvas = gtk::DrawingArea::new();
+        root.pack_start(&canvas, true, true, 0);
         let x_min = Rc::new(Source::new(&ctx, variables, spec.x_min.clone()));
         let x_max = Rc::new(Source::new(&ctx, variables, spec.x_max.clone()));
         let y_min = Rc::new(Source::new(&ctx, variables, spec.y_min.clone()));
@@ -489,7 +491,7 @@ impl LinePlot {
         ));
         let allocated_width = Rc::new(Cell::new(0));
         let allocated_height = Rc::new(Cell::new(0));
-        root.connect_draw(clone!(
+        canvas.connect_draw(clone!(
             @strong allocated_width,
             @strong allocated_height,
             @strong x_min,
@@ -515,7 +517,7 @@ impl LinePlot {
             }
             gtk::Inhibit(true)
         }));
-        root.connect_size_allocate(clone!(
+        canvas.connect_size_allocate(clone!(
         @strong allocated_width,
         @strong allocated_height => move |_, a| {
             allocated_width.set(i32::abs(a.width) as u32);
