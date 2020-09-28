@@ -470,10 +470,16 @@ impl Editor {
             gtk::IconSize::SmallToolbar,
         );
         let dupbtn = gtk::ToolButton::new(Some(&dupbtnicon), None);
+        let undobtnicon = gtk::Image::from_icon_name(
+            Some("edit-undo-symbolic"),
+            gtk::IconSize::SmallToolbar,
+        );
+        let undobtn = gtk::ToolButton::new(Some(&undobtnicon), None);
         treebtns.pack_start(&addbtn, false, false, 5);
         treebtns.pack_start(&addchbtn, false, false, 5);
         treebtns.pack_start(&delbtn, false, false, 5);
         treebtns.pack_start(&dupbtn, false, false, 5);
+        treebtns.pack_start(&undobtn, false, false, 5);
         let treewin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -493,11 +499,13 @@ impl Editor {
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
         let spec = Rc::new(RefCell::new(spec));
+        let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
         let on_change: OnChange = Rc::new({
             let ctx = ctx.clone();
             let spec = Rc::clone(&spec);
             let store = store.clone();
             let scheduled = Rc::new(Cell::new(false));
+            let undo_stack = undo_stack.clone();
             move || {
                 if !scheduled.get() {
                     scheduled.set(true);
@@ -505,8 +513,10 @@ impl Editor {
                         @strong ctx,
                         @strong spec,
                         @strong store,
-                        @strong scheduled => move || {
+                        @strong scheduled,
+                        @strong undo_stack => move || {
                         if let Some(root) = store.get_iter_first() {
+                            undo_stack.borrow_mut().push(spec.borrow().clone());
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
                             let m = FromGui::Render(spec.borrow().clone());
                             let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
@@ -607,10 +617,12 @@ impl Editor {
         let new_sib = gtk::MenuItem::with_label("New Sibling");
         let new_child = gtk::MenuItem::with_label("New Child");
         let delete = gtk::MenuItem::with_label("Delete");
+        let undo = gtk::MenuItem::with_label("Undo");
         menu.append(&duplicate);
         menu.append(&new_sib);
         menu.append(&new_child);
         menu.append(&delete);
+        menu.append(&undo);
         let dup = Rc::new(clone!(
         @strong on_change, @weak store, @strong selected, @strong ctx => move || {
             if let Some(iter) = &*selected.borrow() {
@@ -642,8 +654,7 @@ impl Editor {
         addchbtn.connect_clicked(clone!(@strong newch => move |_| newch()));
         let del = Rc::new(clone!(
             @weak selection, @strong on_change, @weak store, @strong selected => move || {
-            let iter = selected.borrow().clone();
-            if let Some(iter) = iter {
+            if let Some(iter) = selected.borrow().clone() {
                 selection.unselect_iter(&iter);
                 store.remove(&iter);
                 on_change();
@@ -651,6 +662,27 @@ impl Editor {
         }));
         delete.connect_activate(clone!(@strong del => move |_| del()));
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
+        let und = Rc::new(clone!(
+            @strong ctx,
+            @weak store,
+            @strong undo_stack,
+            @strong spec,
+            @strong selected,
+            @weak selection,
+            @strong on_change => move || {
+                if let Some(s) = undo_stack.borrow_mut().pop() {
+                    if let Some(iter) = selected.borrow().clone() {
+                        selection.unselect_iter(&iter);
+                    }
+                    store.clear();
+                    *spec.borrow_mut() = s.clone();
+                    Editor::build_tree(&ctx, &on_change, &store, None, &s.root);
+                    let m = FromGui::Render(s);
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                }
+        }));
+        undo.connect_activate(clone!(@strong und => move |_| und()));
+        undobtn.connect_clicked(clone!(@strong und => move |_| und()));
         view.connect_button_press_event(move |_, b| {
             let right_click =
                 gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
