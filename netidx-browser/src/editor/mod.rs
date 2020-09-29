@@ -26,6 +26,22 @@ impl WidgetProps {
     fn new(on_change: OnChange, spec: view::WidgetProps) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Expander::new(Some("Layout Properties"));
+        root.set_label_fill(true);
+        if let Some(w) = root.get_label_widget() {
+            w.connect_button_press_event(
+                clone!(@weak root => @default-return gtk::Inhibit(false), move |_, ev| {
+                    let left_click =
+                        gdk::EventType::ButtonPress == ev.get_event_type()
+                        && ev.get_button() == 1;
+                    if left_click {
+                        root.set_expanded(!root.get_expanded());
+                        gtk::Inhibit(true)
+                    } else {
+                        gtk::Inhibit(false)
+                    }
+                }),
+            );
+        }
         let mut grid = TwoColGrid::new();
         root.add(grid.root());
         let aligns = ["Fill", "Start", "End", "Center", "Baseline"];
