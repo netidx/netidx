@@ -30,6 +30,7 @@ impl WidgetProps {
         if let Some(w) = root.get_label_widget() {
             w.connect_button_press_event(
                 clone!(@weak root => @default-return gtk::Inhibit(false), move |_, ev| {
+                    dbg!(ev);
                     let left_click =
                         gdk::EventType::ButtonPress == ev.get_event_type()
                         && ev.get_button() == 1;
