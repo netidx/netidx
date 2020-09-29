@@ -22,11 +22,13 @@ pub(super) struct Table {
 
 impl Table {
     pub(super) fn new(on_change: OnChange, path: Path) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        root.pack_start(&pathbox, false, false, 0);
         let label = gtk::Label::new(Some("Path:"));
         let entry = gtk::Entry::new();
-        root.pack_start(&label, false, false, 0);
-        root.pack_start(&entry, true, true, 0);
+        pathbox.pack_start(&label, false, false, 0);
+        pathbox.pack_start(&entry, true, true, 0);
         let spec = Rc::new(RefCell::new(path));
         entry.set_text(&**spec.borrow());
         entry.connect_activate(clone!(@strong spec => move |e| {
@@ -174,8 +176,10 @@ pub(super) struct Label {
 
 impl Label {
     pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Source) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
+        root.pack_start(&pathbox, false, false, 0);
         let (l, e, source) = source(
             ctx,
             "Source:",
@@ -185,8 +189,8 @@ impl Label {
                 on_change()
             }),
         );
-        root.pack_start(&l, false, false, 0);
-        root.pack_start(&e, true, true, 0);
+        pathbox.pack_start(&l, false, false, 0);
+        pathbox.pack_start(&e, true, true, 0);
         Label { root, spec, source }
     }
 
@@ -1028,22 +1032,24 @@ impl Grid {
     pub(super) fn new(on_change: OnChange, spec: view::Grid) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.add(parse_entry(
-            "Homogeneous Columns:",
-            &spec.borrow().homogeneous_columns,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().homogeneous_columns = s;
+        let homogeneous_columns = gtk::CheckButton::with_label("Homogeneous Columns");
+        homogeneous_columns.set_active(spec.borrow().homogeneous_columns);
+        homogeneous_columns.connect_toggled(
+            clone!(@strong on_change, @strong spec => move |b| {
+                spec.borrow_mut().homogeneous_columns = b.get_active();
                 on_change()
             }),
-        ));
-        root.add(parse_entry(
-            "Homogeneous Rows:",
-            &spec.borrow().homogeneous_rows,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().homogeneous_rows = s;
+        );
+        root.attach(&homogeneous_columns, 0, 2, 1);
+        let homogeneous_rows = gtk::CheckButton::with_label("Homogeneous Rows");
+        homogeneous_rows.set_active(spec.borrow().homogeneous_rows);
+        homogeneous_rows.connect_toggled(
+            clone!(@strong on_change, @strong spec => move |b| {
+                spec.borrow_mut().homogeneous_rows = b.get_active();
                 on_change()
             }),
-        ));
+        );
+        root.attach(&homogeneous_rows, 0, 2, 1);
         root.add(parse_entry(
             "Column Spacing:",
             &spec.borrow().column_spacing,
