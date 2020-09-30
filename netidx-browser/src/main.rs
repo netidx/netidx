@@ -1078,7 +1078,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     window.connect_delete_event(clone!(
         @strong ctx,
         @strong saved => @default-return Inhibit(false), move |w, _| {
-            if saved.get() || ask_modal(w, "Unsaved view will be lost, are you sure?") {
+            if saved.get() || ask_modal(w, "Unsaved view will be lost.") {
                 let _: result::Result<_, _> =
                     ctx.from_gui.unbounded_send(FromGui::Terminate);
                 Inhibit(false)
@@ -1124,12 +1124,16 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     ));
     let go_act = gio::SimpleAction::new("go", None);
     window.add_action(&go_act);
-    go_act.connect_activate(clone!(@strong ctx, @weak window => move |_, _| {
-        if let Some(loc) = choose_location(&window, false) {
-            let _: result::Result<_, _> =
-                ctx.from_gui.unbounded_send(FromGui::Navigate(loc));
-        }
-    }));
+    go_act.connect_activate(
+        clone!(@strong ctx, @strong saved, @weak window => move |_, _| {
+            if saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
+                if let Some(loc) = choose_location(&window, false) {
+                    let _: result::Result<_, _> =
+                        ctx.from_gui.unbounded_send(FromGui::Navigate(loc));
+                }
+            }
+        }),
+    );
     let save_as_act = gio::SimpleAction::new("save_as", None);
     window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
@@ -1145,17 +1149,21 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let raw_view_act =
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
     window.add_action(&raw_view_act);
-    raw_view_act.connect_activate(
-        clone!(@strong ctx, @strong current_loc => move |a, _| {
-            if let Some(v) = a.get_state() {
-                let new_v = !v.get::<bool>().expect("invalid state");
+    raw_view_act.connect_activate(clone!(
+        @strong saved,
+        @strong ctx,
+        @strong current_loc,
+        @weak window => move |a, _| {
+        if let Some(v) = a.get_state() {
+            let new_v = !v.get::<bool>().expect("invalid state");
+            if new_v && (saved.get() || ask_modal(&window, "Unsaved view will be lost.")) {
                 ctx.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
                 let m = FromGui::Navigate(current_loc.borrow().clone());
                 let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
             }
-        }),
-    );
+        }
+    }));
     let new_window_act = gio::SimpleAction::new("new_window", None);
     window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
