@@ -83,5 +83,5 @@ pub(super) fn expander_touch_enable(root: &gtk::Expander) {
                 gtk::Inhibit(false)
             }
         }),
-    )
+    );
 }
