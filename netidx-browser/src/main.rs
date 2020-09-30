@@ -496,12 +496,7 @@ impl Widget {
     }
 }
 
-fn make_crumbs(
-    ctx: &WidgetCtx,
-    loc: &ViewLoc,
-    saved: &Rc<Cell<bool>>,
-    history: &Rc<RefCell<Vec<ViewLoc>>>,
-) -> gtk::Box {
+fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: &Rc<Cell<bool>>) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let ask_saved =
         Rc::new(clone!(@strong saved, @weak root => @default-return true, move || {
@@ -511,22 +506,6 @@ fn make_crumbs(
                 true
             }
         }));
-    let back =
-        gtk::Button::from_icon_name(Some("go-previous"), gtk::IconSize::SmallToolbar);
-    if history.borrow().len() == 0 {
-        back.set_sensitive(false);
-    }
-    root.pack_start(&back, false, false, 0);
-    back.connect_clicked(
-        clone!(@strong ctx, @strong history, @strong ask_saved => move |_| {
-            if ask_saved() {
-                if let Some(loc) = history.borrow().last() {
-                    let m = FromGui::Navigate(loc.clone());
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                }
-            }
-        }),
-    );
     match loc {
         ViewLoc::Netidx(path) => {
             for target in Path::dirnames(&path) {
@@ -607,7 +586,6 @@ impl View {
         ctx: WidgetCtx,
         path: &ViewLoc,
         saved: &Rc<Cell<bool>>,
-        history: &Rc<RefCell<Vec<ViewLoc>>>,
         spec: view::View,
     ) -> View {
         let selected_path = gtk::Label::new(None);
@@ -628,7 +606,7 @@ impl View {
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_property_margin(2);
-        root.add(&make_crumbs(&ctx, path, saved, history));
+        root.add(&make_crumbs(&ctx, path, saved));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -1098,7 +1076,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> =
         Rc::new(RefCell::new(ViewLoc::Netidx(Path::from("/"))));
-    let history: Rc<RefCell<Vec<ViewLoc>>> = Rc::new(RefCell::new(Vec::new()));
     let current_spec: Rc<RefCell<protocol_view::View>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
@@ -1240,11 +1217,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     } else {
                         *save_loc.borrow_mut() = None;
                     }
-                    if Some(&loc) == history.borrow().last() {
-                        history.borrow_mut().pop();
-                    } else if &loc != &*current_loc.borrow() {
-                        history.borrow_mut().push(current_loc.borrow().clone());
-                    }
                     *current_loc.borrow_mut() = loc;
                     if design_mode.get_active() {
                         design_mode.set_active(false);
@@ -1252,13 +1224,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 }
             }
             *current_spec.borrow_mut() = original.clone();
-            let cur = View::new(
-                (*ctx).clone(),
-                &*current_loc.borrow(),
-                &saved,
-                &history,
-                raeified,
-            );
+            let cur = View::new((*ctx).clone(), &*current_loc.borrow(), &saved, raeified);
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
