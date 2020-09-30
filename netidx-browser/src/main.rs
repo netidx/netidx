@@ -511,7 +511,8 @@ fn make_crumbs(
                 true
             }
         }));
-    let back = gtk::Button::from_icon_name(Some("back"), gtk::IconSize::SmallToolbar);
+    let back =
+        gtk::Button::from_icon_name(Some("go-previous"), gtk::IconSize::SmallToolbar);
     if history.borrow().len() == 0 {
         back.set_sensitive(false);
     }
