@@ -496,15 +496,36 @@ impl Widget {
     }
 }
 
-fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Box {
+fn make_crumbs(
+    ctx: &WidgetCtx,
+    loc: &ViewLoc,
+    saved: &Rc<Cell<bool>>,
+    history: &Rc<RefCell<Vec<ViewLoc>>>,
+) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-    let ask_saved = Rc::new(clone!(@weak root => @default-return true, move || {
-        if !saved.get() {
-            ask_modal(&root, "Unsaved custom view will be lost. continue?")
-        } else {
-            true
-        }
-    }));
+    let ask_saved =
+        Rc::new(clone!(@strong saved, @weak root => @default-return true, move || {
+            if !saved.get() {
+                ask_modal(&root, "Unsaved view will be lost.")
+            } else {
+                true
+            }
+        }));
+    let back = gtk::Button::from_icon_name(Some("back"), gtk::IconSize::SmallToolbar);
+    if history.borrow().len() == 0 {
+        back.set_sensitive(false);
+    }
+    root.pack_start(&back, false, false, 0);
+    back.connect_clicked(
+        clone!(@strong ctx, @strong history, @strong ask_saved => move |_| {
+            if ask_saved() {
+                if let Some(loc) = history.borrow_mut().pop() {
+                    let m = FromGui::Navigate(loc);
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                }
+            }
+        }),
+    );
     match loc {
         ViewLoc::Netidx(path) => {
             for target in Path::dirnames(&path) {
@@ -547,7 +568,8 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Bo
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    let m = FromGui::Navigate(ViewLoc::Netidx(Path::from("/")));
+                    let loc = ViewLoc::Netidx(Path::from("/"));
+                    let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                     Inhibit(false)
                 }),
@@ -563,7 +585,8 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: Rc<Cell<bool>>) -> gtk::Bo
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    let m = FromGui::Navigate(ViewLoc::File(name.clone()));
+                    let loc = ViewLoc::File(name.clone());
+                    let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                     Inhibit(false)
                 }),
@@ -582,7 +605,8 @@ impl View {
     fn new(
         ctx: WidgetCtx,
         path: &ViewLoc,
-        saved: Rc<Cell<bool>>,
+        saved: &Rc<Cell<bool>>,
+        history: &Rc<RefCell<Vec<ViewLoc>>>,
         spec: view::View,
     ) -> View {
         let selected_path = gtk::Label::new(None);
@@ -602,7 +626,7 @@ impl View {
             selected_path.clone(),
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.add(&make_crumbs(&ctx, path, saved));
+        root.add(&make_crumbs(&ctx, path, saved, history));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -775,6 +799,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                     kind: view::WidgetKind::Table(base_path.clone(), spec)
                                 }
                             };
+                            let raw = ctx.raw_view.load(Ordering::Relaxed);
                             let m = ToGui::View {
                                 loc: Some(ViewLoc::Netidx(base_path.clone())),
                                 original: default_view(base_path.clone()),
@@ -782,7 +807,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 generated: true,
                             };
                             break_err!(ctx.to_gui.send(m));
-                            if !ctx.raw_view.load(Ordering::Relaxed) {
+                            if !raw {
                                 let s = subscriber
                                     .durable_subscribe(base_path.append(".view"));
                                 let (tx, rx) = mpsc::channel(2);
@@ -795,6 +820,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                     }
                 },
                 Some(FromGui::Navigate(ViewLoc::File(file))) => {
+                    // CR estokes: async!
                     match fs::read_to_string(&file) {
                         Err(e) => {
                             let m =
@@ -816,7 +842,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                         loc: Some(ViewLoc::File(file)),
                                         original: v,
                                         raeified: r,
-                                        generated: false
+                                        generated: false,
                                     };
                                     break_err!(ctx.to_gui.send(m));
                                 },
@@ -854,7 +880,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                                 loc: Some(ViewLoc::Netidx(path.clone())),
                                                 original: view,
                                                 raeified: v,
-                                                generated: false
+                                                generated: false,
                                             };
                                             break_err!(ctx.to_gui.send(m));
                                             info!("updated gui view")
@@ -1070,6 +1096,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> =
         Rc::new(RefCell::new(ViewLoc::Netidx(Path::from("/"))));
+    let history: Rc<RefCell<Vec<ViewLoc>>> = Rc::new(RefCell::new(Vec::new()));
     let current_spec: Rc<RefCell<protocol_view::View>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
@@ -1128,8 +1155,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         clone!(@strong ctx, @strong saved, @weak window => move |_, _| {
             if saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
                 if let Some(loc) = choose_location(&window, false) {
-                    let _: result::Result<_, _> =
-                        ctx.from_gui.unbounded_send(FromGui::Navigate(loc));
+                    let m = FromGui::Navigate(loc);
+                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
             }
         }),
@@ -1211,6 +1238,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     } else {
                         *save_loc.borrow_mut() = None;
                     }
+                    if &loc != &*current_loc.borrow() {
+                        history.borrow_mut().push(current_loc.borrow().clone());
+                    }
                     *current_loc.borrow_mut() = loc;
                     if design_mode.get_active() {
                         design_mode.set_active(false);
@@ -1221,7 +1251,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             let cur = View::new(
                 (*ctx).clone(),
                 &*current_loc.borrow(),
-                Rc::clone(&saved),
+                &saved,
+                &history,
                 raeified,
             );
             if let Some(cur) = current.borrow_mut().take() {
@@ -1263,7 +1294,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::TryNavigate(v) => {
             match v {
                 Value::String(path) => {
-                    let m = FromGui::Navigate(ViewLoc::Netidx(Path::from(path)));
+                    let loc = ViewLoc::Netidx(Path::from(path));
+                    let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
                 v => err_modal(
