@@ -19,6 +19,7 @@ use std::{
     cell::{Cell, RefCell},
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    iter::FromIterator,
     ops::Drop,
     rc::{Rc, Weak},
     result,
@@ -108,13 +109,43 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
+fn apply_spec(spec: &view::Table, desc: &mut resolver::Table) {
+    fn filter_cols(
+        cols: &Vec<String>,
+        desc: &mut resolver::Table,
+        f: impl Fn(bool) -> bool,
+    ) {
+        let set = HashSet::from_iter(cols.into().cloned().map(Path::from));
+        let mut i = 0;
+        while i < descr.cols.len() {
+            if f(set.contains(&descr.cols[i].0)) {
+                descr.cols.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    match spec.columns {
+        view::ColumnSpec::Auto => (),
+        view::Hide(cols) => filter_cols(cols, desc, |x| x),
+        view::Exact(cols) => {
+            let order = HashMap::from_iter(
+                cols.iter().cloned().map(Path::from).enumerate().map(|(i, c)| (c, i)),
+            );
+            filter_cols(set, desc, |x| !x);
+            desc.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(order[c1]));
+        }
+    }
+}
+
 impl Table {
     pub(super) fn new(
         ctx: WidgetCtx,
-        base_path: Path,
+        spec: view::Table,
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> Table {
+        apply_spec(&spec, &mut descriptor);
         let view = TreeView::new();
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);

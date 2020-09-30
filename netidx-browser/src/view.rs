@@ -67,7 +67,7 @@ pub(super) struct Grid {
 #[derive(Debug, Clone)]
 pub(super) enum WidgetKind {
     Action(view::Action),
-    Table(Path, resolver::Table),
+    Table(view::Table, resolver::Table),
     Label(view::Source),
     Button(view::Button),
     Toggle(view::Toggle),
@@ -95,9 +95,9 @@ impl Widget {
         boxed::Box::pin(async move {
             let kind = match widget.kind {
                 view::WidgetKind::Action(a) => WidgetKind::Action(a),
-                view::WidgetKind::Table(path) => {
-                    let spec = resolver.table(path.clone()).await?;
-                    WidgetKind::Table(path, spec)
+                view::WidgetKind::Table(spec) => {
+                    let desc = resolver.table(spec.path.clone()).await?;
+                    WidgetKind::Table(spec, desc)
                 }
                 view::WidgetKind::Label(s) => WidgetKind::Label(s),
                 view::WidgetKind::Button(b) => WidgetKind::Button(b),

@@ -141,6 +141,26 @@ pub struct Action {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SortDir {
+    Ascending,
+    Descending
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ColumnSpec {
+    Exactly(Vec<String>),
+    Hide(Vec<String>),
+    Auto
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Table {
+    pub path: Path,
+    pub default_sort_column: Option<(String, SortDir)>,
+    pub columns: ColumnSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Button {
     pub enabled: Source,
     pub label: Source,
@@ -260,7 +280,7 @@ pub struct LinePlot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
     Action(Action),
-    Table(Path),
+    Table(Table),
     Label(Source),
     Button(Button),
     Toggle(Toggle),
