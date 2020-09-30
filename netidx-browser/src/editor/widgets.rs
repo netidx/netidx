@@ -25,16 +25,17 @@ impl Table {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&pathbox, false, false, 0);
-        let label = gtk::Label::new(Some("Path:"));
-        let entry = gtk::Entry::new();
+        let spec = Rc::new(RefCell::new(path));
+        let (label, entry) = parse_entry(
+            "Path:",
+            &*spec.borrow(),
+            clone!(@strong spec => move |s| {
+                *spec.borrow_mut() = s;
+                on_change()
+            }),
+        );
         pathbox.pack_start(&label, false, false, 0);
         pathbox.pack_start(&entry, true, true, 0);
-        let spec = Rc::new(RefCell::new(path));
-        entry.set_text(&**spec.borrow());
-        entry.connect_activate(clone!(@strong spec => move |e| {
-            *spec.borrow_mut() = Path::from(String::from(&*e.get_text()));
-            on_change()
-        }));
         Table { root, spec }
     }
 
@@ -71,11 +72,20 @@ fn source(
     ibox.pack_start(&entry, true, true, 0);
     ibox.pack_end(&inspect, false, false, 0);
     entry.set_text(&source.borrow().to_string());
+    entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
+    entry.connect_changed(move |e| {
+        e.set_icon_from_icon_name(
+            gtk::EntryIconPosition::Secondary,
+            Some("media-floppy"),
+        );
+    });
+    entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
         match e.get_text().parse::<view::Source>() {
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
+                e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
                 inspect.set_active(false);
                 *source.borrow_mut() = s.clone();
                 on_change(s);
@@ -96,13 +106,10 @@ fn source(
             let w = gtk::Window::new(gtk::WindowType::Toplevel);
             w.set_default_size(640, 480);
             let on_change = {
-                let on_change = on_change.clone();
                 let entry = entry.clone();
-                let source = source.clone();
                 move |s: view::Source| {
                     entry.set_text(&s.to_string());
-                    *source.borrow_mut() = s.clone();
-                    on_change(s)
+                    entry.emit_activate();
                 }
             };
             let si = SourceInspector::new(ctx.clone(), on_change, source.borrow().clone());

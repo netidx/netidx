@@ -15,11 +15,19 @@ where
     let label = gtk::Label::new(Some(label));
     let entry = gtk::Entry::new();
     entry.set_text(&spec.to_string());
+    entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
+    entry.connect_changed(move |e| {
+        e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, Some("media-floppy"))
+    });
+    entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(move |e| {
         let txt = e.get_text();
         match txt.parse::<T>() {
             Err(e) => warn!("invalid value: {}, {}", &*txt, e),
-            Ok(src) => on_change(src),
+            Ok(src) => {
+                e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
+                on_change(src);
+            }
         }
     });
     (label, entry)
