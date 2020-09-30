@@ -62,3 +62,26 @@ impl TwoColGrid {
         &self.root
     }
 }
+
+/// 2020-09-29: for some reason expanders are very hard to click
+/// properly on a touch screen. However just adding an event that
+/// causes them to toggle when clicked with button 1 is all that's
+/// needed to fix it. I suspect that by default the expander widget
+/// uses hover logic (the arrow lights up when you hover), and of
+/// course that doesn't work on a touch screen. This fix should be
+/// removed when that behavior is fixed.
+pub(super) fn expander_touch_enable(root: &gtk::Expander) {
+    root.connect_button_press_event(
+        clone!(@weak root => @default-return gtk::Inhibit(false), move |_, ev| {
+            let left_click =
+                gdk::EventType::ButtonPress == ev.get_event_type()
+                && ev.get_button() == 1;
+            if left_click {
+                root.set_expanded(!root.get_expanded());
+                gtk::Inhibit(true)
+            } else {
+                gtk::Inhibit(false)
+            }
+        }),
+    )
+}

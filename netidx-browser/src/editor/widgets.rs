@@ -1,4 +1,4 @@
-use super::super::{util::err_modal, Target, WidgetCtx};
+use super::super::{util::{self, err_modal}, Target, WidgetCtx};
 use super::{
     source_inspector::SourceInspector,
     util::{parse_entry, TwoColGrid},
@@ -540,7 +540,7 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) {
         let axis_exp = gtk::Expander::new(Some("Axis Style"));
-        axis_exp.set_label_fill(true);
+        util::expander_touch_enable(&series_exp);
         let mut axis = TwoColGrid::new();
         root.pack_start(&axis_exp, false, false, 0);
         axis_exp.add(axis.root());
@@ -599,7 +599,7 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> (DbgSrc, DbgSrc, DbgSrc, DbgSrc, DbgSrc) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
-        range_exp.set_label_fill(true);
+        util::expander_touch_enable(&series_exp);
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
         range_exp.add(range.root());
@@ -662,7 +662,7 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) {
         let style_exp = gtk::Expander::new(Some("Chart Style"));
-        style_exp.set_label_fill(true);
+        util::expander_touch_enable(&series_exp);
         let mut style = TwoColGrid::new();
         root.pack_start(&style_exp, false, false, 0);
         style_exp.add(style.root());
@@ -738,7 +738,7 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> Rc<RefCell<IndexMap<usize, Series>>> {
         let series_exp = gtk::Expander::new(Some("Series"));
-        series_exp.set_label_fill(true);
+        util::expander_touch_enable(&series_exp);
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let addbtn = gtk::Button::with_label("+");
         series_exp.add(&seriesbox);
