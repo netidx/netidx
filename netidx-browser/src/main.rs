@@ -519,8 +519,8 @@ fn make_crumbs(
     back.connect_clicked(
         clone!(@strong ctx, @strong history, @strong ask_saved => move |_| {
             if ask_saved() {
-                if let Some(loc) = history.borrow_mut().pop() {
-                    let m = FromGui::Navigate(loc);
+                if let Some(loc) = history.borrow().last() {
+                    let m = FromGui::Navigate(loc.clone());
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
             }
@@ -626,6 +626,7 @@ impl View {
             selected_path.clone(),
         );
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        root.set_property_margin(2);
         root.add(&make_crumbs(&ctx, path, saved, history));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
@@ -1238,7 +1239,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     } else {
                         *save_loc.borrow_mut() = None;
                     }
-                    if &loc != &*current_loc.borrow() {
+                    if Some(&loc) == history.borrow().last() {
+                        history.borrow_mut().pop();
+                    } else if &loc != &*current_loc.borrow() {
                         history.borrow_mut().push(current_loc.borrow().clone());
                     }
                     *current_loc.borrow_mut() = loc;
