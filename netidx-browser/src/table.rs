@@ -260,6 +260,20 @@ impl Table {
                 }));
             }));
         });
+        if let Some((col, dir)) = spec.default_sort_column {
+            let col = Path::from(col.clone());
+            let idx = desc.cols
+                .iter()
+                .enumerate()
+                .find_map(|(i, (c, _))| if c == col { Some(i) } else { None });
+            let dir = match dir {
+                view::SortDir::Ascending => gtk::SortType::Ascending,
+                view::SortDir::Descending => gtk::SortType::Descending,
+            };
+            if let Some(i) = idx {
+                t.store().set_sort_column_id(i as i32, dir)
+            }
+        }
         t
     }
 
