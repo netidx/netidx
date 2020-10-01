@@ -15,6 +15,7 @@ use netidx::{
     resolver,
     subscriber::{Dval, SubId, Value},
 };
+use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     cmp::Ordering,
@@ -44,7 +45,7 @@ struct TableInner {
     focus_row: RefCell<Option<String>>,
     descriptor: resolver::Table,
     vector_mode: bool,
-    base_path: Path,
+    spec: view::Table,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
@@ -109,13 +110,13 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-fn apply_spec(spec: &view::Table, desc: &mut resolver::Table) {
+fn apply_spec(spec: &view::Table, descr: &mut resolver::Table) {
     fn filter_cols(
         cols: &Vec<String>,
-        desc: &mut resolver::Table,
+        descr: &mut resolver::Table,
         f: impl Fn(bool) -> bool,
     ) {
-        let set = HashSet::from_iter(cols.into().cloned().map(Path::from));
+        let set: HashSet<Path> = HashSet::from_iter(cols.iter().cloned().map(Path::from));
         let mut i = 0;
         while i < descr.cols.len() {
             if f(set.contains(&descr.cols[i].0)) {
@@ -125,15 +126,15 @@ fn apply_spec(spec: &view::Table, desc: &mut resolver::Table) {
             }
         }
     }
-    match spec.columns {
+    match &spec.columns {
         view::ColumnSpec::Auto => (),
-        view::Hide(cols) => filter_cols(cols, desc, |x| x),
-        view::Exact(cols) => {
-            let order = HashMap::from_iter(
+        view::ColumnSpec::Hide(cols) => filter_cols(&cols, descr, |x| x),
+        view::ColumnSpec::Exactly(cols) => {
+            let order: HashMap<Path, usize> = HashMap::from_iter(
                 cols.iter().cloned().map(Path::from).enumerate().map(|(i, c)| (c, i)),
             );
-            filter_cols(set, desc, |x| !x);
-            desc.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(order[c1]));
+            filter_cols(&cols, descr, |x| !x);
+            descr.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(&order[c1]));
         }
     }
 }
@@ -179,7 +180,7 @@ impl Table {
             store,
             descriptor,
             vector_mode,
-            base_path,
+            spec,
             style,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
@@ -245,7 +246,7 @@ impl Table {
         t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
-                    let path = t.0.base_path.append(row_name);
+                    let path = t.0.spec.path.append(row_name);
                     let m = FromGui::Navigate(ViewLoc::Netidx(path));
                     let _: result::Result<_, _> = t.0.ctx.from_gui.unbounded_send(m);
                 }
@@ -260,18 +261,18 @@ impl Table {
                 }));
             }));
         });
-        if let Some((col, dir)) = spec.default_sort_column {
+        if let Some((col, dir)) = &t.0.spec.default_sort_column {
             let col = Path::from(col.clone());
-            let idx = desc.cols
+            let idx = t.0.descriptor.cols
                 .iter()
                 .enumerate()
-                .find_map(|(i, (c, _))| if c == col { Some(i) } else { None });
+                .find_map(|(i, (c, _))| if c == &col { Some(i) } else { None });
             let dir = match dir {
                 view::SortDir::Ascending => gtk::SortType::Ascending,
                 view::SortDir::Descending => gtk::SortType::Descending,
             };
             if let Some(i) = idx {
-                t.store().set_sort_column_id(i as i32, dir)
+                t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
             }
         }
         t
@@ -337,9 +338,9 @@ impl Table {
                         c.as_ref().and_then(|c| c.get_title())
                     };
                     match col_name {
-                        None => self.0.base_path.append(row_name),
+                        None => self.0.spec.path.append(row_name),
                         Some(col_name) => {
-                            self.0.base_path.append(row_name).append(col_name.as_str())
+                            self.0.spec.path.append(row_name).append(col_name.as_str())
                         }
                     }
                 }
@@ -405,7 +406,7 @@ impl Table {
             let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
-                let p = self.0.base_path.append(row_name);
+                let p = self.0.spec.path.append(row_name);
                 let p = if self.0.vector_mode {
                     p
                 } else {

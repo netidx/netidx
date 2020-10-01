@@ -652,7 +652,11 @@ fn default_view(path: Path) -> protocol_view::View {
         variables: HashMap::new(),
         keybinds: Vec::new(),
         root: protocol_view::Widget {
-            kind: protocol_view::WidgetKind::Table(path),
+            kind: protocol_view::WidgetKind::Table(protocol_view::Table {
+                path,
+                default_sort_column: None,
+                columns: protocol_view::ColumnSpec::Auto,
+            }),
             props: DEFAULT_PROPS,
         },
     }
@@ -776,7 +780,11 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 variables: HashMap::new(),
                                 root: view::Widget {
                                     props: DEFAULT_PROPS,
-                                    kind: view::WidgetKind::Table(base_path.clone(), spec)
+                                    kind: view::WidgetKind::Table(view::Table {
+                                        path: base_path.clone(),
+                                        default_sort_column: None,
+                                        columns: view::ColumnSpec::Auto
+                                    }, spec)
                                 }
                             };
                             let raw = ctx.raw_view.load(Ordering::Relaxed);

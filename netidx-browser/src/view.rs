@@ -1,7 +1,6 @@
 use anyhow::Result;
 use futures::{future::join_all, prelude::Future};
 use netidx::{
-    path::Path,
     resolver::{self, ResolverRead},
     subscriber::Value,
 };

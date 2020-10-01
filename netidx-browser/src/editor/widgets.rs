@@ -17,20 +17,20 @@ use std::{
 #[derive(Clone, Debug)]
 pub(super) struct Table {
     root: gtk::Box,
-    spec: Rc<RefCell<Path>>,
+    spec: Rc<RefCell<view::Table>>,
 }
 
 impl Table {
-    pub(super) fn new(on_change: OnChange, path: Path) -> Self {
+    pub(super) fn new(on_change: OnChange, path: view::Table) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&pathbox, false, false, 0);
         let spec = Rc::new(RefCell::new(path));
         let (label, entry) = parse_entry(
             "Path:",
-            &*spec.borrow(),
+            &spec.borrow().path,
             clone!(@strong spec => move |s| {
-                *spec.borrow_mut() = s;
+                spec.borrow_mut().path = s;
                 on_change()
             }),
         );

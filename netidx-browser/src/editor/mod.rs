@@ -284,12 +284,20 @@ impl Widget {
             view::Widget { kind, props: DEFAULT_PROPS }
         }
         match name {
-            None => widget(view::WidgetKind::Table(Path::from("/"))),
+            None => widget(view::WidgetKind::Table(view::Table {
+                path: Path::from("/"),
+                default_sort_column: None,
+                columns: view::ColumnSpec::Auto,
+            })),
             Some("Action") => widget(view::WidgetKind::Action(view::Action {
                 source: view::Source::Constant(Value::U64(42)),
                 sink: view::Sink::Variable(String::from("foo")),
             })),
-            Some("Table") => widget(view::WidgetKind::Table(Path::from("/"))),
+            Some("Table") => widget(view::WidgetKind::Table(view::Table {
+                path: Path::from("/"),
+                default_sort_column: None,
+                columns: view::ColumnSpec::Auto,
+            })),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
                 widget(view::WidgetKind::Label(view::Source::Constant(s)))
