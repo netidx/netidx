@@ -36,7 +36,7 @@ impl Table {
         );
         pathbox.pack_start(&label, false, false, 0);
         pathbox.pack_start(&entry, true, true, 0);
-        let default_sort_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let default_sort_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.pack_start(&default_sort_box, false, false, 0);
         let default_sort_cb = gtk::CheckButton::with_label("Default Sort");
         let show_hide_default_sort_gui = Rc::new(clone!(
@@ -58,8 +58,9 @@ impl Table {
                         None => (&empty_col, view::SortDir::Ascending),
                         Some((ref c, d)) => (c, d)
                     };
-                    let (_, ent) = parse_entry(
-                        "",
+                    let col_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+                    let (lbl, ent) = parse_entry(
+                        "Column:",
                         current_col,
                         clone!(@strong spec, @strong on_change => move |c| {
                             let mut spec = spec.borrow_mut();
@@ -73,7 +74,9 @@ impl Table {
                             on_change()
                         })
                     );
-                    default_sort_box.pack_start(&ent, false, false, 0);
+                    col_box.pack_start(&lbl, false, false, 0);
+                    col_box.pack_start(&ent, false, false, 0);
+                    default_sort_box.pack_start(&col_box, false, false, 0);
                     let cb = gtk::ComboBoxText::new();
                     cb.append(Some("Ascending"), "Ascending");
                     cb.append(Some("Descending"), "Descending");
@@ -110,6 +113,111 @@ impl Table {
         if spec.borrow().default_sort_column.is_some() {
             show_hide_default_sort_gui(true);
         }
+        let colscb = gtk::ComboBoxText::new();
+        colscb.append(Some("Auto"), "Auto");
+        colscb.append(Some("Exactly"), "Exactly");
+        colscb.append(Some("Hide"), "Hide");
+        colscb.set_active_id(match spec.borrow().columns {
+            view::ColumnSpec::Auto => Some("Auto"),
+            view::ColumnSpec::Hide(_) => Some("Hide"),
+            view::ColumnSpec::Exactly(_) => Some("Exactly"),
+        });
+        root.pack_start(&colscb, false, false, 0);
+        let cols_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        root.pack_start(&cols_box, true, true, 0);
+        let cols_gui = Rc::new(clone!(@strong spec, @weak cols_box => move || {
+            for c in cols_box.get_children() {
+                c.hide();
+                cols_box.remove(&c)
+            }
+            match &spec.borrow().columns {
+                view::ColumnSpec::Auto => (),
+                view::ColumnSpec::Exactly(cols) | view::ColumnSpec::Hide(cols) => {
+                    let btnbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+                    let addbtn = gtk::Button::with_label("+");
+                    let delbtn = gtk::Button::with_label("-");
+                    btnbox.pack_start(&addbtn, false, false, 0);
+                    btnbox.pack_start(&delbtn, false, false, 0);
+                    cols_box.pack_start(&btnbox, false, false, 0);
+                    let win = gtk::ScrolledWindow::new(
+                        None::<&gtk::Adjustment>,
+                        None::<&gtk::Adjustment>
+                    );
+                    win.set_policy(
+                        gtk::PolicyType::Automatic,
+                        gtk::PolicyType::Automatic
+                    );
+                    cols_box.pack_start(&win, true, true, 0);
+                    let view = gtk::TreeView::new();
+                    let store = gtk::ListStore::new(&[String::static_type()]);
+                    win.add(&view);
+                    for c in cols.iter() {
+                        let iter = store.append();
+                        store.set_value(&iter, 0, &c.to_value());
+                    }
+                    view.append_column(&{
+                        let column = gtk::TreeViewColumn::new();
+                        let cell = gtk::CellRendererText::new();
+                        column.pack_start(&cell, true);
+                        column.set_title("column");
+                        column.add_attribute(&cell, "text", 0);
+                        cell.set_property_editable(true);
+                        column
+                    });
+                    view.get_selection().set_mode(gtk::SelectionMode::Single);
+                    view.set_reorderable(true);
+                    view.set_model(Some(&store));
+                    addbtn.connect_clicked(clone!(
+                        @weak store => move |_| {
+                            let iter = store.append();
+                            store.set_value(&iter, 0, &"".to_value());
+                        }));
+                    delbtn.connect_clicked(clone!(
+                        @weak store, @weak view => move |_| {
+                            let selection = view.get_selection();
+                            if let Some((_, i)) = selection.get_selected() {
+                                store.remove(&i);
+                            }
+                        }));
+                    store.connect_row_changed(clone!(
+                        @strong spec,
+                        @strong on_change => move |store, _, _| {
+                            match &mut spec.borrow_mut().columns {
+                                view::ColumnSpec::Auto => (),
+                                view::ColumnSpec::Exactly(ref mut cols)
+                                    | view::ColumnSpec::Hide(ref mut cols) => {
+                                        cols.clear();
+                                        store.foreach(|store, _, iter| {
+                                            let v = store.get_value(&iter, 0);
+                                            if let Ok(Some(c)) = v.get::<&str>() {
+                                                cols.push(String::from(c));
+                                            }
+                                            false
+                                        })
+                                    }
+                            }
+                            on_change()
+                    }));
+                }
+            }
+        }));
+        colscb.connect_changed(clone!(
+            @strong spec, @strong cols_gui => move |b| {
+                match b.get_active_id() {
+                    Some(s) if &*s == "Auto" => {
+                        spec.borrow_mut().columns = view::ColumnSpec::Auto;
+                    }
+                    Some(s) if &*s == "Exactly" => {
+                        spec.borrow_mut().columns = view::ColumnSpec::Exactly(Vec::new());
+                    }
+                    Some(s) if &*s == "Hide" => {
+                        spec.borrow_mut().columns = view::ColumnSpec::Hide(Vec::new());
+                    }
+                    _ => { spec.borrow_mut().columns = view::ColumnSpec::Auto; }
+                }
+                cols_gui()
+        }));
+        cols_gui();
         Table { root, spec }
     }
 

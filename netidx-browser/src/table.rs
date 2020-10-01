@@ -266,7 +266,7 @@ impl Table {
             let idx = t.0.descriptor.cols
                 .iter()
                 .enumerate()
-                .find_map(|(i, (c, _))| if c == &col { Some(i) } else { None });
+                .find_map(|(i, (c, _))| if c == &col { Some(i + 1) } else { None });
             let dir = match dir {
                 view::SortDir::Ascending => gtk::SortType::Ascending,
                 view::SortDir::Descending => gtk::SortType::Descending,
