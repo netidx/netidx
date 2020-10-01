@@ -140,7 +140,7 @@ pub struct Action {
     pub sink: Sink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SortDir {
     Ascending,
     Descending

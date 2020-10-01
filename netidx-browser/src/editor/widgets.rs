@@ -22,20 +22,89 @@ pub(super) struct Table {
 
 impl Table {
     pub(super) fn new(on_change: OnChange, path: view::Table) -> Self {
+        let spec = Rc::new(RefCell::new(path));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&pathbox, false, false, 0);
-        let spec = Rc::new(RefCell::new(path));
         let (label, entry) = parse_entry(
             "Path:",
             &spec.borrow().path,
-            clone!(@strong spec => move |s| {
+            clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().path = s;
                 on_change()
             }),
         );
         pathbox.pack_start(&label, false, false, 0);
         pathbox.pack_start(&entry, true, true, 0);
+        let default_sort_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        root.pack_start(&default_sort_box, false, false, 0);
+        let default_sort_cb = gtk::CheckButton::with_label("Default Sort");
+        let show_hide_default_sort_gui = Rc::new(clone!(
+            @strong spec, @strong on_change, @weak default_sort_box => move |show: bool| {
+                if !show {
+                    let children = default_sort_box.get_children();
+                    if children.len() > 1 {
+                        for c in &children[1..] {
+                            c.hide();
+                            default_sort_box.remove(c);
+                        }
+                    }
+                } else {
+                    let empty_col = String::new();
+                    let spec_ref = spec.borrow();
+                    let (current_col, current_dir) = match spec_ref.default_sort_column {
+                        None => (&empty_col, view::SortDir::Ascending),
+                        Some((ref c, d)) => (c, d)
+                    };
+                    let (_, ent) = parse_entry(
+                        "",
+                        current_col,
+                        clone!(@strong spec, @strong on_change => move |c| {
+                            let mut spec = spec.borrow_mut();
+                            match &mut spec.default_sort_column {
+                                Some((ref mut column, _)) => { *column = c; }
+                                None => {
+                                    spec.default_sort_column =
+                                        Some((c, view::SortDir::Ascending));
+                                }
+                            }
+                            on_change()
+                        })
+                    );
+                    default_sort_box.pack_start(&ent, false, false, 0);
+                    let cb = gtk::ComboBoxText::new();
+                    cb.append(Some("Ascending"), "Ascending");
+                    cb.append(Some("Descending"), "Descending");
+                    cb.set_active_id(Some(match current_dir {
+                        view::SortDir::Ascending => "Ascending",
+                        view::SortDir::Descending => "Descending"
+                    }));
+                    cb.connect_changed(clone!(@strong spec, @strong on_change => move |c| {
+                        let dir = match c.get_active_id() {
+                            Some(s) if &*s == "Ascending" => view::SortDir::Ascending,
+                            Some(s) if &*s == "Descending" => view::SortDir::Descending,
+                            _ => view::SortDir::Ascending
+                        };
+                        let mut spec = spec.borrow_mut();
+                        match &mut spec.default_sort_column {
+                            Some((_, ref mut d)) => { *d = dir; }
+                            None => {
+                                spec.default_sort_column = Some(("".into(), dir));
+                            }
+                        }
+                        on_change()
+                    }));
+                    default_sort_box.pack_start(&cb, false, false, 0);
+                    default_sort_box.show_all();
+                }
+            }
+        ));
+        default_sort_box.pack_start(&default_sort_cb, false, false, 0);
+        default_sort_cb.connect_toggled(
+            clone!(@strong show_hide_default_sort_gui => move |b| {
+                show_hide_default_sort_gui(b.get_active())
+            }),
+        );
         Table { root, spec }
     }
 
