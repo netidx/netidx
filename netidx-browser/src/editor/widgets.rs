@@ -23,7 +23,7 @@ pub(super) struct Table {
 impl Table {
     pub(super) fn new(on_change: OnChange, path: view::Table) -> Self {
         let spec = Rc::new(RefCell::new(path));
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root.pack_start(&pathbox, false, false, 0);
         let (label, entry) = parse_entry(
@@ -36,9 +36,11 @@ impl Table {
         );
         pathbox.pack_start(&label, false, false, 0);
         pathbox.pack_start(&entry, true, true, 0);
+        let default_sort_frame = gtk::Frame::new(Some("Sort Config"));
         let default_sort_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.pack_start(&default_sort_box, false, false, 0);
-        let default_sort_cb = gtk::CheckButton::with_label("Default Sort");
+        root.pack_start(&default_sort_frame, false, false, 0);
+        default_sort_frame.add(&default_sort_box);
+        let default_sort_cb = gtk::CheckButton::with_label("Has Default Sort");
         let show_hide_default_sort_gui = Rc::new(clone!(
             @strong spec, @strong on_change, @weak default_sort_box => move |show: bool| {
                 if !show {
@@ -122,11 +124,13 @@ impl Table {
             view::ColumnSpec::Hide(_) => Some("Hide"),
             view::ColumnSpec::Exactly(_) => Some("Exactly"),
         });
-        root.pack_start(&colscb, false, false, 0);
+        let cols_frame = gtk::Frame::new(Some("Column Config"));
         let cols_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.pack_start(&cols_box, true, true, 0);
+        cols_frame.add(&cols_box);
+        root.pack_start(&cols_frame, true, true, 0);
+        cols_box.pack_start(&colscb, false, false, 0);
         let cols_gui = Rc::new(clone!(@strong spec, @weak cols_box => move || {
-            for c in cols_box.get_children() {
+            for c in cols_box.get_children().into_iter().skip(1) {
                 c.hide();
                 cols_box.remove(&c)
             }
@@ -173,9 +177,10 @@ impl Table {
                     view.set_reorderable(true);
                     view.set_model(Some(&store));
                     addbtn.connect_clicked(clone!(
-                        @weak store => move |_| {
+                        @weak view, @weak store => move |_| {
                             let iter = store.append();
                             store.set_value(&iter, 0, &"".to_value());
+                            view.get_selection().select_iter(&iter);
                         }));
                     delbtn.connect_clicked(clone!(
                         @weak store, @weak view => move |_| {
@@ -184,9 +189,10 @@ impl Table {
                                 store.remove(&i);
                             }
                         }));
-                    store.connect_row_changed(clone!(
+                    let changed = Rc::new(clone!(
+                        @weak store,
                         @strong spec,
-                        @strong on_change => move |store, _, _| {
+                        @strong on_change => move || {
                             match &mut spec.borrow_mut().columns {
                                 view::ColumnSpec::Auto => (),
                                 view::ColumnSpec::Exactly(ref mut cols)
@@ -203,6 +209,15 @@ impl Table {
                             }
                             on_change()
                         }));
+                    store.connect_row_changed(
+                        clone!(@strong changed => move |_, _, _| changed())
+                    );
+                    store.connect_row_deleted(
+                        clone!(@strong changed => move |_, _| changed())
+                    );
+                    store.connect_row_inserted(
+                        clone!(@strong changed => move |_, _, _| changed())
+                    );
                     cols_box.show_all();
                 }
             }
