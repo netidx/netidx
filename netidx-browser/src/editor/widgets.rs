@@ -49,6 +49,8 @@ impl Table {
                             default_sort_box.remove(c);
                         }
                     }
+                    spec.borrow_mut().default_sort_column = None;
+                    on_change()
                 } else {
                     let empty_col = String::new();
                     let spec_ref = spec.borrow();
@@ -105,6 +107,9 @@ impl Table {
                 show_hide_default_sort_gui(b.get_active())
             }),
         );
+        if spec.borrow().default_sort_column.is_some() {
+            show_hide_default_sort_gui(true);
+        }
         Table { root, spec }
     }
 
