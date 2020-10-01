@@ -162,6 +162,11 @@ impl Table {
                         column.set_title("column");
                         column.add_attribute(&cell, "text", 0);
                         cell.set_property_editable(true);
+                        cell.connect_edited(clone!(@weak store => move |_, p, txt| {
+                            if let Some(iter) = store.get_iter(&p) {
+                                store.set_value(&iter, 0, &txt.to_value());
+                            }
+                        }));
                         column
                     });
                     view.get_selection().set_mode(gtk::SelectionMode::Single);
@@ -197,7 +202,8 @@ impl Table {
                                     }
                             }
                             on_change()
-                    }));
+                        }));
+                    cols_box.show_all();
                 }
             }
         }));

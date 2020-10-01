@@ -152,8 +152,13 @@ impl Table {
         root.add(&view);
         let nrows = descriptor.rows.len();
         descriptor.rows.sort();
-        descriptor.cols.sort_by_key(|(p, _)| p.clone());
-        descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
+        match spec.columns {
+            view::ColumnSpec::Exactly(_) => (),
+            view::ColumnSpec::Auto | view::ColumnSpec::Hide(_) => {
+                descriptor.cols.sort_by_key(|(p, _)| p.clone());
+                descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
+            }
+        }
         view.get_selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
