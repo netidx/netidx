@@ -129,99 +129,100 @@ impl Table {
         cols_frame.add(&cols_box);
         root.pack_start(&cols_frame, true, true, 0);
         cols_box.pack_start(&colscb, false, false, 0);
-        let cols_gui = Rc::new(clone!(@strong spec, @weak cols_box => move || {
-            for c in cols_box.get_children().into_iter().skip(1) {
-                c.hide();
-                cols_box.remove(&c)
-            }
-            match &spec.borrow().columns {
-                view::ColumnSpec::Auto => (),
-                view::ColumnSpec::Exactly(cols) | view::ColumnSpec::Hide(cols) => {
-                    let btnbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-                    let addbtn = gtk::Button::with_label("+");
-                    let delbtn = gtk::Button::with_label("-");
-                    btnbox.pack_start(&addbtn, false, false, 0);
-                    btnbox.pack_start(&delbtn, false, false, 0);
-                    cols_box.pack_start(&btnbox, false, false, 0);
-                    let win = gtk::ScrolledWindow::new(
-                        None::<&gtk::Adjustment>,
-                        None::<&gtk::Adjustment>
-                    );
-                    win.set_policy(
-                        gtk::PolicyType::Automatic,
-                        gtk::PolicyType::Automatic
-                    );
-                    cols_box.pack_start(&win, true, true, 0);
-                    let view = gtk::TreeView::new();
-                    let store = gtk::ListStore::new(&[String::static_type()]);
-                    win.add(&view);
-                    for c in cols.iter() {
-                        let iter = store.append();
-                        store.set_value(&iter, 0, &c.to_value());
-                    }
-                    view.append_column(&{
-                        let column = gtk::TreeViewColumn::new();
-                        let cell = gtk::CellRendererText::new();
-                        column.pack_start(&cell, true);
-                        column.set_title("column");
-                        column.add_attribute(&cell, "text", 0);
-                        cell.set_property_editable(true);
-                        cell.connect_edited(clone!(@weak store => move |_, p, txt| {
-                            if let Some(iter) = store.get_iter(&p) {
-                                store.set_value(&iter, 0, &txt.to_value());
-                            }
-                        }));
-                        column
-                    });
-                    view.get_selection().set_mode(gtk::SelectionMode::Single);
-                    view.set_reorderable(true);
-                    view.set_model(Some(&store));
-                    addbtn.connect_clicked(clone!(
-                        @weak view, @weak store => move |_| {
-                            let iter = store.append();
-                            store.set_value(&iter, 0, &"".to_value());
-                            view.get_selection().select_iter(&iter);
-                        }));
-                    delbtn.connect_clicked(clone!(
-                        @weak store, @weak view => move |_| {
-                            let selection = view.get_selection();
-                            if let Some((_, i)) = selection.get_selected() {
-                                store.remove(&i);
-                            }
-                        }));
-                    let changed = Rc::new(clone!(
-                        @weak store,
-                        @strong spec,
-                        @strong on_change => move || {
-                            match &mut spec.borrow_mut().columns {
-                                view::ColumnSpec::Auto => (),
-                                view::ColumnSpec::Exactly(ref mut cols)
-                                    | view::ColumnSpec::Hide(ref mut cols) => {
-                                        cols.clear();
-                                        store.foreach(|store, _, iter| {
-                                            let v = store.get_value(&iter, 0);
-                                            if let Ok(Some(c)) = v.get::<&str>() {
-                                                cols.push(String::from(c));
-                                            }
-                                            false
-                                        })
-                                    }
-                            }
-                            on_change()
-                        }));
-                    store.connect_row_changed(
-                        clone!(@strong changed => move |_, _, _| changed())
-                    );
-                    store.connect_row_deleted(
-                        clone!(@strong changed => move |_, _| changed())
-                    );
-                    store.connect_row_inserted(
-                        clone!(@strong changed => move |_, _, _| changed())
-                    );
-                    cols_box.show_all();
+        let cols_gui =
+            Rc::new(clone!(@strong spec, @strong on_change, @weak cols_box => move || {
+                for c in cols_box.get_children().into_iter().skip(1) {
+                    c.hide();
+                    cols_box.remove(&c)
                 }
-            }
-        }));
+                match &spec.borrow().columns {
+                    view::ColumnSpec::Auto => on_change(),
+                    view::ColumnSpec::Exactly(cols) | view::ColumnSpec::Hide(cols) => {
+                        let btnbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+                        let addbtn = gtk::Button::with_label("+");
+                        let delbtn = gtk::Button::with_label("-");
+                        btnbox.pack_start(&addbtn, false, false, 0);
+                        btnbox.pack_start(&delbtn, false, false, 0);
+                        cols_box.pack_start(&btnbox, false, false, 0);
+                        let win = gtk::ScrolledWindow::new(
+                            None::<&gtk::Adjustment>,
+                            None::<&gtk::Adjustment>
+                        );
+                        win.set_policy(
+                            gtk::PolicyType::Automatic,
+                            gtk::PolicyType::Automatic
+                        );
+                        cols_box.pack_start(&win, true, true, 0);
+                        let view = gtk::TreeView::new();
+                        let store = gtk::ListStore::new(&[String::static_type()]);
+                        win.add(&view);
+                        for c in cols.iter() {
+                            let iter = store.append();
+                            store.set_value(&iter, 0, &c.to_value());
+                        }
+                        view.append_column(&{
+                            let column = gtk::TreeViewColumn::new();
+                            let cell = gtk::CellRendererText::new();
+                            column.pack_start(&cell, true);
+                            column.set_title("column");
+                            column.add_attribute(&cell, "text", 0);
+                            cell.set_property_editable(true);
+                            cell.connect_edited(clone!(@weak store => move |_, p, txt| {
+                                if let Some(iter) = store.get_iter(&p) {
+                                    store.set_value(&iter, 0, &txt.to_value());
+                                }
+                            }));
+                            column
+                        });
+                        view.get_selection().set_mode(gtk::SelectionMode::Single);
+                        view.set_reorderable(true);
+                        view.set_model(Some(&store));
+                        addbtn.connect_clicked(clone!(
+                            @weak view, @weak store => move |_| {
+                                let iter = store.append();
+                                store.set_value(&iter, 0, &"".to_value());
+                                view.get_selection().select_iter(&iter);
+                            }));
+                        delbtn.connect_clicked(clone!(
+                            @weak store, @weak view => move |_| {
+                                let selection = view.get_selection();
+                                if let Some((_, i)) = selection.get_selected() {
+                                    store.remove(&i);
+                                }
+                            }));
+                        let changed = Rc::new(clone!(
+                            @weak store,
+                            @strong spec,
+                            @strong on_change => move || {
+                                match &mut spec.borrow_mut().columns {
+                                    view::ColumnSpec::Auto => (),
+                                    view::ColumnSpec::Exactly(ref mut cols)
+                                        | view::ColumnSpec::Hide(ref mut cols) => {
+                                            cols.clear();
+                                            store.foreach(|store, _, iter| {
+                                                let v = store.get_value(&iter, 0);
+                                                if let Ok(Some(c)) = v.get::<&str>() {
+                                                    cols.push(String::from(c));
+                                                }
+                                                false
+                                            })
+                                        }
+                                }
+                                on_change()
+                            }));
+                        store.connect_row_changed(
+                            clone!(@strong changed => move |_, _, _| changed())
+                        );
+                        store.connect_row_deleted(
+                            clone!(@strong changed => move |_, _| changed())
+                        );
+                        store.connect_row_inserted(
+                            clone!(@strong changed => move |_, _, _| changed())
+                        );
+                        cols_box.show_all();
+                    }
+                }
+            }));
         colscb.connect_changed(clone!(
             @strong spec, @strong cols_gui => move |b| {
                 match b.get_active_id() {
