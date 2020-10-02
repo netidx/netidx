@@ -1,12 +1,14 @@
 * 0.4.0:
-  - protocol breaking changes (additions)
+  - protocol breaking changes (additions). 0.4 will be the last non backwards compatible protocol, from here on protocol breaking changes will introduce a new protocol version, and new library versions will be able to speak to old clients using the old version of the protocol.
   - allow publisher to unicast to specific subscribers
-  - writes return success or failure instead of silently eating errors
+  - writes can return success or failure instead of silently eating errors. This behavior is not mandatory, as it has a performance impact.
+  - netidx browser is now a separate binary from the tools
   - netidx browser "views", publishable and editable custom guis
-  - subscriber will notify explicitly when a subscription is unsubscribed
-  - simplify durable subscriber, shrink it's memory usage
-  - eliminate a race between durable subscriber subscription state and updates
-  - add many useful value types
+  - subscriber will notify explicitly when a subscription is unsubscribed. This imposes minimal to no overhead due to rust being awesome
+  - simplify durable subscriber, shrink it's memory usage a couple of words per subscription
+  - eliminate a race between durable subscriber subscription state and updates. Facepalm averted.
+  - add many useful value types, e.g. Result, DateTime, Duration
+  - It is now possible to build on Mac OS by disabling the (default) krb5_iov feature. This will result in reduced performance when talking to encrypted services, but it works.
 
 * 0.3.2:
   - minor api enhancement. add update_changed, and current to publisher::Val
@@ -21,7 +23,7 @@
 
 * 0.2.0:
   - trim tokio features to the required set
-  - config in dns is removed due to limitations
+  - config in dns is removed due to limitations, which is really sad because it was damn cool
   - reduce buffer slack
   - fix a few cases where we didn't set tcp nodelay
   - many windows releated bugs fixed
