@@ -37,7 +37,8 @@ loop {
     time::delay_for(Duration::from_millis(500)).await;
     temp.update(Value::F32(get_cpu_temp()));
     publisher.flush(None).await?;
-}```
+}
+```
 
  # Subscriber
  ```rust
@@ -61,7 +62,8 @@ while let Some(mut batch) = rx.next().await {
     for (_, v) in batch.drain(..) {
         println!("washu-chan cpu temp is: {:?}", v);
     }
-}```
+}
+```
 
 Published values always have a value, and new subscribers receive
 the most recent published value initially. Thereafter a
