@@ -1,5 +1,5 @@
 * 0.4.0:
-  - protocol breaking changes (additions). 0.4 will be the last non backwards compatible protocol, from here on protocol breaking changes will introduce a new protocol version, and new library versions will be able to speak to old clients using the old version of the protocol.
+  - protocol breaking changes (additions). 0.4 will be the last non backwards compatible protocol, from here on protocol breaking changes will introduce a new protocol version, and new library versions will be able to speak to old clients using at least one protocol version less than the current one.
   - allow publisher to unicast to specific subscribers
   - writes can return success or failure instead of silently eating errors. This behavior is not mandatory, as it has a performance impact.
   - netidx browser is now a separate binary from the tools
@@ -9,6 +9,7 @@
   - eliminate a race between durable subscriber subscription state and updates. Facepalm averted.
   - add many useful value types, e.g. Result, DateTime, Duration
   - It is now possible to build on Mac OS by disabling the (default) krb5_iov feature. This will result in reduced performance when talking to encrypted services, but it works.
+  - netidx-protocols breaking. View definitions are not backwards compatible with 0.3, and given how much development is going on in the browser I would expect more breaking changes to view definitions for a while. At some point it will settle down, and I will start to version that protocol just like the resolver/publisher protocol, but for the moment it's much easier to just move fast and break it.
 
 * 0.3.2:
   - minor api enhancement. add update_changed, and current to publisher::Val
