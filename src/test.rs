@@ -197,6 +197,10 @@ mod resolver {
         .collect::<Vec<_>>();
         let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
         w.publish(paths.iter().cloned()).await.unwrap();
+        // CR estokes: it is not strictly guaranteed that both servers
+        // in the cluster will have finished publishing all the paths
+        // when this method returns, as such this test could fail
+        // spuriously.
         let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
         check_list(&r_root).await;
         check_resolve(&ctx, &r_root, &paths, waddr).await;
