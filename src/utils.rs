@@ -214,14 +214,14 @@ thread_local! {
 pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
     let salt = salt.unwrap_or_else(|| rand::thread_rng().gen::<u64>());
     let mut hash = Sha3_512::new();
-    hash.input(&salt.to_be_bytes());
+    hash.update(&salt.to_be_bytes());
     for v in secret {
-        hash.input(v);
+        hash.update(v);
     }
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         b.put_u64(salt);
-        b.extend(hash.result().into_iter());
+        b.extend(hash.finalize().into_iter());
         b.split().freeze()
     })
 }
