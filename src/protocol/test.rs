@@ -239,7 +239,7 @@ mod resolver {
 mod publisher {
     use super::*;
     use crate::protocol::publisher::v1::{From, Hello, Id, To, Value};
-    use chrono::prelude::*;
+    use chrono::{MIN_DATETIME, MAX_DATETIME, prelude::*};
     use std::{net::SocketAddr, time::Duration};
 
     fn hello() -> impl Strategy<Value = Hello> {
@@ -272,7 +272,7 @@ mod publisher {
     }
 
     fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
-        (i64::MIN + 1..i64::MAX - 1, 0..1_000_000_000u32)
+        (MIN_DATETIME.timestamp()..MAX_DATETIME.timestamp(), 0..1_000_000_000u32)
             .prop_map(|(s, ns)| Utc.timestamp(s, ns))
     }
 
