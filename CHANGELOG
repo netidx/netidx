@@ -10,6 +10,7 @@
   - add many useful value types, e.g. Result, DateTime, Duration
   - It is now possible to build on Mac OS by disabling the (default) krb5_iov feature. This will result in reduced performance when talking to encrypted services, but it works.
   - netidx-protocols breaking. View definitions are not backwards compatible with 0.3, and given how much development is going on in the browser I would expect more breaking changes to view definitions for a while. At some point it will settle down, and I will start to version that protocol just like the resolver/publisher protocol, but for the moment it's much easier to just move fast and break it.
+  - various improvements to the command line tools, some of which are breaking changes. e.g. publisher and subscriber write now take a triple of path, type, value, instead of path, value.
 
 * 0.3.2:
   - minor api enhancement. add update_changed, and current to publisher::Val
