@@ -239,7 +239,8 @@ mod resolver {
 mod publisher {
     use super::*;
     use crate::protocol::publisher::v1::{From, Hello, Id, To, Value};
-    use std::net::SocketAddr;
+    use chrono::prelude::*;
+    use std::{net::SocketAddr, time::Duration};
 
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
@@ -265,6 +266,15 @@ mod publisher {
         ]
     }
 
+    fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
+        (i64::MIN + 1..i64::MAX - 1, 0..1_000_000_000u32)
+            .prop_map(|(s, ns)| Utc.timestamp(s, ns))
+    }
+
+    fn duration() -> impl Strategy<Value = Duration> {
+        (any::<u64>(), 0..1_000_000_000u32).prop_map(|(s, ns)| Duration::new(s, ns))
+    }
+
     fn value() -> impl Strategy<Value = Value> {
         prop_oneof![
             any::<u32>().prop_map(Value::U32),
@@ -277,10 +287,15 @@ mod publisher {
             any::<i64>().prop_map(Value::Z64),
             any::<f32>().prop_map(Value::F32),
             any::<f64>().prop_map(Value::F64),
+            datetime().prop_map(Value::DateTime),
+            duration().prop_map(Value::Duration),
             chars().prop_map(Value::String),
             bytes().prop_map(Value::Bytes),
             Just(Value::True),
             Just(Value::False),
+            Just(Value::Null),
+            Just(Value::Ok),
+            chars().prop_map(Value::Error),
         ]
     }
 
