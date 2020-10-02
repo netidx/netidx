@@ -150,7 +150,7 @@ impl Val {
     /// receive updates from multiple `Val`s.
     ///
     /// If you register multiple channels pointing to the same
-    /// receiver on a subscription you will not get duplicate updates.
+    /// receiver you will not get duplicate updates.
     pub fn updates(
         &self,
         begin_with_last: bool,
