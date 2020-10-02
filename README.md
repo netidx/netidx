@@ -12,58 +12,58 @@ involved.
  # Publisher
  ```rust
  use netidx::{
-     publisher::{Publisher, Value, BindCfg},
-     config::Config,
-     resolver::Auth,
-     path::Path,
- };
- use tokio::time;
- use std::time::Duration;
+    publisher::{Publisher, Value, BindCfg},
+    config::Config,
+    resolver::Auth,
+    path::Path,
+};
+use tokio::time;
+use std::time::Duration;
 
- // load the site cluster config. You can also just use a file.
- let cfg = Config::load_from_dns(None)?;
+// load the site cluster config. You can also just use a file.
+let cfg = Config::load_default()?;
 
- // no authentication (kerberos v5 is the other option)
- // listen on any unique address matching 192.168.0.0/16
- let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
+// no authentication (kerberos v5 is the other option)
+// listen on any unique address matching 192.168.0.0/16
+let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
 
- let temp = publisher.publish(
-     Path::from("/hw/washu-chan/cpu-temp"),
-     Value::F32(get_cpu_temp())
- )?;
- publisher.flush(None).await?;
+let temp = publisher.publish(
+    Path::from("/hw/washu-chan/cpu-temp"),
+    Value::F32(get_cpu_temp())
+)?;
+publisher.flush(None).await?;
 
- loop {
-     time::delay_for(Duration::from_millis(500)).await;
-     temp.update(Value::F32(get_cpu_temp()));
-     publisher.flush(None).await?;
- }
- ```
+loop {
+    time::delay_for(Duration::from_millis(500)).await;
+    temp.update(Value::F32(get_cpu_temp()));
+    publisher.flush(None).await?;
+}
+```
 
  # Subscriber
  ```rust
  use netidx::{
-     subscriber::Subscriber,
-     config::Config,
-     resolver::Auth,
-     path::Path,
- };
- use futures::{prelude::*, channel::mpsc};
+    subscriber::Subscriber,
+    config::Config,
+    resolver::Auth,
+    path::Path,
+};
+use futures::{prelude::*, channel::mpsc};
 
- let cfg = Config::load_from_dns(None)?;
- let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
- let path = Path::from("/hw/washu-chan/cpu-temp");
- let temp = subscriber.subscribe_one(path, None).await?;
- println!("washu-chan cpu temp is: {:?}", temp.last());
+let cfg = Config::load_default()?;
+let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
+let path = Path::from("/hw/washu-chan/cpu-temp");
+let temp = subscriber.subscribe_one(path, None).await?;
+println!("washu-chan cpu temp is: {:?}", temp.last());
 
- let (tx, mut rx) = mpsc::channel(10);
- temp.updates(false, tx);
- while let Some(mut batch) = rx.next().await {
-     for (_, v) in batch.drain(..) {
-         println!("washu-chan cpu temp is: {:?}", v);
-     }
- }
- ```
+let (tx, mut rx) = mpsc::channel(10);
+temp.updates(false, tx);
+while let Some(mut batch) = rx.next().await {
+    for (_, v) in batch.drain(..) {
+        println!("washu-chan cpu temp is: {:?}", v);
+    }
+}
+```
 
 Published values always have a value, and new subscribers receive
 the most recent published value initially. Thereafter a
