@@ -262,7 +262,12 @@ mod publisher {
                     token
                 }
             ),
-            any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i)))
+            any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i))),
+            (any::<u64>(), value(), any::<bool>()).prop_map(|(i, v, r)| To::Write(
+                Id::mk(i),
+                v,
+                r
+            ))
         ]
     }
 
@@ -310,7 +315,8 @@ mod publisher {
                 v
             )),
             (any::<u64>(), value()).prop_map(|(i, v)| From::Update(Id::mk(i), v)),
-            Just(From::Heartbeat)
+            Just(From::Heartbeat),
+            (any::<u64>(), value()).prop_map(|(i, v)| From::WriteResult(Id::mk(i), v))
         ]
     }
 
