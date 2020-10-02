@@ -172,6 +172,7 @@ mod resolver {
     fn to_write() -> impl Strategy<Value = ToWrite> {
         prop_oneof![
             path().prop_map(ToWrite::Publish),
+            path().prop_map(ToWrite::PublishDefault),
             path().prop_map(ToWrite::Unpublish),
             Just(ToWrite::Clear),
             Just(ToWrite::Heartbeat)
