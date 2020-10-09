@@ -3,15 +3,11 @@ use futures::prelude::*;
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, Typ, Publisher, Val},
+    publisher::{BindCfg, Publisher, Typ, Val, Value},
     resolver::Auth,
     utils::{self, BatchItem, Batched},
 };
-use std::{
-    collections::HashMap,
-    convert::From,
-    time::Duration,
-};
+use std::{collections::HashMap, convert::From, time::Duration};
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader},
     runtime::Runtime,
@@ -42,14 +38,19 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                             continue,
                             m.next().ok_or_else(|| anyhow!("missing path"))
                         );
-                        let typ = try_cf!(
+                        let typ_or_null = try_cf!(
                             "missing type",
                             continue,
-                            m.next()
-                                .ok_or_else(|| anyhow!("missing type"))
-                                .and_then(|s| Ok(s.parse::<Typ>()?))
+                            m.next().ok_or_else(|| anyhow!("missing type"))
                         );
-                        let val = {
+                        let val = if typ_or_null == "null" {
+                            Value::Null
+                        } else {
+                            let typ = try_cf!(
+                                "invalid type",
+                                continue,
+                                typ_or_null.parse::<Typ>()
+                            );
                             let v = try_cf!(
                                 "missing value",
                                 continue,

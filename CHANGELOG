@@ -1,3 +1,8 @@
+* 0.4.1:
+  - Fix a bug in the resolver store that would result in ghost columns remaining in the browser even after data was removed. Enhanced tests to cover the columns method.
+  - Fix a bug in resolver store that would result in a list of a path with a trailing slash recursively listing all children. While this might seem useful it wouldn't work in a hierarchical cluster, so the easiest thing to do is remove it. In any case for a large server it could be quite a bit more dangerous than a simple list, especially if triggered accidentally.
+  - Change the way null is published in the shell publisher such that it is possible to publish a string "null", sorry :facepalm:.
+
 * 0.4.0:
   - protocol breaking changes (additions). 0.4 will be the last non backwards compatible protocol, from here on protocol breaking changes will introduce a new protocol version, and new library versions will be able to speak to old clients using at least one protocol version less than the current one.
   - allow publisher to unicast to specific subscribers
