@@ -116,6 +116,7 @@ extern crate anyhow;
 
 pub mod pool;
 mod pack;
+mod batch_channel;
 #[macro_use]
 pub mod utils;
 mod auth;

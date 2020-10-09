@@ -1,5 +1,6 @@
 pub use crate::protocol::publisher::v1::{Typ, Value};
 use crate::{
+    batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, ReadChannel, WriteChannel},
     chars::Chars,
     config::Config,
@@ -28,7 +29,6 @@ use std::{
     hash::Hash,
     iter, mem,
     net::SocketAddr,
-    result,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -38,8 +38,6 @@ use tokio::{
     task,
     time::{self, Delay, Instant},
 };
-
-const BATCH: usize = 100_000;
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -82,7 +80,7 @@ struct SubscribeValRequest {
     token: Bytes,
     resolver: SocketAddr,
     finished: oneshot::Sender<Result<Val>>,
-    con: UnboundedSender<ToCon>,
+    con: BatchSender<ToCon>,
     deadline: Option<Instant>,
 }
 
@@ -106,14 +104,13 @@ struct ValInner {
     sub_id: SubId,
     id: Id,
     addr: SocketAddr,
-    connection: UnboundedSender<ToCon>,
+    connection: BatchSender<ToCon>,
     last: Arc<Mutex<Event>>,
 }
 
 impl Drop for ValInner {
     fn drop(&mut self) {
-        let _: result::Result<_, _> =
-            self.connection.unbounded_send(ToCon::Unsubscribe(self.id));
+        self.connection.send(ToCon::Unsubscribe(self.id));
     }
 }
 
@@ -162,7 +159,7 @@ impl Val {
             last: begin_with_last,
             id: self.0.id,
         };
-        let _ = self.0.connection.unbounded_send(m);
+        self.0.connection.send(m);
     }
 
     /// Write a value back to the publisher. This will start going out
@@ -176,7 +173,7 @@ impl Val {
     /// update values you are subscribed to, or trigger some other
     /// observable action.
     pub fn write(&self, v: Value) {
-        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, None));
+        self.0.connection.send(ToCon::Write(self.0.id, v, None));
     }
 
     /// This does the same thing as `write` except that it requires
@@ -189,7 +186,7 @@ impl Val {
     /// are required.
     pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.connection.unbounded_send(ToCon::Write(self.0.id, v, Some(tx)));
+        self.0.connection.send(ToCon::Write(self.0.id, v, Some(tx)));
         rx
     }
 
@@ -288,7 +285,7 @@ impl Dval {
                     last: begin_with_last,
                     id: sub.0.id,
                 };
-                let _ = sub.0.connection.unbounded_send(m);
+                sub.0.connection.send(m);
             }
         }
     }
@@ -347,7 +344,7 @@ fn pick(n: usize) -> usize {
 #[derive(Debug)]
 struct SubscriberInner {
     resolver: ResolverRead,
-    connections: HashMap<SocketAddr, UnboundedSender<ToCon>, FxBuildHasher>,
+    connections: HashMap<SocketAddr, BatchSender<ToCon>, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DvalWeak>,
     durable_alive: HashMap<Path, DvalWeak>,
@@ -482,13 +479,12 @@ impl Subscriber {
                                 ds.tries = 0;
                                 ds.streams.retain(|c| !c.is_closed());
                                 for tx in ds.streams.iter().cloned() {
-                                    let _ =
-                                        sub.0.connection.unbounded_send(ToCon::Stream {
-                                            tx,
-                                            sub_id: ds.sub_id,
-                                            last: true,
-                                            id: sub.0.id,
-                                        });
+                                    sub.0.connection.send(ToCon::Stream {
+                                        tx,
+                                        sub_id: ds.sub_id,
+                                        last: true,
+                                        id: sub.0.id,
+                                    });
                                 }
                                 ds.sub = Some(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
@@ -632,7 +628,7 @@ impl Subscriber {
                                 }
                             };
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
-                                let (tx, rx) = mpsc::unbounded();
+                                let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {
                                     None => Chars::new(),
                                     Some(p) => p.clone(),
@@ -655,25 +651,23 @@ impl Subscriber {
                             });
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
-                            let r = con.unbounded_send(ToCon::Subscribe(
-                                SubscribeValRequest {
-                                    path: p.clone(),
-                                    timestamp: resolved.timestamp,
-                                    permissions: resolved.permissions,
-                                    token: addr.1,
-                                    resolver: resolved.resolver,
-                                    finished: tx,
-                                    con: con_,
-                                    deadline,
-                                },
-                            ));
-                            match r {
-                                Ok(()) => {
-                                    pending.insert(p, St::Subscribing(rx));
-                                }
-                                Err(e) => {
-                                    pending.insert(p, St::Error(Error::from(e)));
-                                }
+                            let r = con.send(ToCon::Subscribe(SubscribeValRequest {
+                                path: p.clone(),
+                                timestamp: resolved.timestamp,
+                                permissions: resolved.permissions,
+                                token: addr.1,
+                                resolver: resolved.resolver,
+                                finished: tx,
+                                con: con_,
+                                deadline,
+                            }));
+                            if r {
+                                pending.insert(p, St::Subscribing(rx));
+                            } else {
+                                pending.insert(
+                                    p,
+                                    St::Error(Error::from(anyhow!("connection closed"))),
+                                );
                             }
                         }
                     }
@@ -806,7 +800,7 @@ impl Subscriber {
                 .values()
                 .map(|c| {
                     let (tx, rx) = oneshot::channel();
-                    let _ = c.unbounded_send(ToCon::Flush(tx));
+                    c.send(ToCon::Flush(tx));
                     rx
                 })
                 .collect::<Vec<_>>()
@@ -1079,15 +1073,13 @@ async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
     target_spn: Chars,
-    from_sub: UnboundedReceiver<ToCon>,
+    from_sub: BatchReceiver<ToCon>,
     auth: Auth,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
-    let mut idle: usize = 0;
     let mut msg_recvd = false;
-    let mut from_sub = Batched::new(from_sub, BATCH);
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
     soc.set_nodelay(true)?;
     let mut con = Channel::new(soc);
@@ -1109,12 +1101,6 @@ async fn connection(
                 } else {
                     msg_recvd = false;
                 }
-                if subscriptions.len() == 0 && pending.len() == 0 {
-                    idle += 1;
-                    if idle == 2 { break 'main Ok(()); }
-                } else {
-                    idle = 0;
-                }
                 let mut timed_out = Vec::new();
                 for (path, req) in pending.iter() {
                     if let Some(deadline) = req.deadline {
@@ -1130,67 +1116,83 @@ async fn connection(
                 }
                 try_cf!(try_flush(&mut write_con).await)
             },
-            msg = from_sub.next() => match msg {
+            batch = from_sub.recv().fuse() => match batch {
                 None => break Err(anyhow!("dropped")),
-                Some(BatchItem::EndBatch) => {
-                    try_cf!(try_flush(&mut write_con).await)
-                }
-                Some(BatchItem::InBatch(ToCon::Subscribe(req))) => {
-                    let path = req.path.clone();
-                    let resolver = req.resolver;
-                    let token = req.token.clone();
-                    let permissions = req.permissions;
-                    let timestamp = req.timestamp;
-                    pending.insert(path.clone(), req);
-                    try_cf!(write_con.queue_send(&To::Subscribe {
-                        path,
-                        resolver,
-                        timestamp,
-                        permissions,
-                        token,
-                    }))
-                }
-                Some(BatchItem::InBatch(ToCon::Unsubscribe(id))) => {
-                    info!("unsubscribe {:?}", id);
-                    try_cf!(write_con.queue_send(&To::Unsubscribe(id)))
-                }
-                Some(BatchItem::InBatch(ToCon::Stream { id, sub_id, mut tx, last })) => {
-                    if let Some(sub) = subscriptions.get_mut(&id) {
-                        sub.streams.retain(|(_, _, c)| {
-                            if c.is_closed() {
-                                by_receiver.remove(&ChanWrap(c.clone()));
-                                false
-                            } else {
-                                true
+                Some(mut batch) => {
+                    for msg in batch.drain(..) {
+                        match msg {
+                            ToCon::Subscribe(req) => {
+                                let path = req.path.clone();
+                                let resolver = req.resolver;
+                                let token = req.token.clone();
+                                let permissions = req.permissions;
+                                let timestamp = req.timestamp;
+                                pending.insert(path.clone(), req);
+                                try_cf!(break, 'main, write_con.queue_send(&To::Subscribe {
+                                    path,
+                                    resolver,
+                                    timestamp,
+                                    permissions,
+                                    token,
+                                }))
                             }
-                        });
-                        if !sub.streams.iter().any(|(_, _, s)| tx.same_receiver(s)) {
-                            if last {
-                                let m = sub.last.lock().clone();
-                                let mut b = BATCHES.take();
-                                b.push((sub_id, m));
-                                match tx.send(b).await {
-                                    Err(_) => continue,
-                                    Ok(()) => ()
+                            ToCon::Unsubscribe(id) => {
+                                info!("unsubscribe {:?}", id);
+                                try_cf!(
+                                    break,
+                                    'main,
+                                    write_con.queue_send(&To::Unsubscribe(id))
+                                )
+                            }
+                            ToCon::Stream { id, sub_id, mut tx, last } => {
+                                if let Some(sub) = subscriptions.get_mut(&id) {
+                                    sub.streams.retain(|(_, _, c)| {
+                                        if c.is_closed() {
+                                            by_receiver.remove(&ChanWrap(c.clone()));
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    });
+                                    let already_have =
+                                        sub.streams
+                                            .iter()
+                                            .any(|(_, _, s)| tx.same_receiver(s));
+                                    if !already_have {
+                                        if last {
+                                            let m = sub.last.lock().clone();
+                                            let mut b = BATCHES.take();
+                                            b.push((sub_id, m));
+                                            match tx.send(b).await {
+                                                Err(_) => continue,
+                                                Ok(()) => ()
+                                            }
+                                        }
+                                        let id = by_receiver.entry(ChanWrap(tx.clone()))
+                                            .or_insert_with(ChanId::new);
+                                        sub.streams.push((sub_id, *id, tx));
+                                    }
                                 }
                             }
-                            let id = by_receiver.entry(ChanWrap(tx.clone()))
-                                .or_insert_with(ChanId::new);
-                            sub.streams.push((sub_id, *id, tx));
+                            ToCon::Write(id, v, tx) => {
+                                try_cf!(
+                                    break,
+                                    'main,
+                                    write_con.queue_send(&To::Write(id, v, tx.is_some()))
+                                );
+                                if let Some(tx) = tx {
+                                    pending_writes
+                                        .entry(id)
+                                        .or_insert_with(VecDeque::new)
+                                        .push_back(tx);
+                                }
+                            }
+                            ToCon::Flush(tx) => {
+                                let _ = tx.send(());
+                            }
                         }
                     }
-                }
-                Some(BatchItem::InBatch(ToCon::Write(id, v, tx))) => {
-                    try_cf!(write_con.queue_send(&To::Write(id, v, tx.is_some())));
-                    if let Some(tx) = tx {
-                        pending_writes
-                            .entry(id)
-                            .or_insert_with(VecDeque::new)
-                            .push_back(tx);
-                    }
-                }
-                Some(BatchItem::InBatch(ToCon::Flush(tx))) => {
-                    let _ = tx.send(());
+                    try_cf!(try_flush(&mut write_con).await);
                 }
             },
             r = batches.next() => match r {
@@ -1215,7 +1217,15 @@ async fn connection(
                             &mut write_con,
                             &subscriber,
                             addr).await);
-                        try_cf!(try_flush(&mut write_con).await)
+                        try_cf!(try_flush(&mut write_con).await);
+                        if subscriptions.is_empty() && pending.is_empty() {
+                            let mut inner = subscriber.0.lock();
+                            if from_sub.len() == 0 {
+                                inner.connections.remove(&addr);
+                                let _ = tx_stop.send(());
+                                return Ok(())
+                            }
+                        }
                     }
                 Some(Err(e)) => break Err(Error::from(e)),
                 None => break Err(anyhow!("EOF")),
