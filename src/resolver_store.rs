@@ -371,8 +371,13 @@ impl<T> StoreInner<T> {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
-        let n = Path::levels(&**parent);
-        let mut parent = String::from(&**parent);
+        let parent = if parent == &Path::root() {
+            parent.as_ref()
+        } else {
+            parent.trim_end_matches(path::SEP)
+        };
+        let n = Path::levels(parent);
+        let mut parent = String::from(parent);
         if !parent.ends_with(path::SEP) {
             parent.push(path::SEP);
         }

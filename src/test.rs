@@ -408,7 +408,8 @@ mod resolver_store {
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0].as_ref(), "/app/test/app0");
             assert_eq!(paths[1].as_ref(), "/app/test/app1");
-            let cols = store.columns(&Path::from("/app/test"));
+            let mut cols = store.columns(&Path::from("/app/test"));
+            cols.sort();
             assert_eq!(cols.len(), 5);
             assert_eq!(cols[0].0.as_ref(), "v0");
             assert_eq!(cols[0].1, Z64(2));
@@ -434,12 +435,9 @@ mod resolver_store {
             let cols = store.columns(&Path::from("/app/test/app1"));
             assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app/test/"));
-            assert_eq!(paths.len(), 5);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-            assert_eq!(paths[2].as_ref(), "/app/test/app1/v2");
-            assert_eq!(paths[3].as_ref(), "/app/test/app1/v3");
-            assert_eq!(paths[4].as_ref(), "/app/test/app1/v4");            
+            assert_eq!(paths.len(), 2);
+            assert_eq!(paths[0].as_ref(), "/app/test/app0");
+            assert_eq!(paths[1].as_ref(), "/app/test/app1");
         }
         let (ref paths, ref addr) = apps[2];
         let addr = addr.parse::<SocketAddr>().unwrap();
@@ -472,7 +470,8 @@ mod resolver_store {
             let paths = store.list(&Path::from("/app/test"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            let cols = store.columns(&Path::from("/app/test"));
+            let mut cols = store.columns(&Path::from("/app/test"));
+            cols.sort();
             assert_eq!(cols.len(), 2);
             assert_eq!(cols[0].0.as_ref(), "v0");
             assert_eq!(cols[0].1, Z64(2));
@@ -486,7 +485,7 @@ mod resolver_store {
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
             assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-            let cols = store.list(&Path::from("/app/test/app0"));
+            let cols = store.columns(&Path::from("/app/test/app0"));
             assert_eq!(cols.len(), 0);
         }
         {

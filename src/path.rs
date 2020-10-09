@@ -192,6 +192,7 @@ impl<'a> Iterator for DirNames<'a> {
 impl Path {
     /// returns /
     pub fn root() -> Path {
+        // CR estokes: need a good solution for using SEP here
         Path::from("/")
     }
 
