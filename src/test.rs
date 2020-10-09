@@ -353,12 +353,13 @@ mod publisher {
 }
 
 mod resolver_store {
-    use crate::{path::Path, resolver_store::*};
+    use crate::{path::Path, resolver_store::*, pack::Z64};
     use bytes::Bytes;
     use std::{
         collections::{BTreeMap, HashMap},
         net::SocketAddr,
     };
+    use rand::{self, Rng};
 
     #[test]
     fn test_resolver_store() {
@@ -384,6 +385,10 @@ mod resolver_store {
                     if !store.resolve(&path).contains(&(addr, Bytes::new())) {
                         panic!()
                     }
+                    if rand::thread_rng().gen_bool(0.5) {
+                        // check that this is idempotent
+                        store.publish(path.clone(), addr, false);
+                    }
                 }
             }
         }
@@ -392,22 +397,49 @@ mod resolver_store {
             let paths = store.list(&Path::from("/"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app");
+            let cols = store.columns(&Path::from("/"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app/test");
+            let cols = store.columns(&Path::from("/app"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app/test"));
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0].as_ref(), "/app/test/app0");
             assert_eq!(paths[1].as_ref(), "/app/test/app1");
+            let cols = store.columns(&Path::from("/app/test"));
+            assert_eq!(cols.len(), 5);
+            assert_eq!(cols[0].0.as_ref(), "v0");
+            assert_eq!(cols[0].1, Z64(2));
+            assert_eq!(cols[1].0.as_ref(), "v1");
+            assert_eq!(cols[1].1, Z64(2));
+            assert_eq!(cols[2].0.as_ref(), "v2");
+            assert_eq!(cols[2].1, Z64(1));
+            assert_eq!(cols[3].0.as_ref(), "v3");
+            assert_eq!(cols[3].1, Z64(1));
+            assert_eq!(cols[4].0.as_ref(), "v4");
+            assert_eq!(cols[4].1, Z64(1));
             let paths = store.list(&Path::from("/app/test/app0"));
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
             assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
+            let cols = store.columns(&Path::from("/app/test/app0"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app/test/app1"));
             assert_eq!(paths.len(), 3);
             assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
             assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
             assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
+            let cols = store.columns(&Path::from("/app/test/app1"));
+            assert_eq!(cols.len(), 0);
+            let paths = store.list(&Path::from("/app/test/"));
+            assert_eq!(paths.len(), 5);
+            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
+            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
+            assert_eq!(paths[2].as_ref(), "/app/test/app1/v2");
+            assert_eq!(paths[3].as_ref(), "/app/test/app1/v3");
+            assert_eq!(paths[4].as_ref(), "/app/test/app1/v4");            
         }
         let (ref paths, ref addr) = apps[2];
         let addr = addr.parse::<SocketAddr>().unwrap();
@@ -419,6 +451,10 @@ mod resolver_store {
                 if store.resolve(&path).contains(&(addr, Bytes::new())) {
                     panic!()
                 }
+                if rand::thread_rng().gen_bool(0.5) {
+                    // check that this is idempotent
+                    store.unpublish(path.clone(), addr);
+                }
             }
         }
         {
@@ -426,18 +462,52 @@ mod resolver_store {
             let paths = store.list(&Path::from("/"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app");
+            let cols = store.columns(&Path::from("/"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app/test");
+            let cols = store.columns(&Path::from("/app"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app/test"));
             assert_eq!(paths.len(), 1);
             assert_eq!(paths[0].as_ref(), "/app/test/app0");
+            let cols = store.columns(&Path::from("/app/test"));
+            assert_eq!(cols.len(), 2);
+            assert_eq!(cols[0].0.as_ref(), "v0");
+            assert_eq!(cols[0].1, Z64(2));
+            assert_eq!(cols[1].0.as_ref(), "v1");
+            assert_eq!(cols[1].1, Z64(2));
             let paths = store.list(&Path::from("/app/test/app1"));
             assert_eq!(paths.len(), 0);
+            let cols = store.columns(&Path::from("/app/test/app1"));
+            assert_eq!(cols.len(), 0);
             let paths = store.list(&Path::from("/app/test/app0"));
             assert_eq!(paths.len(), 2);
             assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
             assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
+            let cols = store.list(&Path::from("/app/test/app0"));
+            assert_eq!(cols.len(), 0);
+        }
+        {
+            let mut store = store.write();
+            for (paths, addr) in &apps {
+                let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
+                let addr = addr.parse::<SocketAddr>().unwrap();
+                for path in parsed.clone() {
+                    store.unpublish(path.clone(), addr);
+                    if store.resolve(&path).contains(&(addr, Bytes::new())) {
+                        panic!()
+                    }
+                }
+            }
+        }
+        {
+            let store = store.read();
+            let paths = store.list(&Path::from("/"));
+            assert_eq!(paths.len(), 0);
+            let cols = store.columns(&Path::from("/app/test"));
+            assert_eq!(cols.len(), 0);
         }
     }
 }

@@ -234,11 +234,16 @@ impl<T> StoreInner<T> {
     pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr, default: bool) {
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
+        let len = addrs.len();
         *addrs = self.addrs.add_address(addrs, addr);
-        self.add_parents(path.as_ref());
-        self.add_column(&path);
-        let n = Path::levels(path.as_ref());
-        self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
+        if addrs.len() > len {
+            self.add_column(&path);
+            let n = Path::levels(path.as_ref());
+            self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
+        }
+        if len == 0 {
+            self.add_parents(path.as_ref());
+        }
         if default {
             self.defaults.insert(path);
         }
@@ -258,19 +263,25 @@ impl<T> StoreInner<T> {
         }
         match self.by_path.get_mut(&path) {
             None => (),
-            Some(addrs) => match self.addrs.remove_address(addrs, addr) {
-                Some(new_addrs) => {
-                    *addrs = new_addrs;
-                }
-                None => {
-                    self.by_path.remove(&path);
-                    self.defaults.remove(&path);
-                    let n = Path::levels(path.as_ref());
-                    self.by_level.get_mut(&n).into_iter().for_each(|s| {
-                        s.remove(&path);
-                    });
-                    self.remove_parents(path.as_ref());
-                    self.remove_column(&path);
+            Some(addrs) => {
+                let len = addrs.len();
+                match self.addrs.remove_address(addrs, addr) {
+                    Some(new_addrs) => {
+                        *addrs = new_addrs;
+                        if addrs.len() < len {
+                            self.remove_column(&path);
+                        }
+                    }
+                    None => {
+                        self.by_path.remove(&path);
+                        self.defaults.remove(&path);
+                        let n = Path::levels(path.as_ref());
+                        self.by_level.get_mut(&n).into_iter().for_each(|s| {
+                            s.remove(&path);
+                        });
+                        self.remove_parents(path.as_ref());
+                        self.remove_column(&path);
+                    }
                 }
             },
         }
