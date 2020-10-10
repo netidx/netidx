@@ -1,4 +1,5 @@
 * 0.4.1:
+  - Increase the input buffer size in the command line publisher to 4MB so it can handle large string values from shell scripts.
   - Fix a bug in the resolver store that would result in ghost columns remaining in the browser even after data was removed. Enhanced tests to cover the columns method.
   - Fix a bug in resolver store that would result in a list of a path with a trailing slash recursively listing all children. While this might seem useful it wouldn't work in a hierarchical cluster, so the easiest thing to do is remove it. In any case for a large server it could be quite a bit more dangerous than a simple list, especially if triggered accidentally.
   - Change the way null is published in the shell publisher such that it is possible to publish a string "null", sorry :facepalm:.
