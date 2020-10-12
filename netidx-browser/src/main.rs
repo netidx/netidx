@@ -1170,7 +1170,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         @weak window => move |a, _| {
         if let Some(v) = a.get_state() {
             let new_v = !v.get::<bool>().expect("invalid state");
-            if new_v && (saved.get() || ask_modal(&window, "Unsaved view will be lost.")) {
+            if !new_v || saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
                 ctx.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
                 let m = FromGui::Navigate(current_loc.borrow().clone());

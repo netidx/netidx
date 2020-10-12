@@ -1,4 +1,5 @@
 * 0.4.1:
+  - Fix browser can't get out of raw mode.
   - Subscriber: Tweak the semantics when registering a duplicate
     channel for updates on a subscription. Now, if begin_with_last is
     true, the duplicate channel will receive an update with the current
