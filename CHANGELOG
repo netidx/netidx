@@ -1,8 +1,8 @@
 * 0.4.1:
   - Subscriber: Tweak the semantics when registering a duplicate
-   channel for updates on a subscription. Now, if begin_with_last is
-   true, the duplicate channel will receive an update with the current
-   state even though the registration will be ignored.
+    channel for updates on a subscription. Now, if begin_with_last is
+    true, the duplicate channel will receive an update with the current
+    state even though the registration will be ignored.
   - Reduce allocation in the command line publisher.
   - Fix a bug in the resolver store that would result in ghost columns
     remaining in the browser even after data was removed. Enhanced

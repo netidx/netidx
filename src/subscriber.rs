@@ -281,15 +281,15 @@ impl Dval {
         t.streams.retain(|c| !c.is_closed());
         if !t.streams.iter().any(|s| tx.same_receiver(s)) {
             t.streams.push(tx.clone());
-            if let Some(ref sub) = t.sub {
-                let m = ToCon::Stream {
-                    tx,
-                    sub_id: t.sub_id,
-                    last: begin_with_last,
-                    id: sub.0.id,
-                };
-                sub.0.connection.send(m);
-            }
+        }
+        if let Some(ref sub) = t.sub {
+            let m = ToCon::Stream {
+                tx,
+                sub_id: t.sub_id,
+                last: begin_with_last,
+                id: sub.0.id,
+            };
+            sub.0.connection.send(m);
         }
     }
 
