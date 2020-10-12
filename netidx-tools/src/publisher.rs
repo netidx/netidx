@@ -21,7 +21,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
         let publisher =
             Publisher::new(config, auth, bcfg).await.expect("creating publisher");
         let mut buf = String::new();
-        let mut stdin = BufReader::with_capacity(4 * 1024 * 1024, stdin());
+        let mut stdin = BufReader::new(stdin());
         while let Ok(len) = stdin.read_line(&mut buf).await {
             if len == 0 {
                 break;

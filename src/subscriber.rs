@@ -147,7 +147,10 @@ impl Val {
     /// receive updates from multiple `Val`s.
     ///
     /// If you register multiple channels pointing to the same
-    /// receiver you will not get duplicate updates.
+    /// receiver you will not get duplicate updates. However, if you
+    /// register a duplicate channel and begin_with_last is true you
+    /// will get an update with the current state, even though the
+    /// channel registration will be ignored.
     pub fn updates(
         &self,
         begin_with_last: bool,
@@ -1154,20 +1157,20 @@ async fn connection(
                                             true
                                         }
                                     });
+                                    if last {
+                                        let m = sub.last.lock().clone();
+                                        let mut b = BATCHES.take();
+                                        b.push((sub_id, m));
+                                        match tx.send(b).await {
+                                            Err(_) => continue,
+                                            Ok(()) => ()
+                                        }
+                                    }
                                     let already_have =
                                         sub.streams
                                             .iter()
                                             .any(|(_, _, s)| tx.same_receiver(s));
                                     if !already_have {
-                                        if last {
-                                            let m = sub.last.lock().clone();
-                                            let mut b = BATCHES.take();
-                                            b.push((sub_id, m));
-                                            match tx.send(b).await {
-                                                Err(_) => continue,
-                                                Ok(()) => ()
-                                            }
-                                        }
                                         let id = by_receiver.entry(ChanWrap(tx.clone()))
                                             .or_insert_with(ChanId::new);
                                         sub.streams.push((sub_id, *id, tx));

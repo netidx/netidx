@@ -1,26 +1,63 @@
 * 0.4.1:
-  - Increase the input buffer size in the command line publisher to 4MB so it can handle large string values from shell scripts.
-  - Fix a bug in the resolver store that would result in ghost columns remaining in the browser even after data was removed. Enhanced tests to cover the columns method.
-  - Fix a bug in resolver store that would result in a list of a path with a trailing slash recursively listing all children. While this might seem useful it wouldn't work in a hierarchical cluster, so the easiest thing to do is remove it. In any case for a large server it could be quite a bit more dangerous than a simple list, especially if triggered accidentally.
-  - Change the way null is published in the shell publisher such that it is possible to publish a string "null", sorry :facepalm:.
-  - Fix subscriber connection might decide it's idle and disconnect when there are pending subscription requests in it's queue. subscriber will now disconnect immediatly when the last subscription is unsubscribed and there are no queued subscriptions.
+  - Subscriber: Tweak the semantics when registering a duplicate
+   channel for updates on a subscription. Now, if begin_with_last is
+   true, the duplicate channel will receive an update with the current
+   state even though the registration will be ignored.
+  - Reduce allocation in the command line publisher.
+  - Fix a bug in the resolver store that would result in ghost columns
+    remaining in the browser even after data was removed. Enhanced
+    tests to cover the columns method.
+  - Fix a bug in resolver store that would result in a list of a path
+    with a trailing slash recursively listing all children. While this
+    might seem useful it wouldn't work in a hierarchical cluster, so
+    the easiest thing to do is remove it. In any case for a large
+    server it could be quite a bit more dangerous than a simple list,
+    especially if triggered accidentally.
+  - Change the way null is published in the shell publisher such that
+    it is possible to publish a string "null", sorry :facepalm:.
+  - Fix subscriber connection might decide it's idle and disconnect
+    when there are pending subscription requests in it's
+    queue. subscriber will now disconnect immediatly when the last
+    subscription is unsubscribed and there are no queued
+    subscriptions.
 
 * 0.4.0:
-  - protocol breaking changes (additions). 0.4 will be the last non backwards compatible protocol, from here on protocol breaking changes will introduce a new protocol version, and new library versions will be able to speak to old clients using at least one protocol version less than the current one.
+  - protocol breaking changes (additions). 0.4 will be the last non
+    backwards compatible protocol, from here on protocol breaking
+    changes will introduce a new protocol version, and new library
+    versions will be able to speak to old clients using at least one
+    protocol version less than the current one.
   - allow publisher to unicast to specific subscribers
-  - writes can return success or failure instead of silently eating errors. This behavior is not mandatory, as it has a performance impact.
+  - writes can return success or failure instead of silently eating
+    errors. This behavior is not mandatory, as it has a performance
+    impact.
   - netidx browser is now a separate binary from the tools
   - netidx browser "views", publishable and editable custom guis
-  - subscriber will notify explicitly when a subscription is unsubscribed. This imposes minimal to no overhead due to rust being awesome
-  - simplify durable subscriber, shrink it's memory usage a couple of words per subscription
-  - eliminate a race between durable subscriber subscription state and updates. Facepalm averted.
+  - subscriber will notify explicitly when a subscription is
+    unsubscribed. This imposes minimal to no overhead due to rust
+    being awesome
+  - simplify durable subscriber, shrink it's memory usage a couple of
+    words per subscription
+  - eliminate a race between durable subscriber subscription state and
+    updates. Facepalm averted.
   - add many useful value types, e.g. Result, DateTime, Duration
-  - It is now possible to build on Mac OS by disabling the (default) krb5_iov feature. This will result in reduced performance when talking to encrypted services, but it works.
-  - netidx-protocols breaking. View definitions are not backwards compatible with 0.3, and given how much development is going on in the browser I would expect more breaking changes to view definitions for a while. At some point it will settle down, and I will start to version that protocol just like the resolver/publisher protocol, but for the moment it's much easier to just move fast and break it.
-  - various improvements to the command line tools, some of which are breaking changes. e.g. publisher and subscriber write now take a triple of path, type, value, instead of path, value.
+  - It is now possible to build on Mac OS by disabling the (default)
+    krb5_iov feature. This will result in reduced performance when
+    talking to encrypted services, but it works.
+  - netidx-protocols breaking. View definitions are not backwards
+    compatible with 0.3, and given how much development is going on in
+    the browser I would expect more breaking changes to view
+    definitions for a while. At some point it will settle down, and I
+    will start to version that protocol just like the
+    resolver/publisher protocol, but for the moment it's much easier
+    to just move fast and break it.
+  - various improvements to the command line tools, some of which are
+    breaking changes. e.g. publisher and subscriber write now take a
+    triple of path, type, value, instead of path, value.
 
 * 0.3.2:
-  - minor api enhancement. add update_changed, and current to publisher::Val
+  - minor api enhancement. add update_changed, and current to
+    publisher::Val
 
 * 0.3.1:
   - make publisher::Id public again, sorry!
@@ -32,7 +69,8 @@
 
 * 0.2.0:
   - trim tokio features to the required set
-  - config in dns is removed due to limitations, which is really sad because it was damn cool
+  - config in dns is removed due to limitations, which is really sad
+    because it was damn cool
   - reduce buffer slack
   - fix a few cases where we didn't set tcp nodelay
   - many windows releated bugs fixed
