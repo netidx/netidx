@@ -1,11 +1,11 @@
 [package]
 name = "netidx-browser"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
 description = "A graphical browser/ui creator for netidx"
-homepage = "https://github.com/estokes/netidx"
+homepage = "https://estokes.github.io/netidx-book/"
 documentation = "https://docs.rs/netidx"
 keywords = ["networking", "distributed", "kerberos", "tool"]
 categories = ["gui"]

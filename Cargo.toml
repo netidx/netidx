@@ -1,11 +1,11 @@
 [package]
 name = "netidx"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
 description = "Cross platform secure messaging framework, \"like DNS for values\""
-homepage = "https://github.com/estokes/netidx"
+homepage = "https://estokes.github.io/netidx-book/"
 documentation = "https://docs.rs/netidx"
 keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]

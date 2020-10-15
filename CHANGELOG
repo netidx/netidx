@@ -1,3 +1,11 @@
+* 0.4.2:
+  - Fix browser design mode widget highlights are wrong when there are
+    nested grids.
+  - Maybe fix an intermittant issue with design mode where invisible
+    widgets are still interactable in the properties view and the
+    visible widgets are not.
+  - Make the WIP book the homepage
+
 * 0.4.1:
   - Fix browser can't get out of raw mode.
   - Subscriber: Tweak the semantics when registering a duplicate
