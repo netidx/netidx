@@ -566,6 +566,7 @@ impl Editor {
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
                         w.root().hide();
+                        w.root().set_sensitive(false);
                         properties.remove(w.root());
                     }
                     let id = c.get_active_id();
@@ -574,7 +575,9 @@ impl Editor {
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
                         properties.pack_start(w.root(), true, true, 5);
+                        w.root().set_sensitive(true);
                     }
+                    properties.show_all();
                     on_change();
                 }
             }
@@ -596,10 +599,13 @@ impl Editor {
         @weak reveal_properties,
         @weak properties,
         @strong inhibit_change => move |s| {
-            let children = properties.get_children();
-            if children.len() == 3 {
-                children[2].hide();
-                properties.remove(&children[2]);
+            {
+                let children = properties.get_children();
+                if children.len() == 3 {
+                    children[2].hide();
+                    children[2].set_sensitive(false);
+                    properties.remove(&children[2]);
+                }
             }
             match s.get_selected() {
                 None => {
@@ -622,6 +628,7 @@ impl Editor {
                     let v = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = v.get::<&Widget>() {
                         properties.pack_start(w.root(), true, true, 5);
+                        w.root().set_sensitive(true);
                     }
                     properties.show_all();
                     reveal_properties.set_reveal_child(true);

@@ -1,0 +1,8 @@
+* when there are nested grids, child grid rows are not highlighted correctly
+
+* there is an intermittant bug when switching rows the widgets that
+  are hidden are interactable even though they're hidden, while the
+  visible widgets are not. (maybe fixed)
+
+* Graphs are blank after long period of inactivity/sleep even though
+  labels are updating.
