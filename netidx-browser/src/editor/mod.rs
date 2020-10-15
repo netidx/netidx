@@ -253,6 +253,7 @@ impl Widget {
             root.pack_start(r, true, true, 0);
         }
         store.set_value(iter, 0, &name.to_value());
+        root.set_sensitive(false);
         let t = Widget { root, props, kind };
         store.set_value(iter, 1, &t.to_value());
     }
@@ -576,6 +577,7 @@ impl Editor {
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
                         properties.pack_start(w.root(), true, true, 5);
                         w.root().set_sensitive(true);
+                        w.root().grab_focus();
                     }
                     properties.show_all();
                     on_change();
@@ -629,6 +631,7 @@ impl Editor {
                     if let Ok(Some(w)) = v.get::<&Widget>() {
                         properties.pack_start(w.root(), true, true, 5);
                         w.root().set_sensitive(true);
+                        w.root().grab_focus();
                     }
                     properties.show_all();
                     reveal_properties.set_reveal_child(true);
@@ -901,13 +904,12 @@ impl Editor {
                 WidgetKind::Grid(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf)
-                    } else if path.len() == 1 {
+                    } else {
                         match path[0] {
                             WidgetPath::GridRow(_) => (),
+                            WidgetPath::GridItem(_, _) => (),
                             _ => path.insert(0, WidgetPath::GridItem(nrow, nchild)),
                         }
-                    } else {
-                        path.insert(0, WidgetPath::GridItem(nrow, nchild))
                     }
                     false
                 }
@@ -925,6 +927,8 @@ impl Editor {
                     }
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::GridRow(nrow));
+                    } else {
+                        path.insert(0, WidgetPath::GridItem(nrow, nchild));
                     }
                     true
                 }
