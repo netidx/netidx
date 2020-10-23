@@ -185,7 +185,7 @@ async fn connection_read(
                         }
                     };
                     let timeout =
-                        max(HELLO_TO, Duration::from_millis(tx_batch.len() as u64 * 100));
+                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 10));
                     for (_, m) in &*tx_batch {
                         match c.queue_send(m) {
                             Ok(()) => (),
@@ -212,7 +212,7 @@ async fn connection_read(
                                         continue 'batch;
                                     }
                                     Err(e) => {
-                                        warn!("read connection reply timeout {}", e);
+                                        warn!("read connection timeout, waited: {}", e);
                                         con = None;
                                         continue 'batch;
                                     }
@@ -472,7 +472,7 @@ async fn connection_write(
                 Some((tx_batch, reply)) => {
                     act = true;
                     let mut tries: usize = 0;
-                    loop {
+                    'batch: loop {
                         if tries > 3 {
                             degraded = true;
                             warn!("abandoning batch, replica now degraded");
@@ -507,10 +507,14 @@ async fn connection_write(
                                 }
                             }
                         };
+                        let timeout = max(
+                            HELLO_TO,
+                            Duration::from_micros(tx_batch.len() as u64 * 30)
+                        );
                         for (_, m) in &**tx_batch {
                             try_cf!("queue send {}", continue, 'main, c.queue_send(m))
                         }
-                        match c.flush().await {
+                        match c.flush_timeout(timeout).await {
                             Err(e) => {
                                 info!("write_con connection send error {}", e);
                                 con = None;
@@ -519,25 +523,27 @@ async fn connection_write(
                                 let mut err = false;
                                 let mut rx_batch = RAWFROMWRITEPOOL.take();
                                 while rx_batch.len() < tx_batch.len() {
-                                    match c.receive_batch(&mut *rx_batch).await {
-                                        Ok(()) => (),
+                                    let f = c.receive_batch(&mut *rx_batch);
+                                    match time::timeout(timeout, f).await {
+                                        Ok(Ok(())) => (),
+                                        Ok(Err(e)) => {
+                                            warn!("write_con connection recv error {}", e);
+                                            con = None;
+                                            continue 'batch;
+                                        }
                                         Err(e) => {
-                                            info!("write_con connection recv error {}", e);
-                                            err = true;
-                                            break
+                                            warn!("write_con timeout, waited: {}", e);
+                                            con = None;
+                                            continue 'batch;
                                         }
                                     }
                                 }
-                                if err {
-                                    con = None;
-                                } else {
-                                    let mut result = FROMWRITEPOOL.take();
-                                    for (i, m) in rx_batch.drain(..).enumerate() {
-                                        result.push((tx_batch[i].0, m))
-                                    }
-                                    let _ = reply.send(result);
-                                    break
+                                let mut result = FROMWRITEPOOL.take();
+                                for (i, m) in rx_batch.drain(..).enumerate() {
+                                    result.push((tx_batch[i].0, m))
                                 }
+                                let _ = reply.send(result);
+                                break
                             }
                         }
                     }
