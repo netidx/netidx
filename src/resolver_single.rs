@@ -158,7 +158,7 @@ async fn connection_read(
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
-                loop {
+                'batch: loop {
                     if tries > 3 {
                         break;
                     }
@@ -184,6 +184,8 @@ async fn connection_read(
                             }
                         }
                     };
+                    let timeout =
+                        max(HELLO_TO, Duration::from_millis(tx_batch.len() as u64 * 100));
                     for (_, m) in &*tx_batch {
                         match c.queue_send(m) {
                             Ok(()) => (),
@@ -194,36 +196,37 @@ async fn connection_read(
                             }
                         }
                     }
-                    match c.flush().await {
+                    match c.flush_timeout(timeout).await {
                         Err(_) => {
                             con = None;
                         }
                         Ok(()) => {
-                            let mut err = false;
                             let mut rx_batch = RAWFROMREADPOOL.take();
                             while rx_batch.len() < tx_batch.len() {
-                                match c.receive_batch(&mut *rx_batch).await {
-                                    Ok(()) => (),
-                                    Err(e) => {
+                                let f = c.receive_batch(&mut *rx_batch);
+                                match time::timeout(timeout, f).await {
+                                    Ok(Ok(())) => (),
+                                    Ok(Err(e)) => {
                                         warn!("read connection failed {}", e);
-                                        err = true;
-                                        break;
+                                        con = None;
+                                        continue 'batch;
+                                    }
+                                    Err(e) => {
+                                        warn!("read connection reply timeout {}", e);
+                                        con = None;
+                                        continue 'batch;
                                     }
                                 }
                             }
-                            if err {
-                                con = None;
-                            } else {
-                                let mut result = FROMREADPOOL.take();
-                                result.extend(
-                                    rx_batch
-                                        .drain(..)
-                                        .enumerate()
-                                        .map(|(i, m)| (tx_batch[i].0, m)),
-                                );
-                                let _ = reply.send(result);
-                                break;
-                            }
+                            let mut result = FROMREADPOOL.take();
+                            result.extend(
+                                rx_batch
+                                    .drain(..)
+                                    .enumerate()
+                                    .map(|(i, m)| (tx_batch[i].0, m)),
+                            );
+                            let _ = reply.send(result);
+                            break;
                         }
                     }
                 }
