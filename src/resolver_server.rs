@@ -6,18 +6,18 @@ use crate::{
     os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
     path::Path,
+    pool::Pooled,
     protocol::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
             FromWrite, ReadyForOwnershipCheck, Resolved, Secret, ServerAuthWrite,
-            ServerHelloRead, ServerHelloWrite, ToRead, ToWrite, Table
+            ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
     resolver_store::{Store, StoreInner, MAX_WRITE_BATCH},
     secstore::SecStore,
     utils,
-    pool::Pooled,
 };
 use anyhow::Result;
 use bytes::{Buf, Bytes};
@@ -33,8 +33,8 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::SystemTime,
     thread,
+    time::SystemTime,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -43,7 +43,10 @@ use tokio::{
     time::{self, Instant},
 };
 
-type ClientInfo = Option<oneshot::Sender<()>>;
+enum ClientInfo {
+    Running(oneshot::Sender<()>),
+    CleaningUp(Vec<oneshot::Sender<()>>),
+}
 
 fn handle_batch_write(
     store: &Store<ClientInfo>,
@@ -95,9 +98,9 @@ fn handle_batch_write(
                 // release the lock
                 drop(publish);
                 drop(s);
-                store.unpublish_addr(write_addr);
+                task::block_in_place(|| store.unpublish_addr(write_addr));
                 con.queue_send(&FromWrite::Unpublished)?;
-                break handle_batch_write(store, con, secstore, uifo, write_addr, msgs)
+                break handle_batch_write(store, con, secstore, uifo, write_addr, msgs);
             }
         }
     }
@@ -137,14 +140,23 @@ async fn client_loop_write(
                 if act {
                     act = false;
                 } else {
-                    let mut inner = store.write();
-                    if let Some(ref mut cl) = inner.clinfo_mut().remove(&write_addr) {
-                        if let Some(stop) = mem::replace(cl, None) {
-                            let _ = stop.send(());
+                    {
+                        let mut inner = store.write();
+                        match inner.clinfo_mut().remove(&write_addr) {
+                            None => (),
+                            Some(ClientInfo::CleaningUp(_)) => unreachable!(),
+                            Some(ClientInfo::Running(stop)) => {
+                                let _ = stop.send(());
+                            }
                         }
+                        let state = ClientInfo::CleaningUp(Vec::new());
+                        inner.clinfo_mut().insert(write_addr, state);
                     }
-                    drop(inner);
-                    store.unpublish_addr(write_addr);
+                    task::block_in_place(|| store.unpublish_addr(write_addr));
+                    {
+                        let mut inner = store.write();
+                        inner.clinfo_mut().remove(&write_addr);
+                    }
                     bail!("client timed out");
                 }
             },
@@ -170,13 +182,13 @@ async fn client_loop_write(
                             write_addr,
                             batch.by_ref().take(MAX_WRITE_BATCH)
                         );
+                        // make sure the scheduler lets other threads run
+                        thread::yield_now();
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
                             con = None;
                             continue 'main;
                         }
-                        // allow some waiting readers to read
-                        thread::yield_now();
                     }
                     if let Err(e) = c.flush().await {
                         warn!("flush to write client failed: {}", e);
@@ -310,19 +322,28 @@ async fn hello_client_write(
         },
     };
     let (tx_stop, rx_stop) = oneshot::channel();
-    {
-        let mut store = store.write();
-        let clinfos = store.clinfo_mut();
-        match clinfos.get_mut(&hello.write_addr) {
-            None => {
-                clinfos.insert(hello.write_addr, Some(tx_stop));
-            }
-            Some(cl) => {
-                if let Some(old_stop) = mem::replace(cl, Some(tx_stop)) {
+    loop {
+        let rx = {
+            let mut store = store.write();
+            let clinfos = store.clinfo_mut();
+            match clinfos.get_mut(&hello.write_addr) {
+                None => {
+                    clinfos.insert(hello.write_addr, ClientInfo::Running(tx_stop));
+                    break;
+                }
+                Some(ClientInfo::Running(cl)) => {
+                    let old_stop = mem::replace(cl, tx_stop);
                     let _ = old_stop.send(());
+                    break;
+                }
+                Some(ClientInfo::CleaningUp(waiters)) => {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.push(tx);
+                    rx
                 }
             }
-        }
+        };
+        let _ = rx.await;
     }
     Ok(client_loop_write(
         cfg,
