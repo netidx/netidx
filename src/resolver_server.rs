@@ -125,7 +125,7 @@ async fn client_loop_write(
             None => future::pending().await,
         }
     }
-    loop {
+    'main: loop {
         select_biased! {
             _ = server_stop => break Ok(()),
             _ = rx_stop => break Ok(()),
@@ -153,20 +153,29 @@ async fn client_loop_write(
                 Ok(()) => {
                     act = true;
                     let c = con.as_mut().unwrap();
-                    let r = handle_batch_write(
-                        &store,
-                        c,
-                        secstore.as_ref(),
-                        &uifo,
-                        write_addr,
-                        batch.drain(..)
-                    );
-                    match r {
-                        Err(_) => { con = None },
-                        Ok(()) => match c.flush().await {
-                            Err(_) => { con = None }, // CR estokes: Log this
-                            Ok(()) => ()
+                    let mut batch = batch.drain(..).peekable();
+                    // hold the write lock for no more than 100K write
+                    // ops, no matter how big the actual batch is.
+                    while batch.peek().is_some() {
+                        let r = handle_batch_write(
+                            &store,
+                            c,
+                            secstore.as_ref(),
+                            &uifo,
+                            write_addr,
+                            batch.by_ref().take(100_000)
+                        );
+                        if let Err(e) = r {
+                            warn!("handle_write_batch failed {}", e);
+                            con = None;
+                            continue 'main;
                         }
+                        // allow some waiting readers to read
+                        thread::yield_now();
+                    }
+                    match c.flush().await {
+                        Ok(()) => ()
+                        Err(_) => { con = None }, // CR estokes: Log this
                     }
                 }
             },

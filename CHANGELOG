@@ -1,3 +1,15 @@
+* 0.4.3:
+  - Implement timeout logic in the resolver client to deal with the
+    case where a resolver server is hung. The rule is, minimum timeout
+    5 seconds or 10 microseconds per operation in the batch for reads
+    and 30 microseconds per operation in the batch for writes,
+    whichever timeout is longer. So e.g. a 20 million item write batch
+    would get 600 seconds to complete before a timeout.
+  - To prevent reader starvation, resolver server will now release the
+    write lock and yield after 100K write ops, even if the batch it's
+    given is bigger than that. e.g. a huge publisher trying to publish
+    10s of millions of things at one time.
+
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are
     nested grids.
