@@ -185,7 +185,7 @@ async fn connection_read(
                         }
                     };
                     let timeout =
-                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 10));
+                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 2));
                     for (_, m) in &*tx_batch {
                         match c.queue_send(m) {
                             Ok(()) => (),
@@ -509,7 +509,7 @@ async fn connection_write(
                         };
                         let timeout = max(
                             HELLO_TO,
-                            Duration::from_micros(tx_batch.len() as u64 * 30)
+                            Duration::from_micros(tx_batch.len() as u64 * 6)
                         );
                         for (_, m) in &**tx_batch {
                             try_cf!("queue send {}", continue, 'main, c.queue_send(m))

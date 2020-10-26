@@ -15,7 +15,7 @@ use crate::{
             ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
-    resolver_store::{Store, StoreInner, MAX_WRITE_BATCH},
+    resolver_store::{Store, StoreInner, MAX_WRITE_BATCH, MAX_READ_BATCH},
     secstore::SecStore,
     utils,
 };
@@ -33,7 +33,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    thread,
     time::SystemTime,
 };
 use tokio::{
@@ -182,17 +181,16 @@ async fn client_loop_write(
                             write_addr,
                             batch.by_ref().take(MAX_WRITE_BATCH)
                         );
-                        // make sure the scheduler lets other threads run
-                        thread::yield_now();
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
                             con = None;
                             continue 'main;
                         }
-                    }
-                    if let Err(e) = c.flush().await {
-                        warn!("flush to write client failed: {}", e);
-                        con = None;
+                        if let Err(e) = c.flush().await {
+                            warn!("flush to write client failed: {}", e);
+                            con = None;
+                            continue 'main;
+                        }
                     }
                 }
             },
@@ -474,15 +472,18 @@ async fn client_loop_read(
             m = con.receive_batch(&mut batch).fuse() => {
                 m?;
                 act = true;
-                handle_batch_read(
-                    &store,
-                    &mut con,
-                    secstore.as_ref(),
-                    &uifo,
-                    id,
-                    batch.drain(0..)
-                )?;
-                con.flush().await?;
+                let mut batch = batch.drain(..).peekable();
+                while batch.peek().is_some() {
+                    handle_batch_read(
+                        &store,
+                        &mut con,
+                        secstore.as_ref(),
+                        &uifo,
+                        id,
+                        batch.by_ref().take(MAX_READ_BATCH)
+                    )?;
+                    con.flush().await?;
+                }
             },
         }
     }

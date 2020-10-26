@@ -32,6 +32,7 @@ lazy_static! {
 }
 
 pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
+pub(crate) const MAX_READ_BATCH: usize = 100_000;
 
 type Addrs = Arc<Vec<SocketAddr>>;
 
