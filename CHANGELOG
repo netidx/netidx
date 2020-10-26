@@ -4,7 +4,7 @@
     5 seconds or 2 microseconds per operation in the batch for reads
     and 6 microseconds per operation in the batch for writes,
     whichever timeout is longer. So e.g. a 20 million item write batch
-    would get 600 seconds to complete before a timeout.
+    would get 120 seconds to return a chunk before it times out.
   - Limit reads and writes to a maximum batch size to prevent, doing
     too much work at once on a tokio worker thread, and reader/writer
     starvation, The max batch sizes are are 100K ops for readers and
