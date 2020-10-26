@@ -23,11 +23,15 @@ use std::{
     net::SocketAddr,
     ops::Deref,
     sync::{Arc, Weak},
+    thread,
 };
 
 lazy_static! {
     static ref EMPTY: Addrs = Arc::new(Vec::new());
+    static ref EMPTY_PATHSET: HashSet<Path> = HashSet::new();
 }
+
+pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
 
 type Addrs = Arc<Vec<SocketAddr>>;
 
@@ -283,16 +287,18 @@ impl<T> StoreInner<T> {
                         self.remove_column(&path);
                     }
                 }
-            },
+            }
         }
     }
 
-    pub(crate) fn unpublish_addr(&mut self, addr: SocketAddr) {
-        self.by_addr.remove(&addr).into_iter().for_each(|paths| {
-            for path in paths {
-                self.unpublish(path, addr);
-            }
-        })
+    pub(crate) fn published_for_addr(
+        &self,
+        addr: &SocketAddr,
+    ) -> impl Iterator<Item = &Path> {
+        match self.by_addr.get(addr) {
+            None => EMPTY_PATHSET.iter(),
+            Some(paths) => paths.iter(),
+        }
     }
 
     fn resolve_default(&self, path: &Path) -> Pooled<Vec<(SocketAddr, Bytes)>> {
@@ -463,5 +469,23 @@ impl<T> Store<T> {
             inner.add_parents(child.append("z").as_ref());
         }
         Store(Arc::new(RwLock::new(inner)))
+    }
+
+    pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
+        let mut paths = Vec::new();
+        loop {
+            let mut inner = self.0.write();
+            paths.extend(inner.published_for_addr(&addr).take(MAX_WRITE_BATCH).cloned());
+            for path in paths.drain(..) {
+                inner.unpublish(path, addr);
+            }
+            if inner.published_for_addr(&addr).next().is_some() {
+                drop(inner);
+                thread::yield_now()
+            } else {
+                inner.gc();
+                break;
+            }
+        }
     }
 }

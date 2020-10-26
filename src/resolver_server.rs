@@ -14,7 +14,7 @@ use crate::{
             ServerHelloRead, ServerHelloWrite, ToRead, ToWrite, Table
         },
     },
-    resolver_store::{Store, StoreInner},
+    resolver_store::{Store, StoreInner, MAX_WRITE_BATCH},
     secstore::SecStore,
     utils,
     pool::Pooled,
@@ -51,7 +51,7 @@ fn handle_batch_write(
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
     write_addr: SocketAddr,
-    msgs: impl Iterator<Item = ToWrite>,
+    mut msgs: impl Iterator<Item = ToWrite>,
 ) -> Result<()> {
     let mut s = store.write();
     let publish = |s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
@@ -75,12 +75,13 @@ fn handle_batch_write(
         }
         Ok(())
     };
-    for m in msgs {
-        match m {
-            ToWrite::Heartbeat => (),
-            ToWrite::Publish(path) => publish(&mut s, con, path, false)?,
-            ToWrite::PublishDefault(path) => publish(&mut s, con, path, true)?,
-            ToWrite::Unpublish(path) => {
+    loop {
+        match msgs.next() {
+            None => break Ok(()),
+            Some(ToWrite::Heartbeat) => (),
+            Some(ToWrite::Publish(path)) => publish(&mut s, con, path, false)?,
+            Some(ToWrite::PublishDefault(path)) => publish(&mut s, con, path, true)?,
+            Some(ToWrite::Unpublish(path)) => {
                 if !Path::is_absolute(&*path) {
                     con.queue_send(&FromWrite::Error("absolute paths required".into()))?
                 } else if let Some(r) = s.check_referral(&path) {
@@ -90,14 +91,16 @@ fn handle_batch_write(
                     con.queue_send(&FromWrite::Unpublished)?
                 }
             }
-            ToWrite::Clear => {
-                s.unpublish_addr(write_addr);
-                s.gc();
-                con.queue_send(&FromWrite::Unpublished)?
+            Some(ToWrite::Clear) => {
+                // release the lock
+                drop(publish);
+                drop(s);
+                store.unpublish_addr(write_addr);
+                con.queue_send(&FromWrite::Unpublished)?;
+                break handle_batch_write(store, con, secstore, uifo, write_addr, msgs)
             }
         }
     }
-    Ok(())
 }
 
 async fn client_loop_write(
@@ -134,14 +137,14 @@ async fn client_loop_write(
                 if act {
                     act = false;
                 } else {
-                    let mut store = store.write();
-                    if let Some(ref mut cl) = store.clinfo_mut().remove(&write_addr) {
+                    let mut inner = store.write();
+                    if let Some(ref mut cl) = inner.clinfo_mut().remove(&write_addr) {
                         if let Some(stop) = mem::replace(cl, None) {
                             let _ = stop.send(());
                         }
                     }
+                    drop(inner);
                     store.unpublish_addr(write_addr);
-                    store.gc();
                     bail!("client timed out");
                 }
             },
@@ -155,8 +158,9 @@ async fn client_loop_write(
                     act = true;
                     let c = con.as_mut().unwrap();
                     let mut batch = batch.drain(..).peekable();
-                    // hold the write lock for no more than 10K write
-                    // ops, no matter how big the actual batch is.
+                    // hold the write lock for no more than
+                    // MAX_WRITE_BATCH write ops, no matter how big
+                    // the actual batch is.
                     while batch.peek().is_some() {
                         let r = handle_batch_write(
                             &store,
@@ -164,7 +168,7 @@ async fn client_loop_write(
                             secstore.as_ref(),
                             &uifo,
                             write_addr,
-                            batch.by_ref().take(10_000)
+                            batch.by_ref().take(MAX_WRITE_BATCH)
                         );
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
