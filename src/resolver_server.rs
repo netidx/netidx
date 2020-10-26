@@ -23,7 +23,7 @@ use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
-use log::{debug, info};
+use log::{debug, info, warn};
 use parking_lot::RwLockWriteGuard;
 use std::{
     collections::HashMap,
@@ -34,6 +34,7 @@ use std::{
         Arc,
     },
     time::SystemTime,
+    thread,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -173,9 +174,9 @@ async fn client_loop_write(
                         // allow some waiting readers to read
                         thread::yield_now();
                     }
-                    match c.flush().await {
-                        Ok(()) => ()
-                        Err(_) => { con = None }, // CR estokes: Log this
+                    if let Err(e) = c.flush().await {
+                        warn!("flush to write client failed: {}", e);
+                        con = None;
                     }
                 }
             },
