@@ -1,9 +1,10 @@
 [package]
 name = "netidx-protocols"
-version = "0.4.2"
+version = "0.5.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 homepage = "https://estokes.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
 description = "Various protocols build on top of netidx"
 documentation = "https://docs.rs/netidx-protocols"
 license = "MIT"

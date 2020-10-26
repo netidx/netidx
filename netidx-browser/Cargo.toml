@@ -1,11 +1,12 @@
 [package]
 name = "netidx-browser"
-version = "0.4.2"
+version = "0.5.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
 description = "A graphical browser/ui creator for netidx"
 homepage = "https://estokes.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
 keywords = ["networking", "distributed", "kerberos", "tool"]
 categories = ["gui"]
@@ -34,7 +35,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 futures = "0.3"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "0.3", features = ["full"] }
 serde = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 netidx = { path = "..", version = "0.4" , default_features = false }

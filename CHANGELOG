@@ -1,4 +1,5 @@
-* 0.4.3:
+* 0.5.0:
+  - Update to tokio 0.3 aka 1.0
   - Implement timeout logic in the resolver client to deal with the
     case where a resolver server is hung. The rule is, minimum timeout
     5 seconds or 2 microseconds per operation in the batch for reads

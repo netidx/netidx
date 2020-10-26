@@ -83,13 +83,10 @@ system more discoverable, and is also quite efficient.
 # Browser
 
 In the case where you publish values in a regular structure you can
-use netidx browser to visualize part of your tree as a table.
-
-![netidx-browser](netidx-browser.gif)
-
-A row in the table is made of a root node with a child for each column.
-If a subtree consists of row nodes that share the same columns most of the time
-then it can be drawn as a table in the browser. e.g.
+use netidx browser to visualize part of your tree as a table. A row in
+the table is made of a root node with a child for each column.  If a
+subtree consists of row nodes that share the same columns most of the
+time then it can be drawn as a table in the browser. e.g.
 
 ```
 /bench/0/0

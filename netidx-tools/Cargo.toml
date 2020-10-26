@@ -1,11 +1,12 @@
 [package]
 name = "netidx-tools"
-version = "0.4.2"
+version = "0.5.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
 description = "Cross platform secure messaging framework, \"like DNS for values\""
 homepage = "https://estokes.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
 keywords = ["networking", "networking", "distributed", "kerberos", "tool"]
 categories = ["network-programming"]
@@ -34,7 +35,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 futures = "0.3"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "0.3", features = ["full"] }
 serde = "1.0"
 netidx = { path = "..", version = "0.4" , default_features = false }
 serde_json = "1.0"
