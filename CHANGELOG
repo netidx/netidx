@@ -6,7 +6,7 @@
     whichever timeout is longer. So e.g. a 20 million item write batch
     would get 600 seconds to complete before a timeout.
   - To prevent reader starvation, resolver server will now release the
-    write lock and yield after 100K write ops, even if the batch it's
+    write lock and yield after 10K write ops, even if the batch it's
     given is bigger than that. e.g. a huge publisher trying to publish
     10s of millions of things at one time.
 

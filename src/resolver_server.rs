@@ -155,7 +155,7 @@ async fn client_loop_write(
                     act = true;
                     let c = con.as_mut().unwrap();
                     let mut batch = batch.drain(..).peekable();
-                    // hold the write lock for no more than 100K write
+                    // hold the write lock for no more than 10K write
                     // ops, no matter how big the actual batch is.
                     while batch.peek().is_some() {
                         let r = handle_batch_write(
@@ -164,7 +164,7 @@ async fn client_loop_write(
                             secstore.as_ref(),
                             &uifo,
                             write_addr,
-                            batch.by_ref().take(100_000)
+                            batch.by_ref().take(10_000)
                         );
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
