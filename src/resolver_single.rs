@@ -88,7 +88,7 @@ async fn connect_read(
         }
         if n % addrs.len() == 0 && tries > 0 {
             let wait = thread_rng().gen_range(1, 4);
-            time::delay_for(Duration::from_secs(wait)).await;
+            time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
         let con = cwt!("connect", TcpStream::connect(&addr));
@@ -164,7 +164,7 @@ async fn connection_read(
                     }
                     if tries > 1 {
                         let wait = thread_rng().gen_range(1, 4);
-                        time::delay_for(Duration::from_secs(wait)).await
+                        time::sleep(Duration::from_secs(wait)).await
                     }
                     tries += 1;
                     let c = match con {
@@ -460,7 +460,7 @@ async fn connection_write(
                                         resolver_addr, e
                                     );
                                     let wait = thread_rng().gen_range(1, 4);
-                                    time::delay_for(Duration::from_secs(wait)).await;
+                                    time::sleep(Duration::from_secs(wait)).await;
                                 }
                             }
                         },
@@ -480,7 +480,7 @@ async fn connection_write(
                         }
                         if tries > 0 {
                             let wait = thread_rng().gen_range(1, 4);
-                            time::delay_for(Duration::from_secs(wait)).await;
+                            time::sleep(Duration::from_secs(wait)).await;
                         }
                         tries += 1;
                         let c = match con {

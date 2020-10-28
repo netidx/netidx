@@ -819,7 +819,7 @@ impl Publisher {
                 .collect::<Vec<_>>();
             pb.resolver.clone()
         };
-        for mut client in clients {
+        for client in clients {
             let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
@@ -1196,7 +1196,7 @@ async fn hello_client(
         },
         ResolverAuthenticate(id, _) => {
             // slow down brute force attacks on the hashed secret
-            time::delay_for(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
             info!("hello_client processing listener ownership check from resolver");
             let secret =
                 secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
@@ -1318,7 +1318,7 @@ async fn client_loop(
 
 async fn accept_loop(
     t: PublisherWeak,
-    mut serv: TcpListener,
+    serv: TcpListener,
     stop: oneshot::Receiver<()>,
     desired_auth: Auth,
 ) {

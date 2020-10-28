@@ -33,7 +33,7 @@ serde_derive = "1"
 serde_json = "1"
 rand = "0.7"
 lazy_static = "1"
-bytes = { version = "0.5", features = ["serde"] }
+bytes = { version = "0.6", features = ["serde"] }
 byteorder = "1"
 pin-utils = "0.1"
 crossbeam = "0.7"

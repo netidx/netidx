@@ -36,7 +36,7 @@ use tokio::{
     net::TcpStream,
     sync::{mpsc::error::SendTimeoutError, oneshot},
     task,
-    time::{self, Delay, Instant},
+    time::{self, Sleep, Instant},
 };
 
 #[derive(Debug)]
@@ -395,13 +395,13 @@ impl Subscriber {
     }
 
     fn start_resub_task(&self, incoming: UnboundedReceiver<()>) {
-        async fn wait_retry(retry: &mut Option<Delay>) {
+        async fn wait_retry(retry: &mut Option<Sleep>) {
             match retry {
                 None => future::pending().await,
                 Some(d) => d.await,
             }
         }
-        fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Delay>) {
+        fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Sleep>) {
             *retry = subscriber
                 .durable_dead
                 .values()
@@ -417,9 +417,9 @@ impl Subscriber {
                         }
                     }
                 })
-                .map(|t| time::delay_until(t + Duration::from_secs(1)));
+                .map(|t| time::sleep_until(t + Duration::from_secs(1)));
         }
-        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Delay>) {
+        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Sleep>) {
             if let Some(subscriber) = subscriber.upgrade() {
                 info!("doing resubscriptions");
                 let now = Instant::now();
@@ -502,7 +502,7 @@ impl Subscriber {
         let subscriber = self.downgrade();
         task::spawn(async move {
             let mut incoming = Batched::new(incoming, 100_000);
-            let mut retry: Option<Delay> = None;
+            let mut retry: Option<Sleep> = None;
             loop {
                 select! {
                     _ = wait_retry(&mut retry).fuse() => {

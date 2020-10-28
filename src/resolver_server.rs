@@ -596,7 +596,7 @@ async fn server_loop(
             Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
-    let mut listener = TcpListener::bind(id).await?;
+    let listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
