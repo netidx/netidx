@@ -30,7 +30,7 @@ async fn run_publisher(
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
             n += cols;
-            if n % 10000 == 0 {
+            if n % 100000 == 0 {
                 publisher.flush(None).await.expect("publish");
             }
         }
