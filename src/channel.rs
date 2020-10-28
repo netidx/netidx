@@ -1,7 +1,7 @@
 use crate::{os::Krb5Ctx, pack::Pack};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{buf::BufExt, Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use futures::{prelude::*, select_biased};
 use log::info;
 use std::{cmp::min, fmt::Debug, mem, result, time::Duration};
@@ -37,7 +37,7 @@ async fn flush_buf<B: Buf>(
         buf.remaining() as u32
     };
     let lenb = len.to_be_bytes();
-    let mut buf = BufExt::chain(&lenb[..], buf);
+    let mut buf = Buf::chain(&lenb[..], buf);
     while buf.has_remaining() {
         soc.write_buf(&mut buf).await?;
     }
@@ -188,7 +188,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
     mut soc: ReadHalf<TcpStream>,
     mut set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<BytesMut> {
-    let (mut tx, rx) = mpsc::channel(3);
+    let (tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
         let mut ctx: Option<C> = None;

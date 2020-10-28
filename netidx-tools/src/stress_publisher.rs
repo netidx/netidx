@@ -42,7 +42,7 @@ async fn run_publisher(
         }
         publisher.flush(None).await.expect("flush");
         if let Some(delay) = delay {
-            time::delay_for(delay).await;
+            time::sleep(delay).await;
         }
         let now = Instant::now();
         let elapsed = now - last_stat;
@@ -66,10 +66,10 @@ pub(crate) fn run(
     cols: usize,
     auth: Auth,
 ) {
-    let mut rt = Runtime::new().expect("failed to init runtime");
+    let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         run_publisher(config, bcfg, delay, rows, cols, auth).await;
         // Allow the publisher time to send the clear message
-        time::delay_for(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     });
 }

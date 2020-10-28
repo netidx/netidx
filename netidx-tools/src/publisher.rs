@@ -14,7 +14,7 @@ use tokio::{
 };
 
 pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Auth) {
-    let mut rt = Runtime::new().expect("failed to init runtime");
+    let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
         let mut published: HashMap<Path, Val> = HashMap::new();

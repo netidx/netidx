@@ -7,7 +7,7 @@ use netidx::{
 use tokio::runtime::Runtime;
 
 pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
-    let mut rt = Runtime::new().expect("failed to init runtime");
+    let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         match cmd {
             ResolverCmd::Resolve { path } => {

@@ -257,7 +257,7 @@ mod publisher {
 
     #[test]
     fn publish_subscribe() {
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let mut cfg = config::Config::load("cfg/simple.json")
                 .expect("load simple config");
@@ -284,7 +284,7 @@ mod publisher {
                 vp.writes(tx);
                 let mut c = 1;
                 loop {
-                    time::delay_for(Duration::from_millis(100)).await;
+                    time::sleep(Duration::from_millis(100)).await;
                     while let Ok(r) = df.try_next() {
                         match r {
                             None => panic!("publish default chan closed"),

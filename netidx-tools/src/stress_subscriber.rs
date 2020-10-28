@@ -13,7 +13,7 @@ use tokio::{
 };
 
 pub(crate) fn run(config: Config, auth: Auth) {
-    let mut rt = Runtime::new().expect("runtime");
+    let rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());
         let table = r.table(Path::from("/bench")).await.expect("table");

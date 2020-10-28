@@ -15,7 +15,7 @@ pub(crate) fn run(
         file.push_str(&format!("{}.pid", id));
         Daemonize::new().pid_file(file).start().expect("failed to daemonize");
     }
-    let mut rt = Runtime::new().expect("failed to init runtime");
+    let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let server = Server::new(config, permissions, delay_reads, id)
             .await

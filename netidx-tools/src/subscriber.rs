@@ -255,6 +255,6 @@ async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
 }
 
 pub(crate) fn run(cfg: Config, paths: Vec<String>, auth: Auth) {
-    let mut rt = Runtime::new().expect("failed to init runtime");
+    let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(subscribe(cfg, paths, auth));
 }

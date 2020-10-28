@@ -37,7 +37,7 @@
 //! publisher.flush(None).await?;
 //!
 //! loop {
-//!     time::delay_for(Duration::from_millis(500)).await;
+//!     time::sleep(Duration::from_millis(500)).await;
 //!     temp.update(Value::F32(get_cpu_temp()));
 //!     publisher.flush(None).await?;
 //! }
