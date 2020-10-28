@@ -890,7 +890,7 @@ fn run_tokio(
     mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut rt = Runtime::new().expect("failed to create tokio runtime");
+        let rt = Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async move {
             while let Some(ctx) = start_netidx.next().await {
                 task::spawn(netidx_main(ctx));
