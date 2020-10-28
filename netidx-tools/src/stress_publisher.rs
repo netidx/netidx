@@ -6,7 +6,8 @@ use netidx::{
     resolver::Auth,
 };
 use std::time::{Duration, Instant};
-use tokio::{runtime::Runtime, signal, time};
+use anyhow::Result;
+use tokio::{runtime::Runtime, signal, task, time};
 
 async fn run_publisher(
     config: Config,
@@ -24,14 +25,20 @@ async fn run_publisher(
     let published = {
         let mut published = Vec::with_capacity(rows * cols);
         let mut n = 0;
+        let mut task: Option<task::JoinHandle<Result<()>>> = None;
         for row in 0..rows {
             for col in 0..cols {
                 let path = Path::from(format!("/bench/{}/{}", row, col));
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
             n += cols;
-            if n % 100000 == 0 {
-                publisher.flush(None).await.expect("publish");
+            if n >= 100000 {
+                n = 0;
+                if let Some(task) = task.take() {
+                    task.await.expect("publish join").expect("publish")
+                }
+                let publisher = publisher.clone();
+                task = Some(task::spawn(async move { publisher.flush(None).await }));
             }
         }
         published
