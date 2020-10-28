@@ -434,36 +434,40 @@ async fn connection_write(
                 if act {
                     act = false;
                 } else {
-                    match con {
-                        Some(ref mut c) => match c.send_one(&ToWrite::Heartbeat).await {
-                            Ok(()) => break,
-                            Err(e) => {
-                                info!("write_con heartbeat send error {}", e);
-                                con = None;
+                    for i in 0..3 {
+                        match con {
+                            Some(ref mut c) => {
+                                match c.send_one(&ToWrite::Heartbeat).await {
+                                    Ok(()) => break,
+                                    Err(e) => {
+                                        info!("write_con heartbeat send error {}", e);
+                                        con = None;
+                                    }
+                                }
                             }
+                            None => {
+                                let r = connect_write(
+                                    &resolver, resolver_addr, write_addr, &published,
+                                    &secrets, &mut ctx, &desired_auth, &mut degraded
+                                ).await;
+                                match r {
+                                    Ok((ttl, c)) => {
+                                        set_ttl(ttl, &mut hb, &mut dc);
+                                        con = Some(c);
+                                        break
+                                    }
+                                    Err(e) => {
+                                        ctx = None;
+                                        warn!(
+                                            "write connection to {:?} failed {}",
+                                            resolver_addr, e
+                                        );
+                                        let wait = thread_rng().gen_range(1, 4);
+                                        time::sleep(Duration::from_secs(wait)).await;
+                                    }
+                                }
+                            },
                         }
-                        None => for i in 0..3 {
-                            let r = connect_write(
-                                &resolver, resolver_addr, write_addr, &published,
-                                &secrets, &mut ctx, &desired_auth, &mut degraded
-                            ).await;
-                            match r {
-                                Ok((ttl, c)) => {
-                                    set_ttl(ttl, &mut hb, &mut dc);
-                                    con = Some(c);
-                                    break
-                                }
-                                Err(e) => {
-                                    ctx = None;
-                                    warn!(
-                                        "write connection to {:?} failed {}",
-                                        resolver_addr, e
-                                    );
-                                    let wait = thread_rng().gen_range(1, 4);
-                                    time::sleep(Duration::from_secs(wait)).await;
-                                }
-                            }
-                        },
                     }
                 }
             },
