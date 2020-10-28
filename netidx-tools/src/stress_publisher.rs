@@ -23,10 +23,15 @@ async fn run_publisher(
     let mut v = 0u64;
     let published = {
         let mut published = Vec::with_capacity(rows * cols);
+        let mut n = 0;
         for row in 0..rows {
             for col in 0..cols {
                 let path = Path::from(format!("/bench/{}/{}", row, col));
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
+            }
+            n += cols;
+            if n % 10000 == 0 {
+                publisher.flush(None).await.expect("publish");
             }
         }
         published
