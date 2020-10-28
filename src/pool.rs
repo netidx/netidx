@@ -65,7 +65,7 @@ impl<T: Poolable + Sync + Send + 'static> Pool<T> {
 
     /// takes an item from the pool, creating one if none are available.
     pub fn take(&self) -> Pooled<T> {
-        let object = self.0.pop().unwrap_or_else(|_| <T as Poolable>::alloc());
+        let object = self.0.pop().unwrap_or_else(|| <T as Poolable>::alloc());
         Pooled { pool: Arc::downgrade(&self.0), object: Some(object) }
     }
 }

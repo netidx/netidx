@@ -1282,7 +1282,7 @@ async fn client_loop(
             to_cl = flushes.next() => match to_cl {
                 None => break Ok(()),
                 Some(timeout) => {
-                    while let Ok(m) = updates.pop() {
+                    while let Some(m) = updates.pop() {
                         msg_sent = true;
                         match m {
                             ToClientMsg::Val(id, v) => {
