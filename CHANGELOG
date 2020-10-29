@@ -38,6 +38,9 @@
     forever. There is just no combination of timeouts and or logic
     that seems better at the moment. The means that publisher::flush
     now cannot fail.
+  - Fix a bug in publisher that would cause new published names not to
+    be sent to the resolver if they are queued while a flush operation
+    is in progress. Sorry.
 
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are
