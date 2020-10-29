@@ -6,7 +6,6 @@ use netidx::{
     resolver::Auth,
 };
 use std::time::{Duration, Instant};
-use anyhow::Result;
 use tokio::{runtime::Runtime, signal, task, time};
 
 async fn run_publisher(
@@ -25,7 +24,7 @@ async fn run_publisher(
     let published = {
         let mut published = Vec::with_capacity(rows * cols);
         let mut n = 0;
-        let mut task: Option<task::JoinHandle<Result<()>>> = None;
+        let mut task: Option<task::JoinHandle<()>> = None;
         for row in 0..rows {
             for col in 0..cols {
                 let path = Path::from(format!("/bench/{}/{}", row, col));
@@ -35,7 +34,7 @@ async fn run_publisher(
             if n >= 100000 {
                 n = 0;
                 if let Some(task) = task.take() {
-                    task.await.expect("publish join").expect("publish")
+                    task.await.expect("publish join")
                 }
                 let publisher = publisher.clone();
                 task = Some(task::spawn(async move { publisher.flush(None).await }));
@@ -43,7 +42,7 @@ async fn run_publisher(
         }
         published
     };
-    publisher.flush(None).await.expect("publish");
+    publisher.flush(None).await;
     let mut last_stat = Instant::now();
     let one_second = Duration::from_secs(1);
     loop {
@@ -52,7 +51,7 @@ async fn run_publisher(
             p.update(Value::V64(v + i as u64));
             sent += 1;
         }
-        publisher.flush(None).await.expect("flush");
+        publisher.flush(None).await;
         if let Some(delay) = delay {
             time::sleep(delay).await;
         }

@@ -66,7 +66,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 }
             }
             buf.clear();
-            try_cf!("flush failed", continue, publisher.flush(timeout).await);
+            publisher.flush(timeout).await
         }
         // run until we are killed even if stdin closes or ends
         future::pending::<()>().await;

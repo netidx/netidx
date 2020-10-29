@@ -34,7 +34,7 @@ use tokio::{
     time::{self, Instant, Interval},
 };
 
-const HELLO_TO: Duration = Duration::from_secs(60);
+const HELLO_TO: Duration = Duration::from_secs(15);
 
 static TTL: u64 = 120;
 
@@ -86,7 +86,7 @@ async fn connect_read(
             bail!("can't connect to any resolver servers");
         }
         if n % addrs.len() == 0 && tries > 0 {
-            let wait = thread_rng().gen_range(1, 4);
+            let wait = thread_rng().gen_range(1, 12);
             time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
@@ -154,7 +154,7 @@ async fn connection_read(
                         break;
                     }
                     if tries > 1 {
-                        let wait = thread_rng().gen_range(1, 4);
+                        let wait = thread_rng().gen_range(1, 12);
                         time::sleep(Duration::from_secs(wait)).await
                     }
                     tries += 1;
@@ -173,7 +173,7 @@ async fn connection_read(
                         },
                     };
                     let timeout =
-                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 2));
+                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 6));
                     for (_, m) in &*tx_batch {
                         match c.queue_send(m) {
                             Ok(()) => (),
@@ -450,7 +450,7 @@ async fn connection_write(
                                             "write connection to {:?} failed {}",
                                             resolver_addr, e
                                         );
-                                        let wait = thread_rng().gen_range(1, 4);
+                                        let wait = thread_rng().gen_range(1, 12);
                                         time::sleep(Duration::from_secs(wait)).await;
                                     }
                                 }
@@ -471,7 +471,7 @@ async fn connection_write(
                             break 'batch;
                         }
                         if tries > 0 {
-                            let wait = thread_rng().gen_range(1, 4);
+                            let wait = thread_rng().gen_range(1, 12);
                             time::sleep(Duration::from_secs(wait)).await;
                         }
                         tries += 1;
@@ -501,7 +501,7 @@ async fn connection_write(
                         };
                         let timeout = max(
                             HELLO_TO,
-                            Duration::from_micros(tx_batch.len() as u64 * 6)
+                            Duration::from_micros(tx_batch.len() as u64 * 12)
                         );
                         for (_, m) in &**tx_batch {
                             try_cf!("queue send {}", continue, 'main, c.queue_send(m))
@@ -585,6 +585,14 @@ async fn write_mgr(
     while let Some((batch, reply)) = receiver.next().await {
         let tx_batch = Arc::new(batch);
         let mut waiters = Vec::new();
+        {
+            let mut published = published.write();
+            for (_, tx) in tx_batch.iter() {
+                if let ToWrite::Publish(path) = tx {
+                    published.insert(path.clone());
+                }
+            }
+        }
         for s in senders.iter_mut() {
             let (tx, rx) = oneshot::channel();
             let _ = s.send((Arc::clone(&tx_batch), tx)).await;
@@ -593,17 +601,6 @@ async fn write_mgr(
         match select_ok(waiters).await {
             Err(e) => warn!("write_mgr: write failed on all writers {}", e),
             Ok((rx_batch, _)) => {
-                let mut published = published.write();
-                for ((_, tx), (_, rx)) in tx_batch.iter().zip(rx_batch.iter()) {
-                    if let ToWrite::Publish(path) = tx {
-                        match rx {
-                            FromWrite::Published => {
-                                published.insert(path.clone());
-                            }
-                            _ => (),
-                        }
-                    }
-                }
                 let _ = reply.send(rx_batch);
             }
         }

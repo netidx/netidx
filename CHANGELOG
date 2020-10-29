@@ -2,10 +2,9 @@
   - Update to tokio 0.3 aka 1.0
   - Implement timeout logic in the resolver client to deal with the
     case where a resolver server is hung. The rule is, minimum timeout
-    5 seconds or 2 microseconds per operation in the batch for reads
-    and 6 microseconds per operation in the batch for writes,
-    whichever timeout is longer. So e.g. a 20 million item write batch
-    would get 120 seconds to return a chunk before it times out.
+    15 seconds or 6 microseconds per operation in the batch for reads
+    and 12 microseconds per operation in the batch for writes,
+    whichever timeout is longer.
   - Limit reads and writes to a maximum batch size to prevent doing
     too much work at once on a tokio worker thread, and reader/writer
     starvation, The max batch sizes are are 100K ops for readers and
@@ -20,14 +19,25 @@
     security context around for a publisher for as long as that
     publisher is alive.
   - Caching of read security contexts is no longer supported after I
-    found they hold an open file per ctx for the replay cache (at
-    least with MIT Kerberos). Since we must keep one for each live
-    publisher you may need to raise the allowed number of open file
-    descriptors to avoid starvation. The number of open files should
-    be at least P + 2*C, where P is the number of publishers and C is
-    the number of allowed simultaneous connections. Alternatively you
-    can disable the replay cache by setting KRB5RCACHETYPE=none. This
-    is not recommended as it opens you to token replay attacks.
+    found that some implementations of kerberos hold an open file per
+    ctx for the replay cache. Since we must keep a live ctx for each
+    live publisher you may need to raise the allowed number of open
+    file descriptors to avoid starvation if you use an effected
+    kerberos distribution. The number of open files should be at least
+    P + 2*C, where P is the number of publishers and C is the number
+    of allowed simultaneous connections. Alternatively you can disable
+    the replay cache by setting KRB5RCACHETYPE=none. This is not
+    recommended as it opens you to token replay attacks.
+  - Fix a bug in the resolver server connection tracking logic that
+    caused the number of counted open connections to be higher than
+    the actual number when the counted connections are live publishers
+    that are heartbeating but not actually connected. This could cause
+    read and write starvation with a large number of publishers.
+  - No longer fail publisher flushes when the publisher can't reach
+    any resolver server, instead log the error and keep trying
+    forever. There is just no combination of timeouts and or logic
+    that seems better at the moment. The means that publisher::flush
+    now cannot fail.
 
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are

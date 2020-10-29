@@ -17,7 +17,7 @@ use crossbeam::queue::SegQueue;
 use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectAll};
 use fxhash::FxBuildHasher;
 use get_if_addrs::get_if_addrs;
-use log::{debug, info};
+use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
@@ -799,7 +799,7 @@ impl Publisher {
     /// update within the timeout duration will be disconnected.
     /// Otherwise flush will wait as long as necessary to flush the
     /// update to every client.
-    pub async fn flush(&self, timeout: Option<Duration>) -> Result<()> {
+    pub async fn flush(&self, timeout: Option<Duration>) {
         let mut to_publish;
         let mut to_publish_default;
         let mut to_unpublish;
@@ -823,18 +823,23 @@ impl Publisher {
             let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
-            resolver.publish(to_publish.drain()).await?;
-            self.0.lock().to_publish = to_publish;
+            if let Err(e) = resolver.publish(to_publish.drain()).await {
+                error!("failed to publish some paths to at least one resolver {}", e);
+            }
         }
         if to_publish_default.len() > 0 {
-            resolver.publish_default(to_publish_default.drain()).await?;
-            self.0.lock().to_publish_default = to_publish_default;
+            if let Err(e) = resolver.publish_default(to_publish_default.drain()).await {
+                error!(
+                    "failed to publish_default some paths to at least one resolver {}",
+                    e
+                )
+            }
         }
         if to_unpublish.len() > 0 {
-            resolver.unpublish(to_unpublish.drain()).await?;
-            self.0.lock().to_unpublish = to_unpublish;
+            if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
+                error!("failed to unpublish some paths to at least one resolver {}", e)
+            }
         }
-        Ok(())
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
