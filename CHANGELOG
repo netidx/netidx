@@ -6,7 +6,7 @@
     and 6 microseconds per operation in the batch for writes,
     whichever timeout is longer. So e.g. a 20 million item write batch
     would get 120 seconds to return a chunk before it times out.
-  - Limit reads and writes to a maximum batch size to prevent, doing
+  - Limit reads and writes to a maximum batch size to prevent doing
     too much work at once on a tokio worker thread, and reader/writer
     starvation, The max batch sizes are are 100K ops for readers and
     10K ops for writers. Cleaning up dead publishers are included in
@@ -14,6 +14,20 @@
     case the publisher is huge. Results are flushed back to the client
     after each chunk so that we interact properly with the hang
     detection feature mentioned above.
+  - Fix a bug in the resolver client that would cause a long running
+    write connection to stop after the heartbeat interval.
+  - Fix a design flaw in the secstore. Now it will always keep the
+    security context around for a publisher for as long as that
+    publisher is alive.
+  - Caching of read security contexts is no longer supported after I
+    found they hold an open file per ctx for the replay cache (at
+    least with MIT Kerberos). Since we must keep one for each live
+    publisher you may need to raise the allowed number of open file
+    descriptors to avoid starvation. The number of open files should
+    be at least P + 2*C, where P is the number of publishers and C is
+    the number of allowed simultaneous connections. Alternatively you
+    can disable the replay cache by setting KRB5RCACHETYPE=none. This
+    is not recommended as it opens you to token replay attacks.
 
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are

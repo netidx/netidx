@@ -3,56 +3,26 @@ use crate::{
     chars::Chars,
     config,
     os::{self, Krb5Ctx, Mapper, ServerCtx},
-    protocol::resolver::v1::CtxId,
 };
-use rand::Rng;
 use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, Guard};
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
+use rand::Rng;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-static GC: usize = u16::MAX as usize;
-
 pub(crate) struct SecStoreInner {
-    read_ctxts: HashMap<CtxId, ServerCtx, FxBuildHasher>,
-    write_ctxts: HashMap<SocketAddr, (Chars, u128, ServerCtx), FxBuildHasher>,
+    ctxts: HashMap<SocketAddr, (Chars, u128, ServerCtx), FxBuildHasher>,
     userdb: UserDb,
 }
 
 impl SecStoreInner {
-    fn get_read(&self, id: &CtxId) -> Option<ServerCtx> {
-        self.read_ctxts.get(id).and_then(|ctx| match ctx.ttl() {
-            Ok(ttl) if ttl.as_secs() > 0 => Some(ctx.clone()),
-            _ => None,
-        })
-    }
-
-    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<&(Chars, u128, ServerCtx)> {
-        self.write_ctxts.get(id).and_then(|r| match r.2.ttl() {
+    pub(crate) fn get(&self, id: &SocketAddr) -> Option<&(Chars, u128, ServerCtx)> {
+        self.ctxts.get(id).and_then(|r| match r.2.ttl() {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
         })
-    }
-
-    fn gc(&mut self) {
-        let mut read = Vec::new();
-        let mut write = Vec::new();
-        for (id, ctx) in self.read_ctxts.iter() {
-            read.push((*id, ctx.ttl().map(|d| d.as_secs()).unwrap_or(0)));
-        }
-        for (id, (_, _, ctx)) in self.write_ctxts.iter() {
-            write.push((*id, ctx.ttl().map(|d| d.as_secs()).unwrap_or(0)));
-        }
-        read.sort_by_key(|(_, ttl)| *ttl);
-        write.sort_by_key(|(_, ttl)| *ttl);
-        for (id, _) in read.drain(0..read.len() - GC) {
-            self.read_ctxts.remove(&id);
-        }
-        for (id, _) in write.drain(0..write.len() - GC) {
-            self.write_ctxts.remove(&id);
-        }
     }
 
     fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>> {
@@ -79,8 +49,7 @@ impl SecStore {
             spn: Arc::new(spn),
             pmap: ArcSwap::from(Arc::new(pmap)),
             store: Arc::new(RwLock::new(SecStoreInner {
-                read_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
-                write_ctxts: HashMap::with_hasher(FxBuildHasher::default()),
+                ctxts: HashMap::with_hasher(FxBuildHasher::default()),
                 userdb,
             })),
         })
@@ -95,14 +64,9 @@ impl SecStore {
         self.pmap.swap(Arc::new(pmap));
     }
 
-    pub(crate) fn get_read(&self, id: &CtxId) -> Option<ServerCtx> {
+    pub(crate) fn get(&self, id: &SocketAddr) -> Option<ServerCtx> {
         let inner = self.store.read();
-        inner.get_read(id)
-    }
-
-    pub(crate) fn get_write(&self, id: &SocketAddr) -> Option<ServerCtx> {
-        let inner = self.store.read();
-        inner.get_write(id).map(|(_, _, c)| c.clone())
+        inner.get(id).map(|(_, _, c)| c.clone())
     }
 
     pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, u128, Bytes)> {
@@ -114,17 +78,7 @@ impl SecStore {
         Ok((ctx, secret, tok))
     }
 
-    pub(crate) fn store_read(&self, ctx: ServerCtx) -> CtxId {
-        let id = CtxId::new();
-        let mut inner = self.store.write();
-        inner.read_ctxts.insert(id, ctx);
-        if inner.read_ctxts.len() > GC {
-            inner.gc();
-        }
-        id
-    }
-
-    pub(crate) fn store_write(
+    pub(crate) fn store(
         &self,
         addr: SocketAddr,
         spn: Chars,
@@ -132,10 +86,12 @@ impl SecStore {
         ctx: ServerCtx,
     ) {
         let mut inner = self.store.write();
-        inner.write_ctxts.insert(addr, (spn, secret, ctx));
-        if inner.write_ctxts.len() > GC {
-            inner.gc();
-        }
+        inner.ctxts.insert(addr, (spn, secret, ctx));
+    }
+
+    pub(crate) fn remove(&self, addr: &SocketAddr) {
+        let mut inner = self.store.write();
+        inner.ctxts.remove(addr);
     }
 
     pub(crate) fn ifo(&self, user: Option<&str>) -> Result<Arc<UserInfo>> {

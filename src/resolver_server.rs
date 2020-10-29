@@ -10,12 +10,12 @@ use crate::{
     protocol::{
         publisher,
         resolver::v1::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-            FromWrite, ReadyForOwnershipCheck, Resolved, Secret, ServerAuthWrite,
-            ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromRead, FromWrite, ReadyForOwnershipCheck, Resolved, Secret,
+            ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
-    resolver_store::{Store, StoreInner, MAX_WRITE_BATCH, MAX_READ_BATCH},
+    resolver_store::{Store, StoreInner, MAX_READ_BATCH, MAX_WRITE_BATCH},
     secstore::SecStore,
     utils,
 };
@@ -150,12 +150,13 @@ async fn client_loop_write(
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
                         inner.clinfo_mut().insert(write_addr, state);
+                        if let Some(secstore) = secstore {
+                            secstore.remove(&write_addr);
+                        }
                     }
                     task::block_in_place(|| store.unpublish_addr(write_addr));
-                    {
-                        let mut inner = store.write();
-                        inner.clinfo_mut().remove(&write_addr);
-                    }
+                    let mut inner = store.write();
+                    inner.clinfo_mut().remove(&write_addr);
                     bail!("client timed out");
                 }
             },
@@ -234,7 +235,7 @@ async fn hello_client_write(
         }
         ClientAuthWrite::Reuse => match secstore {
             None => bail!("authentication not supported"),
-            Some(ref secstore) => match secstore.get_write(&hello.write_addr) {
+            Some(ref secstore) => match secstore.get(&hello.write_addr) {
                 None => bail!("session not found"),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
@@ -312,7 +313,7 @@ async fn hello_client_write(
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = spn.unwrap_or(Chars::from(client));
                         info!("hello_write listener ownership check succeeded");
-                        secstore.store_write(hello.write_addr, spn, secret, ctx.clone());
+                        secstore.store(hello.write_addr, spn, secret, ctx.clone());
                         uifo
                     }
                 }
@@ -510,23 +511,13 @@ async fn hello_client_read(
             send(&cfg, &mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
         }
-        ClientAuthRead::Reuse(id) => match secstore {
-            None => bail!("authentication requested but not supported"),
-            Some(ref secstore) => match secstore.get_read(&id) {
-                None => bail!("ctx id not found"),
-                Some(ctx) => {
-                    send(&cfg, &mut con, ServerHelloRead::Reused).await?;
-                    con.set_ctx(ctx.clone()).await;
-                    secstore.ifo(Some(&ctx.client()?))?
-                }
-            },
-        },
+        ClientAuthRead::Reuse(_) => bail!("read session reuse deprecated"),
         ClientAuthRead::Initiate(tok) => match secstore {
             None => bail!("authentication requested but not supported"),
             Some(ref secstore) => {
                 let (ctx, _, tok) = secstore.create(&tok)?;
-                let id = secstore.store_read(ctx.clone());
-                send(&cfg, &mut con, ServerHelloRead::Accepted(tok, id)).await?;
+                send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
+                    .await?;
                 con.set_ctx(ctx.clone()).await;
                 secstore.ifo(Some(&ctx.client()?))?
             }

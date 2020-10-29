@@ -348,7 +348,7 @@ impl<T> StoreInner<T> {
         Pooled<Vec<(SocketAddr, Bytes)>>,
     ) {
         let mut krb5_spns = self.spn_pool.take();
-        let mut sign_addr = |addr: &SocketAddr| match sec.get_write(addr) {
+        let mut sign_addr = |addr: &SocketAddr| match sec.get(addr) {
             None => (*addr, Bytes::new()),
             Some((spn, secret, _)) => {
                 if !krb5_spns.contains_key(addr) {

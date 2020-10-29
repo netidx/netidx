@@ -6,7 +6,7 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
+        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
         FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
         ServerHelloWrite, ToRead, ToWrite,
     },
@@ -74,7 +74,6 @@ macro_rules! cwt {
 
 async fn connect_read(
     resolver: &Config,
-    sc: &mut Option<(CtxId, ClientCtx)>,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
     let mut addrs = resolver.addrs.clone();
@@ -96,26 +95,20 @@ async fn connect_read(
         let mut con = Channel::new(con);
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
-        let sec = Duration::from_secs(1);
         let (auth, ctx) = match (desired_auth, &resolver.auth) {
             (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
             (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
                 bail!("authentication unavailable")
             }
-            (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => match sc {
-                Some((id, ctx)) if ctx.ttl().unwrap_or(sec) > sec => {
-                    (ClientAuthRead::Reuse(*id), Some(ctx.clone()))
-                }
-                _ => {
-                    let upn = upn.as_ref().map(|s| s.as_str());
-                    let target_spn = spns.get(&addr).ok_or_else(|| {
-                        anyhow!("no target spn for resolver {:?}", addr)
-                    })?;
-                    let (ctx, tok) =
-                        try_cf!("create ctx", continue, create_ctx(upn, target_spn));
-                    (ClientAuthRead::Initiate(tok), Some(ctx))
-                }
-            },
+            (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => {
+                let upn = upn.as_ref().map(|s| s.as_str());
+                let target_spn = spns
+                    .get(&addr)
+                    .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
+                let (ctx, tok) =
+                    try_cf!("create ctx", continue, create_ctx(upn, target_spn));
+                (ClientAuthRead::Initiate(tok), Some(ctx))
+            }
         };
         cwt!("hello", con.send_one(&ClientHello::ReadOnly(auth)));
         let r: ServerHelloRead = cwt!("hello reply", con.receive());
@@ -133,10 +126,9 @@ async fn connect_read(
                 continue;
             }
             (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
-            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, id)) => {
+            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
                 try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
-                *sc = Some((id, ctx));
             }
         };
         break Ok(con);
@@ -151,7 +143,6 @@ async fn connection_read(
     resolver: Config,
     desired_auth: Auth,
 ) {
-    let mut ctx: Option<(CtxId, ClientCtx)> = None;
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
         match receiver.next().await {
@@ -169,20 +160,17 @@ async fn connection_read(
                     tries += 1;
                     let c = match con {
                         Some(ref mut c) => c,
-                        None => {
-                            match connect_read(&resolver, &mut ctx, &desired_auth).await {
-                                Ok(c) => {
-                                    con = Some(c);
-                                    con.as_mut().unwrap()
-                                }
-                                Err(e) => {
-                                    ctx = None;
-                                    con = None;
-                                    warn!("connect_read failed: {}", e);
-                                    continue;
-                                }
+                        None => match connect_read(&resolver, &desired_auth).await {
+                            Ok(c) => {
+                                con = Some(c);
+                                con.as_mut().unwrap()
                             }
-                        }
+                            Err(e) => {
+                                con = None;
+                                warn!("connect_read failed: {}", e);
+                                continue;
+                            }
+                        },
                     };
                     let timeout =
                         max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 2));
