@@ -113,20 +113,17 @@ impl CTracker {
     }
 
     fn open(&self) -> CId {
-        let mut inner = self.0.lock();
         let id = CId::new();
-        inner.insert(id);
+        self.0.lock().insert(id);
         id
     }
 
     fn close(&self, id: CId) {
-        let mut inner = self.0.lock();
-        inner.remove(&id);
+        self.0.lock().remove(&id);
     }
 
     fn num_open(&self) -> usize {
-        let mut inner = self.0.lock();
-        inner.len()
+        self.0.lock().len()
     }
 }
 
@@ -167,7 +164,7 @@ async fn client_loop_write(
                     act = false;
                 } else {
                     con = None;
-                    ctracker.clone(connection_id);
+                    ctracker.close(connection_id);
                     {
                         let mut inner = store.write();
                         match inner.clinfo_mut().remove(&write_addr) {
@@ -215,13 +212,13 @@ async fn client_loop_write(
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
                             con = None;
-                            ctracker.clone(connection_id);
+                            ctracker.close(connection_id);
                             continue 'main;
                         }
                         if let Err(e) = c.flush().await {
                             warn!("flush to write client failed: {}", e);
                             con = None;
-                            ctracker.clone(connection_id);
+                            ctracker.close(connection_id);
                             continue 'main;
                         }
                     }
@@ -665,7 +662,7 @@ async fn server_loop(
                                 secstore,
                                 id
                             ).await;
-                            ctracker.clone(connection_id);
+                            ctracker.close(connection_id);
                             info!("server_loop client shutting down {:?}", r);
                         }
                     });
