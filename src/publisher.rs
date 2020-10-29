@@ -824,20 +824,23 @@ impl Publisher {
         }
         if to_publish.len() > 0 {
             if let Err(e) = resolver.publish(to_publish.drain()).await {
-                error!("failed to publish some paths to at least one resolver {}", e);
+                error!(
+                    "failed to publish some paths to at least one resolver {} will retry",
+                    e
+                );
             }
         }
         if to_publish_default.len() > 0 {
             if let Err(e) = resolver.publish_default(to_publish_default.drain()).await {
                 error!(
-                    "failed to publish_default some paths to at least one resolver {}",
+                    "failed to publish_default some paths to at least one resolver {} will retry",
                     e
                 )
             }
         }
         if to_unpublish.len() > 0 {
             if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
-                error!("failed to unpublish some paths to at least one resolver {}", e)
+                error!("failed to unpublish some paths to at least one resolver {} will retry", e)
             }
         }
     }
