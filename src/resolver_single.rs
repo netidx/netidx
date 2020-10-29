@@ -34,7 +34,7 @@ use tokio::{
     time::{self, Instant, Interval},
 };
 
-const HELLO_TO: Duration = Duration::from_secs(5);
+const HELLO_TO: Duration = Duration::from_secs(60);
 
 static TTL: u64 = 120;
 
@@ -468,7 +468,7 @@ async fn connection_write(
                         if tries > 3 {
                             degraded = true;
                             warn!("abandoning batch, replica now degraded");
-                            break
+                            break 'batch;
                         }
                         if tries > 0 {
                             let wait = thread_rng().gen_range(1, 4);
@@ -494,7 +494,7 @@ async fn connection_write(
                                             "failed to connect to resolver {:?} {}",
                                             resolver_addr, e
                                         );
-                                        continue
+                                        continue 'batch
                                     }
                                 }
                             }
@@ -535,7 +535,7 @@ async fn connection_write(
                                     result.push((tx_batch[i].0, m))
                                 }
                                 let _ = reply.send(result);
-                                break
+                                break 'batch
                             }
                         }
                     }

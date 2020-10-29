@@ -17,21 +17,7 @@ use std::{
 
 type Result<T> = result::Result<T, PackError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Id(u64);
-
-impl Id {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        Id(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mk(i: u64) -> Self {
-        Id(i)
-    }
-}
+atomic_id!(Id);
 
 impl Pack for Id {
     fn len(&self) -> usize {

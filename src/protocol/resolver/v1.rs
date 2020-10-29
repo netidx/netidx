@@ -11,21 +11,7 @@ use std::{collections::HashMap, net::SocketAddr, result};
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CtxId(u64);
-
-impl CtxId {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        CtxId(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mk(i: u64) -> CtxId {
-        CtxId(i)
-    }
-}
+atomic_id!(CtxId);
 
 impl Pack for CtxId {
     fn len(&self) -> usize {

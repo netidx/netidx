@@ -24,16 +24,13 @@ use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
-use parking_lot::RwLockWriteGuard;
+use parking_lot::{Mutex, RwLockWriteGuard};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     mem,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::SystemTime,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -105,8 +102,38 @@ fn handle_batch_write(
     }
 }
 
+atomic_id!(CId);
+
+#[derive(Debug, Clone)]
+struct CTracker(Arc<Mutex<HashSet<CId>>>);
+
+impl CTracker {
+    fn new() -> Self {
+        CTracker(Arc::new(Mutex::new(HashSet::new())))
+    }
+
+    fn open(&self) -> CId {
+        let mut inner = self.0.lock();
+        let id = CId::new();
+        inner.insert(id);
+        id
+    }
+
+    fn close(&self, id: CId) {
+        let mut inner = self.0.lock();
+        inner.remove(&id);
+    }
+
+    fn num_open(&self) -> usize {
+        let mut inner = self.0.lock();
+        inner.len()
+    }
+}
+
 async fn client_loop_write(
     cfg: Arc<config::Config>,
+    ctracker: CTracker,
+    connection_id: CId,
     store: Store<ClientInfo>,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
@@ -139,6 +166,8 @@ async fn client_loop_write(
                 if act {
                     act = false;
                 } else {
+                    con = None;
+                    ctracker.clone(connection_id);
                     {
                         let mut inner = store.write();
                         match inner.clinfo_mut().remove(&write_addr) {
@@ -157,13 +186,14 @@ async fn client_loop_write(
                     task::block_in_place(|| store.unpublish_addr(write_addr));
                     let mut inner = store.write();
                     inner.clinfo_mut().remove(&write_addr);
-                    bail!("client timed out");
+                    bail!("write client timed out");
                 }
             },
             m = receive_batch(&mut con, &mut batch).fuse() => match m {
                 Err(e) => {
                     batch.clear();
                     con = None;
+                    ctracker.close(connection_id);
                     info!("write client loop error reading message: {}", e)
                 },
                 Ok(()) => {
@@ -185,11 +215,13 @@ async fn client_loop_write(
                         if let Err(e) = r {
                             warn!("handle_write_batch failed {}", e);
                             con = None;
+                            ctracker.clone(connection_id);
                             continue 'main;
                         }
                         if let Err(e) = c.flush().await {
                             warn!("flush to write client failed: {}", e);
                             con = None;
+                            ctracker.clone(connection_id);
                             continue 'main;
                         }
                     }
@@ -201,6 +233,8 @@ async fn client_loop_write(
 
 async fn hello_client_write(
     cfg: Arc<config::Config>,
+    ctracker: CTracker,
+    connection_id: CId,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
     mut con: Channel<ServerCtx>,
@@ -346,6 +380,8 @@ async fn hello_client_write(
     }
     Ok(client_loop_write(
         cfg,
+        ctracker,
+        connection_id,
         store,
         con,
         secstore,
@@ -528,6 +564,8 @@ async fn hello_client_read(
 
 async fn hello_client(
     cfg: Arc<config::Config>,
+    ctracker: CTracker,
+    connection_id: CId,
     delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
     store: Store<ClientInfo>,
@@ -554,6 +592,8 @@ async fn hello_client(
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
             cfg,
+            ctracker,
+            connection_id,
             listen_addr,
             store,
             con,
@@ -577,7 +617,7 @@ async fn server_loop(
     let delay_reads =
         if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
     let cfg = Arc::new(cfg);
-    let connections = Arc::new(AtomicUsize::new(0));
+    let ctracker = CTracker::new();
     let published: Store<ClientInfo> =
         Store::new(cfg.parent.clone(), cfg.children.clone());
     let id = cfg.addrs[id];
@@ -602,18 +642,21 @@ async fn server_loop(
                 return Ok(local_addr)
             },
             cl = listener.accept().fuse() => match cl {
-                Err(_) => (),
+                Err(e) => warn!("accept failed: {}", e),
                 Ok((client, _)) => {
-                    if connections.fetch_add(1, Ordering::Relaxed) < max_connections {
-                        let connections = connections.clone();
+                    let (tx, rx) = oneshot::channel();
+                    client_stops.push(tx);
+                    let connection_id = ctracker.open();
+                    task::spawn({
+                        let ctracker = ctracker.clone();
                         let published = published.clone();
                         let secstore = secstore.clone();
                         let cfg = cfg.clone();
-                        let (tx, rx) = oneshot::channel();
-                        client_stops.push(tx);
-                        task::spawn(async move {
+                        async move {
                             let r = hello_client(
                                 cfg,
+                                ctracker.clone(),
+                                connection_id,
                                 delay_reads,
                                 local_addr,
                                 published,
@@ -622,9 +665,12 @@ async fn server_loop(
                                 secstore,
                                 id
                             ).await;
-                            info!("server_loop client connection shutting down {:?}", r);
-                            connections.fetch_sub(1, Ordering::Relaxed);
-                        });
+                            ctracker.clone(connection_id);
+                            info!("server_loop client shutting down {:?}", r);
+                        }
+                    });
+                    while ctracker.num_open() > max_connections {
+                        time::sleep(Duration::from_millis(10u64)).await;
                     }
                 }
             },

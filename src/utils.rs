@@ -110,6 +110,27 @@ macro_rules! try_cf {
     };
 }
 
+#[macro_export]
+macro_rules! atomic_id {
+    ($name:ident) => (
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(u64);
+
+        impl $name {
+            pub fn new() -> Self {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                $name(NEXT.fetch_add(1, Ordering::Relaxed))
+            }
+
+            #[cfg(test)]
+            pub(crate) fn mk(i: u64) -> Self {
+                $name(i)
+            }
+        }
+    )
+}
+
 pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
     match ip {
         IpAddr::V4(ip) if ip.is_link_local() => {

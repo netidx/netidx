@@ -61,16 +61,7 @@ impl fmt::Display for NoSuchValue {
 
 impl error::Error for NoSuchValue {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SubId(u64);
-
-impl SubId {
-    pub fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        SubId(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+atomic_id!(SubId);
 
 #[derive(Debug)]
 struct SubscribeValRequest {
