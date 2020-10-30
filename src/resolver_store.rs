@@ -35,27 +35,36 @@ lazy_static! {
 
 pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
 pub(crate) const MAX_READ_BATCH: usize = 100_000;
+pub(crate) const GC_THRESHOLD: usize = 100_000;
 
 // We hashcons the address sets. On average, a publisher should publish many paths.
 // for each published value we only store the path once, since it's an Arc<str>,
 // and a pointer to the set of addresses it is published by.
 #[derive(Debug)]
-struct HCAddrs(HashMap<Set<Addr>, (), FxBuildHasher>);
+struct HCAddrs {
+    ops: usize,
+    addrs: HashMap<Set<Addr>, (), FxBuildHasher>,
+}
 
 impl HCAddrs {
     fn new() -> HCAddrs {
-        HCAddrs(HashMap::with_hasher(FxBuildHasher::default()))
+        HCAddrs { ops: 0, addrs: HashMap::with_hasher(FxBuildHasher::default()) }
     }
 
     fn hashcons(&mut self, set: Set<Addr>) -> Set<Addr> {
-        match self.0.entry(set) {
+        let new = match self.addrs.entry(set) {
             Entry::Occupied(e) => e.key().clone(),
             Entry::Vacant(e) => {
                 let r = e.key().clone();
                 e.insert(());
                 r
             }
+        };
+        self.ops += 1;
+        if self.ops > GC_THRESHOLD {
+            self.gc()
         }
+        new
     }
 
     fn add_address(&mut self, current: &Set<Addr>, addr: Addr) -> Set<Addr> {
@@ -77,7 +86,8 @@ impl HCAddrs {
     }
 
     fn gc(&mut self) {
-        self.0.retain(|s, ()| s.strong_count() > 1)
+        self.ops = 0;
+        self.addrs.retain(|s, ()| s.strong_count() > 1)
     }
 }
 

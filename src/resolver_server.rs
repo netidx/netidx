@@ -258,7 +258,29 @@ async fn hello_client_write(
         Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
-    let ttl_expired = !clinfos.0.lock().contains_key(&hello.write_addr);
+    let (tx_stop, rx_stop) = oneshot::channel();
+    let ttl_expired = loop {
+        let rx = {
+            let mut inner = clinfos.0.lock();
+            match inner.get_mut(&hello.write_addr) {
+                None => {
+                    inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
+                    break true;
+                }
+                Some(ClientInfo::Running(cl)) => {
+                    let old_stop = mem::replace(cl, tx_stop);
+                    let _ = old_stop.send(());
+                    break false;
+                }
+                Some(ClientInfo::CleaningUp(waiters)) => {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.push(tx);
+                    rx
+                }
+            }
+        };
+        let _ = rx.await;
+    };
     let uifo = match hello.auth {
         ClientAuthWrite::Anonymous => {
             let h = ServerHelloWrite {
@@ -359,29 +381,6 @@ async fn hello_client_write(
             }
         },
     };
-    let (tx_stop, rx_stop) = oneshot::channel();
-    loop {
-        let rx = {
-            let mut inner = clinfos.0.lock();
-            match inner.get_mut(&hello.write_addr) {
-                None => {
-                    inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
-                    break;
-                }
-                Some(ClientInfo::Running(cl)) => {
-                    let old_stop = mem::replace(cl, tx_stop);
-                    let _ = old_stop.send(());
-                    break;
-                }
-                Some(ClientInfo::CleaningUp(waiters)) => {
-                    let (tx, rx) = oneshot::channel();
-                    waiters.push(tx);
-                    rx
-                }
-            }
-        };
-        let _ = rx.await;
-    }
     Ok(client_loop_write(
         cfg,
         clinfos,
