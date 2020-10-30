@@ -39,13 +39,8 @@ use tokio::{
     time::{self, Instant},
 };
 
-enum ClientInfo {
-    Running(oneshot::Sender<()>),
-    CleaningUp(Vec<oneshot::Sender<()>>),
-}
-
 fn handle_batch_write(
-    store: &Store<ClientInfo>,
+    store: &Store,
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
@@ -53,7 +48,7 @@ fn handle_batch_write(
     mut msgs: impl Iterator<Item = ToWrite>,
 ) -> Result<()> {
     let mut s = store.write();
-    let publish = |s: &mut RwLockWriteGuard<StoreInner<ClientInfo>>,
+    let publish = |s: &mut RwLockWriteGuard<StoreInner>,
                    con: &mut Channel<ServerCtx>,
                    path: Path,
                    default: bool|
@@ -127,11 +122,20 @@ impl CTracker {
     }
 }
 
+enum ClientInfo {
+    Running(oneshot::Sender<()>),
+    CleaningUp(Vec<oneshot::Sender<()>>),
+}
+
+#[derive(Clone)]
+struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
+
 async fn client_loop_write(
     cfg: Arc<config::Config>,
+    clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
-    store: Store<ClientInfo>,
+    store: Store,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
     server_stop: oneshot::Receiver<()>,
@@ -166,8 +170,8 @@ async fn client_loop_write(
                     con = None;
                     ctracker.close(connection_id);
                     {
-                        let mut inner = store.write();
-                        match inner.clinfo_mut().remove(&write_addr) {
+                        let mut inner = clinfos.0.lock();
+                        match inner.remove(&write_addr) {
                             None => (),
                             Some(ClientInfo::CleaningUp(_)) => unreachable!(),
                             Some(ClientInfo::Running(stop)) => {
@@ -175,14 +179,14 @@ async fn client_loop_write(
                             }
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
-                        inner.clinfo_mut().insert(write_addr, state);
+                        inner.insert(write_addr, state);
                         if let Some(secstore) = secstore {
                             secstore.remove(&write_addr);
                         }
                     }
                     task::block_in_place(|| store.unpublish_addr(write_addr));
-                    let mut inner = store.write();
-                    inner.clinfo_mut().remove(&write_addr);
+                    let mut inner = clinfos.0.lock();
+                    inner.remove(&write_addr);
                     bail!("write client timed out");
                 }
             },
@@ -195,6 +199,9 @@ async fn client_loop_write(
                 },
                 Ok(()) => {
                     act = true;
+                    if batch.len() == 1 && batch[0] == ToWrite::Heartbeat {
+                        continue 'main
+                    }
                     let c = con.as_mut().unwrap();
                     let mut batch = batch.drain(..).peekable();
                     // hold the write lock for no more than
@@ -230,10 +237,11 @@ async fn client_loop_write(
 
 async fn hello_client_write(
     cfg: Arc<config::Config>,
+    clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
     listen_addr: SocketAddr,
-    store: Store<ClientInfo>,
+    store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -250,7 +258,7 @@ async fn hello_client_write(
         Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
-    let ttl_expired = !store.read().clinfo().contains_key(&hello.write_addr);
+    let ttl_expired = !clinfos.0.lock().contains_key(&hello.write_addr);
     let uifo = match hello.auth {
         ClientAuthWrite::Anonymous => {
             let h = ServerHelloWrite {
@@ -354,11 +362,10 @@ async fn hello_client_write(
     let (tx_stop, rx_stop) = oneshot::channel();
     loop {
         let rx = {
-            let mut store = store.write();
-            let clinfos = store.clinfo_mut();
-            match clinfos.get_mut(&hello.write_addr) {
+            let mut inner = clinfos.0.lock();
+            match inner.get_mut(&hello.write_addr) {
                 None => {
-                    clinfos.insert(hello.write_addr, ClientInfo::Running(tx_stop));
+                    inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
                     break;
                 }
                 Some(ClientInfo::Running(cl)) => {
@@ -377,6 +384,7 @@ async fn hello_client_write(
     }
     Ok(client_loop_write(
         cfg,
+        clinfos,
         ctracker,
         connection_id,
         store,
@@ -391,7 +399,7 @@ async fn hello_client_write(
 }
 
 fn handle_batch_read(
-    store: &Store<ClientInfo>,
+    store: &Store,
     con: &mut Channel<ServerCtx>,
     secstore: Option<&SecStore>,
     uifo: &Arc<UserInfo>,
@@ -481,7 +489,7 @@ fn handle_batch_read(
 
 async fn client_loop_read(
     cfg: Arc<config::Config>,
-    store: Store<ClientInfo>,
+    store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -525,7 +533,7 @@ async fn client_loop_read(
 
 async fn hello_client_read(
     cfg: Arc<config::Config>,
-    store: Store<ClientInfo>,
+    store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -561,11 +569,12 @@ async fn hello_client_read(
 
 async fn hello_client(
     cfg: Arc<config::Config>,
+    clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
     delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
-    store: Store<ClientInfo>,
+    store: Store,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -589,6 +598,7 @@ async fn hello_client(
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
             cfg,
+            clinfos,
             ctracker,
             connection_id,
             listen_addr,
@@ -615,8 +625,8 @@ async fn server_loop(
         if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
     let cfg = Arc::new(cfg);
     let ctracker = CTracker::new();
-    let published: Store<ClientInfo> =
-        Store::new(cfg.parent.clone(), cfg.children.clone());
+    let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
+    let published: Store = Store::new(cfg.parent.clone(), cfg.children.clone());
     let id = cfg.addrs[id];
     let secstore = match &cfg.auth {
         config::Auth::Anonymous => None,
@@ -645,6 +655,7 @@ async fn server_loop(
                     client_stops.push(tx);
                     let connection_id = ctracker.open();
                     task::spawn({
+                        let clinfos = clinfos.clone();
                         let ctracker = ctracker.clone();
                         let published = published.clone();
                         let secstore = secstore.clone();
@@ -652,6 +663,7 @@ async fn server_loop(
                         async move {
                             let r = hello_client(
                                 cfg,
+                                clinfos,
                                 ctracker.clone(),
                                 connection_id,
                                 delay_reads,
@@ -669,6 +681,7 @@ async fn server_loop(
                     while ctracker.num_open() > max_connections {
                         time::sleep(Duration::from_millis(10u64)).await;
                     }
+                    debug!("I have {} writers", clinfos.0.lock().len())
                 }
             },
         }

@@ -6,14 +6,17 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::resolver::v1::Referral,
     secstore::SecStoreInner,
-    utils,
+    utils::{self, Addr},
 };
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
+use immutable_chunkmap::set::Set;
+use log::debug;
 use parking_lot::RwLock;
 use std::{
     clone::Clone,
     collections::{
+        hash_map::Entry,
         BTreeMap, BTreeSet, Bound,
         Bound::{Excluded, Included, Unbounded},
         HashMap, HashSet,
@@ -22,68 +25,59 @@ use std::{
     iter::{self, FromIterator},
     net::SocketAddr,
     ops::Deref,
-    sync::{Arc, Weak},
+    sync::Arc,
     thread,
 };
 
 lazy_static! {
-    static ref EMPTY: Addrs = Arc::new(Vec::new());
     static ref EMPTY_PATHSET: HashSet<Path> = HashSet::new();
 }
 
 pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
 pub(crate) const MAX_READ_BATCH: usize = 100_000;
 
-type Addrs = Arc<Vec<SocketAddr>>;
-
 // We hashcons the address sets. On average, a publisher should publish many paths.
 // for each published value we only store the path once, since it's an Arc<str>,
 // and a pointer to the set of addresses it is published by.
 #[derive(Debug)]
-struct HCAddrs(HashMap<Vec<SocketAddr>, Weak<Vec<SocketAddr>>, FxBuildHasher>);
+struct HCAddrs(HashMap<Set<Addr>, (), FxBuildHasher>);
 
 impl HCAddrs {
     fn new() -> HCAddrs {
         HCAddrs(HashMap::with_hasher(FxBuildHasher::default()))
     }
 
-    fn hashcons(&mut self, set: Vec<SocketAddr>) -> Addrs {
-        match self.0.get(&set).and_then(|v| v.upgrade()) {
-            Some(addrs) => addrs,
-            None => {
-                let addrs = Arc::new(set.clone());
-                self.0.insert(set, Arc::downgrade(&addrs));
-                addrs
+    fn hashcons(&mut self, set: Set<Addr>) -> Set<Addr> {
+        match self.0.entry(set) {
+            Entry::Occupied(e) => e.key().clone(),
+            Entry::Vacant(e) => {
+                let r = e.key().clone();
+                e.insert(());
+                r
             }
         }
     }
 
-    fn add_address(&mut self, current: &Addrs, addr: SocketAddr) -> Addrs {
-        let mut set = current.iter().copied().chain(iter::once(addr)).collect::<Vec<_>>();
-        set.sort_by_key(|a| (a.ip(), a.port()));
-        set.dedup();
-        self.hashcons(set)
+    fn add_address(&mut self, current: &Set<Addr>, addr: Addr) -> Set<Addr> {
+        let (new, existed) = current.insert(addr);
+        if existed {
+            new
+        } else {
+            self.hashcons(new)
+        }
     }
 
-    fn remove_address(&mut self, current: &Addrs, addr: SocketAddr) -> Option<Addrs> {
-        if current.len() == 1 && current[0] == addr {
+    fn remove_address(&mut self, current: &Set<Addr>, addr: &Addr) -> Option<Set<Addr>> {
+        let (new, _) = current.remove(addr);
+        if new.len() == 0 {
             None
         } else {
-            let s = current.iter().copied().filter(|a| a != &addr);
-            Some(self.hashcons(s.collect()))
+            Some(self.hashcons(new))
         }
     }
 
     fn gc(&mut self) {
-        let mut dead = Vec::new();
-        for (k, v) in self.0.iter() {
-            if v.upgrade().is_none() {
-                dead.push(k.clone());
-            }
-        }
-        for k in dead {
-            self.0.remove(&k);
-        }
+        self.0.retain(|s, ()| s.strong_count() > 1)
     }
 }
 
@@ -94,8 +88,8 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 }
 
 #[derive(Debug)]
-pub(crate) struct StoreInner<T> {
-    by_path: HashMap<Path, Addrs>,
+pub(crate) struct StoreInner {
+    by_path: HashMap<Path, Set<Addr>>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
@@ -103,7 +97,6 @@ pub(crate) struct StoreInner<T> {
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
     addrs: HCAddrs,
-    clinfos: HashMap<SocketAddr, T, FxBuildHasher>,
     spn_pool: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>>,
     signed_addrs_pool: Pool<Vec<(SocketAddr, Bytes)>>,
     addrs_pool: Pool<Vec<SocketAddr>>,
@@ -111,7 +104,7 @@ pub(crate) struct StoreInner<T> {
     cols_pool: Pool<Vec<(Path, Z64)>>,
 }
 
-impl<T> StoreInner<T> {
+impl StoreInner {
     fn remove_parents(&mut self, mut p: &str) {
         loop {
             let p_with_sep = match Path::dirname_with_sep(p) {
@@ -238,9 +231,9 @@ impl<T> StoreInner<T> {
 
     pub(crate) fn publish(&mut self, path: Path, addr: SocketAddr, default: bool) {
         self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
-        let addrs = self.by_path.entry(path.clone()).or_insert_with(|| EMPTY.clone());
+        let addrs = self.by_path.entry(path.clone()).or_insert_with(Set::new);
         let len = addrs.len();
-        *addrs = self.addrs.add_address(addrs, addr);
+        *addrs = self.addrs.add_address(addrs, Addr(addr));
         if addrs.len() > len {
             self.add_column(&path);
             let n = Path::levels(path.as_ref());
@@ -270,7 +263,7 @@ impl<T> StoreInner<T> {
             None => (),
             Some(addrs) => {
                 let len = addrs.len();
-                match self.addrs.remove_address(addrs, addr) {
+                match self.addrs.remove_address(addrs, &Addr(addr)) {
                     Some(new_addrs) => {
                         *addrs = new_addrs;
                         if addrs.len() < len {
@@ -317,7 +310,7 @@ impl<T> StoreInner<T> {
                     None => self.signed_addrs_pool.take(),
                     Some(a) => {
                         let mut addrs = self.signed_addrs_pool.take();
-                        addrs.extend(a.iter().map(|a| (*a, Bytes::new())));
+                        addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
                         addrs
                     }
                 }
@@ -331,7 +324,7 @@ impl<T> StoreInner<T> {
             None => self.resolve_default(path),
             Some(a) => {
                 let mut addrs = self.signed_addrs_pool.take();
-                addrs.extend(a.iter().map(|addr| (*addr, Bytes::new())));
+                addrs.extend(a.into_iter().map(|addr| (addr.0, Bytes::new())));
                 addrs
             }
         }
@@ -372,7 +365,9 @@ impl<T> StoreInner<T> {
         match self.by_path.get(&*path) {
             None => signed_addrs
                 .extend(self.resolve_default(path).drain(..).map(|(a, _)| sign_addr(&a))),
-            Some(addrs) => signed_addrs.extend(addrs.iter().map(&mut sign_addr)),
+            Some(addrs) => {
+                signed_addrs.extend(addrs.into_iter().map(|a| sign_addr(&a.0)))
+            }
         }
         (krb5_spns, signed_addrs)
     }
@@ -414,32 +409,44 @@ impl<T> StoreInner<T> {
         self.addrs.gc();
     }
 
-    pub(crate) fn clinfo(&self) -> &HashMap<SocketAddr, T, FxBuildHasher> {
-        &self.clinfos
-    }
-
-    pub(crate) fn clinfo_mut(&mut self) -> &mut HashMap<SocketAddr, T, FxBuildHasher> {
-        &mut self.clinfos
+    #[allow(dead_code)]
+    pub(crate) fn invariant(&self) {
+        debug!("resolver_store: checking invariants");
+        for (addr, paths) in self.by_addr.iter() {
+            for path in paths.iter() {
+                match self.by_path.get(path) {
+                    None => panic!("path {} in by_addr but not in by_path", path),
+                    Some(addrs) => {
+                        if !addrs.into_iter().any(|a| &a.0 == addr) {
+                            panic!(
+                                "path {} in {} by_addr, but {} not present in addrs",
+                                path, addr, addr
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-pub(crate) struct Store<T>(Arc<RwLock<StoreInner<T>>>);
+pub(crate) struct Store(Arc<RwLock<StoreInner>>);
 
-impl<T> Clone for Store<T> {
+impl Clone for Store {
     fn clone(&self) -> Self {
         Store(Arc::clone(&self.0))
     }
 }
 
-impl<T> Deref for Store<T> {
-    type Target = RwLock<StoreInner<T>>;
+impl Deref for Store {
+    type Target = RwLock<StoreInner>;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
     }
 }
 
-impl<T> Store<T> {
+impl Store {
     pub(crate) fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
@@ -453,7 +460,6 @@ impl<T> Store<T> {
             parent,
             children,
             addrs: HCAddrs::new(),
-            clinfos: HashMap::with_hasher(FxBuildHasher::default()),
             spn_pool: Pool::new(100),
             signed_addrs_pool: Pool::new(100),
             addrs_pool: Pool::new(100),

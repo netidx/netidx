@@ -9,7 +9,7 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::publisher,
     resolver::{Auth, ResolverWrite},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Addr},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
@@ -21,9 +21,7 @@ use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
-    borrow::Borrow,
     boxed::Box,
-    cmp::{Ord, Ordering, PartialOrd},
     collections::{hash_map::Entry, BTreeMap, BTreeSet, Bound, HashMap, HashSet},
     convert::From,
     default::Default,
@@ -57,52 +55,6 @@ pub struct WriteRequest {
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000);
-}
-
-// a socketaddr wrapper that implements Ord so we can put clients in a
-// set.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct Addr(SocketAddr);
-
-impl From<SocketAddr> for Addr {
-    fn from(addr: SocketAddr) -> Self {
-        Addr(addr)
-    }
-}
-
-impl Borrow<SocketAddr> for Addr {
-    fn borrow(&self) -> &SocketAddr {
-        &self.0
-    }
-}
-
-impl PartialOrd for Addr {
-    fn partial_cmp(&self, other: &Addr) -> Option<Ordering> {
-        match (self.0, other.0) {
-            (SocketAddr::V4(v0), SocketAddr::V4(v1)) => {
-                match v0.ip().octets().partial_cmp(&v1.ip().octets()) {
-                    None => None,
-                    Some(Ordering::Equal) => v0.port().partial_cmp(&v1.port()),
-                    Some(o) => Some(o),
-                }
-            }
-            (SocketAddr::V6(v0), SocketAddr::V6(v1)) => {
-                match v0.ip().octets().partial_cmp(&v1.ip().octets()) {
-                    None => None,
-                    Some(Ordering::Equal) => v0.port().partial_cmp(&v1.port()),
-                    Some(o) => Some(o),
-                }
-            }
-            (SocketAddr::V4(_), SocketAddr::V6(_)) => Some(Ordering::Less),
-            (SocketAddr::V6(_), SocketAddr::V4(_)) => Some(Ordering::Greater),
-        }
-    }
-}
-
-impl Ord for Addr {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
 }
 
 // The set of clients subscribed to a given value is hashconsed.
@@ -824,23 +776,17 @@ impl Publisher {
         }
         if to_publish.len() > 0 {
             if let Err(e) = resolver.publish(to_publish.drain()).await {
-                error!(
-                    "failed to publish some paths to at least one resolver {} will retry",
-                    e
-                );
+                error!("failed to publish some paths {} will retry", e);
             }
         }
         if to_publish_default.len() > 0 {
             if let Err(e) = resolver.publish_default(to_publish_default.drain()).await {
-                error!(
-                    "failed to publish_default some paths to at least one resolver {} will retry",
-                    e
-                )
+                error!("failed to publish_default some paths {} will retry", e)
             }
         }
         if to_unpublish.len() > 0 {
             if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
-                error!("failed to unpublish some paths to at least one resolver {} will retry", e)
+                error!("failed to unpublish some paths {} will retry", e)
             }
         }
     }

@@ -17,6 +17,8 @@ use std::{
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
+    borrow::Borrow,
+    cmp::{Ord, Ordering, PartialOrd},
     str,
     borrow::Cow,
 };
@@ -410,5 +412,51 @@ impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
         cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
         self.stream().poll_close(cx)
+    }
+}
+
+// a socketaddr wrapper that implements Ord so we can put clients in a
+// set.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct Addr(pub SocketAddr);
+
+impl From<SocketAddr> for Addr {
+    fn from(addr: SocketAddr) -> Self {
+        Addr(addr)
+    }
+}
+
+impl Borrow<SocketAddr> for Addr {
+    fn borrow(&self) -> &SocketAddr {
+        &self.0
+    }
+}
+
+impl PartialOrd for Addr {
+    fn partial_cmp(&self, other: &Addr) -> Option<Ordering> {
+        match (self.0, other.0) {
+            (SocketAddr::V4(v0), SocketAddr::V4(v1)) => {
+                match v0.ip().octets().partial_cmp(&v1.ip().octets()) {
+                    None => None,
+                    Some(Ordering::Equal) => v0.port().partial_cmp(&v1.port()),
+                    Some(o) => Some(o),
+                }
+            }
+            (SocketAddr::V6(v0), SocketAddr::V6(v1)) => {
+                match v0.ip().octets().partial_cmp(&v1.ip().octets()) {
+                    None => None,
+                    Some(Ordering::Equal) => v0.port().partial_cmp(&v1.port()),
+                    Some(o) => Some(o),
+                }
+            }
+            (SocketAddr::V4(_), SocketAddr::V6(_)) => Some(Ordering::Less),
+            (SocketAddr::V6(_), SocketAddr::V4(_)) => Some(Ordering::Greater),
+        }
+    }
+}
+
+impl Ord for Addr {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }

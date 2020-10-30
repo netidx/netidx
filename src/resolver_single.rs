@@ -345,30 +345,24 @@ async fn connect_write(
             }
             Ok((r.ttl, con))
         } else {
-            info!("write_con ttl is expired, republishing {}", len);
-            if *degraded {
-                con.queue_send(&ToWrite::Clear)?
-            }
+            info!(
+                "write_con ttl: {} degraded: {}, republishing: {}",
+                len, r.ttl_expired, *degraded
+            );
             for p in &names {
                 con.queue_send(&ToWrite::Publish(p.clone()))?
             }
             con.flush().await?;
-            if *degraded {
-                match con.receive().await? {
-                    FromWrite::Unpublished => (),
-                    m => warn!("unexpected response to clear {:?}", m),
-                }
-            }
-            *degraded = false;
+            let mut success = 0;
             for p in &names {
                 match try_cf!("replublish reply", continue, con.receive().await) {
-                    FromWrite::Published => (),
-                    r => {
-                        *degraded = true;
-                        warn!("unexpected republish reply for {} {:?}", p, r)
+                    FromWrite::Published => {
+                        success += 1;
                     }
+                    r => warn!("unexpected republish reply for {} {:?}", p, r),
                 }
             }
+            *degraded = success != len;
             info!(
                 "connected to resolver {:?} for write (republished {})",
                 resolver_addr,
@@ -419,6 +413,7 @@ async fn connection_write(
                 }
             },
             _ = hb.next() => {
+                println!("{}: {} ({})", write_addr, degraded, published.read().len());
                 if act {
                     act = false;
                 } else {
@@ -529,6 +524,18 @@ async fn connection_write(
                                             continue 'batch;
                                         }
                                     }
+                                }
+                                for ((_, tx), rx) in tx_batch.iter().zip(rx_batch.iter()) {
+                                    match tx {
+                                        ToWrite::Publish(_) => match rx {
+                                            FromWrite::Published => (),
+                                            _ => { degraded = true; }
+                                        }
+                                        _ => ()
+                                    }
+                                }
+                                if degraded {
+                                    warn!("replica now degraded");
                                 }
                                 let mut result = FROMWRITEPOOL.take();
                                 for (i, m) in rx_batch.drain(..).enumerate() {
