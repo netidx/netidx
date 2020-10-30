@@ -278,7 +278,7 @@ mod publisher {
                 let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 let mut dfp: Option<Val> = None;
                 let mut df = publisher.publish_default("/app/q".into()).unwrap();
-                publisher.flush(None).await.unwrap();
+                publisher.flush(None).await;
                 tx.send(()).unwrap();
                 let (tx, mut rx) = mpsc::channel(10);
                 vp.writes(tx);
@@ -299,7 +299,7 @@ mod publisher {
                         dfp.update(Value::True);
                     }
                     vp.update(Value::U64(314159 + c));
-                    publisher.flush(None).await.unwrap();
+                    publisher.flush(None).await;
                     if let Some(mut batch) = rx.next().await {
                         for req in batch.drain(..) {
                             match req.value {
@@ -374,7 +374,7 @@ mod resolver_store {
                 "127.0.0.1:105",
             ),
         ];
-        let store = Store::<()>::new(None, BTreeMap::new());
+        let store = Store::new(None, BTreeMap::new());
         {
             let mut store = store.write();
             for (paths, addr) in &apps {

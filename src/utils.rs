@@ -126,6 +126,7 @@ macro_rules! atomic_id {
             }
 
             #[cfg(test)]
+            #[allow(dead_code)]
             pub(crate) fn mk(i: u64) -> Self {
                 $name(i)
             }
