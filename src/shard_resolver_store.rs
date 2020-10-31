@@ -304,6 +304,10 @@ impl Store {
                 }
                 i += 1;
             }
+            if by_shard.iter().all(|v| v.is_empty()) {
+                assert!(finished);
+                break Ok(())
+            }
             let mut replies =
                 join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
                     let (tx, rx) = oneshot::channel();
@@ -362,7 +366,7 @@ impl Store {
                 assert!(r.is_empty())
             }
             if finished {
-                return Ok(())
+                break Ok(())
             }
         }
     }
