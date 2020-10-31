@@ -413,7 +413,6 @@ async fn connection_write(
                 }
             },
             _ = hb.next() => {
-                println!("{}: {} ({})", write_addr, degraded, published.read().len());
                 if act {
                     act = false;
                 } else {
@@ -533,9 +532,6 @@ async fn connection_write(
                                         }
                                         _ => ()
                                     }
-                                }
-                                if degraded {
-                                    warn!("replica now degraded");
                                 }
                                 let mut result = FROMWRITEPOOL.take();
                                 for (i, m) in rx_batch.drain(..).enumerate() {
