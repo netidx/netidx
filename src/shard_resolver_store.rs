@@ -276,6 +276,10 @@ impl Store {
         hasher.finish() as usize % self.shards.len()
     }
 
+    fn shard_batch<T>(&self, pool: &Pool<T>) -> Vec<Pooled<T>> {
+        (0..self.shards.len()).into_iter().map(|_| pool.take()).collect::<Vec<_>>()
+    }
+
     pub(crate) async fn handle_batch_read(
         &self,
         con: &mut Channel<ServerCtx>,
@@ -286,10 +290,7 @@ impl Store {
         let mut i = 0;
         let mut finished = false;
         loop {
-            let mut by_shard = (0..self.shards.len())
-                .into_iter()
-                .map(|_| TO_READ_POOL.take())
-                .collect::<Vec<_>>();
+            let mut by_shard = self.shard_batch(&*TO_READ_POOL);
             for _ in 0..MAX_READ_BATCH {
                 match msgs.next() {
                     None => {
@@ -297,7 +298,8 @@ impl Store {
                         break;
                     }
                     Some(ToRead::Resolve(path)) => {
-                        by_shard[self.shard(&path)].push(i, ToRead::Resolve(path));
+                        let s = self.shard(&path);
+                        by_shard[s].push(i, ToRead::Resolve(path));
                     }
                     Some(ToRead::List(path)) => {
                         for b in by_shard.iter_mut() {
@@ -320,7 +322,7 @@ impl Store {
                 join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
                     let (tx, rx) = oneshot::channel();
                     let req = ReadRequest { uifo: uifo.clone(), id, msgs };
-                    self.shards[i].send((req, tx));
+                    let _ = self.shards[i].read.send((req, tx));
                     rx
                 }))
                 .await
@@ -330,7 +332,7 @@ impl Store {
                 if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
                     let r = replies
                         .iter_mut()
-                        .find(|v| v.0 == i)
+                        .find(|r| r.front().map(|v| v.0 == i).unwrap_or(false))
                         .unwrap()
                         .pop_front()
                         .unwrap();
@@ -379,20 +381,17 @@ impl Store {
         }
     }
 
-    fn handle_batch_write(
+    fn handle_batch_write_no_clear(
         &self,
-        con: &mut Channel<ServerCtx>,
+        con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
         mut msgs: impl Iterator<Item = ToWrite>,
     ) -> Result<()> {
-        let mut i = 0;
+        let mut n = 0;
         let mut finished = false;
         loop {
-            let mut by_shard = (0..self.shards.len())
-                .into_iter()
-                .map(|_| TO_READ_POOL.take())
-                .collect::<Vec<_>>();
+            let mut by_shard = self.shard_batch(&*TO_WRITE_POOL);
             for _ in 0..MAX_WRITE_BATCH {
                 match msgs.next() {
                     None => {
@@ -403,18 +402,18 @@ impl Store {
                     Some(ToWrite::Clear) => unreachable!("call process_clear instead"),
                     Some(ToWrite::Publish(path)) => {
                         let s = self.shard(&path);
-                        by_shard[s].push(ToWrite::Publish(path));
+                        by_shard[s].push((n, ToWrite::Publish(path)));
                     }
                     Some(ToWrite::Unpublish(path)) => {
                         let s = self.shard(&path);
-                        by_shard[s].push(ToWrite::Unpublish(path));
+                        by_shard[s].push((n, ToWrite::Unpublish(path)));
                     }
                     Some(ToWrite::PublishDefault(path)) => {
                         let s = self.shard(&path);
-                        by_shard[s].push(ToWrite::PublishDefault(path));
+                        by_shard[s].push((n, ToWrite::PublishDefault(path)));
                     }
                 }
-                i += 1;
+                n += 1;
             }
             if by_shard.iter().all(|v| v.is_empty()) {
                 assert!(finished);
@@ -424,24 +423,53 @@ impl Store {
                 join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
                     let (tx, rx) = oneshot::channel();
                     let req = ReadRequest { uifo: uifo.clone(), id, msgs };
-                    self.shards[i].send((req, tx));
+                    let _ = self.shards[i].write.send((req, tx));
                     rx
                 }))
                 .await
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<WriteR>>>, RecvError>()?;
-            for i in 0..i {
+            for i in 0..n {
                 let r = replies
                     .iter_mut()
-                    .find(|v| v.0 == i)
+                    .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
                     .unwrap()
                     .pop_front()
                     .unwrap();
-                con.queue_send(r)?;
+                if let Some(con) = con {
+                    con.queue_send(&r)?;
+                }
+            }
+            for v in relies.iter() {
+                assert!(v.is_empty())
             }
             if finished {
-                break Ok(())
+                break Ok(());
             }
         }
+    }
+
+    fn handle_clear(
+        &self,
+        con: &mut Channel<ServerCtx>,
+        uifo: Arc<UserInfo>,
+        write_addr: SocketAddr,
+    ) -> Result<()> {
+        let published_paths = join_all(self.shards.iter().map(|shard| {
+            let (tx, rx) = oneshot::channel();
+            let _ = shard.internal.send((write_addr, tx));
+            rx
+        }))
+        .await
+        .into_iter()
+        .collect::<result::Result<Vec<HashSet<Path>>, RecvError>>()?;
+        let mut paths = published_paths.pop().unwrap();
+        for set in published_paths {
+            for path in set {
+                paths.insert(path);
+            }
+        }
+        self.handle_write_batch_no_clear(None, uifo, write_addr, paths.into_iter()).await?;
+        Ok(con.queue_send(&FromWrite::Unpublished)?)
     }
 }
