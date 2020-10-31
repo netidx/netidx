@@ -15,20 +15,21 @@ use crate::{
             ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
-    resolver_store,
+    resolver_store::{self, MAX_READ_BATCH},
     secstore::SecStore,
     utils,
 };
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use futures::{prelude::*, select};
+use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLockWriteGuard};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     mem,
     net::SocketAddr,
+    result,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -36,16 +37,16 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
-        oneshot,
+        oneshot::{self, error::RecvError},
     },
     task,
     time::{self, Instant},
 };
 
 type ReadB = Vec<(u64, ToRead)>;
-type ReadR = Vec<(u64, FromRead)>;
+type ReadR = VecDeque<(u64, FromRead)>;
 type WriteB = Vec<(u64, ToWrite)>;
-type WriteR = Vec<(u64, FromWrite)>;
+type WriteR = VecDeque<(u64, FromWrite)>;
 
 lazy_static! {
     static ref TO_READ_POOL: Pool<ReadB> = Pool::new(640);
@@ -102,6 +103,7 @@ impl Shard {
                     }
                 }
             }
+            info!("shard loop finished")
         });
         Shard { read, write }
     }
@@ -127,7 +129,7 @@ impl Shard {
                                 krb5_spns: Pooled::orphan(HashMap::with_hasher(
                                     FxBuildHasher::default(),
                                 )),
-                                resolver: id,
+                                resolver: req.id,
                                 addrs: store.resolve(&path),
                                 timestamp: now,
                                 permissions: Permissions::all().bits(),
@@ -137,7 +139,7 @@ impl Shard {
                         Some(ref secstore) => {
                             let perm = secstore.pmap().permissions(&*path, &*req.uifo);
                             if !perm.contains(Permissions::SUBSCRIBE) {
-                                (id, FromRead::Denied);
+                                (id, FromRead::Denied)
                             } else {
                                 let (krb5_spns, addrs) = store.resolve_and_sign(
                                     &**sec.as_ref().unwrap(),
@@ -147,7 +149,7 @@ impl Shard {
                                 );
                                 let a = Resolved {
                                     krb5_spns,
-                                    resolver: id,
+                                    resolver: req.id,
                                     addrs,
                                     timestamp: now,
                                     permissions: perm.bits(),
@@ -180,7 +182,7 @@ impl Shard {
                         .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*req.uifo))
                         .unwrap_or(true);
                     if !allowed {
-                        (id, FromRead::Denied);
+                        (id, FromRead::Denied)
                     } else {
                         let rows = store.list(&path);
                         let cols = store.columns(&path);
@@ -222,18 +224,18 @@ impl Shard {
             }
         };
         let resp = FROM_WRITE_POOL.take();
-        resp.extend(req.batch.drain(..).filter_map(|(id, m)| match m {
-            ToWrite::Heartbeat | ToWrite::Clear => None,
-            ToWrite::Publish(path) => Some((id, publish(store, path, false))),
-            ToWrite::PublishDefault(path) => Some((id, publish(s, path, true))),
+        resp.extend(req.batch.drain(..).map(|(id, m)| match m {
+            ToWrite::Heartbeat | ToWrite::Clear => unreachable!(),
+            ToWrite::Publish(path) => (id, publish(store, path, false)),
+            ToWrite::PublishDefault(path) => (id, publish(s, path, true)),
             ToWrite::Unpublish(path) => {
                 if !Path::is_absolute(&*path) {
-                    Some((id, FromWrite::Error("absolute paths required".into())))
+                    (id, FromWrite::Error("absolute paths required".into()))
                 } else if let Some(r) = s.check_referral(&path) {
-                    Some((id, FromWrite::Referral(r)))
+                    (id, FromWrite::Referral(r))
                 } else {
                     store.unpublish(path, write_addr);
-                    Some((id, FromWrite::Unpublished))
+                    (id, FromWrite::Unpublished)
                 }
             }
         }));
@@ -242,7 +244,126 @@ impl Shard {
 }
 
 #[derive(Clone)]
-struct Store(Vec<Shard>);
+struct Store {
+    shards: Vec<Shard>,
+    build_hasher: FxBuildHasher,
+}
 
 impl Store {
+    fn new(
+        parent: Option<Referral>,
+        children: BTreeMap<Path, Referral>,
+        secstore: SecStore,
+    ) -> Self {
+        let shards = (0..num_cpus::get())
+            .into_iter()
+            .map(|_| Shard::new(parent.clone(), children.clone(), secstore.clone()))
+            .collect();
+        Store { shards, build_hasher: FxBuildHasher::default() }
+    }
+
+    fn shard(&self, path: &Path) -> usize {
+        let mut hasher = self.build_hasher.build_hasher();
+        path.hash(&mut hasher);
+        hasher.finish() as usize % self.shards.len()
+    }
+
+    pub(crate) async fn handle_batch_read(
+        &self,
+        con: &mut Channel<ServerCtx>,
+        uifo: Arc<UserInfo>,
+        id: SocketAddr,
+        msgs: impl Iterator<Item = ToRead>,
+    ) -> Result<()> {
+        let mut i = 0;
+        let mut finished = false;
+        loop {
+            let mut by_shard = (0..self.shards.len())
+                .into_iter()
+                .map(|_| TO_READ_POOL.take())
+                .collect::<Vec<_>>();
+            for _ in 0..MAX_READ_BATCH {
+                match msgs.next() {
+                    None => {
+                        finished = true;
+                        break;
+                    }
+                    Some(ToRead::Resolve(path)) => {
+                        by_shard[self.shard(&path)].push(i, ToRead::Resolve(path));
+                    }
+                    Some(ToRead::List(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((i, ToRead::List(path.clone())));
+                        }
+                    }
+                    Some(ToRead::Table(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((i, ToRead::Table(path.clone())));
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let mut replies =
+                join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
+                    let (tx, rx) = oneshot::channel();
+                    let req = ReadRequest { uifo: uifo.clone(), id, msgs };
+                    self.shards[i].send((req, tx));
+                    rx
+                }))
+                .await
+                .into_iter()
+                .collect::<result::Result<Vec<Pooled<ReadR>>>, RecvError>()?;
+            for i in 0..i {
+                if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
+                    let r = replies
+                        .iter_mut()
+                        .find(|v| v.0 == i)
+                        .unwrap()
+                        .pop_front()
+                        .unwrap();
+                    con.queue_send(r)?;
+                } else {
+                    match replies[0].pop_front().unwrap() {
+                        (_, FromRead::Resolved(_)) => unreachable!(),
+                        (_, FromRead::List(mut paths)) => {
+                            for i in 1..replies.len() {
+                                match replies[i].pop_front().unwrap() {
+                                    FromRead::Resolved(_) => unreachable!(),
+                                    FromRead::Table { .. } => unreachable!(),
+                                    FromRead::List(p) => {
+                                        paths.extend(p.drain(..));
+                                    }
+                                }
+                            }
+                            con.queue_send(FromRead::List(paths))?;
+                        }
+                        (_, FromRead::Table { mut rows, mut cols }) => {
+                            for i in 1..replies.len() {
+                                match replies[i].pop_front().unwrap() {
+                                    FromRead::Resolved(_) => unreachable!(),
+                                    FromRead::List(_) => unreachable!(),
+                                    FromRead::Table { rows: rs, cols: cs } => {
+                                        rows.extend(rs.drain(..));
+                                        cols.extend(cs.drain(..));
+                                    }
+                                }
+                            }
+                            rows.sort();
+                            rows.dedup();
+                            cols.sort();
+                            cols.dedup();
+                            con.queue_send(FromRead::Table { rows, cols })?;
+                        }
+                    }
+                }
+            }
+            for r in replies.iter() {
+                assert!(r.is_empty())
+            }
+            if finished {
+                return Ok(())
+            }
+        }
+    }
 }
