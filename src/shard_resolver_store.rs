@@ -462,14 +462,10 @@ impl Store {
         }))
         .await
         .into_iter()
-        .collect::<result::Result<Vec<HashSet<Path>>, RecvError>>()?;
-        let mut paths = published_paths.pop().unwrap();
-        for set in published_paths {
-            for path in set {
-                paths.insert(path);
-            }
-        }
-        self.handle_write_batch_no_clear(None, uifo, write_addr, paths.into_iter()).await?;
+        .collect::<result::Result<Vec<HashSet<Path>>, RecvError>>()?
+        .into_iter()
+        .flat_map(|s| s.into_iter().map(ToWrite::Unpublish));
+        self.handle_write_batch_no_clear(None, uifo, write_addr, published_paths).await?;
         Ok(con.queue_send(&FromWrite::Unpublished)?)
     }
 }
