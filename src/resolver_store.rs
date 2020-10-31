@@ -29,10 +29,6 @@ use std::{
     thread,
 };
 
-lazy_static! {
-    static ref EMPTY_PATHSET: HashSet<Path> = HashSet::new();
-}
-
 pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
 pub(crate) const MAX_READ_BATCH: usize = 100_000;
 pub(crate) const GC_THRESHOLD: usize = 100_000;
@@ -326,13 +322,10 @@ impl Store {
         }
     }
 
-    pub(crate) fn published_for_addr(
-        &self,
-        addr: &SocketAddr,
-    ) -> impl Iterator<Item = &Path> {
+    pub(crate) fn published_for_addr(&self, addr: &SocketAddr) -> HashSet<Path> {
         match self.by_addr.get(addr) {
-            None => EMPTY_PATHSET.iter(),
-            Some(paths) => paths.iter(),
+            None => HashSet::new(),
+            Some(paths) => paths.clone(),
         }
     }
 

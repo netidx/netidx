@@ -15,7 +15,7 @@ use crate::{
             ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
-    resolver_store::{self, MAX_READ_BATCH},
+    resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH},
     secstore::SecStore,
     utils,
 };
@@ -69,18 +69,20 @@ struct WriteRequest {
 
 #[derive(Clone)]
 struct Shard {
-    read: UnboundedSender<(Pooled<ReadRequest>, oneshot::Receiver<Pooled<ReadR>>)>,
-    write: UnboundedSender<(Pooled<WriteRequest>, oneshot::Receiver<Pooled<WriteR>>)>,
+    read: UnboundedSender<(Pooled<ReadRequest>, oneshot::Sender<Pooled<ReadR>>)>,
+    write: UnboundedSender<(Pooled<WriteRequest>, oneshot::Sender<Pooled<WriteR>>)>,
+    internal: UnboundedSender<(SocketAddr, oneshot::Sender<HashSet<Path>>)>,
 }
 
 impl Shard {
     fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
-        secstore: SecStore,
+        secstore: Option<SecStore>,
     ) -> Self {
         let (read, read_rx) = unbounded_channel();
         let (write, write_rx) = unbounded_channel();
+        let (internal, internal_rx) = unbounded_channel();
         task::spawn(async move {
             let mut store = resolver_store::Store::new(parent, children);
             loop {
@@ -101,11 +103,17 @@ impl Shard {
                             );
                         }
                     }
+                    addr = internal_rx => match addr {
+                        None => break,
+                        Some((addr, reply)) => {
+                            let _ = reply.send(store.published_for_addr(addr));
+                        }
+                    }
                 }
             }
             info!("shard loop finished")
         });
-        Shard { read, write }
+        Shard { read, write, internal }
     }
 
     fn process_read_batch(
@@ -253,7 +261,7 @@ impl Store {
     fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
-        secstore: SecStore,
+        secstore: Option<SecStore>,
     ) -> Self {
         let shards = (0..num_cpus::get())
             .into_iter()
@@ -306,7 +314,7 @@ impl Store {
             }
             if by_shard.iter().all(|v| v.is_empty()) {
                 assert!(finished);
-                break Ok(())
+                break Ok(());
             }
             let mut replies =
                 join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
@@ -364,6 +372,72 @@ impl Store {
             }
             for r in replies.iter() {
                 assert!(r.is_empty())
+            }
+            if finished {
+                break Ok(());
+            }
+        }
+    }
+
+    fn handle_batch_write(
+        &self,
+        con: &mut Channel<ServerCtx>,
+        uifo: Arc<UserInfo>,
+        write_addr: SocketAddr,
+        mut msgs: impl Iterator<Item = ToWrite>,
+    ) -> Result<()> {
+        let mut i = 0;
+        let mut finished = false;
+        loop {
+            let mut by_shard = (0..self.shards.len())
+                .into_iter()
+                .map(|_| TO_READ_POOL.take())
+                .collect::<Vec<_>>();
+            for _ in 0..MAX_WRITE_BATCH {
+                match msgs.next() {
+                    None => {
+                        finished = true;
+                        break;
+                    }
+                    Some(ToWrite::Heartbeat) => continue,
+                    Some(ToWrite::Clear) => unreachable!("call process_clear instead"),
+                    Some(ToWrite::Publish(path)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push(ToWrite::Publish(path));
+                    }
+                    Some(ToWrite::Unpublish(path)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push(ToWrite::Unpublish(path));
+                    }
+                    Some(ToWrite::PublishDefault(path)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push(ToWrite::PublishDefault(path));
+                    }
+                }
+                i += 1;
+            }
+            if by_shard.iter().all(|v| v.is_empty()) {
+                assert!(finished);
+                break Ok(());
+            }
+            let mut replies =
+                join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
+                    let (tx, rx) = oneshot::channel();
+                    let req = ReadRequest { uifo: uifo.clone(), id, msgs };
+                    self.shards[i].send((req, tx));
+                    rx
+                }))
+                .await
+                .into_iter()
+                .collect::<result::Result<Vec<Pooled<WriteR>>>, RecvError>()?;
+            for i in 0..i {
+                let r = replies
+                    .iter_mut()
+                    .find(|v| v.0 == i)
+                    .unwrap()
+                    .pop_front()
+                    .unwrap();
+                con.queue_send(r)?;
             }
             if finished {
                 break Ok(())
