@@ -98,7 +98,7 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 }
 
 #[derive(Debug)]
-pub(crate) struct StoreInner {
+pub(crate) struct Store {
     by_path: HashMap<Path, Set<Addr>>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
     by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
@@ -114,7 +114,38 @@ pub(crate) struct StoreInner {
     cols_pool: Pool<Vec<(Path, Z64)>>,
 }
 
-impl StoreInner {
+impl Store {
+    pub(crate) fn new(
+        parent: Option<Referral>,
+        children: BTreeMap<Path, Referral>,
+    ) -> Self {
+        let mut t = Store {
+            by_path: HashMap::new(),
+            by_addr: HashMap::with_hasher(FxBuildHasher::default()),
+            by_level: HashMap::with_hasher(FxBuildHasher::default()),
+            columns: HashMap::new(),
+            defaults: BTreeSet::new(),
+            parent,
+            children,
+            addrs: HCAddrs::new(),
+            spn_pool: Pool::new(100),
+            signed_addrs_pool: Pool::new(100),
+            addrs_pool: Pool::new(100),
+            paths_pool: Pool::new(100),
+            cols_pool: Pool::new(100),
+        };
+        let children = t.children.keys().cloned().collect::<Vec<_>>();
+        for child in children {
+            // since we want child to be in levels as well as
+            // dirname(child) we add a fake level below child. This
+            // will never be seen, since all requests for any path
+            // under child result in a referral, and anyway it won't
+            // even be added anywhere.
+            t.add_parents(child.append("z").as_ref());
+        }
+        t
+    }
+
     fn remove_parents(&mut self, mut p: &str) {
         loop {
             let p_with_sep = match Path::dirname_with_sep(p) {
@@ -419,6 +450,26 @@ impl StoreInner {
         self.addrs.gc();
     }
 
+    /*
+    pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
+        let mut paths = Vec::new();
+        loop {
+            let mut inner = self.0.write();
+            paths.extend(inner.published_for_addr(&addr).take(MAX_WRITE_BATCH).cloned());
+            for path in paths.drain(..) {
+                inner.unpublish(path, addr);
+            }
+            if inner.published_for_addr(&addr).next().is_some() {
+                drop(inner);
+                thread::yield_now()
+            } else {
+                inner.gc();
+                break;
+            }
+        }
+    }
+    */
+
     #[allow(dead_code)]
     pub(crate) fn invariant(&self) {
         debug!("resolver_store: checking invariants");
@@ -435,73 +486,6 @@ impl StoreInner {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-pub(crate) struct Store(Arc<RwLock<StoreInner>>);
-
-impl Clone for Store {
-    fn clone(&self) -> Self {
-        Store(Arc::clone(&self.0))
-    }
-}
-
-impl Deref for Store {
-    type Target = RwLock<StoreInner>;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
-impl Store {
-    pub(crate) fn new(
-        parent: Option<Referral>,
-        children: BTreeMap<Path, Referral>,
-    ) -> Self {
-        let mut inner = StoreInner {
-            by_path: HashMap::new(),
-            by_addr: HashMap::with_hasher(FxBuildHasher::default()),
-            by_level: HashMap::with_hasher(FxBuildHasher::default()),
-            columns: HashMap::new(),
-            defaults: BTreeSet::new(),
-            parent,
-            children,
-            addrs: HCAddrs::new(),
-            spn_pool: Pool::new(100),
-            signed_addrs_pool: Pool::new(100),
-            addrs_pool: Pool::new(100),
-            paths_pool: Pool::new(100),
-            cols_pool: Pool::new(100),
-        };
-        let children = inner.children.keys().cloned().collect::<Vec<_>>();
-        for child in children {
-            // since we want child to be in levels as well as
-            // dirname(child) we add a fake level below child. This
-            // will never be seen, since all requests for any path
-            // under child result in a referral, and anyway it won't
-            // even be added anywhere.
-            inner.add_parents(child.append("z").as_ref());
-        }
-        Store(Arc::new(RwLock::new(inner)))
-    }
-
-    pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
-        let mut paths = Vec::new();
-        loop {
-            let mut inner = self.0.write();
-            paths.extend(inner.published_for_addr(&addr).take(MAX_WRITE_BATCH).cloned());
-            for path in paths.drain(..) {
-                inner.unpublish(path, addr);
-            }
-            if inner.published_for_addr(&addr).next().is_some() {
-                drop(inner);
-                thread::yield_now()
-            } else {
-                inner.gc();
-                break;
             }
         }
     }
