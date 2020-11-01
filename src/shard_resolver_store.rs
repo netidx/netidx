@@ -46,7 +46,6 @@ lazy_static! {
 
 struct ReadRequest {
     uifo: Arc<UserInfo>,
-    id: SocketAddr,
     batch: Pooled<ReadB>,
 }
 
@@ -68,6 +67,7 @@ impl Shard {
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
         secstore: Option<SecStore>,
+        resolver: SocketAddr,
     ) -> Self {
         let (read, read_rx) = unbounded_channel();
         let (write, write_rx) = unbounded_channel();
@@ -86,6 +86,7 @@ impl Shard {
                             let r = Shard::process_read_batch(
                                 &mut store,
                                 secstore.as_ref(),
+                                resolver,
                                 req
                             );
                             let _ = reply.send(r);
@@ -118,13 +119,15 @@ impl Shard {
     fn process_read_batch(
         store: &mut resolver_store::Store,
         secstore: Option<&SecStore>,
-        req: ReadRequest,
+        resolver: SocketAddr,
+        mut req: ReadRequest,
     ) -> Pooled<ReadR> {
         // things would need to be massively screwed for this to fail
         let now =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         let mut resp = FROM_READ_POOL.take();
         let sec = secstore.map(|s| s.store.read());
+        let uifo = req.uifo;
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
                 if let Some(r) = store.check_referral(&path) {
@@ -136,7 +139,7 @@ impl Shard {
                                 krb5_spns: Pooled::orphan(HashMap::with_hasher(
                                     FxBuildHasher::default(),
                                 )),
-                                resolver: req.id,
+                                resolver,
                                 addrs: store.resolve(&path),
                                 timestamp: now,
                                 permissions: Permissions::all().bits(),
@@ -144,7 +147,7 @@ impl Shard {
                             (id, FromRead::Resolved(a))
                         }
                         Some(ref secstore) => {
-                            let perm = secstore.pmap().permissions(&*path, &*req.uifo);
+                            let perm = secstore.pmap().permissions(&*path, &*uifo);
                             if !perm.contains(Permissions::SUBSCRIBE) {
                                 (id, FromRead::Denied)
                             } else {
@@ -156,7 +159,7 @@ impl Shard {
                                 );
                                 let a = Resolved {
                                     krb5_spns,
-                                    resolver: req.id,
+                                    resolver,
                                     addrs,
                                     timestamp: now,
                                     permissions: perm.bits(),
@@ -172,7 +175,7 @@ impl Shard {
                     (id, FromRead::Referral(r))
                 } else {
                     let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*req.uifo))
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if allowed {
                         (id, FromRead::List(store.list(&path)))
@@ -186,7 +189,7 @@ impl Shard {
                     (id, FromRead::Referral(r))
                 } else {
                     let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*req.uifo))
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if !allowed {
                         (id, FromRead::Denied)
@@ -204,7 +207,7 @@ impl Shard {
     fn process_write_batch(
         store: &mut resolver_store::Store,
         secstore: Option<&SecStore>,
-        req: WriteRequest,
+        mut req: WriteRequest,
     ) -> Pooled<WriteR> {
         let uifo = &*req.uifo;
         let write_addr = req.write_addr;
@@ -231,7 +234,7 @@ impl Shard {
                 }
             }
         };
-        let resp = FROM_WRITE_POOL.take();
+        let mut resp = FROM_WRITE_POOL.take();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToWrite::Heartbeat | ToWrite::Clear => unreachable!(),
             ToWrite::Publish(path) => (id, publish(store, path, false)),
@@ -261,10 +264,13 @@ impl Store {
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
         secstore: Option<SecStore>,
+        resolver: SocketAddr,
     ) -> Arc<Self> {
         let shards = (0..num_cpus::get())
             .into_iter()
-            .map(|_| Shard::new(parent.clone(), children.clone(), secstore.clone()))
+            .map(|_| {
+                Shard::new(parent.clone(), children.clone(), secstore.clone(), resolver)
+            })
             .collect();
         Arc::new(Store { shards, build_hasher: FxBuildHasher::default() })
     }
@@ -286,7 +292,6 @@ impl Store {
         &self,
         con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
-        id: SocketAddr,
         mut msgs: impl Iterator<Item = ToRead>,
     ) -> Result<()> {
         let mut i = 0;
@@ -323,7 +328,7 @@ impl Store {
             let mut replies =
                 join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
-                    let req = ReadRequest { uifo: uifo.clone(), id, batch };
+                    let req = ReadRequest { uifo: uifo.clone(), batch };
                     let _ = self.shards[i].read.send((req, tx));
                     rx
                 }))
@@ -343,33 +348,53 @@ impl Store {
                 } else {
                     match replies[0].pop_front().unwrap() {
                         (_, FromRead::Resolved(_)) => unreachable!(),
-                        (_, FromRead::List(mut paths)) => {
+                        (_, FromRead::Referral(r)) => {
                             for i in 1..replies.len() {
                                 match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Resolved(_)) => unreachable!(),
-                                    (_, FromRead::Table(_)) => unreachable!(),
-                                    (_, FromRead::List(mut p)) => {
-                                        paths.extend(p.drain(..));
-                                    }
+                                    (_, FromRead::Referral(r_)) if r == r_ => (),
+                                    _ => panic!("desynced referral"),
+                                }
+                            }
+                            con.queue_send(&FromRead::Referral(r))?;
+                        }
+                        (_, FromRead::Denied) => {
+                            for i in 1..replies.len() {
+                                match replies[i].pop_front().unwrap() {
+                                    (_, FromRead::Denied) => (),
+                                    _ => panic!("desynced permissions"),
+                                }
+                            }
+                            con.queue_send(&FromRead::Denied)?;
+                        }
+                        (_, FromRead::Error(e)) => {
+                            for i in 1..replies.len() {
+                                replies[i].pop_front().unwrap();
+                            }
+                            con.queue_send(&FromRead::Error(e));
+                        }
+                        (_, FromRead::List(mut paths)) => {
+                            for i in 1..replies.len() {
+                                if let (_, FromRead::List(mut p)) =
+                                    replies[i].pop_front().unwrap()
+                                {
+                                    paths.extend(p.drain(..));
+                                } else {
+                                    panic!("desynced list")
                                 }
                             }
                             con.queue_send(&FromRead::List(paths))?;
                         }
                         (_, FromRead::Table(Table { mut rows, mut cols })) => {
                             for i in 1..replies.len() {
-                                match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Resolved(_)) => unreachable!(),
-                                    (_, FromRead::List(_)) => unreachable!(),
-                                    (
-                                        _,
-                                        FromRead::Table(Table {
-                                            rows: mut rs,
-                                            cols: mut cs,
-                                        }),
-                                    ) => {
-                                        rows.extend(rs.drain(..));
-                                        cols.extend(cs.drain(..));
-                                    }
+                                if let (
+                                    _,
+                                    FromRead::Table(Table { rows: mut rs, cols: mut cs }),
+                                ) = replies[i].pop_front().unwrap()
+                                {
+                                    rows.extend(rs.drain(..));
+                                    cols.extend(cs.drain(..));
+                                } else {
+                                    panic!("desynced table")
                                 }
                             }
                             rows.sort();

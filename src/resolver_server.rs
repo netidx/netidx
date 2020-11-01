@@ -379,7 +379,6 @@ async fn client_loop_read(
                 store.handle_batch_read(
                     &mut con,
                     uifo.clone(),
-                    id,
                     batch.drain(..)
                 ).await?;
                 con.flush().await?;
@@ -491,7 +490,7 @@ async fn server_loop(
         }
     };
     let published =
-        Store::new(cfg.parent.clone(), cfg.children.clone(), secstore.clone());
+        Store::new(cfg.parent.clone(), cfg.children.clone(), secstore.clone(), id);
     let listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
