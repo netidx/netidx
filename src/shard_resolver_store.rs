@@ -467,7 +467,8 @@ impl Store {
                     .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
                     .unwrap()
                     .pop_front()
-                    .unwrap();
+                    .unwrap()
+                    .1;
                 if let Some(ref mut c) = con {
                     c.queue_send(&r)?;
                 }
