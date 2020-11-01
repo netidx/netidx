@@ -292,9 +292,9 @@ impl Store {
         uifo: Arc<UserInfo>,
         mut msgs: impl Iterator<Item = ToRead>,
     ) -> Result<()> {
-        let mut i = 0;
         let mut finished = false;
         loop {
+            let mut n = 0;
             let mut by_shard = self.shard_batch(&*TO_READ_POOL);
             for _ in 0..MAX_READ_BATCH {
                 match msgs.next() {
@@ -304,20 +304,20 @@ impl Store {
                     }
                     Some(ToRead::Resolve(path)) => {
                         let s = self.shard(&path);
-                        by_shard[s].push((i, ToRead::Resolve(path)));
+                        by_shard[s].push((n, ToRead::Resolve(path)));
                     }
                     Some(ToRead::List(path)) => {
                         for b in by_shard.iter_mut() {
-                            b.push((i, ToRead::List(path.clone())));
+                            b.push((n, ToRead::List(path.clone())));
                         }
                     }
                     Some(ToRead::Table(path)) => {
                         for b in by_shard.iter_mut() {
-                            b.push((i, ToRead::Table(path.clone())));
+                            b.push((n, ToRead::Table(path.clone())));
                         }
                     }
                 }
-                i += 1;
+                n += 1;
             }
             if by_shard.iter().all(|v| v.is_empty()) {
                 assert!(finished);
@@ -333,7 +333,7 @@ impl Store {
                 .await
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<ReadR>>, RecvError>>()?;
-            for i in 0..i {
+            for i in 0..n {
                 if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
                     let r = replies
                         .iter_mut()
@@ -420,9 +420,9 @@ impl Store {
         write_addr: SocketAddr,
         mut msgs: impl Iterator<Item = ToWrite>,
     ) -> Result<()> {
-        let mut n = 0;
         let mut finished = false;
         loop {
+            let mut n = 0;
             let mut by_shard = self.shard_batch(&*TO_WRITE_POOL);
             for _ in 0..MAX_WRITE_BATCH {
                 match msgs.next() {
