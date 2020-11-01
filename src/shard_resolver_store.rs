@@ -1,19 +1,20 @@
 use crate::{
     auth::{Permissions, UserInfo},
     channel::Channel,
-    pack::Z64,
     os::ServerCtx,
+    pack::Z64,
     path::Path,
     pool::{Pool, Poolable, Pooled},
     protocol::resolver::v1::{
         FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
-    resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH, COLS_POOL, PATH_POOL},
+    resolver_store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL},
     secstore::SecStore,
 };
 use anyhow::Result;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
+use immutable_chunkmap::set::Set;
 use log::{debug, info};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -32,8 +33,21 @@ use tokio::{
     time::Instant,
 };
 
+struct TableInternal {
+    rows: Set<Path>,
+    cols: Pooled<Vec<(Path, Z64)>>,
+}
+
+enum FromReadInternal {
+    Resolved(Resolved),
+    List(Set<Path>),
+    Table(TableInternal),
+    Referral(Referral),
+    Denied,
+}
+
 type ReadB = Vec<(u64, ToRead)>;
-type ReadR = VecDeque<(u64, FromRead)>;
+type ReadR = VecDeque<(u64, FromReadInternal)>;
 type WriteB = Vec<(u64, ToWrite)>;
 type WriteR = VecDeque<(u64, FromWrite)>;
 
@@ -133,7 +147,7 @@ impl Shard {
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
                 if let Some(r) = store.check_referral(&path) {
-                    (id, FromRead::Referral(r))
+                    (id, FromReadInternal::Referral(r))
                 } else {
                     match secstore {
                         None => {
@@ -146,12 +160,12 @@ impl Shard {
                                 timestamp: now,
                                 permissions: Permissions::all().bits(),
                             };
-                            (id, FromRead::Resolved(a))
+                            (id, FromReadInternal::Resolved(a))
                         }
                         Some(ref secstore) => {
                             let perm = secstore.pmap().permissions(&*path, &*uifo);
                             if !perm.contains(Permissions::SUBSCRIBE) {
-                                (id, FromRead::Denied)
+                                (id, FromReadInternal::Denied)
                             } else {
                                 let (krb5_spns, addrs) = store.resolve_and_sign(
                                     &**sec.as_ref().unwrap(),
@@ -166,7 +180,7 @@ impl Shard {
                                     timestamp: now,
                                     permissions: perm.bits(),
                                 };
-                                (id, FromRead::Resolved(a))
+                                (id, FromReadInternal::Resolved(a))
                             }
                         }
                     }
@@ -174,31 +188,31 @@ impl Shard {
             }
             ToRead::List(path) => {
                 if let Some(r) = store.check_referral(&path) {
-                    (id, FromRead::Referral(r))
+                    (id, FromReadInternal::Referral(r))
                 } else {
                     let allowed = secstore
                         .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if allowed {
-                        (id, FromRead::List(store.list(&path)))
+                        (id, FromReadInternal::List(store.list(&path)))
                     } else {
-                        (id, FromRead::Denied)
+                        (id, FromReadInternal::Denied)
                     }
                 }
             }
             ToRead::Table(path) => {
                 if let Some(r) = store.check_referral(&path) {
-                    (id, FromRead::Referral(r))
+                    (id, FromReadInternal::Referral(r))
                 } else {
                     let allowed = secstore
                         .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if !allowed {
-                        (id, FromRead::Denied)
+                        (id, FromReadInternal::Denied)
                     } else {
                         let rows = store.list(&path);
                         let cols = store.columns(&path);
-                        (id, FromRead::Table(Table { rows, cols }))
+                        (id, FromReadInternal::Table(TableInternal { rows, cols }))
                     }
                 }
             }
@@ -346,72 +360,77 @@ impl Store {
                         .pop_front()
                         .unwrap()
                         .1;
-                    con.queue_send(&r)?;
+                    con.queue_send(&match r {
+                        FromReadInternal::List(_) | FromReadInternal::Table(_) => {
+                            unreachable!()
+                        }
+                        FromReadInternal::Resolved(r) => FromRead::Resolved(r),
+                        FromReadInternal::Referral(r) => FromRead::Referral(r),
+                        FromReadInternal::Denied => FromRead::Denied,
+                    })?;
                 } else {
                     match replies[0].pop_front().unwrap() {
-                        (_, FromRead::Resolved(_)) => unreachable!(),
-                        (_, FromRead::Referral(r)) => {
+                        (_, FromReadInternal::Resolved(_)) => unreachable!(),
+                        (_, FromReadInternal::Referral(r)) => {
                             for i in 1..replies.len() {
                                 match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Referral(r_)) if r == r_ => (),
+                                    (_, FromReadInternal::Referral(r_)) if r == r_ => (),
                                     _ => panic!("desynced referral"),
                                 }
                             }
                             con.queue_send(&FromRead::Referral(r))?;
                         }
-                        (_, FromRead::Denied) => {
+                        (_, FromReadInternal::Denied) => {
                             for i in 1..replies.len() {
                                 match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Denied) => (),
+                                    (_, FromReadInternal::Denied) => (),
                                     _ => panic!("desynced permissions"),
                                 }
                             }
                             con.queue_send(&FromRead::Denied)?;
                         }
-                        (_, FromRead::Error(e)) => {
-                            for i in 1..replies.len() {
-                                replies[i].pop_front().unwrap();
-                            }
-                            con.queue_send(&FromRead::Error(e))?;
-                        }
-                        (_, FromRead::List(mut paths)) => {
-                            let mut hpaths = PATH_HPOOL.take();
-                            hpaths.extend(paths.drain(..));
-                            for i in 1..replies.len() {
-                                if let (_, FromRead::List(mut p)) =
-                                    replies[i].pop_front().unwrap()
-                                {
-                                    hpaths.extend(p.drain(..));
-                                } else {
-                                    panic!("desynced list")
-                                }
-                            }
-                            let mut paths = PATH_POOL.take();
-                            paths.extend(hpaths.drain());
-                            con.queue_send(&FromRead::List(paths))?;
-                        }
-                        (_, FromRead::Table(Table { mut rows, mut cols })) => {
-                            let mut hrows = PATH_HPOOL.take();
-                            let mut hcols = COLS_HPOOL.take();
-                            hrows.extend(rows.drain(..));
-                            hcols.extend(cols.drain(..));
-                            for i in 1..replies.len() {
-                                if let (
-                                    _,
-                                    FromRead::Table(Table { rows: mut rs, cols: mut cs }),
-                                ) = replies[i].pop_front().unwrap()
-                                {
-                                    hrows.extend(rs.drain(..));
-                                    for (p, c) in cs.drain(..) {
-                                        hcols.entry(p).or_insert(Z64(0)).0 += c.0;
+                        (_, FromReadInternal::List(paths)) => {
+                            let paths =
+                                (1..replies.len()).into_iter().fold(paths, |paths, i| {
+                                    if let (_, FromReadInternal::List(p)) =
+                                        replies[i].pop_front().unwrap()
+                                    {
+                                        paths.union(&p)
+                                    } else {
+                                        panic!("desynced list")
                                     }
-                                } else {
-                                    panic!("desynced table")
-                                }
-                            }
+                                });
+                            let mut res = PATH_POOL.take();
+                            res.extend(paths.into_iter().cloned());
+                            con.queue_send(&FromRead::List(res))?;
+                        }
+                        (
+                            _,
+                            FromReadInternal::Table(TableInternal { rows, mut cols }),
+                        ) => {
+                            let mut hcols = COLS_HPOOL.take();
+                            hcols.extend(cols.drain(..));
+                            let srows =
+                                (1..replies.len()).into_iter().fold(rows, |rows, i| {
+                                    if let (
+                                        _,
+                                        FromReadInternal::Table(TableInternal {
+                                            rows: rs,
+                                            cols: mut cs,
+                                        }),
+                                    ) = replies[i].pop_front().unwrap()
+                                    {
+                                        for (p, c) in cs.drain(..) {
+                                            hcols.entry(p).or_insert(Z64(0)).0 += c.0;
+                                        }
+                                        rows.union(&rs)
+                                    } else {
+                                        panic!("desynced table")
+                                    }
+                                });
                             let mut rows = PATH_POOL.take();
                             let mut cols = COLS_POOL.take();
-                            rows.extend(hrows.drain());
+                            rows.extend(srows.into_iter().cloned());
                             cols.extend(hcols.drain());
                             con.queue_send(&FromRead::Table(Table { rows, cols }))?;
                         }
