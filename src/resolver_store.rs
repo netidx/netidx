@@ -400,7 +400,7 @@ impl Store {
         (krb5_spns, signed_addrs)
     }
 
-    pub(crate) fn list(&self, parent: &Path) -> Set<Path> {
+    pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let parent = if parent == &Path::root() {
             parent.as_ref()
         } else {
@@ -411,17 +411,18 @@ impl Store {
         if !parent.ends_with(path::SEP) {
             parent.push(path::SEP);
         }
-        match self.by_level.get(&(n + 1)) {
-            None => Set::new(),
-            Some(l) => Set::from_iter(
+        let mut paths = PATH_POOL.take();
+        if let Some(l) = self.by_level.get(&(n + 1)) {
+            paths.extend(
                 l.range::<str, (Bound<&str>, Bound<&str>)>((
                     Excluded(parent.as_str()),
                     Unbounded,
                 ))
                 .take_while(|p| p.as_ref().starts_with(parent.as_str()))
                 .cloned(),
-            ),
+            )
         }
+        paths
     }
 
     pub(crate) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
