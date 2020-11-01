@@ -31,7 +31,7 @@ async fn run_publisher(
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
             n += cols;
-            if n >= 100000 {
+            if n >= 1000000 {
                 n = 0;
                 if let Some(task) = task.take() {
                     task.await.expect("publish join")

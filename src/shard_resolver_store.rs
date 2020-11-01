@@ -13,7 +13,7 @@ use crate::{
 use anyhow::Result;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
-use log::info;
+use log::{debug, info};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
@@ -28,6 +28,7 @@ use tokio::{
         oneshot::{self, error::RecvError},
     },
     task,
+    time::Instant,
 };
 
 type ReadB = Vec<(u64, ToRead)>;
@@ -404,9 +405,6 @@ impl Store {
                     }
                 }
             }
-            for r in replies.iter() {
-                assert!(r.is_empty())
-            }
             if finished {
                 break Ok(());
             }
@@ -424,6 +422,7 @@ impl Store {
         loop {
             let mut n = 0;
             let mut by_shard = self.shard_batch(&*TO_WRITE_POOL);
+            let start = Instant::now();
             for _ in 0..MAX_WRITE_BATCH {
                 match msgs.next() {
                     None => {
@@ -451,6 +450,12 @@ impl Store {
                 assert!(finished);
                 break Ok(());
             }
+            debug!(
+                "submitting write batch of size: {} build: {}s shards: {:?}",
+                n,
+                start.elapsed().as_secs_f32(),
+                by_shard.iter().map(|v| v.len()).collect::<Vec<_>>()
+            );
             let mut replies =
                 join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
@@ -461,20 +466,17 @@ impl Store {
                 .await
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<WriteR>>, RecvError>>()?;
-            for i in 0..n {
-                let r = replies
-                    .iter_mut()
-                    .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
-                    .unwrap()
-                    .pop_front()
-                    .unwrap()
-                    .1;
-                if let Some(ref mut c) = con {
+            if let Some(ref mut c) = con {
+                for i in 0..n {
+                    let r = replies
+                        .iter_mut()
+                        .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
+                        .unwrap()
+                        .pop_front()
+                        .unwrap()
+                        .1;
                     c.queue_send(&r)?;
                 }
-            }
-            for v in replies.iter() {
-                assert!(v.is_empty())
             }
             if finished {
                 break Ok(());
@@ -487,17 +489,24 @@ impl Store {
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
     ) -> Result<()> {
-        let published_paths = join_all(self.shards.iter().map(|shard| {
+        use rand::{prelude::*, thread_rng};
+        let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.send((write_addr, tx));
             rx
         }))
         .await
         .into_iter()
-        .collect::<result::Result<Vec<HashSet<Path>>, RecvError>>()?
-        .into_iter()
-        .flat_map(|s| s.into_iter().map(ToWrite::Unpublish));
-        self.handle_batch_write_no_clear(None, uifo, write_addr, published_paths).await?;
+        .flat_map(|s| s.unwrap().into_iter().map(ToWrite::Unpublish))
+        .collect::<Vec<_>>();
+        published_paths.shuffle(&mut thread_rng());
+        self.handle_batch_write_no_clear(
+            None,
+            uifo,
+            write_addr,
+            published_paths.into_iter(),
+        )
+        .await?;
         Ok(())
     }
 }

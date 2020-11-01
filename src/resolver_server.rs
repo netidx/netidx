@@ -145,6 +145,7 @@ async fn client_loop_write(
                     while let Some((i, _)) =
                         batch.iter().enumerate().find(|(_, m)| *m == &ToWrite::Clear)
                     {
+                        debug!("batch {} contains clear at pos {}", batch.len(), i);
                         let rest = batch.split_off(i + 1);
                         for m in batch.drain(..) {
                             match m {
