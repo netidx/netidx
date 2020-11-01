@@ -2,7 +2,6 @@ use crate::{
     auth::{Permissions, UserInfo},
     channel::Channel,
     os::ServerCtx,
-    pack::Pack,
     path::Path,
     pool::{Pool, Poolable, Pooled},
     protocol::resolver::v1::{
@@ -12,7 +11,6 @@ use crate::{
     secstore::SecStore,
 };
 use anyhow::Result;
-use bytes::Buf;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
 use log::info;
@@ -370,7 +368,7 @@ impl Store {
                             for i in 1..replies.len() {
                                 replies[i].pop_front().unwrap();
                             }
-                            con.queue_send(&FromRead::Error(e));
+                            con.queue_send(&FromRead::Error(e))?;
                         }
                         (_, FromRead::List(mut paths)) => {
                             for i in 1..replies.len() {

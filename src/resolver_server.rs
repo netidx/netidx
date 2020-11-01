@@ -355,7 +355,6 @@ async fn client_loop_read(
     store: Arc<Store>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
-    id: SocketAddr,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
     let mut batch: Vec<ToRead> = Vec::new();
@@ -393,7 +392,6 @@ async fn hello_client_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
-    id: SocketAddr,
     hello: ClientAuthRead,
 ) -> Result<()> {
     async fn send(
@@ -420,7 +418,7 @@ async fn hello_client_read(
             }
         },
     };
-    Ok(client_loop_read(cfg, store, con, server_stop, id, uifo).await?)
+    Ok(client_loop_read(cfg, store, con, server_stop, uifo).await?)
 }
 
 async fn hello_client(
@@ -449,7 +447,7 @@ async fn hello_client(
                     bail!("no read clients allowed yet");
                 }
             }
-            Ok(hello_client_read(cfg, store, con, server_stop, secstore, id, hello)
+            Ok(hello_client_read(cfg, store, con, server_stop, secstore, hello)
                 .await?)
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(

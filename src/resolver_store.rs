@@ -12,7 +12,6 @@ use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use immutable_chunkmap::set::Set;
 use log::debug;
-use parking_lot::RwLock;
 use std::{
     clone::Clone,
     collections::{
@@ -24,9 +23,6 @@ use std::{
     convert::AsRef,
     iter::{self, FromIterator},
     net::SocketAddr,
-    ops::Deref,
-    sync::Arc,
-    thread,
 };
 
 pub(crate) const MAX_WRITE_BATCH: usize = 10_000;
@@ -438,30 +434,6 @@ impl Store {
         }
         cols
     }
-
-    pub(crate) fn gc(&mut self) {
-        self.addrs.gc();
-    }
-
-    /*
-    pub(crate) fn unpublish_addr(&self, addr: SocketAddr) {
-        let mut paths = Vec::new();
-        loop {
-            let mut inner = self.0.write();
-            paths.extend(inner.published_for_addr(&addr).take(MAX_WRITE_BATCH).cloned());
-            for path in paths.drain(..) {
-                inner.unpublish(path, addr);
-            }
-            if inner.published_for_addr(&addr).next().is_some() {
-                drop(inner);
-                thread::yield_now()
-            } else {
-                inner.gc();
-                break;
-            }
-        }
-    }
-    */
 
     #[allow(dead_code)]
     pub(crate) fn invariant(&self) {
