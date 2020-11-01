@@ -130,6 +130,7 @@ pub mod publisher;
 pub mod resolver;
 pub mod resolver_server;
 mod resolver_single;
+mod shard_resolver_store;
 mod resolver_store;
 mod secstore;
 pub mod subscriber;

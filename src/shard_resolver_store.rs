@@ -251,23 +251,22 @@ impl Shard {
     }
 }
 
-#[derive(Clone)]
-struct Store {
+pub(crate) struct Store {
     shards: Vec<Shard>,
     build_hasher: FxBuildHasher,
 }
 
 impl Store {
-    fn new(
+    pub(crate) fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
         secstore: Option<SecStore>,
-    ) -> Self {
+    ) -> Arc<Self> {
         let shards = (0..num_cpus::get())
             .into_iter()
             .map(|_| Shard::new(parent.clone(), children.clone(), secstore.clone()))
             .collect();
-        Store { shards, build_hasher: FxBuildHasher::default() }
+        Arc::new(Store { shards, build_hasher: FxBuildHasher::default() })
     }
 
     fn shard(&self, path: &Path) -> usize {
@@ -381,7 +380,7 @@ impl Store {
         }
     }
 
-    fn handle_batch_write_no_clear(
+    pub(crate) async fn handle_batch_write_no_clear(
         &self,
         con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
@@ -449,9 +448,8 @@ impl Store {
         }
     }
 
-    fn handle_clear(
+    pub(crate) async fn handle_clear(
         &self,
-        con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
     ) -> Result<()> {
@@ -466,6 +464,6 @@ impl Store {
         .into_iter()
         .flat_map(|s| s.into_iter().map(ToWrite::Unpublish));
         self.handle_write_batch_no_clear(None, uifo, write_addr, published_paths).await?;
-        Ok(con.queue_send(&FromWrite::Unpublished)?)
+        Ok(())
     }
 }

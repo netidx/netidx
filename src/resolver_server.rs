@@ -15,8 +15,8 @@ use crate::{
             ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
         },
     },
-    resolver_store::{Store, StoreInner, MAX_READ_BATCH, MAX_WRITE_BATCH},
     secstore::SecStore,
+    shard_resolver_store::Store,
     utils,
 };
 use anyhow::Result;
@@ -38,64 +38,6 @@ use tokio::{
     task,
     time::{self, Instant},
 };
-
-fn handle_batch_write(
-    store: &Store,
-    con: &mut Channel<ServerCtx>,
-    secstore: Option<&SecStore>,
-    uifo: &Arc<UserInfo>,
-    write_addr: SocketAddr,
-    mut msgs: impl Iterator<Item = ToWrite>,
-) -> Result<()> {
-    let mut s = store.write();
-    let publish = |s: &mut RwLockWriteGuard<StoreInner>,
-                   con: &mut Channel<ServerCtx>,
-                   path: Path,
-                   default: bool|
-     -> Result<()> {
-        if !Path::is_absolute(&*path) {
-            con.queue_send(&FromWrite::Error("absolute paths required".into()))?
-        } else if let Some(r) = s.check_referral(&path) {
-            con.queue_send(&FromWrite::Referral(r))?
-        } else {
-            let perm =
-                if default { Permissions::PUBLISH_DEFAULT } else { Permissions::PUBLISH };
-            if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true) {
-                s.publish(path, write_addr, default);
-                con.queue_send(&FromWrite::Published)?
-            } else {
-                con.queue_send(&FromWrite::Denied)?
-            }
-        }
-        Ok(())
-    };
-    loop {
-        match msgs.next() {
-            None => break Ok(()),
-            Some(ToWrite::Heartbeat) => (),
-            Some(ToWrite::Publish(path)) => publish(&mut s, con, path, false)?,
-            Some(ToWrite::PublishDefault(path)) => publish(&mut s, con, path, true)?,
-            Some(ToWrite::Unpublish(path)) => {
-                if !Path::is_absolute(&*path) {
-                    con.queue_send(&FromWrite::Error("absolute paths required".into()))?
-                } else if let Some(r) = s.check_referral(&path) {
-                    con.queue_send(&FromWrite::Referral(r))?
-                } else {
-                    s.unpublish(path, write_addr);
-                    con.queue_send(&FromWrite::Unpublished)?
-                }
-            }
-            Some(ToWrite::Clear) => {
-                // release the lock
-                drop(publish);
-                drop(s);
-                task::block_in_place(|| store.unpublish_addr(write_addr));
-                con.queue_send(&FromWrite::Unpublished)?;
-                break handle_batch_write(store, con, secstore, uifo, write_addr, msgs);
-            }
-        }
-    }
-}
 
 atomic_id!(CId);
 
@@ -135,7 +77,7 @@ async fn client_loop_write(
     clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
-    store: Store,
+    store: Arc<Store>,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
     server_stop: oneshot::Receiver<()>,
@@ -184,7 +126,7 @@ async fn client_loop_write(
                             secstore.remove(&write_addr);
                         }
                     }
-                    task::block_in_place(|| store.unpublish_addr(write_addr));
+                    store.handle_clear(uifo.clone(), write_addr).await?;
                     let mut inner = clinfos.0.lock();
                     inner.remove(&write_addr);
                     bail!("write client timed out");
@@ -203,31 +145,45 @@ async fn client_loop_write(
                         continue 'main
                     }
                     let c = con.as_mut().unwrap();
-                    let mut batch = batch.drain(..).peekable();
-                    // hold the write lock for no more than
-                    // MAX_WRITE_BATCH write ops, no matter how big
-                    // the actual batch is.
-                    while batch.peek().is_some() {
-                        let r = handle_batch_write(
-                            &store,
-                            c,
-                            secstore.as_ref(),
-                            &uifo,
-                            write_addr,
-                            batch.by_ref().take(MAX_WRITE_BATCH)
-                        );
-                        if let Err(e) = r {
-                            warn!("handle_write_batch failed {}", e);
-                            con = None;
-                            ctracker.close(connection_id);
-                            continue 'main;
+                    while let Some((i, _)) =
+                        batch.iter().enumerate().find(|(_, m)| m == ToWrite::Clear)
+                    {
+                        let rest = batch.split_off(i + 1);
+                        for m in batch.drain(..) {
+                            match m {
+                                ToWrite::Heartbeat => (),
+                                ToWrite::Publish(_) | ToWrite::PublishDefault(_) =>
+                                    c.queue_send(&FromWrite::Published)?,
+                                ToWrite::Unpublish(_) =>
+                                    c.queue_send(&FromWrite::Unpublished)?,
+                                ToWrite::Clear => {
+                                    store.handle_clear(
+                                        uifo.clone,
+                                        write_addr
+                                    ).await?;
+                                    c.queue_send(&FromWrite::Unpublished)?
+                                }
+                            }
                         }
-                        if let Err(e) = c.flush().await {
-                            warn!("flush to write client failed: {}", e);
-                            con = None;
-                            ctracker.close(connection_id);
-                            continue 'main;
-                        }
+                        batch = rest;
+                    }
+                    let r = store.handle_batch_write_no_clear(
+                        Some(c),
+                        &uifo,
+                        write_addr,
+                        batch.drain(..)
+                    );
+                    if let Err(e) = r {
+                        warn!("handle_write_batch failed {}", e);
+                        con = None;
+                        ctracker.close(connection_id);
+                        continue 'main;
+                    }
+                    if let Err(e) = c.flush().await {
+                        warn!("flush to write client failed: {}", e);
+                        con = None;
+                        ctracker.close(connection_id);
+                        continue 'main;
                     }
                 }
             },
@@ -241,7 +197,7 @@ async fn hello_client_write(
     ctracker: CTracker,
     connection_id: CId,
     listen_addr: SocketAddr,
-    store: Store,
+    store: Arc<Store>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -397,98 +353,9 @@ async fn hello_client_write(
     .await?)
 }
 
-fn handle_batch_read(
-    store: &Store,
-    con: &mut Channel<ServerCtx>,
-    secstore: Option<&SecStore>,
-    uifo: &Arc<UserInfo>,
-    id: SocketAddr,
-    msgs: impl Iterator<Item = ToRead>,
-) -> Result<()> {
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
-    let s = store.read();
-    let sec = secstore.map(|s| s.store.read());
-    for m in msgs {
-        match m {
-            ToRead::Resolve(path) => {
-                if let Some(r) = s.check_referral(&path) {
-                    con.queue_send(&FromRead::Referral(r))?
-                } else {
-                    match secstore {
-                        None => {
-                            let a = Resolved {
-                                krb5_spns: Pooled::orphan(HashMap::with_hasher(
-                                    FxBuildHasher::default(),
-                                )),
-                                resolver: id,
-                                addrs: s.resolve(&path),
-                                timestamp: now,
-                                permissions: Permissions::all().bits(),
-                            };
-                            con.queue_send(&FromRead::Resolved(a))?;
-                        }
-                        Some(ref secstore) => {
-                            let perm = secstore.pmap().permissions(&*path, &**uifo);
-                            if !perm.contains(Permissions::SUBSCRIBE) {
-                                con.queue_send(&FromRead::Denied)?;
-                            } else {
-                                let (krb5_spns, addrs) = s.resolve_and_sign(
-                                    &**sec.as_ref().unwrap(),
-                                    now,
-                                    perm,
-                                    &path,
-                                );
-                                let a = Resolved {
-                                    krb5_spns,
-                                    resolver: id,
-                                    addrs,
-                                    timestamp: now,
-                                    permissions: perm.bits(),
-                                };
-                                con.queue_send(&FromRead::Resolved(a))?
-                            }
-                        }
-                    }
-                }
-            }
-            ToRead::List(path) => {
-                if let Some(r) = s.check_referral(&path) {
-                    con.queue_send(&FromRead::Referral(r))?
-                } else {
-                    let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
-                        .unwrap_or(true);
-                    if allowed {
-                        con.queue_send(&FromRead::List(s.list(&path)))?
-                    } else {
-                        con.queue_send(&FromRead::Denied)?
-                    }
-                }
-            }
-            ToRead::Table(path) => {
-                if let Some(r) = s.check_referral(&path) {
-                    con.queue_send(&FromRead::Referral(r))?
-                } else {
-                    let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, uifo))
-                        .unwrap_or(true);
-                    if !allowed {
-                        con.queue_send(&FromRead::Denied)?;
-                    } else {
-                        let rows = s.list(&path);
-                        let cols = s.columns(&path);
-                        con.queue_send(&FromRead::Table(Table { rows, cols }))?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn client_loop_read(
     cfg: Arc<config::Config>,
-    store: Store,
+    store: Arc<Store>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -532,7 +399,7 @@ async fn client_loop_read(
 
 async fn hello_client_read(
     cfg: Arc<config::Config>,
-    store: Store,
+    store: Arc<Store>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -573,7 +440,7 @@ async fn hello_client(
     connection_id: CId,
     delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
-    store: Store,
+    store: Arc<Store>,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -625,7 +492,6 @@ async fn server_loop(
     let cfg = Arc::new(cfg);
     let ctracker = CTracker::new();
     let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
-    let published: Store = Store::new(cfg.parent.clone(), cfg.children.clone());
     let id = cfg.addrs[id];
     let secstore = match &cfg.auth {
         config::Auth::Anonymous => None,
@@ -633,6 +499,8 @@ async fn server_loop(
             Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
+    let published: Store =
+        Store::new(cfg.parent.clone(), cfg.children.clone(), secstore.clone());
     let listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
