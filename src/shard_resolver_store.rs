@@ -381,6 +381,8 @@ impl Store {
                                     panic!("desynced list")
                                 }
                             }
+                            paths.sort();
+                            paths.dedup();
                             con.queue_send(&FromRead::List(paths))?;
                         }
                         (_, FromRead::Table(Table { mut rows, mut cols })) => {
