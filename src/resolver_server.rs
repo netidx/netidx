@@ -9,8 +9,8 @@ use crate::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromWrite, ReadyForOwnershipCheck, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite, Secret,
+            FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
         },
     },
     secstore::SecStore,
@@ -490,7 +490,7 @@ async fn server_loop(
             Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
-    let published: Store =
+    let published =
         Store::new(cfg.parent.clone(), cfg.children.clone(), secstore.clone());
     let listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;

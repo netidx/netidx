@@ -4,7 +4,7 @@ use crate::{
     os::ServerCtx,
     pack::Pack,
     path::Path,
-    pool::{Pool, Pooled, Poolable},
+    pool::{Pool, Poolable, Pooled},
     protocol::resolver::v1::{
         FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
@@ -18,6 +18,7 @@ use fxhash::FxBuildHasher;
 use log::info;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    hash::{BuildHasher, Hash, Hasher},
     net::SocketAddr,
     result,
     sync::Arc,
@@ -71,8 +72,12 @@ impl Shard {
         let (read, read_rx) = unbounded_channel();
         let (write, write_rx) = unbounded_channel();
         let (internal, internal_rx) = unbounded_channel();
+        let t = Shard { read, write, internal };
         task::spawn(async move {
             let mut store = resolver_store::Store::new(parent, children);
+            let mut read_rx = read_rx.fuse();
+            let mut write_rx = write_rx.fuse();
+            let mut internal_rx = internal_rx.fuse();
             loop {
                 select! {
                     batch = read_rx.next() => match batch {
@@ -97,17 +102,17 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    addr = internal_rx => match addr {
+                    addr = internal_rx.next() => match addr {
                         None => break,
                         Some((addr, reply)) => {
-                            let _ = reply.send(store.published_for_addr(addr));
+                            let _ = reply.send(store.published_for_addr(&addr));
                         }
                     }
                 }
             }
             info!("shard loop finished")
         });
-        Shard { read, write, internal }
+        t
     }
 
     fn process_read_batch(
@@ -188,7 +193,7 @@ impl Shard {
                     } else {
                         let rows = store.list(&path);
                         let cols = store.columns(&path);
-                        (id, FromRead::Table(Table { rows, cols }));
+                        (id, FromRead::Table(Table { rows, cols }))
                     }
                 }
             }
@@ -201,7 +206,7 @@ impl Shard {
         secstore: Option<&SecStore>,
         req: WriteRequest,
     ) -> Pooled<WriteR> {
-        let uinfo = &*req.uinfo;
+        let uifo = &*req.uifo;
         let write_addr = req.write_addr;
         let publish = |s: &mut resolver_store::Store,
                        path: Path,
@@ -217,7 +222,7 @@ impl Shard {
                 } else {
                     Permissions::PUBLISH
                 };
-                if secstore.map(|s| s.pmap().allowed(&*path, perm, uinfo)).unwrap_or(true)
+                if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true)
                 {
                     s.publish(path, write_addr, default);
                     FromWrite::Published
@@ -270,7 +275,10 @@ impl Store {
         hasher.finish() as usize % self.shards.len()
     }
 
-    fn shard_batch<T: Poolable>(&self, pool: &Pool<T>) -> Vec<Pooled<T>> {
+    fn shard_batch<T: Poolable + Send + Sync + 'static>(
+        &self,
+        pool: &Pool<T>,
+    ) -> Vec<Pooled<T>> {
         (0..self.shards.len()).into_iter().map(|_| pool.take()).collect::<Vec<_>>()
     }
 
@@ -279,7 +287,7 @@ impl Store {
         con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
         id: SocketAddr,
-        msgs: impl Iterator<Item = ToRead>,
+        mut msgs: impl Iterator<Item = ToRead>,
     ) -> Result<()> {
         let mut i = 0;
         let mut finished = false;
@@ -329,29 +337,36 @@ impl Store {
                         .find(|r| r.front().map(|v| v.0 == i).unwrap_or(false))
                         .unwrap()
                         .pop_front()
-                        .unwrap();
-                    con.queue_send(r)?;
+                        .unwrap()
+                        .1;
+                    con.queue_send(&r)?;
                 } else {
                     match replies[0].pop_front().unwrap() {
                         (_, FromRead::Resolved(_)) => unreachable!(),
                         (_, FromRead::List(mut paths)) => {
                             for i in 1..replies.len() {
                                 match replies[i].pop_front().unwrap() {
-                                    FromRead::Resolved(_) => unreachable!(),
-                                    FromRead::Table { .. } => unreachable!(),
-                                    FromRead::List(p) => {
+                                    (_, FromRead::Resolved(_)) => unreachable!(),
+                                    (_, FromRead::Table(_)) => unreachable!(),
+                                    (_, FromRead::List(mut p)) => {
                                         paths.extend(p.drain(..));
                                     }
                                 }
                             }
-                            con.queue_send(FromRead::List(paths))?;
+                            con.queue_send(&FromRead::List(paths))?;
                         }
-                        (_, FromRead::Table { mut rows, mut cols }) => {
+                        (_, FromRead::Table(Table { mut rows, mut cols })) => {
                             for i in 1..replies.len() {
                                 match replies[i].pop_front().unwrap() {
-                                    FromRead::Resolved(_) => unreachable!(),
-                                    FromRead::List(_) => unreachable!(),
-                                    FromRead::Table { rows: rs, cols: cs } => {
+                                    (_, FromRead::Resolved(_)) => unreachable!(),
+                                    (_, FromRead::List(_)) => unreachable!(),
+                                    (
+                                        _,
+                                        FromRead::Table(Table {
+                                            rows: mut rs,
+                                            cols: mut cs,
+                                        }),
+                                    ) => {
                                         rows.extend(rs.drain(..));
                                         cols.extend(cs.drain(..));
                                     }
@@ -361,7 +376,7 @@ impl Store {
                             rows.dedup();
                             cols.sort();
                             cols.dedup();
-                            con.queue_send(FromRead::Table { rows, cols })?;
+                            con.queue_send(&FromRead::Table(Table { rows, cols }))?;
                         }
                     }
                 }
