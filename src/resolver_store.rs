@@ -25,6 +25,14 @@ use std::{
     net::SocketAddr,
 };
 
+lazy_static! {
+    static ref SPN_POOL: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>> = Pool::new(256);
+    static ref SIGNED_ADDRS_POOL: Pool<Vec<(SocketAddr, Bytes)>> = Pool::new(256);
+    static ref ADDRS_POOL: Pool<Vec<SocketAddr>> = Pool::new(256);
+    pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256);
+    pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256);
+}
+
 pub(crate) const MAX_WRITE_BATCH: usize = 100_000;
 pub(crate) const MAX_READ_BATCH: usize = 1_000_000;
 pub(crate) const GC_THRESHOLD: usize = 100_000;
@@ -99,11 +107,6 @@ pub(crate) struct Store {
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
     addrs: HCAddrs,
-    spn_pool: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>>,
-    signed_addrs_pool: Pool<Vec<(SocketAddr, Bytes)>>,
-    addrs_pool: Pool<Vec<SocketAddr>>,
-    paths_pool: Pool<Vec<Path>>,
-    cols_pool: Pool<Vec<(Path, Z64)>>,
 }
 
 impl Store {
@@ -120,11 +123,6 @@ impl Store {
             parent,
             children,
             addrs: HCAddrs::new(),
-            spn_pool: Pool::new(100),
-            signed_addrs_pool: Pool::new(100),
-            addrs_pool: Pool::new(100),
-            paths_pool: Pool::new(100),
-            cols_pool: Pool::new(100),
         };
         let children = t.children.keys().cloned().collect::<Vec<_>>();
         for child in children {
@@ -334,18 +332,18 @@ impl Store {
             ))
             .next_back();
         match default {
-            None => self.signed_addrs_pool.take(),
+            None => SIGNED_ADDRS_POOL.take(),
             Some(p) if path.starts_with(p.as_ref()) => {
                 match self.by_path.get(p.as_ref()) {
-                    None => self.signed_addrs_pool.take(),
+                    None => SIGNED_ADDRS_POOL.take(),
                     Some(a) => {
-                        let mut addrs = self.signed_addrs_pool.take();
+                        let mut addrs = SIGNED_ADDRS_POOL.take();
                         addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
                         addrs
                     }
                 }
             }
-            Some(_) => self.signed_addrs_pool.take(),
+            Some(_) => SIGNED_ADDRS_POOL.take(),
         }
     }
 
@@ -353,7 +351,7 @@ impl Store {
         match self.by_path.get(path.as_ref()) {
             None => self.resolve_default(path),
             Some(a) => {
-                let mut addrs = self.signed_addrs_pool.take();
+                let mut addrs = SIGNED_ADDRS_POOL.take();
                 addrs.extend(a.into_iter().map(|addr| (addr.0, Bytes::new())));
                 addrs
             }
@@ -370,7 +368,7 @@ impl Store {
         Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
         Pooled<Vec<(SocketAddr, Bytes)>>,
     ) {
-        let mut krb5_spns = self.spn_pool.take();
+        let mut krb5_spns = SPN_POOL.take();
         let mut sign_addr = |addr: &SocketAddr| match sec.get(addr) {
             None => (*addr, Bytes::new()),
             Some((spn, secret, _)) => {
@@ -391,7 +389,7 @@ impl Store {
                 )
             }
         };
-        let mut signed_addrs = self.signed_addrs_pool.take();
+        let mut signed_addrs = SIGNED_ADDRS_POOL.take();
         match self.by_path.get(&*path) {
             None => signed_addrs
                 .extend(self.resolve_default(path).drain(..).map(|(a, _)| sign_addr(&a))),
@@ -413,7 +411,7 @@ impl Store {
         if !parent.ends_with(path::SEP) {
             parent.push(path::SEP);
         }
-        let mut paths = self.paths_pool.take();
+        let mut paths = PATH_POOL.take();
         if let Some(l) = self.by_level.get(&(n + 1)) {
             paths.extend(
                 l.range::<str, (Bound<&str>, Bound<&str>)>((
@@ -428,7 +426,7 @@ impl Store {
     }
 
     pub(crate) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
-        let mut cols = self.cols_pool.take();
+        let mut cols = COLS_POOL.take();
         if let Some(c) = self.columns.get(root) {
             cols.extend(c.iter().map(|(name, cnt)| (name.clone(), *cnt)));
         }

@@ -1,13 +1,14 @@
 use crate::{
     auth::{Permissions, UserInfo},
     channel::Channel,
+    pack::Z64,
     os::ServerCtx,
     path::Path,
     pool::{Pool, Poolable, Pooled},
     protocol::resolver::v1::{
         FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
-    resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH},
+    resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH, COLS_POOL, PATH_POOL},
     secstore::SecStore,
 };
 use anyhow::Result;
@@ -41,6 +42,8 @@ lazy_static! {
     static ref FROM_READ_POOL: Pool<ReadR> = Pool::new(640);
     static ref TO_WRITE_POOL: Pool<WriteB> = Pool::new(640);
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640);
+    static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32);
+    static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32);
 }
 
 struct ReadRequest {
@@ -372,36 +375,44 @@ impl Store {
                             con.queue_send(&FromRead::Error(e))?;
                         }
                         (_, FromRead::List(mut paths)) => {
+                            let mut hpaths = PATH_HPOOL.take();
+                            hpaths.extend(paths.drain(..));
                             for i in 1..replies.len() {
                                 if let (_, FromRead::List(mut p)) =
                                     replies[i].pop_front().unwrap()
                                 {
-                                    paths.extend(p.drain(..));
+                                    hpaths.extend(p.drain(..));
                                 } else {
                                     panic!("desynced list")
                                 }
                             }
-                            paths.sort();
-                            paths.dedup();
+                            let mut paths = PATH_POOL.take();
+                            paths.extend(hpaths.drain());
                             con.queue_send(&FromRead::List(paths))?;
                         }
                         (_, FromRead::Table(Table { mut rows, mut cols })) => {
+                            let mut hrows = PATH_HPOOL.take();
+                            let mut hcols = COLS_HPOOL.take();
+                            hrows.extend(rows.drain(..));
+                            hcols.extend(cols.drain(..));
                             for i in 1..replies.len() {
                                 if let (
                                     _,
                                     FromRead::Table(Table { rows: mut rs, cols: mut cs }),
                                 ) = replies[i].pop_front().unwrap()
                                 {
-                                    rows.extend(rs.drain(..));
-                                    cols.extend(cs.drain(..));
+                                    hrows.extend(rs.drain(..));
+                                    for (p, c) in cs.drain(..) {
+                                        hcols.entry(p).or_insert(Z64(0)).0 += c.0;
+                                    }
                                 } else {
                                     panic!("desynced table")
                                 }
                             }
-                            rows.sort();
-                            rows.dedup();
-                            cols.sort();
-                            cols.dedup();
+                            let mut rows = PATH_POOL.take();
+                            let mut cols = COLS_POOL.take();
+                            rows.extend(hrows.drain());
+                            cols.extend(hcols.drain());
                             con.queue_send(&FromRead::Table(Table { rows, cols }))?;
                         }
                     }

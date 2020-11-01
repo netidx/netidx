@@ -2,7 +2,7 @@
 /// modifications
 use crossbeam::queue::ArrayQueue;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     default::Default,
     fmt::Debug,
     hash::{BuildHasher, Hash},
@@ -25,6 +25,20 @@ where
 {
     fn alloc() -> Self {
         HashMap::default()
+    }
+
+    fn reset(&mut self) {
+        self.clear()
+    }
+}
+
+impl<K, R> Poolable for HashSet<K, R>
+where
+    K: Hash + Eq,
+    R: Default + BuildHasher,
+{
+    fn alloc() -> Self {
+        HashSet::default()
     }
 
     fn reset(&mut self) {
