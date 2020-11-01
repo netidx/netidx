@@ -1,18 +1,16 @@
 use crate::{
-    auth::{Permissions, UserInfo, ANONYMOUS},
+    auth::{UserInfo, ANONYMOUS},
     channel::Channel,
     chars::Chars,
     config,
     os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
-    path::Path,
-    pool::Pooled,
     protocol::{
         publisher,
         resolver::v1::{
             ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ReadyForOwnershipCheck, Resolved, Secret,
-            ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
+            FromWrite, ReadyForOwnershipCheck, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite, Secret,
         },
     },
     secstore::SecStore,
@@ -22,15 +20,14 @@ use crate::{
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
-use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
-use parking_lot::{Mutex, RwLockWriteGuard};
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     mem,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -146,7 +143,7 @@ async fn client_loop_write(
                     }
                     let c = con.as_mut().unwrap();
                     while let Some((i, _)) =
-                        batch.iter().enumerate().find(|(_, m)| m == ToWrite::Clear)
+                        batch.iter().enumerate().find(|(_, m)| *m == &ToWrite::Clear)
                     {
                         let rest = batch.split_off(i + 1);
                         for m in batch.drain(..) {
@@ -158,7 +155,7 @@ async fn client_loop_write(
                                     c.queue_send(&FromWrite::Unpublished)?,
                                 ToWrite::Clear => {
                                     store.handle_clear(
-                                        uifo.clone,
+                                        uifo.clone(),
                                         write_addr
                                     ).await?;
                                     c.queue_send(&FromWrite::Unpublished)?
@@ -169,10 +166,10 @@ async fn client_loop_write(
                     }
                     let r = store.handle_batch_write_no_clear(
                         Some(c),
-                        &uifo,
+                        uifo.clone(),
                         write_addr,
                         batch.drain(..)
-                    );
+                    ).await;
                     if let Err(e) = r {
                         warn!("handle_write_batch failed {}", e);
                         con = None;
@@ -358,7 +355,6 @@ async fn client_loop_read(
     store: Arc<Store>,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
-    secstore: Option<SecStore>,
     id: SocketAddr,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
@@ -380,18 +376,13 @@ async fn client_loop_read(
             m = con.receive_batch(&mut batch).fuse() => {
                 m?;
                 act = true;
-                let mut batch = batch.drain(..).peekable();
-                while batch.peek().is_some() {
-                    handle_batch_read(
-                        &store,
-                        &mut con,
-                        secstore.as_ref(),
-                        &uifo,
-                        id,
-                        batch.by_ref().take(MAX_READ_BATCH)
-                    )?;
-                    con.flush().await?;
-                }
+                store.handle_batch_read(
+                    &mut con,
+                    uifo.clone(),
+                    id,
+                    batch.drain(..)
+                ).await?;
+                con.flush().await?;
             },
         }
     }
@@ -430,7 +421,7 @@ async fn hello_client_read(
             }
         },
     };
-    Ok(client_loop_read(cfg, store, con, server_stop, secstore, id, uifo).await?)
+    Ok(client_loop_read(cfg, store, con, server_stop, id, uifo).await?)
 }
 
 async fn hello_client(

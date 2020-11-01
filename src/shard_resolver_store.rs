@@ -1,46 +1,34 @@
 use crate::{
-    auth::{Permissions, UserInfo, ANONYMOUS},
+    auth::{Permissions, UserInfo},
     channel::Channel,
-    chars::Chars,
-    config,
-    os::{Krb5ServerCtx, ServerCtx},
+    os::ServerCtx,
     pack::Pack,
     path::Path,
-    pool::{Pool, Pooled},
-    protocol::{
-        publisher,
-        resolver::v1::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ReadyForOwnershipCheck, Resolved, Secret,
-            ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
-        },
+    pool::{Pool, Pooled, Poolable},
+    protocol::resolver::v1::{
+        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
     resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH},
     secstore::SecStore,
-    utils,
 };
 use anyhow::Result;
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
-use log::{debug, info, warn};
-use parking_lot::{Mutex, RwLockWriteGuard};
+use log::info;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    mem,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     result,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 use tokio::{
-    net::{TcpListener, TcpStream},
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
         oneshot::{self, error::RecvError},
     },
     task,
-    time::{self, Instant},
 };
 
 type ReadB = Vec<(u64, ToRead)>;
@@ -69,8 +57,8 @@ struct WriteRequest {
 
 #[derive(Clone)]
 struct Shard {
-    read: UnboundedSender<(Pooled<ReadRequest>, oneshot::Sender<Pooled<ReadR>>)>,
-    write: UnboundedSender<(Pooled<WriteRequest>, oneshot::Sender<Pooled<WriteR>>)>,
+    read: UnboundedSender<(ReadRequest, oneshot::Sender<Pooled<ReadR>>)>,
+    write: UnboundedSender<(WriteRequest, oneshot::Sender<Pooled<WriteR>>)>,
     internal: UnboundedSender<(SocketAddr, oneshot::Sender<HashSet<Path>>)>,
 }
 
@@ -90,19 +78,25 @@ impl Shard {
                     batch = read_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
-                            let _ = reply.send(
-                                Shard::process_read_batch(&mut store, &secstore, req)
+                            let r = Shard::process_read_batch(
+                                &mut store,
+                                secstore.as_ref(),
+                                req
                             );
+                            let _ = reply.send(r);
                         }
-                    }
+                    },
                     batch = write_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
-                            let _ = reply.send(
-                                Shard::process_write_batch(&mut store, &secstore, req)
+                            let r = Shard::process_write_batch(
+                                &mut store,
+                                secstore.as_ref(),
+                                req
                             );
+                            let _ = reply.send(r);
                         }
-                    }
+                    },
                     addr = internal_rx => match addr {
                         None => break,
                         Some((addr, reply)) => {
@@ -118,7 +112,7 @@ impl Shard {
 
     fn process_read_batch(
         store: &mut resolver_store::Store,
-        secstore: &SecStore,
+        secstore: Option<&SecStore>,
         req: ReadRequest,
     ) -> Pooled<ReadR> {
         // things would need to be massively screwed for this to fail
@@ -204,10 +198,11 @@ impl Shard {
 
     fn process_write_batch(
         store: &mut resolver_store::Store,
-        secstore: &SecStore,
+        secstore: Option<&SecStore>,
         req: WriteRequest,
     ) -> Pooled<WriteR> {
         let uinfo = &*req.uinfo;
+        let write_addr = req.write_addr;
         let publish = |s: &mut resolver_store::Store,
                        path: Path,
                        default: bool|
@@ -235,11 +230,11 @@ impl Shard {
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToWrite::Heartbeat | ToWrite::Clear => unreachable!(),
             ToWrite::Publish(path) => (id, publish(store, path, false)),
-            ToWrite::PublishDefault(path) => (id, publish(s, path, true)),
+            ToWrite::PublishDefault(path) => (id, publish(store, path, true)),
             ToWrite::Unpublish(path) => {
                 if !Path::is_absolute(&*path) {
                     (id, FromWrite::Error("absolute paths required".into()))
-                } else if let Some(r) = s.check_referral(&path) {
+                } else if let Some(r) = store.check_referral(&path) {
                     (id, FromWrite::Referral(r))
                 } else {
                     store.unpublish(path, write_addr);
@@ -275,7 +270,7 @@ impl Store {
         hasher.finish() as usize % self.shards.len()
     }
 
-    fn shard_batch<T>(&self, pool: &Pool<T>) -> Vec<Pooled<T>> {
+    fn shard_batch<T: Poolable>(&self, pool: &Pool<T>) -> Vec<Pooled<T>> {
         (0..self.shards.len()).into_iter().map(|_| pool.take()).collect::<Vec<_>>()
     }
 
@@ -298,7 +293,7 @@ impl Store {
                     }
                     Some(ToRead::Resolve(path)) => {
                         let s = self.shard(&path);
-                        by_shard[s].push(i, ToRead::Resolve(path));
+                        by_shard[s].push((i, ToRead::Resolve(path)));
                     }
                     Some(ToRead::List(path)) => {
                         for b in by_shard.iter_mut() {
@@ -318,15 +313,15 @@ impl Store {
                 break Ok(());
             }
             let mut replies =
-                join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
+                join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
-                    let req = ReadRequest { uifo: uifo.clone(), id, msgs };
+                    let req = ReadRequest { uifo: uifo.clone(), id, batch };
                     let _ = self.shards[i].read.send((req, tx));
                     rx
                 }))
                 .await
                 .into_iter()
-                .collect::<result::Result<Vec<Pooled<ReadR>>>, RecvError>()?;
+                .collect::<result::Result<Vec<Pooled<ReadR>>, RecvError>>()?;
             for i in 0..i {
                 if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
                     let r = replies
@@ -382,7 +377,7 @@ impl Store {
 
     pub(crate) async fn handle_batch_write_no_clear(
         &self,
-        con: Option<&mut Channel<ServerCtx>>,
+        mut con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
         mut msgs: impl Iterator<Item = ToWrite>,
@@ -419,15 +414,15 @@ impl Store {
                 break Ok(());
             }
             let mut replies =
-                join_all(by_shard.drain(..).enumerated().map(|(i, msgs)| {
+                join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
-                    let req = ReadRequest { uifo: uifo.clone(), id, msgs };
+                    let req = WriteRequest { uifo: uifo.clone(), write_addr, batch };
                     let _ = self.shards[i].write.send((req, tx));
                     rx
                 }))
                 .await
                 .into_iter()
-                .collect::<result::Result<Vec<Pooled<WriteR>>>, RecvError>()?;
+                .collect::<result::Result<Vec<Pooled<WriteR>>, RecvError>>()?;
             for i in 0..n {
                 let r = replies
                     .iter_mut()
@@ -435,11 +430,11 @@ impl Store {
                     .unwrap()
                     .pop_front()
                     .unwrap();
-                if let Some(con) = con {
-                    con.queue_send(&r)?;
+                if let Some(ref mut c) = con {
+                    c.queue_send(&r)?;
                 }
             }
-            for v in relies.iter() {
+            for v in replies.iter() {
                 assert!(v.is_empty())
             }
             if finished {
@@ -463,7 +458,7 @@ impl Store {
         .collect::<result::Result<Vec<HashSet<Path>>, RecvError>>()?
         .into_iter()
         .flat_map(|s| s.into_iter().map(ToWrite::Unpublish));
-        self.handle_write_batch_no_clear(None, uifo, write_addr, published_paths).await?;
+        self.handle_batch_write_no_clear(None, uifo, write_addr, published_paths).await?;
         Ok(())
     }
 }
