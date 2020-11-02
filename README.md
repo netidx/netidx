@@ -31,12 +31,12 @@ let temp = publisher.publish(
     Path::from("/hw/washu-chan/cpu-temp"),
     Value::F32(get_cpu_temp())
 )?;
-publisher.flush(None).await?;
+publisher.flush(None).await;
 
 loop {
     time::delay_for(Duration::from_millis(500)).await;
     temp.update(Value::F32(get_cpu_temp()));
-    publisher.flush(None).await?;
+    publisher.flush(None).await;
 }
 ```
 
