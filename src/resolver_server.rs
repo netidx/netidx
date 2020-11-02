@@ -212,20 +212,12 @@ async fn hello_client_write(
         Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
-    let (tx_stop, rx_stop) = oneshot::channel();
     let ttl_expired = loop {
         let rx = {
             let mut inner = clinfos.0.lock();
             match inner.get_mut(&hello.write_addr) {
-                None => {
-                    inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
-                    break true;
-                }
-                Some(ClientInfo::Running(cl)) => {
-                    let old_stop = mem::replace(cl, tx_stop);
-                    let _ = old_stop.send(());
-                    break false;
-                }
+                None => break true,
+                Some(ClientInfo::Running(_)) => break false,
                 Some(ClientInfo::CleaningUp(waiters)) => {
                     let (tx, rx) = oneshot::channel();
                     waiters.push(tx);
@@ -335,6 +327,20 @@ async fn hello_client_write(
             }
         },
     };
+    let (tx_stop, rx_stop) = oneshot::channel();
+    {
+        let mut inner = clinfos.0.lock();
+        match inner.get_mut(&hello.write_addr) {
+            None => {
+                inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
+            }
+            Some(ClientInfo::Running(cl)) => {
+                let cl = mem::replace(cl, tx_stop);
+                let _ = cl.send(());
+            }
+            Some(ClientInfo::CleaningUp(_)) => bail!("unexpected cleaning up"),
+        }
+    }
     Ok(client_loop_write(
         cfg,
         clinfos,
@@ -448,8 +454,7 @@ async fn hello_client(
                     bail!("no read clients allowed yet");
                 }
             }
-            Ok(hello_client_read(cfg, store, con, server_stop, secstore, hello)
-                .await?)
+            Ok(hello_client_read(cfg, store, con, server_stop, secstore, hello).await?)
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
             cfg,
