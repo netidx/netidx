@@ -12,8 +12,8 @@
     these limits. Results are flushed back to the client after each
     chunk so that we interact properly with the hang detection feature
     mentioned above.
-  - Resolver now uses all cores for reads and writes, and no longer
-    uses locking. Instead the database is sharded internally with each
+  - The resolver now uses all cores for reads and writes, and no longer
+    uses locking, instead the database is sharded internally with each
     CPU controlling a shard. Batches are hashed by path and sent out
     to their corresponding shard (or all of them in the case of
     e.g. list). Performance for large publishers and/or lots of
@@ -45,6 +45,9 @@
   - Fix a bug in publisher that would cause new published names not to
     be sent to the resolver if they are queued while a flush operation
     is in progress.
+  - NO protocol changes in 0.5, it's safe to mix any 0.5 with any 0.4
+    component. The major version bump is due to tokio 0.3 being a
+    potentially large change.
 
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are
