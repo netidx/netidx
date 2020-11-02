@@ -5,28 +5,34 @@
     15 seconds or 6 microseconds per operation in the batch for reads
     and 12 microseconds per operation in the batch for writes,
     whichever timeout is longer.
-
   - Limit reads and writes to a maximum batch size to prevent doing
     too much work at once on a tokio worker thread, and reader/writer
     starvation, The max batch sizes are are 1000K ops for readers and
     100K ops for writers. Cleaning up dead publishers are included in
-    these limits.
-
+    these limits. Results are flushed back to the client after each
+    chunk so that we interact properly with the hang detection feature
+    mentioned above.
+  - Resolver now uses all cores for reads and writes, and no longer
+    uses locking. Instead the database is sharded internally with each
+    CPU controlling a shard. Batches are hashed by path and sent out
+    to their corresponding shard (or all of them in the case of
+    e.g. list). Performance for large publishers and/or lots of
+    publishers on machines with a lot of cores is vastly improved.
   - Fix a bug in the resolver client that would cause a long running
     write connection to stop after the heartbeat interval.
   - Fix a design flaw in the secstore. Now it will always keep the
     security context around for a publisher for as long as that
     publisher is alive.
   - Caching of read security contexts is no longer supported after I
-    found that some implementations of kerberos hold an open file per
-    ctx for the replay cache. Since we must keep a live ctx for each
-    live publisher you may need to raise the allowed number of open
-    file descriptors to avoid starvation if you use an effected
-    kerberos distribution. The number of open files should be at least
-    P + 2*C, where P is the number of publishers and C is the number
-    of allowed simultaneous connections. Alternatively you can disable
-    the replay cache by setting KRB5RCACHETYPE=none. This is not
-    recommended as it opens you to token replay attacks.
+    found that some (older) implementations of kerberos hold an open
+    file per ctx for the replay cache. Since we must keep a live ctx
+    for each live publisher you may need to raise the allowed number
+    of open file descriptors to avoid starvation if you use an
+    effected kerberos distribution. The number of open files should be
+    at least P + 2*C, where P is the number of publishers and C is the
+    number of allowed simultaneous connections. Alternatively you can
+    disable the replay cache by setting KRB5RCACHETYPE=none. This is
+    not recommended as it opens you to token replay attacks.
   - Fix a bug in the resolver server connection tracking logic that
     caused the number of counted open connections to be higher than
     the actual number when the counted connections are live publishers
@@ -35,11 +41,10 @@
   - No longer fail publisher flushes when the publisher can't reach
     any resolver server, instead log the error and keep trying
     forever. There is just no combination of timeouts and or logic
-    that seems better at the moment. The means that publisher::flush
-    now cannot fail.
+    that seems better. The means that publisher::flush now cannot fail.
   - Fix a bug in publisher that would cause new published names not to
     be sent to the resolver if they are queued while a flush operation
-    is in progress. Sorry.
+    is in progress.
 
 * 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are
