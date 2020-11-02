@@ -18,6 +18,11 @@
     to their corresponding shard (or all of them in the case of
     e.g. list). Performance for large publishers and/or lots of
     publishers on machines with a lot of cores is vastly improved.
+  - Improve a degenerate case in resolver_store when lots of
+    publishers publish the same paths. It's still N^2, but the
+    constants are much better, and it's now not an issue to get to
+    thousands of publishers publishing the same set of paths, probably
+    more than you'd ever want in practice.
   - Fix a bug in the resolver client that would cause a long running
     write connection to stop after the heartbeat interval.
   - Fix a design flaw in the secstore. Now it will always keep the
