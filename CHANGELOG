@@ -5,14 +5,13 @@
     15 seconds or 6 microseconds per operation in the batch for reads
     and 12 microseconds per operation in the batch for writes,
     whichever timeout is longer.
+
   - Limit reads and writes to a maximum batch size to prevent doing
     too much work at once on a tokio worker thread, and reader/writer
-    starvation, The max batch sizes are are 100K ops for readers and
-    10K ops for writers. Cleaning up dead publishers are included in
-    these limits, and that function is now run on a blocking thread in
-    case the publisher is huge. Results are flushed back to the client
-    after each chunk so that we interact properly with the hang
-    detection feature mentioned above.
+    starvation, The max batch sizes are are 1000K ops for readers and
+    100K ops for writers. Cleaning up dead publishers are included in
+    these limits.
+
   - Fix a bug in the resolver client that would cause a long running
     write connection to stop after the heartbeat interval.
   - Fix a design flaw in the secstore. Now it will always keep the

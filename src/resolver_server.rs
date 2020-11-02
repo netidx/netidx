@@ -163,22 +163,16 @@ async fn client_loop_write(
                                 }
                             }
                         }
+                        c.flush().await?;
                         batch = rest;
                     }
-                    let r = store.handle_batch_write_no_clear(
+                    if let Err(e) = store.handle_batch_write_no_clear(
                         Some(c),
                         uifo.clone(),
                         write_addr,
                         batch.drain(..)
-                    ).await;
-                    if let Err(e) = r {
+                    ).await {
                         warn!("handle_write_batch failed {}", e);
-                        con = None;
-                        ctracker.close(connection_id);
-                        continue 'main;
-                    }
-                    if let Err(e) = c.flush().await {
-                        warn!("flush to write client failed: {}", e);
                         con = None;
                         ctracker.close(connection_id);
                         continue 'main;
@@ -387,7 +381,6 @@ async fn client_loop_read(
                     uifo.clone(),
                     batch.drain(..)
                 ).await?;
-                con.flush().await?;
             },
         }
     }

@@ -418,6 +418,7 @@ impl Store {
                     }
                 }
             }
+            con.flush().await?;
             if finished {
                 break Ok(());
             }
@@ -490,6 +491,7 @@ impl Store {
                         .1;
                     c.queue_send(&r)?;
                 }
+                c.flush().await?;
             }
             if finished {
                 break Ok(());
