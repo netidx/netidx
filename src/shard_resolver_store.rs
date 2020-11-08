@@ -1,14 +1,14 @@
 use crate::{
     auth::{Permissions, UserInfo},
     channel::Channel,
-    pack::Z64,
     os::ServerCtx,
+    pack::Z64,
     path::Path,
     pool::{Pool, Poolable, Pooled},
     protocol::resolver::v1::{
         FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
-    resolver_store::{self, MAX_READ_BATCH, MAX_WRITE_BATCH, COLS_POOL, PATH_POOL},
+    resolver_store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL},
     secstore::SecStore,
 };
 use anyhow::Result;
@@ -18,6 +18,7 @@ use log::{debug, info};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
+    mem,
     net::SocketAddr,
     result,
     sync::Arc,
@@ -259,6 +260,7 @@ impl Shard {
 pub(crate) struct Store {
     shards: Vec<Shard>,
     build_hasher: FxBuildHasher,
+    shard_mask: usize,
 }
 
 impl Store {
@@ -268,19 +270,24 @@ impl Store {
         secstore: Option<SecStore>,
         resolver: SocketAddr,
     ) -> Arc<Self> {
-        let shards = (0..num_cpus::get())
+        let shards = num_cpus::get().next_power_of_two();
+        let usize_bits = mem::size_of::<usize>() * 8;
+        let shard_lz = shards.leading_zeros() as usize;
+        let shard_bits = usize_bits - shard_lz;
+        let shard_mask = 1 << shard_bits;
+        let shards = (0..shards)
             .into_iter()
             .map(|_| {
                 Shard::new(parent.clone(), children.clone(), secstore.clone(), resolver)
             })
             .collect();
-        Arc::new(Store { shards, build_hasher: FxBuildHasher::default() })
+        Arc::new(Store { shards, shard_mask, build_hasher: FxBuildHasher::default() })
     }
 
     fn shard(&self, path: &Path) -> usize {
         let mut hasher = self.build_hasher.build_hasher();
         path.hash(&mut hasher);
-        hasher.finish() as usize % self.shards.len()
+        hasher.finish() as usize & self.shard_mask
     }
 
     fn shard_batch<T: Poolable + Send + Sync + 'static>(
