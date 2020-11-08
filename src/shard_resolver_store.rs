@@ -14,7 +14,7 @@ use crate::{
 use anyhow::Result;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
-use log::{debug, info};
+use log::info;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
@@ -29,7 +29,6 @@ use tokio::{
         oneshot::{self, error::RecvError},
     },
     task,
-    time::Instant,
 };
 
 type ReadB = Vec<(u64, ToRead)>;
@@ -446,7 +445,6 @@ impl Store {
         loop {
             let mut n = 0;
             let mut by_shard = self.write_shard_batch();
-            let start = Instant::now();
             for _ in 0..MAX_WRITE_BATCH {
                 match msgs.next() {
                     None => {
@@ -474,12 +472,6 @@ impl Store {
                 assert!(finished);
                 break Ok(());
             }
-            debug!(
-                "submitting write batch of size: {} build: {}s shards: {:?}",
-                n,
-                start.elapsed().as_secs_f32(),
-                by_shard.iter().map(|v| v.len()).collect::<Vec<_>>()
-            );
             let mut replies =
                 join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
