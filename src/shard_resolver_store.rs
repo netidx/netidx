@@ -4,7 +4,7 @@ use crate::{
     os::ServerCtx,
     pack::Z64,
     path::Path,
-    pool::{Pool, Poolable, Pooled},
+    pool::{Pool, Pooled},
     protocol::resolver::v1::{
         FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
     },
@@ -44,6 +44,8 @@ lazy_static! {
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640);
     static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32);
     static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32);
+    static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000);
+    static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000);
 }
 
 struct ReadRequest {
@@ -286,11 +288,16 @@ impl Store {
         hasher.finish() as usize & self.shard_mask
     }
 
-    fn shard_batch<T: Poolable + Send + Sync + 'static>(
-        &self,
-        pool: &Pool<T>,
-    ) -> Vec<Pooled<T>> {
-        (0..self.shards.len()).into_iter().map(|_| pool.take()).collect::<Vec<_>>()
+    fn read_shard_batch(&self) -> Pooled<Vec<Pooled<ReadB>>> {
+        let mut b = READ_SHARD_BATCH.take();
+        b.extend((0..self.shards.len()).into_iter().map(|_| TO_READ_POOL.take()));
+        b
+    }
+
+    fn write_shard_batch(&self) -> Pooled<Vec<Pooled<WriteB>>> {
+        let mut b = WRITE_SHARD_BATCH.take();
+        b.extend((0..self.shards.len()).into_iter().map(|_| TO_WRITE_POOL.take()));
+        b
     }
 
     pub(crate) async fn handle_batch_read(
@@ -302,7 +309,7 @@ impl Store {
         let mut finished = false;
         loop {
             let mut n = 0;
-            let mut by_shard = self.shard_batch(&*TO_READ_POOL);
+            let mut by_shard = self.read_shard_batch();
             for _ in 0..MAX_READ_BATCH {
                 match msgs.next() {
                     None => {
@@ -438,7 +445,7 @@ impl Store {
         let mut finished = false;
         loop {
             let mut n = 0;
-            let mut by_shard = self.shard_batch(&*TO_WRITE_POOL);
+            let mut by_shard = self.write_shard_batch();
             let start = Instant::now();
             for _ in 0..MAX_WRITE_BATCH {
                 match msgs.next() {
