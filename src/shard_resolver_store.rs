@@ -18,7 +18,6 @@ use log::{debug, info};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
-    mem,
     net::SocketAddr,
     result,
     sync::Arc,
@@ -271,10 +270,7 @@ impl Store {
         resolver: SocketAddr,
     ) -> Arc<Self> {
         let shards = num_cpus::get().next_power_of_two();
-        let usize_bits = mem::size_of::<usize>() * 8;
-        let shard_lz = shards.leading_zeros() as usize;
-        let shard_bits = usize_bits - shard_lz;
-        let shard_mask = 1 << shard_bits;
+        let shard_mask = shards - 1;
         let shards = (0..shards)
             .into_iter()
             .map(|_| {
