@@ -1,4 +1,3 @@
-pub use crate::{protocol::resolver::v1::{Resolved, Table}, resolver_single::Auth};
 use crate::{
     config::Config,
     path::Path,
@@ -8,6 +7,10 @@ use crate::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
     },
+};
+pub use crate::{
+    protocol::resolver::v1::{Resolved, Table},
+    resolver_single::Auth,
 };
 use anyhow::Result;
 use futures::future;
@@ -161,8 +164,8 @@ impl ToReferral for FromWrite {
 
 trait Connection<T, F>
 where
-    T: ToPath,
-    F: ToReferral,
+    T: ToPath + Send + Sync + 'static,
+    F: ToReferral + Send + Sync + 'static,
 {
     fn new(
         resolver: Config,
@@ -213,17 +216,21 @@ impl Connection<ToWrite, FromWrite> for SingleWrite {
 }
 
 lazy_static! {
-    static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(1000);
-    static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000);
-    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000);
-    static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(1000);
-    static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000);
-    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000);
-    static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000);
+    static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(1000, 10000);
+    static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
+    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000, 10000);
+    static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(1000, 10000);
+    static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000, 10000);
+    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
+    static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
 }
 
 #[derive(Debug)]
-struct ResolverWrapInner<C, T, F> {
+struct ResolverWrapInner<C, T, F>
+where
+    T: Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
     router: Router,
     desired_auth: Auth,
     default: C,
@@ -237,7 +244,9 @@ struct ResolverWrapInner<C, T, F> {
 }
 
 #[derive(Debug, Clone)]
-struct ResolverWrap<C, T, F>(Arc<Mutex<ResolverWrapInner<C, T, F>>>);
+struct ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static>(
+    Arc<Mutex<ResolverWrapInner<C, T, F>>>,
+);
 
 impl<C, T, F> ResolverWrap<C, T, F>
 where

@@ -1,6 +1,10 @@
 * 0.5.1:
   - Resolver server: improve the performance of sharding for a
     noticable speedup processing large batches.
+  - Put an upper bound on total pool size to avoid various extreme
+    scenarios causing unbounded memory usage.
+  - Pool more buffers in the resolver server to reduce dynamic
+    allocation.
 
 * 0.5.0:
   - Update to tokio 0.3 aka 1.0

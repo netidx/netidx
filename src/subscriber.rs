@@ -903,8 +903,8 @@ const PERIOD: Duration = Duration::from_secs(100);
 const FLUSH: Duration = Duration::from_secs(1);
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(1000);
-    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(1000);
+    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(1000, 100000);
+    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(1000, 100000);
 }
 
 // This is the fast path for the common case where the batch contains

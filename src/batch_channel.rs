@@ -93,7 +93,7 @@ impl<T: Send + Sync + 'static> BatchReceiver<T> {
 
 pub(crate) fn channel<T: Send + Sync + 'static>(
 ) -> (BatchSender<T>, BatchReceiver<T>) {
-    let pool = Pool::new(1);
+    let pool = Pool::new(1, 1000000);
     let inner = Arc::new(Mutex::new(BatchChannelInner {
         send_closed: false,
         recv_closed: false,

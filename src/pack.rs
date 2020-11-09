@@ -62,7 +62,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
             let mut pools = pools.borrow_mut();
             let pool: &mut Pool<T> = pools
                 .entry(TypeId::of::<T>())
-                .or_insert_with(|| Box::new(Pool::<T>::new(10000)))
+                .or_insert_with(|| Box::new(Pool::<T>::new(10000, 10000)))
                 .downcast_mut()
                 .unwrap();
             let mut t = pool.take();

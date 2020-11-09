@@ -13,6 +13,7 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
+    pool::{Pool, Pooled},
     secstore::SecStore,
     shard_resolver_store::Store,
     utils,
@@ -69,6 +70,11 @@ enum ClientInfo {
 #[derive(Clone)]
 struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 
+lazy_static! {
+    static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
+    static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(5000, 100000);
+}
+
 async fn client_loop_write(
     cfg: Arc<config::Config>,
     clinfos: Clinfos,
@@ -85,7 +91,7 @@ async fn client_loop_write(
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
-    let mut batch = Vec::new();
+    let mut batch = WRITE_BATCHES.take();
     let mut act = false;
     let mut timeout =
         time::interval_at(Instant::now() + cfg.writer_ttl, cfg.writer_ttl).fuse();
@@ -129,7 +135,7 @@ async fn client_loop_write(
                     bail!("write client timed out");
                 }
             },
-            m = receive_batch(&mut con, &mut batch).fuse() => match m {
+            m = receive_batch(&mut con, &mut *batch).fuse() => match m {
                 Err(e) => {
                     batch.clear();
                     con = None;
@@ -164,7 +170,7 @@ async fn client_loop_write(
                             }
                         }
                         c.flush().await?;
-                        batch = rest;
+                        batch = Pooled::orphan(rest);
                     }
                     if let Err(e) = store.handle_batch_write_no_clear(
                         Some(c),
@@ -358,7 +364,7 @@ async fn client_loop_read(
     server_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
-    let mut batch: Vec<ToRead> = Vec::new();
+    let mut batch = READ_BATCHES.take();
     let mut server_stop = server_stop.fuse();
     let mut act = false;
     let mut timeout =

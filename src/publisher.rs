@@ -54,7 +54,7 @@ pub struct WriteRequest {
 }
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000);
+    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50000);
 }
 
 // The set of clients subscribed to a given value is hashconsed.

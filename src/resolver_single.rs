@@ -39,12 +39,13 @@ const HELLO_TO: Duration = Duration::from_secs(15);
 static TTL: u64 = 120;
 
 lazy_static! {
-    pub(crate) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000);
-    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000);
-    pub(crate) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000);
-    pub(crate) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000);
-    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000);
-    pub(crate) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(1000);
+    pub(crate) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
+    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000, 10000);
+    pub(crate) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000, 10000);
+    pub(crate) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> =
+        Pool::new(1000, 10000);
+    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
+    pub(crate) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(1000, 10000);
 }
 
 #[derive(Debug, Clone)]
