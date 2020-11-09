@@ -13,7 +13,7 @@ use std::{
 };
 
 pub trait Poolable {
-    fn alloc() -> Self;
+    fn empty() -> Self;
     fn reset(&mut self);
     fn capacity(&self) -> usize;
 }
@@ -24,7 +24,7 @@ where
     V: Hash + Eq,
     R: Default + BuildHasher,
 {
-    fn alloc() -> Self {
+    fn empty() -> Self {
         HashMap::default()
     }
 
@@ -42,7 +42,7 @@ where
     K: Hash + Eq,
     R: Default + BuildHasher,
 {
-    fn alloc() -> Self {
+    fn empty() -> Self {
         HashSet::default()
     }
 
@@ -56,7 +56,7 @@ where
 }
 
 impl<T> Poolable for Vec<T> {
-    fn alloc() -> Self {
+    fn empty() -> Self {
         Vec::new()
     }
 
@@ -70,7 +70,7 @@ impl<T> Poolable for Vec<T> {
 }
 
 impl<T> Poolable for VecDeque<T> {
-    fn alloc() -> Self {
+    fn empty() -> Self {
         VecDeque::new()
     }
 
@@ -117,7 +117,7 @@ impl<T: Poolable + Sync + Send + 'static> Pool<T> {
 
     /// takes an item from the pool, creating one if none are available.
     pub fn take(&self) -> Pooled<T> {
-        let object = self.0.pool.pop().unwrap_or_else(Poolable::alloc);
+        let object = self.0.pool.pop().unwrap_or_else(Poolable::empty);
         Pooled { pool: Arc::downgrade(&self.0), object }
     }
 }
@@ -157,7 +157,7 @@ impl<T: Poolable + Sync + Send + 'static> Pooled<T> {
     }
 
     pub fn detach(mut self) -> T {
-        mem::replace(&mut self.object, Poolable::alloc())
+        mem::replace(&mut self.object, Poolable::empty())
     }
 }
 
@@ -185,7 +185,7 @@ impl<T: Poolable + Sync + Send + 'static> Drop for Pooled<T> {
     fn drop(&mut self) {
         if let Some(inner) = self.pool.upgrade() {
             if self.object.capacity() <= inner.max_elt_capacity {
-                let mut object = mem::replace(&mut self.object, Poolable::alloc());
+                let mut object = mem::replace(&mut self.object, Poolable::empty());
                 object.reset();
                 inner.pool.push(object).ok();
             }
