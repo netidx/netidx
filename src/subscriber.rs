@@ -1190,7 +1190,7 @@ async fn connection(
                 }
             },
             r = batches.next() => match r {
-                Some(Ok((mut batch, true))) => {
+                Some(Ok((batch, true))) => {
                     msg_recvd = true;
                     process_updates_batch(
                         &mut by_chan,
@@ -1199,7 +1199,7 @@ async fn connection(
                     ).await;
                     try_cf!(try_flush(&mut write_con).await)
                 },
-                Some(Ok((mut batch, false))) =>
+                Some(Ok((batch, false))) =>
                     if let Some(subscriber) = subscriber.upgrade() {
                         msg_recvd = true;
                         try_cf!(process_batch(

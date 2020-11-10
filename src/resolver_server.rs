@@ -112,7 +112,7 @@ async fn client_loop_write(
                 if act {
                     act = false;
                 } else {
-                    con = None;
+                    drop(con);
                     ctracker.close(connection_id);
                     {
                         let mut inner = clinfos.0.lock();

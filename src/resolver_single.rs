@@ -417,7 +417,7 @@ async fn connection_write(
                 if act {
                     act = false;
                 } else {
-                    for i in 0..3 {
+                    for _ in 0..3 {
                         match con {
                             Some(ref mut c) => {
                                 match c.send_one(&ToWrite::Heartbeat).await {
@@ -507,7 +507,6 @@ async fn connection_write(
                                 con = None;
                             }
                             Ok(()) => {
-                                let mut err = false;
                                 let mut rx_batch = RAWFROMWRITEPOOL.take();
                                 while rx_batch.len() < tx_batch.len() {
                                     let f = c.receive_batch(&mut *rx_batch);
