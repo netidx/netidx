@@ -11,6 +11,7 @@ mod resolver;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
+mod recorder;
 
 #[cfg(unix)]
 mod resolver_server;

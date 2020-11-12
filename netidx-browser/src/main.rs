@@ -675,7 +675,7 @@ struct StartNetidx {
 }
 
 lazy_static! {
-    static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5);
+    static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5, 100000);
 }
 
 async fn netidx_main(mut ctx: StartNetidx) {

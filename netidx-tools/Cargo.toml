@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -8,7 +8,7 @@ description = "Cross platform secure messaging framework, \"like DNS for values\
 homepage = "https://estokes.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
-keywords = ["networking", "networking", "distributed", "kerberos", "tool"]
+keywords = ["networking", "distributed", "kerberos", "tool"]
 categories = ["network-programming"]
 
 [[bin]]

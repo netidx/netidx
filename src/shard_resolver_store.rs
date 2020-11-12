@@ -462,8 +462,9 @@ impl Store {
                         by_shard[s].push((n, ToWrite::Unpublish(path)));
                     }
                     Some(ToWrite::PublishDefault(path)) => {
-                        let s = self.shard(&path);
-                        by_shard[s].push((n, ToWrite::PublishDefault(path)));
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::PublishDefault(path.clone())));
+                        }
                     }
                 }
                 n += 1;

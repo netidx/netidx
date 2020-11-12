@@ -5,6 +5,9 @@
     scenarios causing unbounded memory usage.
   - Pool more buffers in the resolver server to reduce dynamic
     allocation.
+  - Fix a bug in the new sharded resolver store that broke default
+    publishing.
+  - Fix unit tests.
 
 * 0.5.0:
   - Update to tokio 0.3 aka 1.0

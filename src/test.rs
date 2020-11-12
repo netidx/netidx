@@ -17,8 +17,8 @@ mod resolver {
     #[test]
     fn publish_resolve_simple() {
         Runtime::new().unwrap().block_on(async {
-            let mut cfg = config::Config::load("cfg/simple.json")
-                .expect("load simple config");
+            let mut cfg =
+                config::Config::load("cfg/simple.json").expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
                 .expect("start server");
@@ -32,13 +32,19 @@ mod resolver {
                 assert_eq!(r.addrs.len(), 1);
                 assert_eq!(r.addrs[0].0, paddr);
             }
-            assert_eq!(&**r.list(p("/")).await.unwrap(), &*vec![p("/app"), p("/foo")]);
+            let mut l = r.list(p("/")).await.unwrap();
+            l.sort();
+            assert_eq!(&**l, &*vec![p("/app"), p("/foo")]);
+            let mut l = r.list(p("/foo")).await.unwrap();
+            l.sort();
             assert_eq!(
-                &**r.list(p("/foo")).await.unwrap(),
+                &**l,
                 &*vec![p("/foo/bar"), p("/foo/baz")]
             );
+            let mut l = r.list(p("/app")).await.unwrap();
+            l.sort();
             assert_eq!(
-                &**r.list(p("/app")).await.unwrap(),
+                &**l,
                 &*vec![p("/app/v0"), p("/app/v1")]
             );
             drop(server)
@@ -59,15 +65,14 @@ mod resolver {
     impl Ctx {
         async fn new() -> Ctx {
             let pmap = config::PMap::default();
-            let cfg_root = config::Config::load("cfg/complex-root.json")
-                .expect("root config");
-            let cfg_huge0 = config::Config::load("cfg/complex-huge0.json")
-                .expect("huge0 config");
-            let cfg_huge1 = config::Config::load("cfg/complex-huge1.json")
-                .expect("huge1 config");
-            let cfg_huge1_sub =
-                config::Config::load("cfg/complex-huge1-sub.json")
-                    .expect("huge1 sub config");
+            let cfg_root =
+                config::Config::load("cfg/complex-root.json").expect("root config");
+            let cfg_huge0 =
+                config::Config::load("cfg/complex-huge0.json").expect("huge0 config");
+            let cfg_huge1 =
+                config::Config::load("cfg/complex-huge1.json").expect("huge1 config");
+            let cfg_huge1_sub = config::Config::load("cfg/complex-huge1-sub.json")
+                .expect("huge1 sub config");
             let server0_root = Server::new(cfg_root.clone(), pmap.clone(), false, 0)
                 .await
                 .expect("root server 0");
@@ -227,7 +232,7 @@ mod publisher {
         publisher::{BindCfg, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
-        subscriber::{Subscriber, Event, Value},
+        subscriber::{Event, Subscriber, Value},
     };
     use futures::{channel::mpsc, prelude::*};
     use std::{
@@ -259,8 +264,8 @@ mod publisher {
     fn publish_subscribe() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let mut cfg = config::Config::load("cfg/simple.json")
-                .expect("load simple config");
+            let mut cfg =
+                config::Config::load("cfg/simple.json").expect("load simple config");
             let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
                 .await
                 .expect("start server");
@@ -353,13 +358,13 @@ mod publisher {
 }
 
 mod resolver_store {
-    use crate::{path::Path, resolver_store::*, pack::Z64};
+    use crate::{pack::Z64, path::Path, resolver_store::*};
     use bytes::Bytes;
+    use rand::{self, Rng};
     use std::{
         collections::{BTreeMap, HashMap},
         net::SocketAddr,
     };
-    use rand::{self, Rng};
 
     #[test]
     fn test_resolver_store() {
@@ -374,139 +379,121 @@ mod resolver_store {
                 "127.0.0.1:105",
             ),
         ];
-        let store = Store::new(None, BTreeMap::new());
-        {
-            let mut store = store.write();
-            for (paths, addr) in &apps {
-                let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-                let addr = addr.parse::<SocketAddr>().unwrap();
-                for path in parsed.clone() {
+        let mut store = Store::new(None, BTreeMap::new());
+        for (paths, addr) in &apps {
+            let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
+            let addr = addr.parse::<SocketAddr>().unwrap();
+            for path in parsed.clone() {
+                store.publish(path.clone(), addr, false);
+                if !store.resolve(&path).contains(&(addr, Bytes::new())) {
+                    panic!()
+                }
+                if rand::thread_rng().gen_bool(0.5) {
+                    // check that this is idempotent
                     store.publish(path.clone(), addr, false);
-                    if !store.resolve(&path).contains(&(addr, Bytes::new())) {
-                        panic!()
-                    }
-                    if rand::thread_rng().gen_bool(0.5) {
-                        // check that this is idempotent
-                        store.publish(path.clone(), addr, false);
-                    }
                 }
             }
         }
-        {
-            let store = store.read();
-            let paths = store.list(&Path::from("/"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app");
-            let cols = store.columns(&Path::from("/"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test");
-            let cols = store.columns(&Path::from("/app"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app/test"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app1");
-            let mut cols = store.columns(&Path::from("/app/test"));
-            cols.sort();
-            assert_eq!(cols.len(), 5);
-            assert_eq!(cols[0].0.as_ref(), "v0");
-            assert_eq!(cols[0].1, Z64(2));
-            assert_eq!(cols[1].0.as_ref(), "v1");
-            assert_eq!(cols[1].1, Z64(2));
-            assert_eq!(cols[2].0.as_ref(), "v2");
-            assert_eq!(cols[2].1, Z64(1));
-            assert_eq!(cols[3].0.as_ref(), "v3");
-            assert_eq!(cols[3].1, Z64(1));
-            assert_eq!(cols[4].0.as_ref(), "v4");
-            assert_eq!(cols[4].1, Z64(1));
-            let paths = store.list(&Path::from("/app/test/app0"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-            let cols = store.columns(&Path::from("/app/test/app0"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app/test/app1"));
-            assert_eq!(paths.len(), 3);
-            assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
-            assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
-            assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
-            let cols = store.columns(&Path::from("/app/test/app1"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app/test/"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app1");
-        }
+        let paths = store.list(&Path::from("/"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_ref(), "/app");
+        let cols = store.columns(&Path::from("/"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_ref(), "/app/test");
+        let cols = store.columns(&Path::from("/app"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app/test"));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1");
+        let mut cols = store.columns(&Path::from("/app/test"));
+        cols.sort();
+        assert_eq!(cols.len(), 5);
+        assert_eq!(cols[0].0.as_ref(), "v0");
+        assert_eq!(cols[0].1, Z64(2));
+        assert_eq!(cols[1].0.as_ref(), "v1");
+        assert_eq!(cols[1].1, Z64(2));
+        assert_eq!(cols[2].0.as_ref(), "v2");
+        assert_eq!(cols[2].1, Z64(1));
+        assert_eq!(cols[3].0.as_ref(), "v3");
+        assert_eq!(cols[3].1, Z64(1));
+        assert_eq!(cols[4].0.as_ref(), "v4");
+        assert_eq!(cols[4].1, Z64(1));
+        let paths = store.list(&Path::from("/app/test/app0"));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
+        let cols = store.columns(&Path::from("/app/test/app0"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app/test/app1"));
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
+        assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
+        let cols = store.columns(&Path::from("/app/test/app1"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app/test/"));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app1");
         let (ref paths, ref addr) = apps[2];
         let addr = addr.parse::<SocketAddr>().unwrap();
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-        {
-            let mut store = store.write();
+        for path in parsed.clone() {
+            store.unpublish(path.clone(), addr);
+            if store.resolve(&path).contains(&(addr, Bytes::new())) {
+                panic!()
+            }
+            if rand::thread_rng().gen_bool(0.5) {
+                // check that this is idempotent
+                store.unpublish(path.clone(), addr);
+            }
+        }
+        let paths = store.list(&Path::from("/"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_ref(), "/app");
+        let cols = store.columns(&Path::from("/"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_ref(), "/app/test");
+        let cols = store.columns(&Path::from("/app"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app/test"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0");
+        let mut cols = store.columns(&Path::from("/app/test"));
+        cols.sort();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].0.as_ref(), "v0");
+        assert_eq!(cols[0].1, Z64(2));
+        assert_eq!(cols[1].0.as_ref(), "v1");
+        assert_eq!(cols[1].1, Z64(2));
+        let paths = store.list(&Path::from("/app/test/app1"));
+        assert_eq!(paths.len(), 0);
+        let cols = store.columns(&Path::from("/app/test/app1"));
+        assert_eq!(cols.len(), 0);
+        let paths = store.list(&Path::from("/app/test/app0"));
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
+        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
+        let cols = store.columns(&Path::from("/app/test/app0"));
+        assert_eq!(cols.len(), 0);
+        for (paths, addr) in &apps {
+            let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
+            let addr = addr.parse::<SocketAddr>().unwrap();
             for path in parsed.clone() {
                 store.unpublish(path.clone(), addr);
                 if store.resolve(&path).contains(&(addr, Bytes::new())) {
                     panic!()
                 }
-                if rand::thread_rng().gen_bool(0.5) {
-                    // check that this is idempotent
-                    store.unpublish(path.clone(), addr);
-                }
             }
         }
-        {
-            let store = store.read();
-            let paths = store.list(&Path::from("/"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app");
-            let cols = store.columns(&Path::from("/"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test");
-            let cols = store.columns(&Path::from("/app"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app/test"));
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0");
-            let mut cols = store.columns(&Path::from("/app/test"));
-            cols.sort();
-            assert_eq!(cols.len(), 2);
-            assert_eq!(cols[0].0.as_ref(), "v0");
-            assert_eq!(cols[0].1, Z64(2));
-            assert_eq!(cols[1].0.as_ref(), "v1");
-            assert_eq!(cols[1].1, Z64(2));
-            let paths = store.list(&Path::from("/app/test/app1"));
-            assert_eq!(paths.len(), 0);
-            let cols = store.columns(&Path::from("/app/test/app1"));
-            assert_eq!(cols.len(), 0);
-            let paths = store.list(&Path::from("/app/test/app0"));
-            assert_eq!(paths.len(), 2);
-            assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-            assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-            let cols = store.columns(&Path::from("/app/test/app0"));
-            assert_eq!(cols.len(), 0);
-        }
-        {
-            let mut store = store.write();
-            for (paths, addr) in &apps {
-                let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-                let addr = addr.parse::<SocketAddr>().unwrap();
-                for path in parsed.clone() {
-                    store.unpublish(path.clone(), addr);
-                    if store.resolve(&path).contains(&(addr, Bytes::new())) {
-                        panic!()
-                    }
-                }
-            }
-        }
-        {
-            let store = store.read();
-            let paths = store.list(&Path::from("/"));
-            assert_eq!(paths.len(), 0);
-            let cols = store.columns(&Path::from("/app/test"));
-            assert_eq!(cols.len(), 0);
-        }
+        let paths = store.list(&Path::from("/"));
+        assert_eq!(paths.len(), 0);
+        let cols = store.columns(&Path::from("/app/test"));
+        assert_eq!(cols.len(), 0);
     }
 }
