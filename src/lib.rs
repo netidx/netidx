@@ -115,7 +115,7 @@ extern crate bitflags;
 extern crate anyhow;
 
 pub mod pool;
-mod pack;
+pub mod pack;
 mod batch_channel;
 #[macro_use]
 pub mod utils;

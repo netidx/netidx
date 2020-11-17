@@ -1,5 +1,5 @@
 use crate::pack::{Pack, PackError};
-use bytes::{Bytes, BytesMut};
+use bytes::{Bytes, Buf, BufMut};
 use std::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     convert::AsRef,
@@ -66,11 +66,11 @@ impl Pack for Chars {
         Pack::len(&self.0)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Pack::encode(&self.0, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         match Chars::from_bytes(<Bytes as Pack>::decode(buf)?) {
             Ok(c) => Ok(c),
             Err(_) => Err(PackError::InvalidFormat),

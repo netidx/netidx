@@ -12,6 +12,7 @@ mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
 mod recorder;
+mod archive;
 
 #[cfg(unix)]
 mod resolver_server;
@@ -97,6 +98,22 @@ enum Sub {
     Subscriber {
         #[structopt(name = "paths")]
         paths: Vec<String>,
+    },
+    #[structopt(name = "record", about = "record and republish archives")]
+    Record {
+        #[structopt(
+            short = "b",
+            long = "bind",
+            help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+        )]
+        bind: Option<BindCfg>,
+        #[structopt(long = "spn", help = "krb5 use <spn>")]
+        spn: Option<String>,
+        #[structopt(long = "republish-base",
+                    help = "base path for republishing the archive")]
+        republish_base: Option<Path>,
+        #[structopt(long = "spec", help = "pattern to archive")]
+        spec: Vec<String>,
     },
     #[structopt(name = "stress", about = "stress test")]
     Stress {
@@ -216,6 +233,10 @@ fn main() {
         Sub::Subscriber { paths } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             subscriber::run(cfg, paths, auth)
+        }
+        Sub::Recorder { spn, spec } => {
+            let auth = auth(opt.anon, &cfg, opt.upn, spn);
+            recorder::run(cfg, auth, spec)
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber => {

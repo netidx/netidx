@@ -3,7 +3,7 @@ use crate::{
     pack::{self, Pack, PackError},
     path::Path,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use std::{
     fmt, mem,
@@ -24,11 +24,11 @@ impl Pack for Id {
         pack::varint_len(self.0)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         Ok(pack::encode_varint(self.0, buf))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         Ok(Id(pack::decode_varint(buf)?))
     }
 }
@@ -70,7 +70,7 @@ impl Pack for Hello {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Hello::Anonymous => Ok(buf.put_u8(0)),
             Hello::Token(tok) => {
@@ -85,7 +85,7 @@ impl Pack for Hello {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Hello::Anonymous),
             1 => Ok(Hello::Token(<Bytes as Pack>::decode(buf)?)),
@@ -138,7 +138,7 @@ impl Pack for To {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> anyhow::Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> anyhow::Result<(), PackError> {
         match self {
             To::Subscribe { path, resolver, timestamp, permissions, token } => {
                 buf.put_u8(0);
@@ -161,7 +161,7 @@ impl Pack for To {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> anyhow::Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> anyhow::Result<Self, PackError> {
         match buf.get_u8() {
             0 => {
                 let path = <Path as Pack>::decode(buf)?;
@@ -626,7 +626,7 @@ impl Pack for Value {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Value::U32(i) => {
                 buf.put_u8(0);
@@ -697,7 +697,7 @@ impl Pack for Value {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Value::U32(buf.get_u32())),
             1 => Ok(Value::V32(pack::decode_varint(buf)? as u32)),
@@ -1287,7 +1287,7 @@ impl Pack for From {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             From::NoSuchValue(p) => {
                 buf.put_u8(0);
@@ -1321,7 +1321,7 @@ impl Pack for From {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(From::NoSuchValue(<Path as Pack>::decode(buf)?)),
             1 => Ok(From::Denied(<Path as Pack>::decode(buf)?)),

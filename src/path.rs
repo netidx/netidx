@@ -15,7 +15,7 @@ use std::{
     str::{self, FromStr},
     sync::Arc,
 };
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -34,17 +34,17 @@ impl Pack for Path {
         varint_len(self.0.len() as u64) + self.0.len()
     }
 
-    fn encode(&self, buf: &mut bytes::BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(self.0.len() as u64, buf);
-        Ok(buf.extend_from_slice(self.0.as_bytes()))
+        Ok(buf.put_slice(self.0.as_bytes()))
     }
 
-    fn decode(buf: &mut bytes::BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let len = decode_varint(buf)?;
         if len as usize > buf.remaining() {
             Err(PackError::TooBig)
         } else {
-            let bytes = buf.split_to(len as usize);
+            let bytes = buf.copy_to_bytes(len as usize);
             match str::from_utf8(&*bytes) {
                 Err(_) => Err(PackError::InvalidFormat),
                 Ok(s) => Ok(Path(Arc::from(s)))

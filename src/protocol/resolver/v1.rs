@@ -4,7 +4,7 @@ use crate::{
     path::Path,
     pool::Pooled,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use fxhash::FxBuildHasher;
 use std::{collections::HashMap, net::SocketAddr, result};
 
@@ -18,11 +18,11 @@ impl Pack for CtxId {
         <u64 as Pack>::len(&self.0)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <u64 as Pack>::encode(&self.0, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         Ok(CtxId(<u64 as Pack>::decode(buf)?))
     }
 }
@@ -43,7 +43,7 @@ impl Pack for ClientAuthRead {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ClientAuthRead::Anonymous => Ok(buf.put_u8(0)),
             ClientAuthRead::Reuse(ref id) => {
@@ -57,7 +57,7 @@ impl Pack for ClientAuthRead {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ClientAuthRead::Anonymous),
             1 => Ok(ClientAuthRead::Reuse(<CtxId as Pack>::decode(buf)?)),
@@ -85,7 +85,7 @@ impl Pack for ClientAuthWrite {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ClientAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ClientAuthWrite::Reuse => Ok(buf.put_u8(1)),
@@ -97,7 +97,7 @@ impl Pack for ClientAuthWrite {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ClientAuthWrite::Anonymous),
             1 => Ok(ClientAuthWrite::Reuse),
@@ -122,18 +122,18 @@ impl Pack for ClientHelloWrite {
         <SocketAddr as Pack>::len(&self.write_addr) + ClientAuthWrite::len(&self.auth)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <SocketAddr as Pack>::encode(&self.write_addr, buf)?;
         ClientAuthWrite::encode(&self.auth, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         let write_addr = <SocketAddr as Pack>::decode(buf)?;
         let auth = ClientAuthWrite::decode(buf)?;
         Ok(ClientHelloWrite { write_addr, auth })
     }
 
-    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<()> {
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<()> {
         self.write_addr = <SocketAddr as Pack>::decode(buf)?;
         self.auth = <ClientAuthWrite as Pack>::decode(buf)?;
         Ok(())
@@ -162,7 +162,7 @@ impl Pack for ClientHello {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ClientHello::ReadOnly(r) => {
                 buf.put_u8(0);
@@ -175,7 +175,7 @@ impl Pack for ClientHello {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ClientHello::ReadOnly(ClientAuthRead::decode(buf)?)),
             1 => Ok(ClientHello::WriteOnly(ClientHelloWrite::decode(buf)?)),
@@ -202,7 +202,7 @@ impl Pack for ServerHelloRead {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ServerHelloRead::Anonymous => Ok(buf.put_u8(0)),
             ServerHelloRead::Reused => Ok(buf.put_u8(1)),
@@ -214,7 +214,7 @@ impl Pack for ServerHelloRead {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ServerHelloRead::Anonymous),
             1 => Ok(ServerHelloRead::Reused),
@@ -244,7 +244,7 @@ impl Pack for ServerAuthWrite {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ServerAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
@@ -255,7 +255,7 @@ impl Pack for ServerAuthWrite {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ServerAuthWrite::Anonymous),
             1 => Ok(ServerAuthWrite::Reused),
@@ -284,14 +284,14 @@ impl Pack for ServerHelloWrite {
             + <SocketAddr as Pack>::len(&self.resolver_id)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <bool as Pack>::encode(&self.ttl_expired, buf)?;
         ServerAuthWrite::encode(&self.auth, buf)?;
         <SocketAddr as Pack>::encode(&self.resolver_id, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         let ttl = <u64 as Pack>::decode(buf)?;
         let ttl_expired = <bool as Pack>::decode(buf)?;
         let auth = ServerAuthWrite::decode(buf)?;
@@ -308,11 +308,11 @@ impl Pack for Secret {
         <u128 as Pack>::len(&self.0)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <u128 as Pack>::encode(&self.0, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         Ok(Secret(<u128 as Pack>::decode(buf)?))
     }
 }
@@ -325,11 +325,11 @@ impl Pack for ReadyForOwnershipCheck {
         1
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         Ok(buf.put_u8(0))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ReadyForOwnershipCheck),
             _ => Err(PackError::UnknownTag),
@@ -356,7 +356,7 @@ impl Pack for ToRead {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ToRead::Resolve(path) => {
                 buf.put_u8(0);
@@ -373,7 +373,7 @@ impl Pack for ToRead {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => {
                 let path = <Path as Pack>::decode(buf)?;
@@ -410,7 +410,7 @@ impl Pack for Resolved {
             + <u32 as Pack>::len(&self.permissions)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encode(
             &self.krb5_spns,
             buf,
@@ -421,7 +421,7 @@ impl Pack for Resolved {
         <u32 as Pack>::encode(&self.permissions, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         let krb5_spns =
             <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::decode(buf)?;
         let resolver = <SocketAddr as Pack>::decode(buf)?;
@@ -450,7 +450,7 @@ impl Pack for Referral {
             )
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <Path as Pack>::encode(&self.path, buf)?;
         <u64 as Pack>::encode(&self.ttl, buf)?;
         <Pooled<Vec<SocketAddr>> as Pack>::encode(&self.addrs, buf)?;
@@ -460,7 +460,7 @@ impl Pack for Referral {
         )
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         let path = <Path as Pack>::decode(buf)?;
         let ttl = <u64 as Pack>::decode(buf)?;
         let addrs = <Pooled<Vec<SocketAddr>> as Pack>::decode(buf)?;
@@ -481,12 +481,12 @@ impl Pack for Table {
         <Pooled<Vec<Path>>>::len(&self.rows) + <Pooled<Vec<(Path, Z64)>>>::len(&self.cols)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         <Pooled<Vec<Path>>>::encode(&self.rows, buf)?;
         <Pooled<Vec<(Path, Z64)>>>::encode(&self.cols, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         let rows = <Pooled<Vec<Path>>>::decode(buf)?;
         let cols = <Pooled<Vec<(Path, Z64)>>>::decode(buf)?;
         Ok(Table { rows, cols })
@@ -515,7 +515,7 @@ impl Pack for FromRead {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             FromRead::Resolved(a) => {
                 buf.put_u8(0);
@@ -541,7 +541,7 @@ impl Pack for FromRead {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
             1 => Ok(FromRead::List(<Pooled<Vec<Path>> as Pack>::decode(buf)?)),
@@ -579,7 +579,7 @@ impl Pack for ToWrite {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ToWrite::Publish(p) => {
                 buf.put_u8(0);
@@ -598,7 +598,7 @@ impl Pack for ToWrite {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ToWrite::Publish(<Path as Pack>::decode(buf)?)),
             1 => Ok(ToWrite::PublishDefault(<Path as Pack>::decode(buf)?)),
@@ -630,7 +630,7 @@ impl Pack for FromWrite {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             FromWrite::Published => Ok(buf.put_u8(0)),
             FromWrite::Unpublished => Ok(buf.put_u8(1)),
@@ -646,7 +646,7 @@ impl Pack for FromWrite {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(FromWrite::Published),
             1 => Ok(FromWrite::Unpublished),

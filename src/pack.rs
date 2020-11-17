@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::pool::{Pool, Pooled, Poolable};
+use crate::pool::{Pool, Poolable, Pooled};
+use bytes::{Buf, BufMut, Bytes};
 use fxhash::FxBuildHasher;
 use std::{
     any::{Any, TypeId},
@@ -30,12 +30,12 @@ impl error::Error for PackError {}
 
 pub trait Pack {
     fn len(&self) -> usize;
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError>;
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError>
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError>;
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError>
     where
         Self: std::marker::Sized;
 
-    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError>
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError>
     where
         Self: std::marker::Sized,
     {
@@ -53,11 +53,11 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
         <T as Pack>::len(&**self)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         <T as Pack>::encode(&**self, buf)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         POOLS.with(|pools| {
             let mut pools = pools.borrow_mut();
             let pool: &mut Pool<T> = pools
@@ -71,7 +71,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
         })
     }
 
-    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         <T as Pack>::decode_into(&mut **self, buf)
     }
 }
@@ -84,7 +84,7 @@ impl Pack for net::SocketAddr {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         match self {
             net::SocketAddr::V4(v4) => {
                 buf.put_u8(0);
@@ -104,7 +104,7 @@ impl Pack for net::SocketAddr {
         Ok(())
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         match buf.get_u8() {
             0 => {
                 let ip = net::Ipv4Addr::from(u32::to_be_bytes(buf.get_u32()));
@@ -133,17 +133,17 @@ impl Pack for Bytes {
         varint_len(Bytes::len(self) as u64) + Bytes::len(self)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(Bytes::len(self) as u64, buf);
-        Ok(buf.extend_from_slice(&*self))
+        Ok(buf.put_slice(&*self))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let len = decode_varint(buf)?;
         if len as usize > buf.remaining() {
             Err(PackError::TooBig)
         } else {
-            Ok(buf.split_to(len as usize).freeze())
+            Ok(buf.copy_to_bytes(len as usize))
         }
     }
 }
@@ -152,7 +152,7 @@ pub fn varint_len(value: u64) -> usize {
     ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
 }
 
-pub(crate) fn encode_varint(mut value: u64, buf: &mut BytesMut) {
+pub fn encode_varint(mut value: u64, buf: &mut impl BufMut) {
     loop {
         if value < 0x80 {
             buf.put_u8(value as u8);
@@ -180,7 +180,7 @@ pub(crate) fn i64_uzz(n: u64) -> i64 {
     ((n >> 1) as i64) ^ (((n as i64) << 63) >> 63)
 }
 
-pub(crate) fn decode_varint(buf: &mut BytesMut) -> Result<u64, PackError> {
+pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let mut value = 0;
     let mut i = 0;
     while i < 10 {
@@ -199,11 +199,11 @@ impl Pack for u128 {
         mem::size_of::<u128>()
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Ok(buf.put_u128(*self))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(buf.get_u128())
     }
 }
@@ -213,11 +213,11 @@ impl Pack for u64 {
         mem::size_of::<u64>()
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Ok(buf.put_u64(*self))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(buf.get_u64())
     }
 }
@@ -244,11 +244,11 @@ impl Pack for Z64 {
         varint_len(**self)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Ok(encode_varint(**self, buf))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(Z64(decode_varint(buf)?))
     }
 }
@@ -258,11 +258,11 @@ impl Pack for u32 {
         mem::size_of::<u32>()
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Ok(buf.put_u32(*self))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(buf.get_u32())
     }
 }
@@ -273,7 +273,7 @@ impl<T: Pack> Pack for Vec<T> {
             .fold(varint_len(self.len() as u64), |len, t| len + <T as Pack>::len(t))
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(Vec::len(self) as u64, buf);
         for t in self {
             <T as Pack>::encode(t, buf)?
@@ -281,7 +281,7 @@ impl<T: Pack> Pack for Vec<T> {
         Ok(())
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
         let mut data = Vec::with_capacity(elts);
         for _ in 0..elts {
@@ -290,7 +290,7 @@ impl<T: Pack> Pack for Vec<T> {
         Ok(data)
     }
 
-    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
         for _ in 0..elts {
             self.push(<T as Pack>::decode(buf)?);
@@ -311,7 +311,7 @@ where
         })
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(self.len() as u64, buf);
         for (k, v) in self {
             <K as Pack>::encode(k, buf)?;
@@ -320,7 +320,7 @@ where
         Ok(())
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
         let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
         for _ in 0..elts {
@@ -331,7 +331,7 @@ where
         Ok(data)
     }
 
-    fn decode_into(&mut self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
         for _ in 0..elts {
             let k = <K as Pack>::decode(buf)?;
@@ -350,7 +350,7 @@ impl<T: Pack> Pack for Option<T> {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         match self {
             None => Ok(buf.put_u8(0)),
             Some(v) => {
@@ -360,7 +360,7 @@ impl<T: Pack> Pack for Option<T> {
         }
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         match buf.get_u8() {
             0 => Ok(None),
             1 => Ok(Some(<T as Pack>::decode(buf)?)),
@@ -374,12 +374,12 @@ impl<T: Pack, U: Pack> Pack for (T, U) {
         <T as Pack>::len(&self.0) + <U as Pack>::len(&self.1)
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         <T as Pack>::encode(&self.0, buf)?;
         Ok(<U as Pack>::encode(&self.1, buf)?)
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let fst = <T as Pack>::decode(buf)?;
         let snd = <U as Pack>::decode(buf)?;
         Ok((fst, snd))
@@ -391,11 +391,11 @@ impl Pack for bool {
         1
     }
 
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), PackError> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         Ok(buf.put_u8(if *self { 1 } else { 0 }))
     }
 
-    fn decode(buf: &mut BytesMut) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         match buf.get_u8() {
             0 => Ok(false),
             1 => Ok(true),
