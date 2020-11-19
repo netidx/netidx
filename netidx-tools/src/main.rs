@@ -234,7 +234,7 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             subscriber::run(cfg, paths, auth)
         }
-        Sub::Recorder { spn, spec } => {
+        Sub::Record { spn, spec, .. } => {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
             recorder::run(cfg, auth, spec)
         }

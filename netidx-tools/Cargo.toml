@@ -34,6 +34,7 @@ default = ["krb5_iov"]
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 tokio = { version = "0.3", features = ["full"] }
 serde = "1.0"

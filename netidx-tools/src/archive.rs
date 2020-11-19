@@ -1,15 +1,18 @@
 use anyhow::{Context, Error, Result};
-use chrono::{naive::NaiveDateTime, prelude::*};
-use fs3::FileExt;
+use chrono::prelude::*;
+use fs3::{allocation_granularity, FileExt};
 use log::warn;
-use mapr::{MmapMut, MmapOptions};
+use mapr::MmapMut;
+use bytes::{Buf, BufMut};
 use netidx::{
-    pack::{decode_varint, encode_varint, varint_len, Pack, PackError, DATETIME_LEN},
+    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     publisher::Value,
+    pool::Pooled,
 };
 use std::{
     self,
+    cmp::max,
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
     mem,
@@ -40,7 +43,7 @@ impl Pack for FileHeader {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         for byte in FILE_MAGIC {
-            if buf.get_u8() != byte {
+            if buf.get_u8() != *byte {
                 return Err(PackError::InvalidFormat);
             }
         }
@@ -82,10 +85,10 @@ impl Pack for RecordHeader {
         let typ = if self.committed { typ } else { typ | 0x80 };
         buf.put_u8(typ);
         buf.put_u32(self.record_length);
-        <DateTime<Utc> as Pack>::encode(self.timestamp, buf)
+        <DateTime<Utc> as Pack>::encode(&self.timestamp, buf)
     }
 
-    fn decode(&self, buf: &mut impl Buf) -> Result<Self, PackError> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let typ = buf.get_u8();
         let record_length = buf.get_u32();
         let timestamp = <DateTime<Utc> as Pack>::decode(buf)?;
@@ -113,7 +116,7 @@ impl Pack for PathMapping {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         <Path as Pack>::encode(&self.0, buf)?;
-        encode_varint(self.1, buf)
+        Ok(encode_varint(self.1, buf))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
@@ -132,7 +135,7 @@ impl Pack for BatchItem {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.0, buf)?;
+        encode_varint(self.0, buf);
         <Value as Pack>::encode(&self.1, buf)
     }
 
@@ -148,19 +151,57 @@ pub(crate) struct Archive {
     batchmap: BTreeMap<DateTime<Utc>, u64>,
     file: File,
     mmap: MmapMut,
+    block_size: u64,
     end: usize,
 }
 
 impl Archive {
-    fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        if FilePath::is_file(path.as_ref()) {
+    pub(crate) fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+        if !FilePath::is_file(path.as_ref()) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(path.as_ref())?;
+            let block_size = allocation_granularity(path.as_ref())?;
+            file.try_lock_exclusive()?;
+            let minsz = <FileHeader as Pack>::const_len().unwrap()
+                + <RecordHeader as Pack>::const_len().unwrap();
+            file.set_len(max(block_size, minsz as u64))?;
+            let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+            let mut buf = &mut *mmap;
+            <FileHeader as Pack>::encode(
+                &FileHeader { version: FILE_VERSION },
+                &mut buf,
+            )?;
+            <RecordHeader as Pack>::encode(
+                &RecordHeader {
+                    committed: true,
+                    record_type: RecordTyp::End,
+                    record_length: 0,
+                    timestamp: Utc::now(),
+                },
+                &mut buf
+            )?;
+            mmap.flush()?;
+            Ok(Archive {
+                pathmap: HashMap::new(),
+                batchmap: BTreeMap::new(),
+                file,
+                mmap,
+                block_size,
+                end: minsz
+            })
+        } else {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .append(true)
                 .open(path.as_ref())?;
+            let block_size = allocation_granularity(path.as_ref())?;
+            file.try_lock_exclusive()?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-            let mut buf: &[u8] = *mmap;
+            let mut buf = &*mmap;
             let total_bytes = buf.remaining();
             // check the file header
             if buf.remaining() < <FileHeader as Pack>::const_len().unwrap() {
@@ -188,7 +229,7 @@ impl Archive {
                     warn!("uncommitted records before end marker {}", pos);
                     break pos;
                 }
-                if buf.remaining() < rh.record_length {
+                if buf.remaining() < rh.record_length as usize {
                     warn!("truncated record at {}", pos);
                     break pos;
                 }
@@ -196,9 +237,9 @@ impl Archive {
                     RecordTyp::End => break pos,
                     RecordTyp::Batch => {
                         if !batchmap.contains_key(&rh.timestamp) {
-                            batchmap.insert(rh.timestamp, pos);
+                            batchmap.insert(rh.timestamp, pos as u64);
                         }
-                        buf.advance(rh.record_length); // skip the contents
+                        buf.advance(rh.record_length as usize); // skip the contents
                     }
                     RecordTyp::PathMappings => {
                         let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(&mut buf)
@@ -210,7 +251,7 @@ impl Archive {
                     }
                 }
             };
-            Ok(Archive { pathmap, batchmap, file, mmap, end })
+            Ok(Archive { pathmap, batchmap, file, mmap, block_size, end })
         }
     }
 }
