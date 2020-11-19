@@ -1,5 +1,6 @@
 use crate::pool::{Pool, Poolable, Pooled};
 use bytes::{Buf, BufMut, Bytes};
+use chrono::{naive::NaiveDateTime, prelude::*};
 use fxhash::FxBuildHasher;
 use std::{
     any::{Any, TypeId},
@@ -11,6 +12,7 @@ use std::{
     hash::{BuildHasher, Hash},
     mem, net,
     ops::{Deref, DerefMut},
+    time::Duration,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +31,7 @@ impl fmt::Display for PackError {
 impl error::Error for PackError {}
 
 pub trait Pack {
+    fn const_len() -> Option<usize> { None }
     fn len(&self) -> usize;
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError>;
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError>
@@ -195,6 +198,10 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
 }
 
 impl Pack for u128 {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<u128>())
+    }
+
     fn len(&self) -> usize {
         mem::size_of::<u128>()
     }
@@ -209,6 +216,10 @@ impl Pack for u128 {
 }
 
 impl Pack for u64 {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<u64>())
+    }
+
     fn len(&self) -> usize {
         mem::size_of::<u64>()
     }
@@ -254,6 +265,10 @@ impl Pack for Z64 {
 }
 
 impl Pack for u32 {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<u32>())
+    }
+
     fn len(&self) -> usize {
         mem::size_of::<u32>()
     }
@@ -387,8 +402,12 @@ impl<T: Pack, U: Pack> Pack for (T, U) {
 }
 
 impl Pack for bool {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<bool>())
+    }
+
     fn len(&self) -> usize {
-        1
+        mem::size_of::<bool>()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -401,5 +420,49 @@ impl Pack for bool {
             1 => Ok(true),
             _ => Err(PackError::UnknownTag),
         }
+    }
+}
+
+impl Pack for DateTime<Utc> {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<i64>() + mem::size_of::<u32>())
+    }
+
+    fn len(&self) -> usize {
+        <DateTime<Utc> as Pack>::const_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        buf.put_i64(self.timestamp());
+        Ok(buf.put_u32(self.timestamp_subsec_nanos()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let ts = buf.get_i64();
+        let ns = buf.get_u32();
+        let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
+            .ok_or_else(|| PackError::InvalidFormat)?;
+        Ok(DateTime::from_utc(ndt, Utc))
+    }
+}
+
+impl Pack for Duration {
+    fn const_len() -> Option<usize> {
+        Some(mem::size_of::<i64>() + mem::size_of::<u32>())
+    }
+
+    fn len(&self) -> usize {
+        <Duration as Pack>::const_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        buf.put_u64(self.as_secs());
+        Ok(buf.put_u32(self.subsec_nanos()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let secs = buf.get_u64();
+        let ns = buf.get_u32();
+        Ok(Duration::new(secs, ns))
     }
 }

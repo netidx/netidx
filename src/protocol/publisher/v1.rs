@@ -670,13 +670,11 @@ impl Pack for Value {
             }
             Value::DateTime(dt) => {
                 buf.put_u8(10);
-                buf.put_i64(dt.timestamp());
-                Ok(buf.put_u32(dt.timestamp_subsec_nanos()))
+                Ok(<DateTime<Utc> as Pack>::encode(dt, buf)?)
             }
             Value::Duration(d) => {
                 buf.put_u8(11);
-                buf.put_u64(d.as_secs());
-                Ok(buf.put_u32(d.subsec_nanos()))
+                Ok(<Duration as Pack>::encode(d, buf)?)
             }
             Value::String(s) => {
                 buf.put_u8(12);
@@ -709,18 +707,8 @@ impl Pack for Value {
             7 => Ok(Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?))),
             8 => Ok(Value::F32(buf.get_f32())),
             9 => Ok(Value::F64(buf.get_f64())),
-            10 => {
-                let ts = buf.get_i64();
-                let ns = buf.get_u32();
-                let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
-                    .ok_or_else(|| PackError::InvalidFormat)?;
-                Ok(Value::DateTime(DateTime::from_utc(ndt, Utc)))
-            }
-            11 => {
-                let secs = buf.get_u64();
-                let ns = buf.get_u32();
-                Ok(Value::Duration(Duration::new(secs, ns)))
-            }
+            10 => Ok(Value::DateTime(<DateTime<Utc> as Pack>::decode(buf)?)),
+            11 => Ok(Value::Duration(<Duration as Pack>::decode(buf)?)),
             12 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
             13 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
             14 => Ok(Value::True),
