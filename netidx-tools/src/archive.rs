@@ -152,6 +152,28 @@ lazy_static! {
     static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MonotonicTimestamper(DateTime<Utc>);
+
+impl MonotonicTimestamper {
+    fn new() -> Self {
+        MonotonicTimestamper(Utc::now())
+    }
+
+    fn now(&mut self) -> DateTime<Utc> {
+        use chrono::Duration;
+        let dt = Utc::now();
+        if dt <= self.0 {
+            self.0 = self.0 + Duration::nanoseconds(1);
+            self.0
+        } else {
+            self.0 = dt;
+            dt
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct Archive {
     path_by_id: HashMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
@@ -162,10 +184,12 @@ pub(crate) struct Archive {
     end: usize,
     uncommitted: usize,
     next_id: u64,
+    ts: MonotonicTimestamper,
 }
 
 impl Archive {
     pub(crate) fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+        let mut ts = MonotonicTimestamper::new();
         if !FilePath::is_file(path.as_ref()) {
             let file = OpenOptions::new()
                 .read(true)
@@ -188,7 +212,7 @@ impl Archive {
                     committed: true,
                     record_type: RecordTyp::End,
                     record_length: 0,
-                    timestamp: Utc::now(),
+                    timestamp: ts.now(),
                 },
                 &mut buf,
             )?;
@@ -203,6 +227,7 @@ impl Archive {
                 end: minsz,
                 uncommitted: minsz,
                 next_id: 0,
+                ts
             })
         } else {
             let file = OpenOptions::new()
@@ -276,6 +301,7 @@ impl Archive {
                 end,
                 uncommitted: end,
                 next_id: max_id + 1,
+                ts
             })
         }
     }
@@ -283,17 +309,31 @@ impl Archive {
     // remap the file reserving space for at least additional_capacity bytes
     fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
         let len = self.mmap.len();
-        let new_len = len + max(len << 3, additional_capacity);
+        let new_len = len + max(len << 4, additional_capacity);
         let new_blocks = (new_len / self.block_size) + 1;
         let new_size = new_blocks * self.block_size;
         self.file.set_len(new_size as u64);
         Ok(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? }))
     }
 
+    fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
+        if record_length > u32::MAX {
+            bail!("record too large");
+        }
+        let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
+        if self.mmap.len() - self.end < len {
+            self.reserve(len)?;
+        }
+        Ok(len)
+    }
+
     pub(crate) fn flush(&mut self) -> Result<()> {
         if self.uncommitted < self.end {
-            self.mmap.flush_range(self.uncommitted, self.end - self.uncommitted)?;
             let hl = <RecordHeader as Pack>::const_len().unwrap();
+            if self.mmap.len() - self.end < hl {
+                self.reserve(hl)?;
+            }
+            self.mmap.flush()?;
             let mut n = self.uncommitted;
             while n < self.end {
                 let hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
@@ -301,7 +341,14 @@ impl Archive {
                 self.mmap[n] &= 0x7F;
                 n += len;
             }
-            self.mmap.flush_range(self.uncommitted, self.end - self.uncommitted)?;
+            let end = RecordHeader {
+                committed: true,
+                record_type: RecordTyp::End,
+                record_length: 0,
+                timestamp: self.ts.now(),
+            };
+            <RecordHeader as Pack>::encode(&end, &mut &mut self.mmap[self.end..])?;
+            self.mmap.flush()?;
             self.uncommitted = self.end;
         }
         Ok(())
@@ -320,19 +367,13 @@ impl Archive {
         }
         if pms.len() > 0 {
             let record_length = <Pooled<Vec<PathMapping>> as Pack>::len(&pms);
-            if record_length > u32::MAX {
-                bail!("too many paths in one batch");
-            }
-            let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
-            if self.mmap.len() - self.end < len {
-                self.reserve(len)?;
-            }
+            let len = self.check_reserve(record_length)?;
             let mut buf = &mut self.mmap[self.end..];
             let rh = RecordHeader {
                 committed: false,
                 record_type: RecordTyp::PathMappings,
                 record_length: record_length as u32,
-                timestamp: Utc::now(),
+                timestamp: self.ts.now(),
             };
             <RecordHeader as Pack>::encode(&rh, buf)?;
             <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, buf)?;
@@ -348,7 +389,7 @@ impl Archive {
     pub(crate) fn path_for_id(&self, id: u64) -> Option<&Path> {
         self.path_by_id.get(&id)
     }
-    
+
     pub(crate) fn add_batch(
         &mut self,
         items: impl IntoIter<Item = (u64, Value)>,
@@ -360,5 +401,22 @@ impl Archive {
             }
             batch.push(BatchItem(id, val));
         }
+        if batch.len() > 0 {
+            let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
+            let len = self.check_reserve(record_length)?;
+            let mut buf = &mut self.mmap[self.end..];
+            let timestamp = self.ts.now();
+            let rh = RecordHeader {
+                committed: false,
+                record_type: RecordTyp::Batch,
+                record_length: record_length as u32,
+                timestamp,
+            };
+            <RecordHeader as Pack>::encode(&rh, buf)?;
+            <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?;
+            self.batchmap.insert(timestamp, self.end);
+            self.end += len;
+        }
+        Ok(())
     }
 }
