@@ -110,10 +110,6 @@ impl Pack for RecordHeader {
 #[derive(Debug, Clone)]
 pub(crate) struct PathMapping(Path, u64);
 
-lazy_static! {
-    static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(100, 100000);
-}
-
 impl Pack for PathMapping {
     fn len(&self) -> usize {
         <Path as Pack>::len(&self.0) + varint_len(self.1)
@@ -149,6 +145,11 @@ impl Pack for BatchItem {
         let value = <Value as Pack>::decode(buf)?;
         Ok(BatchItem(id, value))
     }
+}
+
+lazy_static! {
+    static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
+    static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
 }
 
 pub(crate) struct Archive {
@@ -279,6 +280,7 @@ impl Archive {
         }
     }
 
+    // remap the file reserving space for at least additional_capacity bytes
     fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
         let len = self.mmap.len();
         let new_len = len + max(len << 3, additional_capacity);
@@ -288,10 +290,24 @@ impl Archive {
         Ok(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? }))
     }
 
-    pub(crate) fn add_paths(
-        &mut self,
-        paths: impl IntoIter<Item = &Path>,
-    ) -> Result<()> {
+    pub(crate) fn flush(&mut self) -> Result<()> {
+        if self.uncommitted < self.end {
+            self.mmap.flush_range(self.uncommitted, self.end - self.uncommitted)?;
+            let hl = <RecordHeader as Pack>::const_len().unwrap();
+            let mut n = self.uncommitted;
+            while n < self.end {
+                let hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
+                let len = hl + hr.record_length as usize;
+                self.mmap[n] &= 0x7F;
+                n += len;
+            }
+            self.mmap.flush_range(self.uncommitted, self.end - self.uncommitted)?;
+            self.uncommitted = self.end;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_paths(&mut self, paths: impl IntoIter<Item = &Path>) -> Result<()> {
         let mut pms = PM_POOL.take();
         for path in paths {
             if !self.id_by_path.contains_key(path) {
@@ -304,6 +320,9 @@ impl Archive {
         }
         if pms.len() > 0 {
             let record_length = <Pooled<Vec<PathMapping>> as Pack>::len(&pms);
+            if record_length > u32::MAX {
+                bail!("too many paths in one batch");
+            }
             let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
             if self.mmap.len() - self.end < len {
                 self.reserve(len)?;
@@ -320,5 +339,26 @@ impl Archive {
             self.end += len;
         }
         Ok(())
+    }
+
+    pub(crate) fn id_for_path(&self, path: &Path) -> Option<u64> {
+        self.id_by_path.get(path).copied()
+    }
+
+    pub(crate) fn path_for_id(&self, id: u64) -> Option<&Path> {
+        self.path_by_id.get(&id)
+    }
+    
+    pub(crate) fn add_batch(
+        &mut self,
+        items: impl IntoIter<Item = (u64, Value)>,
+    ) -> Result<()> {
+        let mut batch = BATCH_POOL.take();
+        for (id, val) in items {
+            if !self.path_by_id.contains_key(&id) {
+                bail!("unknown subscription {}, register it first", id);
+            }
+            batch.push(BatchItem(id, val));
+        }
     }
 }
