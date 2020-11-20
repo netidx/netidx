@@ -1,20 +1,21 @@
 use anyhow::{Context, Error, Result};
+use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use log::warn;
 use mapr::MmapMut;
-use bytes::{Buf, BufMut};
 use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
+    pool::{Pool, Pooled},
     publisher::Value,
-    pool::Pooled,
 };
 use std::{
     self,
     cmp::max,
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
+    iter::IntoIter,
     mem,
     path::Path as FilePath,
 };
@@ -109,6 +110,10 @@ impl Pack for RecordHeader {
 #[derive(Debug, Clone)]
 pub(crate) struct PathMapping(Path, u64);
 
+lazy_static! {
+    static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(100, 100000);
+}
+
 impl Pack for PathMapping {
     fn len(&self) -> usize {
         <Path as Pack>::len(&self.0) + varint_len(self.1)
@@ -147,12 +152,15 @@ impl Pack for BatchItem {
 }
 
 pub(crate) struct Archive {
-    pathmap: HashMap<u64, Path>,
+    path_by_id: HashMap<u64, Path>,
+    id_by_path: HashMap<Path, u64>,
     batchmap: BTreeMap<DateTime<Utc>, u64>,
     file: File,
     mmap: MmapMut,
     block_size: u64,
     end: usize,
+    uncommitted: usize,
+    next_id: u64,
 }
 
 impl Archive {
@@ -181,16 +189,19 @@ impl Archive {
                     record_length: 0,
                     timestamp: Utc::now(),
                 },
-                &mut buf
+                &mut buf,
             )?;
             mmap.flush()?;
             Ok(Archive {
-                pathmap: HashMap::new(),
+                path_by_id: HashMap::new(),
+                id_by_path: HashMap::new(),
                 batchmap: BTreeMap::new(),
                 file,
                 mmap,
                 block_size,
-                end: minsz
+                end: minsz,
+                uncommitted: minsz,
+                next_id: 0,
             })
         } else {
             let file = OpenOptions::new()
@@ -214,8 +225,10 @@ impl Archive {
             if header.version != FILE_VERSION {
                 bail!("file version is too new, can't read it")
             }
-            let mut pathmap = HashMap::new();
+            let mut path_by_id = HashMap::new();
+            let mut id_by_path = HashMap::new();
             let mut batchmap = BTreeMap::new();
+            let mut max_id = 0;
             let end = loop {
                 let pos = total_bytes - buf.remaining();
                 if buf.remaining() < <RecordHeader as Pack>::const_len().unwrap() {
@@ -246,12 +259,66 @@ impl Archive {
                             .map_err(Error::from)
                             .context("invalid path mappings record")?;
                         for pm in m.drain(..) {
-                            pathmap.insert(pm.1, pm.0);
+                            id_by_path.insert(pm.0.clone(), pm.1);
+                            path_by_id.insert(pm.1, pm.0);
+                            max_id = max(pm.1, max_id);
                         }
                     }
                 }
             };
-            Ok(Archive { pathmap, batchmap, file, mmap, block_size, end })
+            Ok(Archive {
+                pathmap,
+                batchmap,
+                file,
+                mmap,
+                block_size,
+                end,
+                uncommitted: end,
+                next_id: max_id + 1,
+            })
         }
+    }
+
+    fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
+        let len = self.mmap.len();
+        let new_len = len + max(len << 3, additional_capacity);
+        let new_blocks = (new_len / self.block_size) + 1;
+        let new_size = new_blocks * self.block_size;
+        self.file.set_len(new_size as u64);
+        Ok(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? }))
+    }
+
+    pub(crate) fn add_paths(
+        &mut self,
+        paths: impl IntoIter<Item = &Path>,
+    ) -> Result<()> {
+        let mut pms = PM_POOL.take();
+        for path in paths {
+            if !self.id_by_path.contains_key(path) {
+                let id = self.next_id;
+                self.next_id += 1;
+                self.id_by_path.insert(path.clone(), id);
+                self.path_by_id.insert(id, path.clone());
+                pms.push(PathMapping(path.clone(), id));
+            }
+        }
+        if pms.len() > 0 {
+            let record_length = <Pooled<Vec<PathMapping>> as Pack>::len(&pms);
+            let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
+            if self.mmap.len() - self.end < len {
+                self.reserve(len)?;
+            }
+            let mut buf = &mut self.mmap[self.end..];
+            let rh = RecordHeader {
+                committed: false,
+                record_type: RecordTyp::PathMappings,
+                record_length: record_length as u32,
+                timestamp: Utc::now(),
+            };
+            <RecordHeader as Pack>::encode(&rh, buf)?;
+            <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, buf)?;
+            self.end += len;
+        }
+        Ok(())
     }
 }
