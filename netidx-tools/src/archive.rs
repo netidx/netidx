@@ -419,4 +419,48 @@ impl Archive {
         }
         Ok(())
     }
+
+    // panics on error as opening the archive should have verified
+    // that everthing is in order
+    fn get_batch_at(&self, pos: u64) -> (RecordHeader, Pooled<Vec<BatchItem>>) {
+        if pos > self.end {
+            panic!("get_batch: index {} out of bounds", pos);
+        }
+        let mut buf = self.mmap[pos..];
+        let rh = <RecordHeader as Pack>::decode(&mut buf).unwrap();
+        if pos + rh.record_length as u64 > self.end {
+            panic!("get_batch: error truncated record at {}", pos);
+        }
+        let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf).unwrap();
+        (rh, batch)
+    }
+    
+    /// return the timestamp of the first record in the archive or
+    /// None if the archive is empty.
+    pub(crate) fn first(&self) -> Option<DateTime<Utc>> {
+        self.batchmap.keys().copied().next()
+    }
+
+    /// return the first batch in the archive, or None if the archive
+    /// is empty.
+    pub(crate) fn first_batch(&self) -> Option<(RecordHeader, Pooled<Vec<BatchItem>>)> {
+        self.batchmap.vals().copied().next().map(|pos| self.get_batch_at(pos))
+    }
+
+    /// return the timestamp of the next record who's timestamp is
+    /// greater than the specified timestamp, or None if no such
+    /// record exists. The specified timestamp need not be present in
+    /// the archive as long as a later timestamp is present.
+    pub(crate) fn next(&self, ts: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        use std::ops::Bound::*;
+        self.batchmap.range(Excluded(&ts), Unbounded).next().map(|(k, _)| *k)
+    }
+
+    //pub(crate) fn next_batch()
+
+    /// return the timestamp of the last record in the archive or None
+    /// if the archive is empty.
+    pub(crate) fn last(&self) -> Option<DateTime<Utc>> {
+        self.batchmap.iter().next_back().map(|(k, _)| *k)
+    }
 }
