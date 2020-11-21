@@ -17,7 +17,7 @@ use std::{
     fs::{File, OpenOptions},
     iter::{DoubleEndedIterator, IntoIterator},
     mem,
-    ops::RangeBounds,
+    ops::{Deref, DerefMut, RangeBounds},
     path::Path as FilePath,
 };
 
@@ -53,8 +53,6 @@ impl Pack for FileHeader {
     }
 }
 
-// This cannot be changed due to only 2 bits allocated to it in the
-// header.
 #[derive(PrimitiveEnum, Debug, Clone, Copy)]
 pub enum RecordTyp {
     Timestamp = 0,
@@ -70,16 +68,16 @@ const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 #[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
 pub struct RecordHeader {
     /// two stage commit flag
-    #[packed_field(bits="0", size_bits = "1")]
+    #[packed_field(bits = "0", size_bits = "1")]
     pub committed: bool,
     /// the record type
-    #[packed_field(bits="1:2", size_bits = "2", ty="enum")]
+    #[packed_field(bits = "1:2", size_bits = "2", ty = "enum")]
     pub record_type: RecordTyp,
     /// batch length, up to 2GiB
-    #[packed_field(bits="3:33", size_bits = "31", endian="msb")]
+    #[packed_field(bits = "3:33", size_bits = "31", endian = "msb")]
     pub record_length: u32,
     /// microsecond offset from last timestamp record
-    #[packed_field(bits="34:63", size_bits = "30", endian="msb")]
+    #[packed_field(bits = "34:63", size_bits = "30", endian = "msb")]
     pub timestamp: u32,
 }
 
@@ -149,22 +147,52 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct MonotonicTimestamper(DateTime<Utc>);
+enum MonoTs {
+    NewBasis(DateTime<Utc>),
+    Offset(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MonotonicTimestamper {
+    basis: Option<DateTime<Utc>>,
+    offset: u32,
+}
 
 impl MonotonicTimestamper {
     fn new() -> Self {
-        MonotonicTimestamper(Utc::now())
+        MonotonicTimestamper { basis: None, offset: 0 }
     }
 
-    fn now(&mut self) -> DateTime<Utc> {
+    fn timestamp(&mut self) -> MonoTs {
         use chrono::Duration;
-        let dt = Utc::now();
-        if dt <= self.0 {
-            self.0 = self.0 + Duration::nanoseconds(1);
-            self.0
-        } else {
-            self.0 = dt;
-            dt
+        let now = Utc::now();
+        match self.basis {
+            None => {
+                self.basis = Some(now);
+                self.offset = 0;
+                MonoTs::NewBasis(now)
+            }
+            Some(basis) => match (now - basis).num_microseconds() {
+                Some(off) if off <= 0 => {
+                    if self.offset < MAX_TIMESTAMP {
+                        self.offset += 1;
+                        MonoTs::Offset(self.offset)
+                    } else {
+                        self.basis = Some(basis + Duration::microseconds(1));
+                        self.offset = 0;
+                        MonoTs::NewBasis(self.basis)
+                    }
+                }
+                Some(off) if self.offset + off <= MAX_TIMESTAMP => {
+                    self.offset += off;
+                    MonoTs::Offset(self.offset)
+                }
+                None | Some(_) => {
+                    self.basis = Some(now);
+                    self.offset = 0;
+                    MonoTs::NewBasis(now)
+                }
+            },
         }
     }
 }
@@ -172,8 +200,30 @@ impl MonotonicTimestamper {
 #[derive(Debug)]
 pub struct ReadOnly(Mmap);
 
+impl Deref for ReadOnly {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
 #[derive(Debug)]
 pub struct ReadWrite(MmapMut);
+
+impl Deref for ReadWrite {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl DerefMut for ReadWrite {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
+    }
+}
 
 #[derive(Debug)]
 pub struct Archive<T> {
@@ -190,23 +240,112 @@ pub struct Archive<T> {
 }
 
 impl Archive<T> {
+    fn scan_archive(file: File) -> Result<Archive<ReadOnly>> {
+        let block_size = allocation_granularity(path.as_ref())? as usize;
+        file.try_lock_exclusive()?;
+        let mut mmap = ReadOnly(unsafe { Mmap::map_mut(&file)? });
+        let mut buf = &*mmap;
+        let total_bytes = buf.remaining();
+        // check the file header
+        if buf.remaining() < <FileHeader as Pack>::const_len().unwrap() {
+            bail!("invalid file header: too short")
+        }
+        let header = <FileHeader as Pack>::decode(&mut buf)
+            .map_err(Error::from)
+            .context("invalid file header")?;
+        // this is the first version, so no upgrading can be done yet
+        if header.version != FILE_VERSION {
+            bail!("file version is too new, can't read it")
+        }
+        let mut path_by_id = HashMap::new();
+        let mut id_by_path = HashMap::new();
+        let mut batchmap = BTreeMap::new();
+        let mut time_basis = chrono::MIN_DATETIME;
+        let mut max_id = 0;
+        let end = loop {
+            let pos = total_bytes - buf.remaining();
+            if buf.remaining() < <RecordHeader as Pack>::const_len().unwrap() {
+                warn!("file missing End marker");
+                break pos;
+            }
+            let rh = RecordHeader::decode(&mut buf)
+                .map_err(Error::from)
+                .context("invalid record header")?;
+            if !rh.committed {
+                warn!("uncommitted records before end marker {}", pos);
+                break pos;
+            }
+            if buf.remaining() < rh.record_length as usize {
+                warn!("truncated record at {}", pos);
+                break pos;
+            }
+            match rh.record_type {
+                RecordTyp::End => break pos,
+                RecordTyp::Timestamp => {
+                    time_basis = <DateTime<Utc> as Pack>::decode(&mut buf)?;
+                }
+                RecordTyp::Batch => {
+                    use chrono::Duration;
+                    let timestamp =
+                        time_basis + Duration::microseconds(rh.timestamp as i64);
+                    batchmap.insert(timestamp, pos);
+                    buf.advance(rh.record_length as usize); // skip the contents
+                }
+                RecordTyp::PathMappings => {
+                    let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(&mut buf)
+                        .map_err(Error::from)
+                        .context("invalid path mappings record")?;
+                    for pm in m.drain(..) {
+                        id_by_path.insert(pm.0.clone(), pm.1);
+                        path_by_id.insert(pm.1, pm.0);
+                        max_id = max(pm.1, max_id);
+                    }
+                }
+            }
+        };
+        Ok(Archive {
+            path_by_id,
+            id_by_path,
+            batchmap,
+            file,
+            mmap,
+            block_size,
+            end,
+            uncommitted: end,
+            next_id: max_id + 1,
+            ts: MonotonicTimestamper::new(),
+        })
+    }
+
+    pub fn open_readonly(path: impl AsRef<FilePath>) -> Result<Archive<ReadOnly>> {
+        let file = OpenOptions::new().read(true).open(path.as_ref())?;
+        file.try_lock_exclusive()?;
+        Archive::scan_file(file)
+    }
+
     pub fn open_readwrite(path: impl AsRef<FilePath>) -> Result<Archive<ReadWrite>> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
-            bail!("the archiver cannot run on a < 64 bit platform")
+            warn!("archive file size is limited to 4 GiB on this platform")
         }
         let mut ts = MonotonicTimestamper::new();
-        if !FilePath::is_file(path.as_ref()) {
+        if FilePath::is_file(path.as_ref()) {
+            let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
+            file.try_lock_exclusive()?;
+            let t = Archive::scan_file(file)?;
+            let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.file)? });
+            Ok(Archive { mmap, ..t })
+        } else {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .open(path.as_ref())?;
-            let block_size = allocation_granularity(path.as_ref())? as usize;
             file.try_lock_exclusive()?;
+            let block_size = allocation_granularity(path.as_ref())? as usize;
             let minsz = <FileHeader as Pack>::const_len().unwrap()
                 + <RecordHeader as Pack>::const_len().unwrap();
             file.set_len(max(block_size, minsz) as u64)?;
-            let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+            let mut mmap = ReadWrite(unsafe { MmapMut::map_mut(&file)? });
             let mut buf = &mut *mmap;
             <FileHeader as Pack>::encode(
                 &FileHeader { version: FILE_VERSION },
@@ -232,81 +371,6 @@ impl Archive<T> {
                 end: minsz,
                 uncommitted: minsz,
                 next_id: 0,
-                ts,
-            })
-        } else {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .append(true)
-                .open(path.as_ref())?;
-            let block_size = allocation_granularity(path.as_ref())? as usize;
-            file.try_lock_exclusive()?;
-            let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-            let mut buf = &*mmap;
-            let total_bytes = buf.remaining();
-            // check the file header
-            if buf.remaining() < <FileHeader as Pack>::const_len().unwrap() {
-                bail!("invalid file header: too short")
-            }
-            let header = <FileHeader as Pack>::decode(&mut buf)
-                .map_err(Error::from)
-                .context("invalid file header")?;
-            // this is the first version, so no upgrading can be done yet
-            if header.version != FILE_VERSION {
-                bail!("file version is too new, can't read it")
-            }
-            let mut path_by_id = HashMap::new();
-            let mut id_by_path = HashMap::new();
-            let mut batchmap = BTreeMap::new();
-            let mut max_id = 0;
-            let end = loop {
-                let pos = total_bytes - buf.remaining();
-                if buf.remaining() < <RecordHeader as Pack>::const_len().unwrap() {
-                    warn!("file missing End marker");
-                    break pos;
-                }
-                let rh = RecordHeader::decode(&mut buf)
-                    .map_err(Error::from)
-                    .context("invalid record header")?;
-                if !rh.committed {
-                    warn!("uncommitted records before end marker {}", pos);
-                    break pos;
-                }
-                if buf.remaining() < rh.record_length as usize {
-                    warn!("truncated record at {}", pos);
-                    break pos;
-                }
-                match rh.record_type {
-                    RecordTyp::End => break pos,
-                    RecordTyp::Batch => {
-                        if !batchmap.contains_key(&rh.timestamp) {
-                            batchmap.insert(rh.timestamp, pos);
-                        }
-                        buf.advance(rh.record_length as usize); // skip the contents
-                    }
-                    RecordTyp::PathMappings => {
-                        let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(&mut buf)
-                            .map_err(Error::from)
-                            .context("invalid path mappings record")?;
-                        for pm in m.drain(..) {
-                            id_by_path.insert(pm.0.clone(), pm.1);
-                            path_by_id.insert(pm.1, pm.0);
-                            max_id = max(pm.1, max_id);
-                        }
-                    }
-                }
-            };
-            Ok(Archive {
-                path_by_id,
-                id_by_path,
-                batchmap,
-                file,
-                mmap,
-                block_size,
-                end,
-                uncommitted: end,
-                next_id: max_id + 1,
                 ts,
             })
         }
