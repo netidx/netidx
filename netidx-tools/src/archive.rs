@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use log::warn;
-use mapr::MmapMut;
+use mapr::{Mmap, MmapMut};
 use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
@@ -22,7 +22,7 @@ use std::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct FileHeader {
+pub struct FileHeader {
     version: u32,
 }
 
@@ -53,25 +53,39 @@ impl Pack for FileHeader {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum RecordTyp {
-    PathMappings,
-    Batch,
-    End,
+// This cannot be changed due to only 2 bits allocated to it in the
+// header.
+#[derive(PrimitiveEnum, Debug, Clone, Copy)]
+pub enum RecordTyp {
+    Timestamp = 0,
+    PathMappings = 1,
+    Batch = 2,
+    End = 3,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct RecordHeader {
-    committed: bool,
-    record_type: RecordTyp,
-    record_length: u32,
-    timestamp: DateTime<Utc>,
+const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
+const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
+
+#[derive(PackedStruct, Debug, Clone)]
+#[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
+pub struct RecordHeader {
+    /// two stage commit flag
+    #[packed_field(bits="0", size_bits = "1")]
+    pub committed: bool,
+    /// the record type
+    #[packed_field(bits="1:2", size_bits = "2", ty="enum")]
+    pub record_type: RecordTyp,
+    /// batch length, up to 2GiB
+    #[packed_field(bits="3:33", size_bits = "31", endian="msb")]
+    pub record_length: u32,
+    /// microsecond offset from last timestamp record
+    #[packed_field(bits="34:63", size_bits = "30", endian="msb")]
+    pub timestamp: u32,
 }
 
 impl Pack for RecordHeader {
     fn const_len() -> Option<usize> {
-        <DateTime<Utc> as Pack>::const_len()
-            .map(|dt| mem::size_of::<u8>() + mem::size_of::<u32>() + dt)
+        Some(8)
     }
 
     fn len(&self) -> usize {
@@ -79,37 +93,18 @@ impl Pack for RecordHeader {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        let typ: u8 = match self.record_type {
-            RecordTyp::PathMappings => 0,
-            RecordTyp::Batch => 1,
-            RecordTyp::End => 2,
-        };
-        let typ = if self.committed { typ } else { typ | 0x80 };
-        buf.put_u8(typ);
-        buf.put_u32(self.record_length);
-        <DateTime<Utc> as Pack>::encode(&self.timestamp, buf)
+        Ok(buf.put_slice(&RecordHeader::pack(self)))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let typ = buf.get_u8();
-        let record_length = buf.get_u32();
-        let timestamp = <DateTime<Utc> as Pack>::decode(buf)?;
-        Ok(RecordHeader {
-            committed: typ & 0x80 > 0,
-            record_type: match typ & 0x7F {
-                0 => RecordTyp::PathMappings,
-                1 => RecordTyp::Batch,
-                2 => RecordTyp::End,
-                _ => return Err(PackError::UnknownTag),
-            },
-            record_length,
-            timestamp,
-        })
+        let mut v = [0u8; 8];
+        buf.copy_to_slice(&mut v);
+        Ok(RecordHeader::unpack(&v)?)
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PathMapping(Path, u64);
+pub struct PathMapping(Path, u64);
 
 impl Pack for PathMapping {
     fn len(&self) -> usize {
@@ -129,7 +124,7 @@ impl Pack for PathMapping {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BatchItem(u64, Value);
+pub struct BatchItem(u64, Value);
 
 impl Pack for BatchItem {
     fn len(&self) -> usize {
@@ -175,12 +170,18 @@ impl MonotonicTimestamper {
 }
 
 #[derive(Debug)]
-pub(crate) struct Archive {
+pub struct ReadOnly(Mmap);
+
+#[derive(Debug)]
+pub struct ReadWrite(MmapMut);
+
+#[derive(Debug)]
+pub struct Archive<T> {
     path_by_id: HashMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
     batchmap: BTreeMap<DateTime<Utc>, usize>,
     file: File,
-    mmap: MmapMut,
+    mmap: T,
     block_size: usize,
     end: usize,
     uncommitted: usize,
@@ -188,8 +189,8 @@ pub(crate) struct Archive {
     ts: MonotonicTimestamper,
 }
 
-impl Archive {
-    pub(crate) fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+impl Archive<T> {
+    pub fn open_readwrite(path: impl AsRef<FilePath>) -> Result<Archive<ReadWrite>> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             bail!("the archiver cannot run on a < 64 bit platform")
         }
@@ -428,19 +429,17 @@ impl Archive {
         Ok(())
     }
 
-    // panics on error as opening the archive should have verified
-    // that everthing is in order
-    fn get_batch_at(&self, pos: usize) -> (RecordHeader, Pooled<Vec<BatchItem>>) {
+    fn get_batch_at(&self, pos: usize) -> Result<(RecordHeader, Pooled<Vec<BatchItem>>)> {
         if pos > self.end {
-            panic!("get_batch: index {} out of bounds", pos);
+            bail!("get_batch: index {} out of bounds", pos);
         }
         let mut buf = &self.mmap[pos..];
-        let rh = <RecordHeader as Pack>::decode(&mut buf).unwrap();
+        let rh = <RecordHeader as Pack>::decode(&mut buf)?;
         if pos + rh.record_length as usize > self.end {
-            panic!("get_batch: error truncated record at {}", pos);
+            bail!("get_batch: error truncated record at {}", pos);
         }
-        let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf).unwrap();
-        (rh, batch)
+        let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?;
+        Ok((rh, batch))
     }
 
     /// return an iterator over batches within the specified date
@@ -448,7 +447,7 @@ impl Archive {
     pub(crate) fn range<'a, R>(
         &'a self,
         range: R,
-    ) -> impl DoubleEndedIterator<Item = (RecordHeader, Pooled<Vec<BatchItem>>)> + 'a
+    ) -> impl DoubleEndedIterator<Item = Result<(RecordHeader, Pooled<Vec<BatchItem>>)>> + 'a
     where
         R: RangeBounds<DateTime<Utc>>,
     {
