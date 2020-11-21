@@ -15,8 +15,9 @@ use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
-    iter::IntoIter,
+    iter::{DoubleEndedIterator, IntoIterator},
     mem,
+    ops::RangeBounds,
     path::Path as FilePath,
 };
 
@@ -177,10 +178,10 @@ impl MonotonicTimestamper {
 pub(crate) struct Archive {
     path_by_id: HashMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
-    batchmap: BTreeMap<DateTime<Utc>, u64>,
+    batchmap: BTreeMap<DateTime<Utc>, usize>,
     file: File,
     mmap: MmapMut,
-    block_size: u64,
+    block_size: usize,
     end: usize,
     uncommitted: usize,
     next_id: u64,
@@ -189,6 +190,9 @@ pub(crate) struct Archive {
 
 impl Archive {
     pub(crate) fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+        if mem::size_of::<usize>() < mem::size_of::<u64>() {
+            bail!("the archiver cannot run on a < 64 bit platform")
+        }
         let mut ts = MonotonicTimestamper::new();
         if !FilePath::is_file(path.as_ref()) {
             let file = OpenOptions::new()
@@ -196,11 +200,11 @@ impl Archive {
                 .write(true)
                 .create(true)
                 .open(path.as_ref())?;
-            let block_size = allocation_granularity(path.as_ref())?;
+            let block_size = allocation_granularity(path.as_ref())? as usize;
             file.try_lock_exclusive()?;
             let minsz = <FileHeader as Pack>::const_len().unwrap()
                 + <RecordHeader as Pack>::const_len().unwrap();
-            file.set_len(max(block_size, minsz as u64))?;
+            file.set_len(max(block_size, minsz) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
             <FileHeader as Pack>::encode(
@@ -227,7 +231,7 @@ impl Archive {
                 end: minsz,
                 uncommitted: minsz,
                 next_id: 0,
-                ts
+                ts,
             })
         } else {
             let file = OpenOptions::new()
@@ -235,7 +239,7 @@ impl Archive {
                 .write(true)
                 .append(true)
                 .open(path.as_ref())?;
-            let block_size = allocation_granularity(path.as_ref())?;
+            let block_size = allocation_granularity(path.as_ref())? as usize;
             file.try_lock_exclusive()?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &*mmap;
@@ -276,7 +280,7 @@ impl Archive {
                     RecordTyp::End => break pos,
                     RecordTyp::Batch => {
                         if !batchmap.contains_key(&rh.timestamp) {
-                            batchmap.insert(rh.timestamp, pos as u64);
+                            batchmap.insert(rh.timestamp, pos);
                         }
                         buf.advance(rh.record_length as usize); // skip the contents
                     }
@@ -293,7 +297,8 @@ impl Archive {
                 }
             };
             Ok(Archive {
-                pathmap,
+                path_by_id,
+                id_by_path,
                 batchmap,
                 file,
                 mmap,
@@ -301,7 +306,7 @@ impl Archive {
                 end,
                 uncommitted: end,
                 next_id: max_id + 1,
-                ts
+                ts,
             })
         }
     }
@@ -310,14 +315,14 @@ impl Archive {
     fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
         let len = self.mmap.len();
         let new_len = len + max(len << 4, additional_capacity);
-        let new_blocks = (new_len / self.block_size) + 1;
-        let new_size = new_blocks * self.block_size;
+        let new_blocks = (new_len / self.block_size as usize) + 1;
+        let new_size = new_blocks * self.block_size as usize;
         self.file.set_len(new_size as u64);
-        Ok(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? }))
+        Ok(drop(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? })))
     }
 
     fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
-        if record_length > u32::MAX {
+        if record_length > u32::MAX as usize {
             bail!("record too large");
         }
         let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
@@ -354,7 +359,10 @@ impl Archive {
         Ok(())
     }
 
-    pub(crate) fn add_paths(&mut self, paths: impl IntoIter<Item = &Path>) -> Result<()> {
+    pub(crate) fn add_paths<'a>(
+        &'a mut self,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<()> {
         let mut pms = PM_POOL.take();
         for path in paths {
             if !self.id_by_path.contains_key(path) {
@@ -375,8 +383,8 @@ impl Archive {
                 record_length: record_length as u32,
                 timestamp: self.ts.now(),
             };
-            <RecordHeader as Pack>::encode(&rh, buf)?;
-            <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, buf)?;
+            <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+            <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, &mut buf)?;
             self.end += len;
         }
         Ok(())
@@ -392,7 +400,7 @@ impl Archive {
 
     pub(crate) fn add_batch(
         &mut self,
-        items: impl IntoIter<Item = (u64, Value)>,
+        items: impl IntoIterator<Item = (u64, Value)>,
     ) -> Result<()> {
         let mut batch = BATCH_POOL.take();
         for (id, val) in items {
@@ -412,8 +420,8 @@ impl Archive {
                 record_length: record_length as u32,
                 timestamp,
             };
-            <RecordHeader as Pack>::encode(&rh, buf)?;
-            <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?;
+            <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+            <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
             self.batchmap.insert(timestamp, self.end);
             self.end += len;
         }
@@ -422,45 +430,28 @@ impl Archive {
 
     // panics on error as opening the archive should have verified
     // that everthing is in order
-    fn get_batch_at(&self, pos: u64) -> (RecordHeader, Pooled<Vec<BatchItem>>) {
+    fn get_batch_at(&self, pos: usize) -> (RecordHeader, Pooled<Vec<BatchItem>>) {
         if pos > self.end {
             panic!("get_batch: index {} out of bounds", pos);
         }
-        let mut buf = self.mmap[pos..];
+        let mut buf = &self.mmap[pos..];
         let rh = <RecordHeader as Pack>::decode(&mut buf).unwrap();
-        if pos + rh.record_length as u64 > self.end {
+        if pos + rh.record_length as usize > self.end {
             panic!("get_batch: error truncated record at {}", pos);
         }
         let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf).unwrap();
         (rh, batch)
     }
-    
-    /// return the timestamp of the first record in the archive or
-    /// None if the archive is empty.
-    pub(crate) fn first(&self) -> Option<DateTime<Utc>> {
-        self.batchmap.keys().copied().next()
-    }
 
-    /// return the first batch in the archive, or None if the archive
-    /// is empty.
-    pub(crate) fn first_batch(&self) -> Option<(RecordHeader, Pooled<Vec<BatchItem>>)> {
-        self.batchmap.vals().copied().next().map(|pos| self.get_batch_at(pos))
-    }
-
-    /// return the timestamp of the next record who's timestamp is
-    /// greater than the specified timestamp, or None if no such
-    /// record exists. The specified timestamp need not be present in
-    /// the archive as long as a later timestamp is present.
-    pub(crate) fn next(&self, ts: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        use std::ops::Bound::*;
-        self.batchmap.range(Excluded(&ts), Unbounded).next().map(|(k, _)| *k)
-    }
-
-    //pub(crate) fn next_batch()
-
-    /// return the timestamp of the last record in the archive or None
-    /// if the archive is empty.
-    pub(crate) fn last(&self) -> Option<DateTime<Utc>> {
-        self.batchmap.iter().next_back().map(|(k, _)| *k)
+    /// return an iterator over batches within the specified date
+    /// range.
+    pub(crate) fn range<'a, R>(
+        &'a self,
+        range: R,
+    ) -> impl DoubleEndedIterator<Item = (RecordHeader, Pooled<Vec<BatchItem>>)> + 'a
+    where
+        R: RangeBounds<DateTime<Utc>>,
+    {
+        self.batchmap.range(range).map(move |(_, p)| self.get_batch_at(*p))
     }
 }
