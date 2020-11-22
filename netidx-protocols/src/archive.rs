@@ -601,6 +601,10 @@ impl Archive<ReadWrite> {
 }
 
 impl<T: Deref<Target = [u8]>> Archive<T> {
+    pub fn len(&self) -> usize {
+        self.mmap.len()
+    }
+
     pub fn id_for_path(&self, path: &Path) -> Option<u64> {
         self.id_by_path.get(path).copied()
     }
@@ -631,5 +635,92 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         R: RangeBounds<DateTime<Utc>>,
     {
         self.batchmap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::{
+        fs,
+        ops::Bound::{self, *},
+    };
+
+    fn check_contents<T: Deref<Target = [u8]>>(
+        t: &Archive<T>,
+        paths: &[Path],
+        batches: usize,
+    ) {
+        let mut batch = t
+            .range::<(Bound<DateTime<Utc>>, Bound<DateTime<Utc>>)>((Unbounded, Unbounded))
+            .collect::<Vec<_>>();
+        assert_eq!(batch.len(), batches);
+        let now = Utc::now();
+        for r in batch.drain(..) {
+            let (ts, b) = r.unwrap();
+            let elapsed = (now - ts).num_seconds();
+            assert!(elapsed <= 10 && elapsed >= -10);
+            assert_eq!(Vec::len(&b), paths.len());
+            for (BatchItem(id, v), p) in b.iter().zip(paths.iter()) {
+                assert_eq!(Some(p), t.path_for_id(*id));
+                assert_eq!(v, &Value::U64(42))
+            }
+        }
+    }
+
+    #[test]
+    fn basic_test() {
+        let file = FilePath::new("test-data");
+        let paths = [Path::from("/foo/bar"), Path::from("/foo/baz")];
+        if FilePath::is_file(&file) {
+            fs::remove_file(file).unwrap();
+        }
+        let initial_size = { // check that we can open, and write an archive
+            let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
+            t.add_paths(&paths).unwrap();
+            let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
+            t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.flush().unwrap();
+            check_contents(&t, &paths, 1);
+            t.len()
+        };
+        { // check that we can close, reopen, and read the archive back
+            let t = Archive::<ReadOnly>::open_readonly(file).unwrap();
+            check_contents(&t, &paths, 1);
+        }
+        { // check that we can reopen, and add to an archive
+            let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
+            let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
+            t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.flush().unwrap();
+            check_contents(&t, &paths, 2);
+        }
+        { // check that we can reopen, and read the archive we added to
+            let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
+            check_contents(&t, &paths, 2);
+        }
+        let n = { // check that we can grow the archive by remapping it on the fly
+            let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
+            let mut n = 2;
+            while t.len() == initial_size {
+                let ids =
+                    paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
+                t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+                n += 1;
+                check_contents(&t, &paths, n);
+            }
+            t.flush().unwrap();
+            check_contents(&t, &paths, n);
+            n
+        };
+        { // check that we can reopen, and read the archive we grew
+            let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
+            check_contents(&t, &paths, n);
+        }
+        { // check that we can't open the archive twice
+            let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
+            check_contents(&t, &paths, n);
+            assert!(Archive::<ReadOnly>::open_readonly(&file).is_err());
+        }
     }
 }
