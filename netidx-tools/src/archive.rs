@@ -10,6 +10,7 @@ use netidx::{
     pool::{Pool, Pooled},
     publisher::Value,
 };
+use packed_struct::PackedStruct;
 use std::{
     self,
     cmp::max,
@@ -61,7 +62,7 @@ pub enum RecordTyp {
     End = 3,
 }
 
-const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
+pub const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 
 #[derive(PackedStruct, Debug, Clone)]
@@ -97,7 +98,7 @@ impl Pack for RecordHeader {
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let mut v = [0u8; 8];
         buf.copy_to_slice(&mut v);
-        Ok(RecordHeader::unpack(&v)?)
+        RecordHeader::unpack(&v).map_err(|_| PackError::InvalidFormat)
     }
 }
 
@@ -149,7 +150,7 @@ lazy_static! {
 #[derive(Debug, Clone, Copy)]
 enum MonoTs {
     NewBasis(DateTime<Utc>),
-    Offset(u32),
+    Offset(DateTime<Utc>, u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,16 +177,17 @@ impl MonotonicTimestamper {
                 Some(off) if off <= 0 => {
                     if self.offset < MAX_TIMESTAMP {
                         self.offset += 1;
-                        MonoTs::Offset(self.offset)
+                        MonoTs::Offset(basis, self.offset)
                     } else {
-                        self.basis = Some(basis + Duration::microseconds(1));
+                        let basis = basis + Duration::microseconds(1);
+                        self.basis = Some(basis);
                         self.offset = 0;
-                        MonoTs::NewBasis(self.basis)
+                        MonoTs::NewBasis(basis)
                     }
                 }
-                Some(off) if self.offset + off <= MAX_TIMESTAMP => {
-                    self.offset += off;
-                    MonoTs::Offset(self.offset)
+                Some(off) if self.offset as i64 + off <= MAX_TIMESTAMP as i64 => {
+                    self.offset += off as u32;
+                    MonoTs::Offset(basis, self.offset)
                 }
                 None | Some(_) => {
                     self.basis = Some(now);
@@ -239,11 +241,11 @@ pub struct Archive<T> {
     ts: MonotonicTimestamper,
 }
 
-impl Archive<T> {
-    fn scan_archive(file: File) -> Result<Archive<ReadOnly>> {
-        let block_size = allocation_granularity(path.as_ref())? as usize;
+impl<T> Archive<T> {
+    fn scan(path: &FilePath, file: File) -> Result<Archive<ReadOnly>> {
+        let block_size = allocation_granularity(path)? as usize;
         file.try_lock_exclusive()?;
-        let mut mmap = ReadOnly(unsafe { Mmap::map_mut(&file)? });
+        let mut mmap = ReadOnly(unsafe { Mmap::map(&file)? });
         let mut buf = &*mmap;
         let total_bytes = buf.remaining();
         // check the file header
@@ -320,21 +322,32 @@ impl Archive<T> {
     pub fn open_readonly(path: impl AsRef<FilePath>) -> Result<Archive<ReadOnly>> {
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
         file.try_lock_exclusive()?;
-        Archive::scan_file(file)
+        Archive::<ReadOnly>::scan(path.as_ref(), file)
     }
 
     pub fn open_readwrite(path: impl AsRef<FilePath>) -> Result<Archive<ReadWrite>> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
-        let mut ts = MonotonicTimestamper::new();
         if FilePath::is_file(path.as_ref()) {
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
             file.try_lock_exclusive()?;
-            let t = Archive::scan_file(file)?;
+            let t = Archive::<ReadOnly>::scan(path.as_ref(), file)?;
             let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.file)? });
-            Ok(Archive { mmap, ..t })
+            Ok(Archive {
+                path_by_id: t.path_by_id,
+                id_by_path: t.id_by_path,
+                batchmap: t.batchmap,
+                file: t.file,
+                mmap,
+                block_size: t.block_size,
+                end: t.end,
+                uncommitted: t.uncommitted,
+                next_id: t.next_id,
+                ts: t.ts,
+            })
         } else {
+            let mut ts = MonotonicTimestamper::new();
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -342,25 +355,21 @@ impl Archive<T> {
                 .open(path.as_ref())?;
             file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path.as_ref())? as usize;
-            let minsz = <FileHeader as Pack>::const_len().unwrap()
-                + <RecordHeader as Pack>::const_len().unwrap();
-            file.set_len(max(block_size, minsz) as u64)?;
+            let fh_len = <FileHeader as Pack>::const_len().unwrap();
+            let rh_len = <RecordHeader as Pack>::const_len().unwrap();
+            file.set_len(max(block_size, fh_len + rh_len) as u64)?;
             let mut mmap = ReadWrite(unsafe { MmapMut::map_mut(&file)? });
             let mut buf = &mut *mmap;
-            <FileHeader as Pack>::encode(
-                &FileHeader { version: FILE_VERSION },
-                &mut buf,
-            )?;
-            <RecordHeader as Pack>::encode(
-                &RecordHeader {
-                    committed: true,
-                    record_type: RecordTyp::End,
-                    record_length: 0,
-                    timestamp: ts.now(),
-                },
-                &mut buf,
-            )?;
-            mmap.flush()?;
+            let fh = FileHeader { version: FILE_VERSION };
+            <FileHeader as Pack>::encode(&fh, &mut buf)?;
+            let rh = RecordHeader {
+                committed: true,
+                record_type: RecordTyp::End,
+                record_length: 0,
+                timestamp: 0,
+            };
+            <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+            mmap.0.flush()?;
             Ok(Archive {
                 path_by_id: HashMap::new(),
                 id_by_path: HashMap::new(),
@@ -368,14 +377,16 @@ impl Archive<T> {
                 file,
                 mmap,
                 block_size,
-                end: minsz,
-                uncommitted: minsz,
+                end: fh_len,
+                uncommitted: fh_len,
                 next_id: 0,
                 ts,
             })
         }
     }
+}
 
+impl Archive<ReadWrite> {
     // remap the file reserving space for at least additional_capacity bytes
     fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
         let len = self.mmap.len();
@@ -383,7 +394,10 @@ impl Archive<T> {
         let new_blocks = (new_len / self.block_size as usize) + 1;
         let new_size = new_blocks * self.block_size as usize;
         self.file.set_len(new_size as u64);
-        Ok(drop(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? })))
+        Ok(drop(mem::replace(
+            &mut self.mmap,
+            ReadWrite(unsafe { MmapMut::map_mut(&self.file)? }),
+        )))
     }
 
     fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
@@ -403,22 +417,23 @@ impl Archive<T> {
             if self.mmap.len() - self.end < hl {
                 self.reserve(hl)?;
             }
-            self.mmap.flush()?;
+            self.mmap.0.flush()?;
             let mut n = self.uncommitted;
             while n < self.end {
-                let hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
-                let len = hl + hr.record_length as usize;
-                self.mmap[n] &= 0x7F;
-                n += len;
+                let mut hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
+                hr.committed = true;
+                <RecordHeader as Pack>::encode(&hr, &mut &mut self.mmap[n..]);
+                n += hl + hr.record_length as usize;
             }
+            assert_eq!(n, self.end);
             let end = RecordHeader {
                 committed: true,
                 record_type: RecordTyp::End,
                 record_length: 0,
-                timestamp: self.ts.now(),
+                timestamp: 0,
             };
             <RecordHeader as Pack>::encode(&end, &mut &mut self.mmap[self.end..])?;
-            self.mmap.flush()?;
+            self.mmap.0.flush()?;
             self.uncommitted = self.end;
         }
         Ok(())
@@ -446,21 +461,13 @@ impl Archive<T> {
                 committed: false,
                 record_type: RecordTyp::PathMappings,
                 record_length: record_length as u32,
-                timestamp: self.ts.now(),
+                timestamp: 0,
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, &mut buf)?;
             self.end += len;
         }
         Ok(())
-    }
-
-    pub(crate) fn id_for_path(&self, path: &Path) -> Option<u64> {
-        self.id_by_path.get(path).copied()
-    }
-
-    pub(crate) fn path_for_id(&self, id: u64) -> Option<&Path> {
-        self.path_by_id.get(&id)
     }
 
     pub(crate) fn add_batch(
@@ -476,21 +483,53 @@ impl Archive<T> {
         }
         if batch.len() > 0 {
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
+            if record_length > MAX_RECORD_LEN as usize {
+                bail!("batch is too large")
+            }
+            let (time_basis, time_offset) = match self.ts.timestamp() {
+                MonoTs::Offset(basis, off) => (basis, off),
+                MonoTs::NewBasis(basis) => {
+                    let record_length = <DateTime<Utc> as Pack>::len(&basis);
+                    let rh = RecordHeader {
+                        committed: false,
+                        record_type: RecordTyp::Timestamp,
+                        record_length: record_length as u32,
+                        timestamp: 0,
+                    };
+                    let len = self.check_reserve(record_length)?;
+                    let mut buf = &mut self.mmap[self.end..];
+                    <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+                    <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
+                    self.end += len;
+                    (basis, 0)
+                }
+            };
             let len = self.check_reserve(record_length)?;
             let mut buf = &mut self.mmap[self.end..];
-            let timestamp = self.ts.now();
             let rh = RecordHeader {
                 committed: false,
                 record_type: RecordTyp::Batch,
                 record_length: record_length as u32,
-                timestamp,
+                timestamp: time_offset,
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
+            let timestamp =
+                time_basis + chrono::Duration::microseconds(time_offset as i64);
             self.batchmap.insert(timestamp, self.end);
             self.end += len;
         }
         Ok(())
+    }
+}
+
+impl<T: Deref<Target = [u8]>> Archive<T> {
+    pub(crate) fn id_for_path(&self, path: &Path) -> Option<u64> {
+        self.id_by_path.get(path).copied()
+    }
+
+    pub(crate) fn path_for_id(&self, id: u64) -> Option<&Path> {
+        self.path_by_id.get(&id)
     }
 
     fn get_batch_at(&self, pos: usize) -> Result<(RecordHeader, Pooled<Vec<BatchItem>>)> {
