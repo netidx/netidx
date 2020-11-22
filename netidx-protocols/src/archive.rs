@@ -15,6 +15,8 @@ use std::{
     self,
     cmp::max,
     collections::{BTreeMap, HashMap},
+    error,
+    fmt,
     fs::{File, OpenOptions},
     iter::{DoubleEndedIterator, IntoIterator},
     mem,
@@ -169,24 +171,41 @@ impl MonotonicTimestamper {
         MonotonicTimestamper { basis: None, offset: 0 }
     }
 
+    fn update_basis(&mut self, new_basis: DateTime<Utc>) -> DateTime<Utc> {
+        use chrono::Duration;
+        match self.basis {
+            None => {
+                self.basis = Some(new_basis);
+                self.offset = 0;
+                new_basis
+            }
+            Some(old_basis) => {
+                let old_ts = old_basis + Duration::microseconds(self.offset as i64);
+                if old_ts > new_basis {
+                    self.basis = Some(old_ts);
+                    self.offset = 0;
+                    old_ts
+                } else {
+                    self.basis = Some(new_basis);
+                    self.offset = 0;
+                    new_basis
+                }
+            }
+        }
+    }
+
     fn timestamp(&mut self) -> MonoTs {
         use chrono::Duration;
         let now = Utc::now();
         match self.basis {
-            None => {
-                self.basis = Some(now);
-                self.offset = 0;
-                MonoTs::NewBasis(now)
-            }
+            None => MonoTs::NewBasis(self.update_basis(now)),
             Some(basis) => match (now - basis).num_microseconds() {
                 Some(off) if off <= 0 => {
                     if self.offset < MAX_TIMESTAMP {
                         self.offset += 1;
                         MonoTs::Offset(basis, self.offset)
                     } else {
-                        let basis = basis + Duration::microseconds(1);
-                        self.basis = Some(basis);
-                        self.offset = 0;
+                        let basis = self.update_basis(basis + Duration::microseconds(1));
                         MonoTs::NewBasis(basis)
                     }
                 }
@@ -194,11 +213,7 @@ impl MonotonicTimestamper {
                     self.offset += off as u32;
                     MonoTs::Offset(basis, self.offset)
                 }
-                None | Some(_) => {
-                    self.basis = Some(now);
-                    self.offset = 0;
-                    MonoTs::NewBasis(now)
-                }
+                None | Some(_) => MonoTs::NewBasis(self.update_basis(now)),
             },
         }
     }
@@ -233,6 +248,20 @@ impl DerefMut for ReadWrite {
         self.0.deref_mut()
     }
 }
+
+/// This error will be raised if you try to write a record that is too
+/// large to represent in 31 bits to the file. Nothing will be written
+/// in that case, so you can just split the record and try again.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordTooLarge;
+
+impl fmt::Display for RecordTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl error::Error for RecordTooLarge {}
 
 /// This reads and writes the netidx archive format (as written by the
 /// "record" command in the tools). The archive format is intended to be
@@ -470,8 +499,8 @@ impl Archive<ReadWrite> {
     }
 
     fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
-        if record_length > u32::MAX as usize {
-            bail!("record too large");
+        if record_length > MAX_RECORD_LEN as usize {
+            bail!(RecordTooLarge);
         }
         let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
         if self.mmap.len() - self.end < len {
@@ -547,6 +576,11 @@ impl Archive<ReadWrite> {
 
     /// Add a data batch to the archive. This method will fail if any
     /// of the path ids in the batch are unknown.
+    ///
+    /// batch timestamps are monotonicly increasing, with the
+    /// granularity of 1us. As such, one should avoid writing
+    /// "spurious" batches, and generally for efficiency and
+    /// correctness write as few batches as possible.
     pub fn add_batch(
         &mut self,
         items: impl IntoIterator<Item = (u64, Value)>,
@@ -560,9 +594,6 @@ impl Archive<ReadWrite> {
         }
         if batch.len() > 0 {
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
-            if record_length > MAX_RECORD_LEN as usize {
-                bail!("batch is too large")
-            }
             let (time_basis, time_offset) = match self.ts.timestamp() {
                 MonoTs::Offset(basis, off) => (basis, off),
                 MonoTs::NewBasis(basis) => {
@@ -675,7 +706,8 @@ mod test {
         if FilePath::is_file(&file) {
             fs::remove_file(file).unwrap();
         }
-        let initial_size = { // check that we can open, and write an archive
+        let initial_size = {
+            // check that we can open, and write an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             t.add_paths(&paths).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
@@ -684,22 +716,26 @@ mod test {
             check_contents(&t, &paths, 1);
             t.len()
         };
-        { // check that we can close, reopen, and read the archive back
+        {
+            // check that we can close, reopen, and read the archive back
             let t = Archive::<ReadOnly>::open_readonly(file).unwrap();
             check_contents(&t, &paths, 1);
         }
-        { // check that we can reopen, and add to an archive
+        {
+            // check that we can reopen, and add to an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
             t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 2);
         }
-        { // check that we can reopen, and read the archive we added to
+        {
+            // check that we can reopen, and read the archive we added to
             let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
             check_contents(&t, &paths, 2);
         }
-        let n = { // check that we can grow the archive by remapping it on the fly
+        let n = {
+            // check that we can grow the archive by remapping it on the fly
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let mut n = 2;
             while t.len() == initial_size {
@@ -713,11 +749,13 @@ mod test {
             check_contents(&t, &paths, n);
             n
         };
-        { // check that we can reopen, and read the archive we grew
+        {
+            // check that we can reopen, and read the archive we grew
             let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
             check_contents(&t, &paths, n);
         }
-        { // check that we can't open the archive twice
+        {
+            // check that we can't open the archive twice
             let t = Archive::<ReadOnly>::open_readonly(&file).unwrap();
             check_contents(&t, &paths, n);
             assert!(Archive::<ReadOnly>::open_readonly(&file).is_err());
