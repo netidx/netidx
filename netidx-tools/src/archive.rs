@@ -411,7 +411,7 @@ impl Archive<ReadWrite> {
         Ok(len)
     }
 
-    pub(crate) fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         if self.uncommitted < self.end {
             let hl = <RecordHeader as Pack>::const_len().unwrap();
             if self.mmap.len() - self.end < hl {
@@ -439,7 +439,7 @@ impl Archive<ReadWrite> {
         Ok(())
     }
 
-    pub(crate) fn add_paths<'a>(
+    pub fn add_paths<'a>(
         &'a mut self,
         paths: impl IntoIterator<Item = &'a Path>,
     ) -> Result<()> {
@@ -470,7 +470,7 @@ impl Archive<ReadWrite> {
         Ok(())
     }
 
-    pub(crate) fn add_batch(
+    pub fn add_batch(
         &mut self,
         items: impl IntoIterator<Item = (u64, Value)>,
     ) -> Result<()> {
@@ -524,11 +524,11 @@ impl Archive<ReadWrite> {
 }
 
 impl<T: Deref<Target = [u8]>> Archive<T> {
-    pub(crate) fn id_for_path(&self, path: &Path) -> Option<u64> {
+    pub fn id_for_path(&self, path: &Path) -> Option<u64> {
         self.id_by_path.get(path).copied()
     }
 
-    pub(crate) fn path_for_id(&self, id: u64) -> Option<&Path> {
+    pub fn path_for_id(&self, id: u64) -> Option<&Path> {
         self.path_by_id.get(&id)
     }
 
@@ -547,7 +547,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
 
     /// return an iterator over batches within the specified date
     /// range.
-    pub(crate) fn range<'a, R>(
+    pub fn range<'a, R>(
         &'a self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = Result<(RecordHeader, Pooled<Vec<BatchItem>>)>> + 'a
