@@ -1,8 +1,6 @@
 #![recursion_limit = "2048"]
 #[macro_use] extern crate netidx;
 #[macro_use] extern crate anyhow;
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate packed_struct_codegen;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
@@ -14,7 +12,6 @@ mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
 mod recorder;
-mod archive;
 
 #[cfg(unix)]
 mod resolver_server;

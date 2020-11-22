@@ -28,7 +28,7 @@ pub struct FileHeader {
 }
 
 static FILE_MAGIC: &'static [u8] = b"netidx archive";
-static FILE_VERSION: u32 = 0;
+const FILE_VERSION: u32 = 0;
 
 impl Pack for FileHeader {
     fn const_len() -> Option<usize> {
@@ -55,31 +55,36 @@ impl Pack for FileHeader {
 }
 
 #[derive(PrimitiveEnum, Debug, Clone, Copy)]
-pub enum RecordTyp {
+enum RecordTyp {
+    /// A time basis record
     Timestamp = 0,
+    /// A record mapping paths to ids
     PathMappings = 1,
+    /// A data batch
     Batch = 2,
+    /// End of archive marker
     End = 3,
 }
 
-pub const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
+const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 
+// Every record in the archive starts with this header
 #[derive(PackedStruct, Debug, Clone)]
 #[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
 pub struct RecordHeader {
-    /// two stage commit flag
+    // two stage commit flag
     #[packed_field(bits = "0", size_bits = "1")]
-    pub committed: bool,
-    /// the record type
+    committed: bool,
+    // the record type
     #[packed_field(bits = "1:2", size_bits = "2", ty = "enum")]
-    pub record_type: RecordTyp,
-    /// batch length, up to 2GiB
+    record_type: RecordTyp,
+    // the record length, up to MAX_RECORD_LEN, not including this header
     #[packed_field(bits = "3:33", size_bits = "31", endian = "msb")]
-    pub record_length: u32,
-    /// microsecond offset from last timestamp record
+    record_length: u32,
+    // microsecond offset from last timestamp record, up to MAX_TIMESTAMP
     #[packed_field(bits = "34:63", size_bits = "30", endian = "msb")]
-    pub timestamp: u32,
+    timestamp: u32,
 }
 
 impl Pack for RecordHeader {
@@ -103,7 +108,7 @@ impl Pack for RecordHeader {
 }
 
 #[derive(Debug, Clone)]
-pub struct PathMapping(Path, u64);
+struct PathMapping(Path, u64);
 
 impl Pack for PathMapping {
     fn len(&self) -> usize {
@@ -123,7 +128,7 @@ impl Pack for PathMapping {
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchItem(u64, Value);
+pub struct BatchItem(pub u64, pub Value);
 
 impl Pack for BatchItem {
     fn len(&self) -> usize {
@@ -199,6 +204,7 @@ impl MonotonicTimestamper {
     }
 }
 
+/// The type associated with a read only archive
 #[derive(Debug)]
 pub struct ReadOnly(Mmap);
 
@@ -210,6 +216,7 @@ impl Deref for ReadOnly {
     }
 }
 
+/// The type associated with a read write archive
 #[derive(Debug)]
 pub struct ReadWrite(MmapMut);
 
@@ -227,6 +234,66 @@ impl DerefMut for ReadWrite {
     }
 }
 
+/// This reads and writes the netidx archive format (as written by the
+/// "record" command in the tools). The archive format is intended to be
+/// a compact format for storing recordings of netidx data for long
+/// term storage and access. It uses memory mapped IO for performance
+/// and memory efficiency, and as such file size is limited to
+/// `usize`, which on most platforms is not an issue.
+///
+/// Files begin with a file header, which consists of the string
+/// "netidx archive" followed by the file format
+/// version. Currently there is 1 version, and the version number
+/// is 0.
+///
+/// Following the header are a series of records. Every record begins
+/// with a (RecordHeader)[RecordHeader], which is followed by a data
+/// item, except in the case of the end of archive record, which is
+/// not followed by a data item.
+///
+/// Items are written to the file using a two phase commit scheme to
+/// allow detection of partially committed. Initially, items are
+/// marked as uncommitted, and only upon a successful flush to disk
+/// are they then marked as committed.
+///
+/// When an archive is opened, an index of it's contents is built in
+/// memory so that any part of it can be accessed quickly by
+/// timestamp. As a result, there is some memory overhead.
+///
+/// To prevent data corruption the underling file is locked for
+/// exclusive access using the advisory file locking mechanism present
+/// in the OS (e.g. flock on unix). If the file is modified
+/// independantly of advisory locking it should not cause UB, but it
+/// could cause data corruption, or read errors.
+///
+/// The record header is 8 bytes. A data record starts with a LEB128
+/// encoded item counter, and then a number of items. Path ids are
+/// also LEB128 encoded. So, for example, in an archive containing 1
+/// path, a batch with 1 u64 data item would look like.
+///    
+/// ```
+/// 8 byte header
+/// 1 byte item count
+/// 1 byte path id
+/// 1 byte type tag
+/// 8 byte u64
+/// ----------------
+/// 19 bytes (11 bytes of overhead 57%)
+/// ```
+///
+/// Better overheads can be achieved with larger batches, as should
+/// naturally happen on busier systems. For example a batch of 128
+/// u64s looks like.
+///
+/// ```
+/// 8 byte header
+/// 1 byte item count
+/// (1 byte path id
+///  1 byte type tag
+///  8 byte u64) * 128
+/// ---------------------
+/// 1289 bytes (264 bytes of overhead 20%)
+/// ```
 #[derive(Debug)]
 pub struct Archive<T> {
     path_by_id: HashMap<u64, Path>,
@@ -245,7 +312,7 @@ impl<T> Archive<T> {
     fn scan(path: &FilePath, file: File) -> Result<Archive<ReadOnly>> {
         let block_size = allocation_granularity(path)? as usize;
         file.try_lock_exclusive()?;
-        let mut mmap = ReadOnly(unsafe { Mmap::map(&file)? });
+        let mmap = ReadOnly(unsafe { Mmap::map(&file)? });
         let mut buf = &*mmap;
         let total_bytes = buf.remaining();
         // check the file header
@@ -319,12 +386,15 @@ impl<T> Archive<T> {
         })
     }
 
+    /// Open the specified archive read only
     pub fn open_readonly(path: impl AsRef<FilePath>) -> Result<Archive<ReadOnly>> {
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
         file.try_lock_exclusive()?;
         Archive::<ReadOnly>::scan(path.as_ref(), file)
     }
 
+    /// Open the specified archive for read/write access, if the file
+    /// does not exist then an new archive will be created.
     pub fn open_readwrite(path: impl AsRef<FilePath>) -> Result<Archive<ReadWrite>> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
@@ -347,7 +417,6 @@ impl<T> Archive<T> {
                 ts: t.ts,
             })
         } else {
-            let mut ts = MonotonicTimestamper::new();
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -380,7 +449,7 @@ impl<T> Archive<T> {
                 end: fh_len,
                 uncommitted: fh_len,
                 next_id: 0,
-                ts,
+                ts: MonotonicTimestamper::new(),
             })
         }
     }
@@ -393,7 +462,7 @@ impl Archive<ReadWrite> {
         let new_len = len + max(len << 4, additional_capacity);
         let new_blocks = (new_len / self.block_size as usize) + 1;
         let new_size = new_blocks * self.block_size as usize;
-        self.file.set_len(new_size as u64);
+        self.file.set_len(new_size as u64)?;
         Ok(drop(mem::replace(
             &mut self.mmap,
             ReadWrite(unsafe { MmapMut::map_mut(&self.file)? }),
@@ -411,6 +480,9 @@ impl Archive<ReadWrite> {
         Ok(len)
     }
 
+    /// flush uncommitted changes to disk, mark all flushed records as
+    /// committed, and update the end of archive marker. Does nothing
+    /// if everything is already committed.
     pub fn flush(&mut self) -> Result<()> {
         if self.uncommitted < self.end {
             let hl = <RecordHeader as Pack>::const_len().unwrap();
@@ -422,7 +494,7 @@ impl Archive<ReadWrite> {
             while n < self.end {
                 let mut hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
                 hr.committed = true;
-                <RecordHeader as Pack>::encode(&hr, &mut &mut self.mmap[n..]);
+                <RecordHeader as Pack>::encode(&hr, &mut &mut self.mmap[n..])?;
                 n += hl + hr.record_length as usize;
             }
             assert_eq!(n, self.end);
@@ -439,6 +511,9 @@ impl Archive<ReadWrite> {
         Ok(())
     }
 
+    /// allocate path ids for any of the specified paths that don't
+    /// already have one, and if any ids were allocated then write a
+    /// path mappings record containing the new assignments.
     pub fn add_paths<'a>(
         &'a mut self,
         paths: impl IntoIterator<Item = &'a Path>,
@@ -470,6 +545,8 @@ impl Archive<ReadWrite> {
         Ok(())
     }
 
+    /// Add a data batch to the archive. This method will fail if any
+    /// of the path ids in the batch are unknown.
     pub fn add_batch(
         &mut self,
         items: impl IntoIterator<Item = (u64, Value)>,
@@ -532,7 +609,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.path_by_id.get(&id)
     }
 
-    fn get_batch_at(&self, pos: usize) -> Result<(RecordHeader, Pooled<Vec<BatchItem>>)> {
+    fn get_batch_at(&self, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
         if pos > self.end {
             bail!("get_batch: index {} out of bounds", pos);
         }
@@ -541,19 +618,18 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         if pos + rh.record_length as usize > self.end {
             bail!("get_batch: error truncated record at {}", pos);
         }
-        let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?;
-        Ok((rh, batch))
+        Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
     }
 
-    /// return an iterator over batches within the specified date
+    /// return an iterator over batches within the specified time
     /// range.
     pub fn range<'a, R>(
         &'a self,
         range: R,
-    ) -> impl DoubleEndedIterator<Item = Result<(RecordHeader, Pooled<Vec<BatchItem>>)>> + 'a
+    ) -> impl DoubleEndedIterator<Item = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> + 'a
     where
         R: RangeBounds<DateTime<Utc>>,
     {
-        self.batchmap.range(range).map(move |(_, p)| self.get_batch_at(*p))
+        self.batchmap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
     }
 }
