@@ -300,7 +300,6 @@ impl error::Error for RecordTooLarge {}
 /// also LEB128 encoded. So, for example, in an archive containing 1
 /// path, a batch with 1 u64 data item would look like.
 ///    
-/// ```
 /// 8 byte header
 /// 1 byte item count
 /// 1 byte path id
@@ -308,13 +307,11 @@ impl error::Error for RecordTooLarge {}
 /// 8 byte u64
 /// ----------------
 /// 19 bytes (11 bytes of overhead 57%)
-/// ```
 ///
 /// Better overheads can be achieved with larger batches, as should
 /// naturally happen on busier systems. For example a batch of 128
 /// u64s looks like.
 ///
-/// ```
 /// 8 byte header
 /// 1 byte item count
 /// (1 byte path id
@@ -322,7 +319,6 @@ impl error::Error for RecordTooLarge {}
 ///  8 byte u64) * 128
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
-/// ```
 #[derive(Debug)]
 pub struct Archive<T> {
     path_by_id: HashMap<u64, Path>,

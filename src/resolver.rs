@@ -223,6 +223,7 @@ lazy_static! {
     static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000, 10000);
     static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
     static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
+    static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
 }
 
 #[derive(Debug)]
@@ -402,6 +403,33 @@ impl ResolverRead {
                 FromRead::List(paths) => Ok(paths),
                 m => bail!("unexpected result from list {:?}", m),
             }
+        }
+    }
+
+    pub async fn list_many<I>(&self, batch: I) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>>
+    where
+        I: IntoIterator<Item = Path>,
+    {
+        let mut to = RAWTOREADPOOL.take();
+        to.extend(batch.into_iter().map(ToRead::List));
+        let mut result = self.send(&to).await?;
+        if result.len() != to.len() {
+            bail!(
+                "expected number of list results {} expected {}",
+                result.len(),
+                to.len()
+            );
+        } else {
+            let mut out = LISTPOOL.take();
+            for l in result.drain(..) {
+                match l {
+                    FromRead::List(paths) => {
+                        out.push(paths);
+                    }
+                    m => bail!("unexpected list response {:?}", m)
+                }
+            }
+            Ok(out)
         }
     }
 

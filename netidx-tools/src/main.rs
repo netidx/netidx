@@ -100,6 +100,8 @@ enum Sub {
     },
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
+        #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
+        foreground: bool,
         #[structopt(
             short = "b",
             long = "bind",
@@ -108,10 +110,12 @@ enum Sub {
         bind: Option<BindCfg>,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
-        #[structopt(long = "republish-base",
+        #[structopt(long = "publish-base",
                     help = "base path for republishing the archive")]
-        republish_base: Option<Path>,
-        #[structopt(long = "spec", help = "pattern to archive")]
+        publish_base: Option<Path>,
+        #[structopt(long = "archive", help = "path to the archive file")]
+        archive: String,
+        #[structopt(long = "spec", help = "pattern to archive, can be repeated")]
         spec: Vec<String>,
     },
     #[structopt(name = "stress", about = "stress test")]
@@ -233,9 +237,9 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             subscriber::run(cfg, paths, auth)
         }
-        Sub::Record { spn, spec, .. } => {
+        Sub::Record { foreground, bind, spn, publish_base, archive, spec } => {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
-            recorder::run(cfg, auth, spec)
+            recorder::run(cfg, foreground, bind, publish_base, auth, archive, spec)
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber => {
