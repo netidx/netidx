@@ -523,7 +523,7 @@ impl ResolverRead {
     }
 
     /// list all the non leaf children of the specified path to any
-    /// depth, result order unspecified.
+    /// depth, result order unspecified. Possibly expensive.
     pub async fn list_recursive(&self, base: Path) -> Result<Vec<Path>> {
         let mut leaf = Vec::new();
         let mut query = vec![base];
@@ -543,7 +543,7 @@ impl ResolverRead {
     }
 
     /// Search the resolver server for paths matching the specified
-    /// unix style `Glob`.
+    /// unix style `Glob`. Possibly expensive.
     pub async fn list_glob(&self, glob: &Glob) -> Result<Vec<Path>> {
         let mut matches = Vec::new();
         match &glob.scoped {
