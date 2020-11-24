@@ -308,8 +308,9 @@ impl Store {
         let mut finished = false;
         loop {
             let mut n = 0;
+            let mut c = 0;
             let mut by_shard = self.read_shard_batch();
-            for _ in 0..MAX_READ_BATCH {
+            while c < MAX_READ_BATCH {
                 match msgs.next() {
                     None => {
                         finished = true;
@@ -318,16 +319,19 @@ impl Store {
                     Some(ToRead::Resolve(path)) => {
                         let s = self.shard(&path);
                         by_shard[s].push((n, ToRead::Resolve(path)));
+                        c += 1;
                     }
                     Some(ToRead::List(path)) => {
                         for b in by_shard.iter_mut() {
                             b.push((n, ToRead::List(path.clone())));
                         }
+                        c += 10000;
                     }
                     Some(ToRead::Table(path)) => {
                         for b in by_shard.iter_mut() {
                             b.push((n, ToRead::Table(path.clone())));
                         }
+                        c += 10000;
                     }
                 }
                 n += 1;
