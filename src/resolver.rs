@@ -8,6 +8,7 @@ use crate::{
         RAWFROMWRITEPOOL,
     },
 };
+use globset::{self, GlobBuilder, GlobMatcher};
 pub use crate::{
     protocol::resolver::v1::{Resolved, Table},
     resolver_single::Auth,
@@ -344,6 +345,74 @@ where
 }
 
 #[derive(Debug, Clone)]
+enum Scoped {
+    OneLevel(Vec<GlobMatcher>),
+    Subtree(GlobMatcher),
+}
+
+#[derive(Debug, Clone)]
+pub struct Glob {
+    raw: Path,
+    base: Path,
+    scoped: Scoped,
+}
+
+impl Glob {
+    pub fn new(raw: Path) -> Result<Glob> {
+        if !Path::is_absolute(&raw) {
+            bail!("glob paths must be absolute")
+        }
+        let (lvl, base) =
+            Path::dirnames(&raw).enumerate().fold((0, "/"), |cur, (lvl, p)| {
+                let mut s = p;
+                let is_glob = loop {
+                    if s.is_empty() {
+                        break false;
+                    } else {
+                        match s.find("?*{[") {
+                            None => break false,
+                            Some(i) => {
+                                if s.is_escaped(s, '\\', i) {
+                                    s = &s[i + 1..];
+                                } else {
+                                    break true;
+                                }
+                            }
+                        }
+                    }
+                };
+                if !is_glob {
+                    (lvl, p)
+                } else {
+                    cur
+                }
+            });
+        let base = Path::from(String::from(base));
+        let sc = if Path::dirnames(&raw).skip(lvl).find(|p| Path::basename(p) == "**") {
+            let g = GlobBuilder::new(&raw)
+                .backslash_escape(true)
+                .literal_separator(true)
+                .build()?
+                .compile_matcher();
+            Scoped::Subtree(g)
+        } else {
+            let g = Path::dirnames(&raw)
+                .skip(lvl)
+                .map(|p| {
+                    GlobBuilder::new(p)
+                        .backslash_escape(true)
+                        .literal_separator(true)
+                        .build()?
+                        .compile_matcher()
+                })
+                .collect::<Result<Vec<(Scope, globset::Glob)>>>()?;
+            Scoped::OneLevel(g)
+        };
+        Ok(Glob { raw, base, scoped: sc })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolverRead(ResolverWrap<SingleRead, ToRead, FromRead>);
 
 impl ResolverRead {
@@ -437,12 +506,11 @@ impl ResolverRead {
         }
     }
 
-    /// list all the children of the specified path to any depth,
-    /// result order unspecified. This could be an bandwidth and
-    /// resolver cpu time expensive operation.
+    /// list all the non leaf children of the specified path to any
+    /// depth, result order unspecified.
     pub async fn list_recursive(&self, base: Path) -> Result<Vec<Path>> {
         let mut leaf = Vec::new();
-        let mut query = self.list(base).await?.drain(..).collect::<Vec<_>>();
+        let mut query = vec![base];
         while query.len() > 0 {
             let mut res = self.list_many(query.iter().cloned()).await?;
             let mut new_query = Vec::new();
@@ -456,6 +524,25 @@ impl ResolverRead {
             query = new_query;
         }
         Ok(leaf)
+    }
+
+    /// Search the resolver server for paths matching the specified `Glob`
+    pub async fn list_glob(&self, glob: &Glob) -> Result<Vec<Path>> {
+        let mut matches = Vec::new();
+        match glob.scoped {
+            Scoped::Subtree(pat) => {
+                for p in self.list_recursive(glob.base.clone()).await?.drain(..) {
+                    if pat.is_match(&p) {
+                        matches.push(p);
+                    }
+                }
+            }
+            Scoped::OneLevel(globs) => {
+                let mut query = vec![self.base.clone()];
+                for (scope, glob) in self.globs.iter() {}
+            }
+        }
+        Ok(matches)
     }
 
     pub async fn table(&self, path: Path) -> Result<Table> {
