@@ -227,12 +227,12 @@ impl Path {
     /// ```
     pub fn unescape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
         let s = s.as_ref();
-        if !(0..s.len()).into_iter().any(|i| utils::is_escaped(s, SEP, ESC, i)) {
+        if !(0..s.len()).into_iter().any(|i| utils::is_escaped(s, ESC, i)) {
             Cow::Borrowed(s)
         } else {
             let mut out = String::with_capacity(s.len());
             for (i, c) in s.chars().enumerate() {
-                if utils::is_escaped(s, SEP, ESC, i) {
+                if utils::is_escaped(s, ESC, i) {
                     out.pop();
                 }
                 out.push(c);
@@ -412,7 +412,7 @@ impl Path {
                 match f(s) {
                     None => return None,
                     Some(i) => {
-                        if !utils::is_escaped(s, SEP, ESC, i) {
+                        if !utils::is_escaped(s, ESC, i) {
                             return Some(i);
                         } else {
                             s = &s[0..i];
