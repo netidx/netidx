@@ -1,6 +1,15 @@
+* 0.5.2:
+  - Add list_recursive, and list_glob methods to ResolverRead
+  - Tune the resolver server to give much higher priority to Resolve
+    over List and Table calls to compensate for the potentially large
+    traffic caused by list_recursive and list_glob. A List/Table call
+    now "costs" 10K Resolve calls, so the max batch size of a read
+    client doing only List calls is now 100 instead of 1000K.
+  
 * 0.5.1:
-  - Resolver server: improve the performance of sharding for a
-    noticable speedup processing large batches.
+  - Resolver server: improve the performance of sharding (eliminate
+    integer division) for a noticable speedup processing large
+    batches.
   - Put an upper bound on total pool size to avoid various extreme
     scenarios causing unbounded memory usage.
   - Pool more buffers in the resolver server to reduce dynamic

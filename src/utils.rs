@@ -12,15 +12,15 @@ use futures::{
 use rand::Rng;
 use sha3::Sha3_512;
 use std::{
+    borrow::Borrow,
+    borrow::Cow,
     cell::RefCell,
+    cmp::{Ord, Ordering, PartialOrd},
     hash::Hash,
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    borrow::Borrow,
-    cmp::{Ord, Ordering, PartialOrd},
     str,
-    borrow::Cow,
 };
 
 #[macro_export]
@@ -114,7 +114,7 @@ macro_rules! try_cf {
 
 #[macro_export]
 macro_rules! atomic_id {
-    ($name:ident) => (
+    ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(u64);
 
@@ -131,7 +131,7 @@ macro_rules! atomic_id {
                 $name(i)
             }
         }
-    )
+    };
 }
 
 pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
@@ -177,18 +177,17 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
 
 pub fn is_escaped(s: &str, esc: char, i: usize) -> bool {
     let b = s.as_bytes();
-    !s.is_char_boundary(i)
-        || (b[i] == (esc as u8) && {
-            let mut res = false;
-            for j in (0..i).rev() {
-                if s.is_char_boundary(j) && b[j] == (esc as u8) {
-                    res = !res;
-                } else {
-                    break;
-                }
+    !s.is_char_boundary(i) || {
+        let mut res = false;
+        for j in (0..i).rev() {
+            if s.is_char_boundary(j) && b[j] == (esc as u8) {
+                res = !res;
+            } else {
+                break;
             }
-            res
-        })
+        }
+        res
+    }
 }
 
 pub fn escape<T: AsRef<str> + ?Sized>(s: &T, esc: char, sep: char) -> Cow<str> {

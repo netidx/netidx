@@ -356,7 +356,7 @@ enum Scoped {
 /// * ? matches any character except the path separator
 /// * * matches zero or more characters, but not the path separator
 /// * ** recursively matches containers. It's only legal uses are /**/foo, /foo/**/bar, and /foo/bar/**, which match respectively, any path ending in foo, any path starting with /foo and ending in bar, and any path starting with /foo/bar.
-/// * {a, b}, matches a or b where a and b are glob patterns, but not **, and not a nested {} patteren.
+/// * {a, b}, matches a or b where a and b are glob patterns, {} can't be nested however.
 /// * [ab], [!ab], matches respectively the char a or b, and any char but a or b.
 /// * any of the above metacharacters can be escaped with a \, a literal \ may be produced with \\.
 ///
