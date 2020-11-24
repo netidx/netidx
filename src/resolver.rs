@@ -358,6 +358,7 @@ impl ResolverRead {
         ))
     }
 
+    /// send the specified messages to the resolver, and return the answers (in send order)
     pub async fn send(
         &self,
         batch: &Pooled<Vec<ToRead>>,
@@ -365,6 +366,7 @@ impl ResolverRead {
         self.0.send(batch).await
     }
 
+    /// resolve the specified paths, results are in send order
     pub async fn resolve<I>(&self, batch: I) -> Result<Pooled<Vec<Resolved>>>
     where
         I: IntoIterator<Item = Path>,
@@ -392,6 +394,7 @@ impl ResolverRead {
         }
     }
 
+    /// list children of the specified path. Order is unspecified.
     pub async fn list(&self, path: Path) -> Result<Pooled<Vec<Path>>> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::List(path));
@@ -406,6 +409,7 @@ impl ResolverRead {
         }
     }
 
+    /// list the children of the specified paths, results in send order.
     pub async fn list_many<I>(&self, batch: I) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>>
     where
         I: IntoIterator<Item = Path>,
@@ -426,11 +430,32 @@ impl ResolverRead {
                     FromRead::List(paths) => {
                         out.push(paths);
                     }
-                    m => bail!("unexpected list response {:?}", m)
+                    m => bail!("unexpected list response {:?}", m),
                 }
             }
             Ok(out)
         }
+    }
+
+    /// list all the children of the specified path to any depth,
+    /// result order unspecified. This could be an bandwidth and
+    /// resolver cpu time expensive operation.
+    pub async fn list_recursive(&self, base: Path) -> Result<Vec<Path>> {
+        let mut leaf = Vec::new();
+        let mut query = self.list(base).await?.drain(..).collect::<Vec<_>>();
+        while query.len() > 0 {
+            let mut res = self.list_many(query.iter().cloned()).await?;
+            let mut new_query = Vec::new();
+            for (p, mut res) in query.iter().zip(res.drain(..)) {
+                if res.is_empty() {
+                    leaf.push(p.clone());
+                } else {
+                    new_query.extend(res.drain(..));
+                }
+            }
+            query = new_query;
+        }
+        Ok(leaf)
     }
 
     pub async fn table(&self, path: Path) -> Result<Table> {

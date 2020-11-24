@@ -6,4 +6,5 @@
 
 pub mod view;
 pub mod archive;
+pub mod glob;
 mod parser;

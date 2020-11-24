@@ -175,10 +175,10 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
     }
 }
 
-pub fn is_escaped(s: &str, sep: char, esc: char, i: usize) -> bool {
+pub fn is_escaped(s: &str, esc: char, i: usize) -> bool {
     let b = s.as_bytes();
     !s.is_char_boundary(i)
-        || ((b[i] == (sep as u8) || b[i] == (esc as u8)) && {
+        || (b[i] == (esc as u8) && {
             let mut res = false;
             for j in (0..i).rev() {
                 if s.is_char_boundary(j) && b[j] == (esc as u8) {
