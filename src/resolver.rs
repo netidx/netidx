@@ -7,8 +7,8 @@ use crate::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
     },
+    utils,
 };
-use globset::{self, GlobBuilder, GlobMatcher};
 pub use crate::{
     protocol::resolver::v1::{Resolved, Table},
     resolver_single::Auth,
@@ -16,6 +16,7 @@ pub use crate::{
 use anyhow::Result;
 use futures::future;
 use fxhash::FxBuildHasher;
+use globset::{self, GlobBuilder, GlobMatcher};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{
@@ -350,6 +351,20 @@ enum Scoped {
     Subtree(GlobMatcher),
 }
 
+/// Unix style globs for matching paths in the resolver. All common
+/// unix globing features are supported.
+/// * ? matches any character except the path separator
+/// * * matches zero or more characters, but not the path separator
+/// * ** recursively matches containers. It's only legal uses are /**/foo, /foo/**/bar, and /foo/bar/**, which match respectively, any path ending in foo, any path starting with /foo and ending in bar, and any path starting with /foo/bar.
+/// * {a, b}, matches a or b where a and b are glob patterns, but not **, and not a nested {} patteren.
+/// * [ab], [!ab], matches respectively the char a or b, and any char but a or b.
+/// * any of the above metacharacters can be escaped with a \, a literal \ may be produced with \\.
+///
+/// e.g.
+/// `/solar/{stats,settings}/*` -> all leaf paths under /solar/stats or /solar/settings.
+/// `/s*/s*/**` -> any path who's first two levels start with s.
+/// `/**/?` -> any path who's final component is a single character
+/// `/marketdata/{IBM,MSFT,AMZN}/last`
 #[derive(Debug, Clone)]
 pub struct Glob {
     raw: Path,
@@ -372,7 +387,7 @@ impl Glob {
                         match s.find("?*{[") {
                             None => break false,
                             Some(i) => {
-                                if s.is_escaped(s, '\\', i) {
+                                if utils::is_escaped(s, '\\', i) {
                                     s = &s[i + 1..];
                                 } else {
                                     break true;
@@ -388,26 +403,27 @@ impl Glob {
                 }
             });
         let base = Path::from(String::from(base));
-        let sc = if Path::dirnames(&raw).skip(lvl).find(|p| Path::basename(p) == "**") {
-            let g = GlobBuilder::new(&raw)
-                .backslash_escape(true)
-                .literal_separator(true)
-                .build()?
-                .compile_matcher();
-            Scoped::Subtree(g)
-        } else {
-            let g = Path::dirnames(&raw)
-                .skip(lvl)
-                .map(|p| {
-                    GlobBuilder::new(p)
-                        .backslash_escape(true)
-                        .literal_separator(true)
-                        .build()?
-                        .compile_matcher()
-                })
-                .collect::<Result<Vec<(Scope, globset::Glob)>>>()?;
-            Scoped::OneLevel(g)
-        };
+        let sc =
+            if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
+                let g = GlobBuilder::new(&raw)
+                    .backslash_escape(true)
+                    .literal_separator(true)
+                    .build()?
+                    .compile_matcher();
+                Scoped::Subtree(g)
+            } else {
+                let g = Path::dirnames(&raw)
+                    .skip(lvl)
+                    .map(|p| {
+                        Ok(GlobBuilder::new(p)
+                            .backslash_escape(true)
+                            .literal_separator(true)
+                            .build()?
+                            .compile_matcher())
+                    })
+                    .collect::<Result<Vec<GlobMatcher>>>()?;
+                Scoped::OneLevel(g)
+            };
         Ok(Glob { raw, base, scoped: sc })
     }
 }
@@ -526,20 +542,34 @@ impl ResolverRead {
         Ok(leaf)
     }
 
-    /// Search the resolver server for paths matching the specified `Glob`
+    /// Search the resolver server for paths matching the specified
+    /// unix style `Glob`.
     pub async fn list_glob(&self, glob: &Glob) -> Result<Vec<Path>> {
         let mut matches = Vec::new();
-        match glob.scoped {
+        match &glob.scoped {
             Scoped::Subtree(pat) => {
                 for p in self.list_recursive(glob.base.clone()).await?.drain(..) {
-                    if pat.is_match(&p) {
+                    if pat.is_match(&*p) {
                         matches.push(p);
                     }
                 }
             }
-            Scoped::OneLevel(globs) => {
-                let mut query = vec![self.base.clone()];
-                for (scope, glob) in self.globs.iter() {}
+            Scoped::OneLevel(pats) => {
+                let mut query = vec![glob.base.clone()];
+                for pat in pats.iter() {
+                    let mut res = self.list_many(query.iter().cloned()).await?;
+                    let mut new_query = Vec::new();
+                    for (p, mut res) in query.iter().zip(res.drain(..)) {
+                        if res.is_empty() {
+                            matches.push(p.clone());
+                        } else {
+                            new_query.extend(
+                                res.drain(..).filter(|p| pat.is_match(p.as_ref())),
+                            );
+                        }
+                    }
+                    query = new_query;
+                }
             }
         }
         Ok(matches)
