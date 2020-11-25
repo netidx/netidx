@@ -15,12 +15,11 @@ use std::{
     self,
     cmp::max,
     collections::{BTreeMap, HashMap},
-    error,
-    fmt,
+    error, fmt,
     fs::{File, OpenOptions},
     iter::{DoubleEndedIterator, IntoIterator},
     mem,
-    ops::{Deref, DerefMut, RangeBounds},
+    ops::{Bound, Deref, DerefMut, RangeBounds},
     path::Path as FilePath,
 };
 
@@ -152,6 +151,8 @@ impl Pack for BatchItem {
 lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
     static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
+    static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
+        Pool::new(10, 100000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,6 +217,27 @@ impl MonotonicTimestamper {
                 None | Some(_) => MonoTs::NewBasis(self.update_basis(now)),
             },
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Cursor {
+    start: Bound<DateTime<Utc>>,
+    end: Bound<DateTime<Utc>>,
+    current: Option<DateTime<Utc>>,
+}
+
+impl Cursor {
+    pub fn new(start: Bound<DateTime<Utc>>, end: Bound<DateTime<Utc>>) -> Self {
+        Cursor { start, end, current: None }
+    }
+
+    pub fn reset(&mut self) {
+        self.current = None;
+    }
+
+    pub fn current(&self) -> Option<DateTime<Utc>> {
+        self.current
     }
 }
 
@@ -662,6 +684,30 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         R: RangeBounds<DateTime<Utc>>,
     {
         self.batchmap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
+    }
+
+    /// read up to `n` items from the specified cursor, and advance it
+    /// by the number of items read. The cursor will not be
+    /// invalidated even if no items can be read, however depending on
+    /// it's bounds it may never read any more items.
+    pub fn read_cursor(
+        &self,
+        cursor: &mut Cursor,
+        n: usize,
+    ) -> Result<Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+        let mut res = CURSOR_BATCH_POOL.take();
+        let start = match cursor.current {
+            None => cursor.start,
+            Some(dt) => Bound::Excluded(dt)
+        };
+        let mut current = None;
+        for r in self.range((start, cursor.end)).take(n) {
+            let (d, b) = r?;
+            current = Some(d);
+            res.push((d, b));
+        }
+        cursor.current = current;
+        Ok(res)
     }
 }
 

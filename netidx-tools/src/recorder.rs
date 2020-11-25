@@ -2,23 +2,20 @@ use futures::prelude::*;
 use netidx::{
     config::Config,
     publisher::{BindCfg, Publisher, Val, Value},
-    resolver::Auth,
+    subscriber::{SubId, Dval},
+    resolver::{Auth, ResolverRead, Glob},
     path::Path,
+    pool::Pooled,
 };
-use netidx_protocols::archive::{Archive, ReadOnly, ReadWrite};
+use netidx_protocols::archive::{Archive, ReadOnly, ReadWrite, BatchItem};
 use tokio::runtime::Runtime;
+use std::ops::Bound;
 
-#[derive(Debug, Clone, Copy)]
-enum Level {
-    OneValue,
-    OneLevel,
-    SubTree
-}
-
-#[derive(Debug, Clone)]
-struct Spec {
-    base: Path,
-    level: Level,
+enum ToArchive {
+    AddPaths(Vec<(Path, SubId)>),
+    AddBatch(Pooled<Vec<(SubId, Value)>>),
+    OpenCursor(Bound<DateTime<Utc>>, Bound<DateTime<Utc>>),
+    ReadCursor(u64, usize),
 }
 
 pub(crate) fn run(
