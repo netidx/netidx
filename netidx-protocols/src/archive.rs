@@ -236,6 +236,12 @@ impl Cursor {
         self.current = None;
     }
 
+    pub fn set(&mut self, pos: DateTime<Utc>) {
+        if (self.start, self.end).contains(pos) {
+            current = Some(pos);
+        }
+    }
+    
     pub fn current(&self) -> Option<DateTime<Utc>> {
         self.current
     }
