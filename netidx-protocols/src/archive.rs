@@ -221,14 +221,14 @@ impl MonotonicTimestamper {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor {
-    start: Bound<DateTime<Utc>>,
-    end: Bound<DateTime<Utc>>,
+    pub start: Bound<DateTime<Utc>>,
+    pub end: Bound<DateTime<Utc>>,
     current: Option<DateTime<Utc>>,
 }
 
 impl Cursor {
-    pub fn new(start: Bound<DateTime<Utc>>, end: Bound<DateTime<Utc>>) -> Self {
-        Cursor { start, end, current: None }
+    pub fn new() -> Self {
+        Cursor { start: Bound::Unbounded, end: Bound::Unbounded, current: None }
     }
 
     pub fn reset(&mut self) {
@@ -815,7 +815,8 @@ mod test {
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             t.add_paths(&paths).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.add_batch(false, ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))))
+                .unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 1);
             t.len()
@@ -829,7 +830,8 @@ mod test {
             // check that we can reopen, and add to an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.add_batch(false, ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))))
+                .unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 2);
         }
@@ -845,7 +847,11 @@ mod test {
             while t.len() == initial_size {
                 let ids =
                     paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-                t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+                t.add_batch(
+                    false,
+                    ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))),
+                )
+                .unwrap();
                 n += 1;
                 check_contents(&t, &paths, n);
             }
