@@ -133,18 +133,17 @@ pub struct BatchItem(pub u64, pub Event);
 
 impl Pack for BatchItem {
     fn len(&self) -> usize {
-        varint_len(self.0) + <Value as Pack>::len(&self.1)
+        varint_len(self.0) + Pack::len(&self.1)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(self.0, buf);
-        <Value as Pack>::encode(&self.1, buf)
+        Pack::encode(&self.1, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let id = decode_varint(buf)?;
-        let value = <Value as Pack>::decode(buf)?;
-        Ok(BatchItem(id, value))
+        Ok(BatchItem(id, <Event as Pack>::decode(buf)?))
     }
 }
 
@@ -237,11 +236,11 @@ impl Cursor {
     }
 
     pub fn set(&mut self, pos: DateTime<Utc>) {
-        if (self.start, self.end).contains(pos) {
-            current = Some(pos);
+        if (self.start, self.end).contains(&pos) {
+            self.current = Some(pos);
         }
     }
-    
+
     pub fn current(&self) -> Option<DateTime<Utc>> {
         self.current
     }
@@ -292,11 +291,11 @@ impl fmt::Display for RecordTooLarge {
 impl error::Error for RecordTooLarge {}
 
 /// This reads and writes the netidx archive format (as written by the
-/// "record" command in the tools). The archive format is intended to be
-/// a compact format for storing recordings of netidx data for long
+/// "record" command in the tools). The archive format is intended to
+/// be a compact format for storing recordings of netidx data for long
 /// term storage and access. It uses memory mapped IO for performance
 /// and memory efficiency, and as such file size is limited to
-/// `usize`, which on most platforms is not an issue.
+/// `usize`, which on 64 bit platforms should not be an issue.
 ///
 /// Files begin with a file header, which consists of the string
 /// "netidx archive" followed by the file format
@@ -309,13 +308,29 @@ impl error::Error for RecordTooLarge {}
 /// not followed by a data item.
 ///
 /// Items are written to the file using a two phase commit scheme to
-/// allow detection of partially committed. Initially, items are
+/// allow detection of possibly corrupted data. Initially, items are
 /// marked as uncommitted, and only upon a successful flush to disk
 /// are they then marked as committed.
 ///
 /// When an archive is opened, an index of it's contents is built in
 /// memory so that any part of it can be accessed quickly by
 /// timestamp. As a result, there is some memory overhead.
+///
+/// In order to facilitate full reconstruction of the state at any
+/// point without requiring to decode the entire file up to that point
+/// there are two types of data records, image records contain the
+/// entire state of every archived value, and delta records contain
+/// only values that changed since the last delta record. The full
+/// state of the values can be constructed at a given time `t` by
+/// seeking to the nearest image record that is before `t`, and then
+/// processing all the delta records up to `t`.
+///
+/// Because data sets vary in requirements and size the writing of
+/// image records is configurable in the archiver (e.g. write 1 image
+/// per 512 MiB of deltas), and it is not required to write any image
+/// records, however this will mean that reconstructing the state at
+/// any point will require processing the entire file before that
+/// point.
 ///
 /// To prevent data corruption the underling file is locked for
 /// exclusive access using the advisory file locking mechanism present
@@ -351,7 +366,8 @@ impl error::Error for RecordTooLarge {}
 pub struct Archive<T> {
     path_by_id: HashMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
-    batchmap: BTreeMap<DateTime<Utc>, usize>,
+    imagemap: BTreeMap<DateTime<Utc>, usize>,
+    deltamap: BTreeMap<DateTime<Utc>, usize>,
     file: File,
     mmap: T,
     block_size: usize,
@@ -381,7 +397,8 @@ impl<T> Archive<T> {
         }
         let mut path_by_id = HashMap::new();
         let mut id_by_path = HashMap::new();
-        let mut batchmap = BTreeMap::new();
+        let mut imagemap = BTreeMap::new();
+        let mut deltamap = BTreeMap::new();
         let mut time_basis = chrono::MIN_DATETIME;
         let mut max_id = 0;
         let end = loop {
@@ -394,23 +411,31 @@ impl<T> Archive<T> {
                 .map_err(Error::from)
                 .context("invalid record header")?;
             if !rh.committed {
-                warn!("uncommitted records before end marker {}", pos);
+                // End of archive is marked by an uncommitted record with length 0
+                if rh.record_length != 0 {
+                    warn!("uncommitted records before end marker {}", pos);
+                }
                 break pos;
             }
             if buf.remaining() < rh.record_length as usize {
                 warn!("truncated record at {}", pos);
                 break pos;
             }
+            use chrono::Duration;
             match rh.record_type {
-                RecordTyp::End => break pos,
+                RecordTyp::DeltaBatch => {
+                    let timestamp =
+                        time_basis + Duration::microseconds(rh.timestamp as i64);
+                    deltamap.insert(timestamp, pos);
+                    buf.advance(rh.record_length as usize); // skip the contents
+                }
                 RecordTyp::Timestamp => {
                     time_basis = <DateTime<Utc> as Pack>::decode(&mut buf)?;
                 }
-                RecordTyp::Batch => {
-                    use chrono::Duration;
+                RecordTyp::ImageBatch => {
                     let timestamp =
                         time_basis + Duration::microseconds(rh.timestamp as i64);
-                    batchmap.insert(timestamp, pos);
+                    imagemap.insert(timestamp, pos);
                     buf.advance(rh.record_length as usize); // skip the contents
                 }
                 RecordTyp::PathMappings => {
@@ -428,7 +453,8 @@ impl<T> Archive<T> {
         Ok(Archive {
             path_by_id,
             id_by_path,
-            batchmap,
+            deltamap,
+            imagemap,
             file,
             mmap,
             block_size,
@@ -460,7 +486,8 @@ impl<T> Archive<T> {
             Ok(Archive {
                 path_by_id: t.path_by_id,
                 id_by_path: t.id_by_path,
-                batchmap: t.batchmap,
+                deltamap: t.deltamap,
+                imagemap: t.imagemap,
                 file: t.file,
                 mmap,
                 block_size: t.block_size,
@@ -485,8 +512,8 @@ impl<T> Archive<T> {
             let fh = FileHeader { version: FILE_VERSION };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             let rh = RecordHeader {
-                committed: true,
-                record_type: RecordTyp::End,
+                committed: false,
+                record_type: RecordTyp::DeltaBatch,
                 record_length: 0,
                 timestamp: 0,
             };
@@ -495,7 +522,8 @@ impl<T> Archive<T> {
             Ok(Archive {
                 path_by_id: HashMap::new(),
                 id_by_path: HashMap::new(),
-                batchmap: BTreeMap::new(),
+                deltamap: BTreeMap::new(),
+                imagemap: BTreeMap::new(),
                 file,
                 mmap,
                 block_size,
@@ -552,8 +580,8 @@ impl Archive<ReadWrite> {
             }
             assert_eq!(n, self.end);
             let end = RecordHeader {
-                committed: true,
-                record_type: RecordTyp::End,
+                committed: false,
+                record_type: RecordTyp::DeltaBatch,
                 record_length: 0,
                 timestamp: 0,
             };
@@ -598,8 +626,12 @@ impl Archive<ReadWrite> {
         Ok(())
     }
 
-    /// Add a data batch to the archive. This method will fail if any
-    /// of the path ids in the batch are unknown.
+    /// Add a data batch to the archive. If `image` is true then it
+    /// will be marked as an image batch, and should contain a value
+    /// for every subscriped path whether it changed or not, otherwise
+    /// it will be marked as a delta batch, and should contain only
+    /// values that changed since the last delta batch. This method
+    /// will fail if any of the path ids in the batch are unknown.
     ///
     /// batch timestamps are monotonicly increasing, with the
     /// granularity of 1us. As such, one should avoid writing
@@ -607,7 +639,8 @@ impl Archive<ReadWrite> {
     /// correctness write as few batches as possible.
     pub fn add_batch(
         &mut self,
-        items: impl IntoIterator<Item = (u64, Value)>,
+        image: bool,
+        items: impl IntoIterator<Item = (u64, Event)>,
     ) -> Result<()> {
         let mut batch = BATCH_POOL.take();
         for (id, val) in items {
@@ -640,7 +673,11 @@ impl Archive<ReadWrite> {
             let mut buf = &mut self.mmap[self.end..];
             let rh = RecordHeader {
                 committed: false,
-                record_type: RecordTyp::Batch,
+                record_type: if image {
+                    RecordTyp::ImageBatch
+                } else {
+                    RecordTyp::DeltaBatch
+                },
                 record_length: record_length as u32,
                 timestamp: time_offset,
             };
@@ -648,7 +685,11 @@ impl Archive<ReadWrite> {
             <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
             let timestamp =
                 time_basis + chrono::Duration::microseconds(time_offset as i64);
-            self.batchmap.insert(timestamp, self.end);
+            if image {
+                self.imagemap.insert(timestamp, self.end);
+            } else {
+                self.deltamap.insert(timestamp, self.end);
+            }
             self.end += len;
         }
         Ok(())
@@ -680,16 +721,28 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
     }
 
-    /// return an iterator over batches within the specified time
-    /// range.
-    pub fn range<'a, R>(
+    /// return an iterator over delta batches within the specified
+    /// time range.
+    pub fn delta_range<'a, R>(
         &'a self,
         range: R,
     ) -> impl DoubleEndedIterator<Item = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> + 'a
     where
         R: RangeBounds<DateTime<Utc>>,
     {
-        self.batchmap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
+        self.deltamap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
+    }
+
+    /// return an iterator over image batches within the specified
+    /// time range.
+    pub fn image_range<'a, R>(
+        &'a self,
+        range: R,
+    ) -> impl DoubleEndedIterator<Item = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> + 'a
+    where
+        R: RangeBounds<DateTime<Utc>>,
+    {
+        self.imagemap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
     }
 
     /// read up to `n` items from the specified cursor, and advance it
@@ -704,10 +757,10 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
-            Some(dt) => Bound::Excluded(dt)
+            Some(dt) => Bound::Excluded(dt),
         };
         let mut current = None;
-        for r in self.range((start, cursor.end)).take(n) {
+        for r in self.delta_range((start, cursor.end)).take(n) {
             let (d, b) = r?;
             current = Some(d);
             res.push((d, b));
@@ -720,6 +773,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use netidx::subscriber::Value;
     use std::{
         fs,
         ops::Bound::{self, *},
@@ -731,7 +785,9 @@ mod test {
         batches: usize,
     ) {
         let mut batch = t
-            .range::<(Bound<DateTime<Utc>>, Bound<DateTime<Utc>>)>((Unbounded, Unbounded))
+            .delta_range::<(Bound<DateTime<Utc>>, Bound<DateTime<Utc>>)>((
+                Unbounded, Unbounded,
+            ))
             .collect::<Vec<_>>();
         assert_eq!(batch.len(), batches);
         let now = Utc::now();
@@ -742,7 +798,7 @@ mod test {
             assert_eq!(Vec::len(&b), paths.len());
             for (BatchItem(id, v), p) in b.iter().zip(paths.iter()) {
                 assert_eq!(Some(p), t.path_for_id(*id));
-                assert_eq!(v, &Value::U64(42))
+                assert_eq!(v, &Event::Update(Value::U64(42)))
             }
         }
     }
@@ -759,7 +815,7 @@ mod test {
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             t.add_paths(&paths).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 1);
             t.len()
@@ -773,7 +829,7 @@ mod test {
             // check that we can reopen, and add to an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+            t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 2);
         }
@@ -789,7 +845,7 @@ mod test {
             while t.len() == initial_size {
                 let ids =
                     paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-                t.add_batch(ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
+                t.add_batch(false, ids.iter().map(|id| (*id, Value::U64(42)))).unwrap();
                 n += 1;
                 check_contents(&t, &paths, n);
             }
