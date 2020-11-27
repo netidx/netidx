@@ -5,6 +5,7 @@ use crate::{
     chars::Chars,
     config::Config,
     os::{self, ClientCtx, Krb5Ctx},
+    pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     protocol::publisher::v1::{From, Id, To},
@@ -12,7 +13,7 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
-use bytes::Bytes;
+use bytes::{Bytes, Buf, BufMut};
 use futures::{
     channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
@@ -31,12 +32,13 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Weak},
     time::Duration,
+    result,
 };
 use tokio::{
     net::TcpStream,
     sync::{mpsc::error::SendTimeoutError, oneshot},
     task,
-    time::{self, Sleep, Instant},
+    time::{self, Instant, Sleep},
 };
 
 #[derive(Debug)]
@@ -88,6 +90,31 @@ enum ToCon {
 pub enum Event {
     Unsubscribed,
     Update(Value),
+}
+
+impl Pack for Event {
+    fn len(&self) -> usize {
+        match self {
+            Event::Unsubscribed => 1,
+            Event::Update(v) => Pack::len(v),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
+        match self {
+            Event::Unsubscribed => Ok(buf.put_u8(0x40)),
+            Event::Update(v) => Pack::encode(v, buf),
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
+        if buf.bytes()[0] == 0x40 {
+            buf.advance(1);
+            Ok(Event::Unsubscribed)
+        } else {
+            Ok(Event::Update(Pack::decode(buf)?))
+        }
+    }
 }
 
 #[derive(Debug)]

@@ -342,6 +342,8 @@ impl fmt::Display for Typ {
     }
 }
 
+// This enum is limited to 0x3F cases, because the high 2 bits of the
+// tag are reserved for zero cost wrapper types.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Value {
     /// full 4 byte u32
@@ -626,6 +628,8 @@ impl Pack for Value {
         }
     }
 
+    // the high two bits of the tag are reserved for wrapper types,
+    // max tag is therefore 0x3F
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Value::U32(i) => {

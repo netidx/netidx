@@ -8,7 +8,7 @@ use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    publisher::Value,
+    subscriber::Event,
 };
 use packed_struct::PackedStruct;
 use std::{
@@ -61,10 +61,10 @@ enum RecordTyp {
     Timestamp = 0,
     /// A record mapping paths to ids
     PathMappings = 1,
-    /// A data batch
-    Batch = 2,
-    /// End of archive marker
-    End = 3,
+    /// A data batch containing deltas from the previous batch
+    DeltaBatch = 2,
+    /// A data batch containing a full image
+    ImageBatch = 3,
 }
 
 const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
@@ -129,7 +129,7 @@ impl Pack for PathMapping {
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchItem(pub u64, pub Value);
+pub struct BatchItem(pub u64, pub Event);
 
 impl Pack for BatchItem {
     fn len(&self) -> usize {
