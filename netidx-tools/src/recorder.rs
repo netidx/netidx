@@ -1,4 +1,4 @@
-use futures::{prelude::*, channel::mpsc};
+use futures::{channel::mpsc, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
@@ -26,7 +26,7 @@ fn session_base(publish_base: &Path, id: Uuid) -> Path {
 static START_DOC: &'static str = "The timestamp you want to replay to start at, or String(Unbounded) for the beginning of the archive. Default Unbounded.";
 static END_DOC: &'static str = "Time timestamp you want to replay end at, or String(Unbounded) for the end of the archive. default Unbounded";
 static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, String(Unlimited) = as fast as data can be read and sent. Default is 1";
-static CONTROL_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Default Stop. Pause, pause at the current position. Stop, stop and reset position to the start.";
+static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Pause, pause at the current position. Stop, reset playback to the initial state, unpublish everything, and wait. Default Stop.";
 static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek";
 
 async fn run_session(
@@ -40,35 +40,46 @@ async fn run_session(
     let mut published: HashMap<u64, Val> = HashMap::new();
     let mut cursor = Cursor::new();
     let start_doc = publisher.publish(
-        session_base.append("start/doc"),
+        session_base.append("control/start/doc"),
         Value::String(Chars::from(START_DOC)),
     )?;
     let start = publisher.publish(
-        session_base.append("start/current"),
+        session_base.append("control/start/current"),
         Value::String(Chars::from("Unbounded")),
     )?;
-    let end_doc = publisher
-        .publish(session_base.append("end/doc"), Value::String(Chars::from(END_DOC)))?;
+    let end_doc = publisher.publish(
+        session_base.append("control/end/doc"),
+        Value::String(Chars::from(END_DOC)),
+    )?;
     let end = publisher.publish(
-        session_base.append("end/current"),
+        session_base.append("control/end/current"),
         Value::String(Chars::from("Unbounded")),
     )?;
     let speed_doc = publisher.publish(
-        session_base.append("speed/doc"),
+        session_base.append("control/speed/doc"),
         Value::String(Chars::from(SPEED_DOC)),
     )?;
-    let speed = publisher.publish(session_base.append("speed/current"), Value::V32(1))?;
-    let control_doc = publisher.publish(
-        session_base.append("control/doc"),
-        Value::String(Chars::from(CONTROL_DOC)),
+    let speed =
+        publisher.publish(session_base.append("control/speed/current"), Value::V32(1))?;
+    let state_doc = publisher.publish(
+        session_base.append("control/state/doc"),
+        Value::String(Chars::from(STATE_DOC)),
     )?;
-    let control = publisher.publish(
-        session_base.append("control/current"),
+    let state = publisher.publish(
+        session_base.append("control/state/current"),
         Value::String(Chars::from("Stop")),
     )?;
-    let pos_doc = publisher
-        .publish(session_base.append("pos/doc"), Value::String(Chars::from(POS_DOC)))?;
-    let pos = publisher.publish(session_base.append("pos/current"), Value::Null)?;
+    let pos_doc = publisher.publish(
+        session_base.append("control/pos/doc"),
+        Value::String(Chars::from(POS_DOC)),
+    )?;
+    let pos =
+        publisher.publish(session_base.append("control/pos/current"), Value::Null)?;
+    start.writes(control_tx.clone());
+    end.writes(control_tx.clone());
+    speed.writes(control_tx.clone());
+    control.writes(control_tx.clone());
+    pos.writes(control_tx);
 }
 
 async fn run_publisher(
