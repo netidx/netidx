@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     error, fmt,
     fs::{File, OpenOptions},
-    iter::{DoubleEndedIterator, IntoIterator},
+    iter::IntoIterator,
     mem,
     ops::{Bound, Deref, DerefMut, RangeBounds},
     path::Path as FilePath,
@@ -154,7 +154,7 @@ lazy_static! {
     static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
     static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(10, 100000);
-    static ref POS_POOL: Pool<Vec<(DateTime<Utc>, u64)>> = Pool::new(10, 100000);
+    static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +304,14 @@ struct IndexInner {
 
 #[derive(Debug, Clone)]
 struct Index(Arc<RwLock<IndexInner>>);
+
+impl Deref for Index {
+    type Target = RwLock<IndexInner>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
 
 /// This reads and writes the netidx archive format (as written by the
 /// "record" command in the tools). The archive format is intended to
@@ -495,15 +503,9 @@ impl<T> Archive<T> {
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
             file.try_lock_exclusive()?;
             let t = Archive::<ReadOnly>::scan(path.as_ref(), file)?;
-            let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.file)? });
+            let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.index.read().file)? });
             Ok(Archive {
-                index: Index(Arc::new(RwLock::new(IndexInner {
-                    path_by_id: t.path_by_id,
-                    id_by_path: t.id_by_path,
-                    deltamap: t.deltamap,
-                    imagemap: t.imagemap,
-                    file: t.file,
-                }))),
+                index: t.index,
                 mmap,
                 block_size: t.block_size,
                 end: t.end,
@@ -560,10 +562,11 @@ impl Archive<ReadWrite> {
         let new_len = len + max(len << 4, additional_capacity);
         let new_blocks = (new_len / self.block_size as usize) + 1;
         let new_size = new_blocks * self.block_size as usize;
-        self.index.write().file.set_len(new_size as u64)?;
+        let inner = self.index.read();
+        inner.file.set_len(new_size as u64)?;
         Ok(drop(mem::replace(
             &mut self.mmap,
-            ReadWrite(unsafe { MmapMut::map_mut(&self.file)? }),
+            ReadWrite(unsafe { MmapMut::map_mut(&inner.file)? }),
         )))
     }
 
@@ -721,23 +724,24 @@ impl Archive<ReadWrite> {
 
 impl<T: Deref<Target = [u8]>> Archive<T> {
     /// Create a read-only mirror of the archive. This is a low cost
-    /// operation, it merely duplicates the memory map, although on 32
-    /// bit platforms address space might become an issue if the
-    /// archive is large.
+    /// operation, it duplicates the memory map and shares everything
+    /// else. On 32 bit platforms address space might become an issue
+    /// if the archive is large.
     pub fn mirror(&self) -> Result<Archive<ReadOnly>> {
         let index = self.index.clone();
         let mmap = {
             let inner = index.read();
             ReadOnly(unsafe { Mmap::map(&inner.file)? })
         };
-        Archive {
+        Ok(Archive {
             index,
             mmap,
             block_size: self.block_size,
             end: self.end,
             uncommitted: self.uncommitted,
+            next_id: self.next_id,
             ts: self.ts,
-        }
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -751,11 +755,12 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     pub fn path_for_id(&self, id: u64) -> Option<Path> {
         self.index.read().path_by_id.get(&id).cloned()
     }
+}
 
+impl Archive<ReadOnly> {
     fn get_batch_at(&mut self, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
         if pos > self.len() {
-            let inner = self.index.read();
-            self.mmap = ReadOnly(unsafe { Mmap::map(&inner.file) });
+            self.mmap = ReadOnly(unsafe { Mmap::map(&self.index.read().file)? });
             if pos > self.len() {
                 bail!("get_batch: index {} out of bounds", pos);
             }
@@ -775,8 +780,14 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         &mut self,
         cursor: &Cursor,
     ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        let (ts, pos) = self.index.read().imagemap(cursor.start..cursor.end).next()?;
-        match self.get_batch_at(pos) {
+        let (ts, pos) = self
+            .index
+            .read()
+            .imagemap
+            .range((cursor.start, cursor.end))
+            .next()
+            .map(|(ts, pos)| (*ts, *pos))?;
+        match self.get_batch_at(pos as usize) {
             Err(e) => Some(Err(Error::from(e))),
             Ok(batch) => Some(Ok((ts, batch))),
         }
@@ -798,9 +809,16 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
             Some(dt) => Bound::Excluded(dt),
         };
         let mut current = None;
-        idxs.extend(self.index.read().deltamap.range((start, cursor.end)).take(n));
+        idxs.extend(
+            self.index
+                .read()
+                .deltamap
+                .range((start, cursor.end))
+                .map(|(ts, pos)| (*ts, *pos))
+                .take(n),
+        );
         for (ts, pos) in idxs.drain(..) {
-            let batch = self.get_batch_at(pos)?;
+            let batch = self.get_batch_at(pos as usize)?;
             current = Some(ts);
             res.push((ts, batch));
         }
