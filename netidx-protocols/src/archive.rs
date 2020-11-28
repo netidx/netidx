@@ -11,7 +11,10 @@ use netidx::{
     subscriber::Event,
 };
 use packed_struct::PackedStruct;
-use parking_lot::RwLock;
+use parking_lot::{
+    lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
+    RwLock,
+};
 use std::{
     self,
     cmp::max,
@@ -247,6 +250,10 @@ impl Cursor {
     pub fn current(&self) -> Option<DateTime<Utc>> {
         self.current
     }
+
+    pub fn contains(&self, ts: &DateTime<Utc>) -> bool {
+        (self.start, self.end).contains(ts)
+    }
 }
 
 /// The type associated with a read only archive
@@ -294,23 +301,17 @@ impl fmt::Display for RecordTooLarge {
 impl error::Error for RecordTooLarge {}
 
 #[derive(Debug)]
-struct IndexInner {
+struct ArchiveInner {
     path_by_id: HashMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
     imagemap: BTreeMap<DateTime<Utc>, usize>,
     deltamap: BTreeMap<DateTime<Utc>, usize>,
     file: File,
-}
-
-#[derive(Debug, Clone)]
-struct Index(Arc<RwLock<IndexInner>>);
-
-impl Deref for Index {
-    type Target = RwLock<IndexInner>;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
+    block_size: usize,
+    end: usize,
+    uncommitted: usize,
+    next_id: u64,
+    ts: MonotonicTimestamper,
 }
 
 /// This reads and writes the netidx archive format (as written by the
@@ -387,13 +388,8 @@ impl Deref for Index {
 /// 1289 bytes (264 bytes of overhead 20%)
 #[derive(Debug)]
 pub struct Archive<T> {
-    index: Index,
+    inner: Arc<RwLock<ArchiveInner>>,
     mmap: T,
-    block_size: usize,
-    end: usize,
-    uncommitted: usize,
-    next_id: u64,
-    ts: MonotonicTimestamper,
 }
 
 impl<T> Archive<T> {
@@ -470,19 +466,19 @@ impl<T> Archive<T> {
             }
         };
         Ok(Archive {
-            index: Index(Arc::new(RwLock::new(IndexInner {
+            inner: Arc::new(RwLock::new(ArchiveInner {
                 path_by_id,
                 id_by_path,
                 deltamap,
                 imagemap,
                 file,
-            }))),
+                block_size,
+                end,
+                uncommitted: end,
+                next_id: max_id + 1,
+                ts: MonotonicTimestamper::new(),
+            })),
             mmap,
-            block_size,
-            end,
-            uncommitted: end,
-            next_id: max_id + 1,
-            ts: MonotonicTimestamper::new(),
         })
     }
 
@@ -503,16 +499,8 @@ impl<T> Archive<T> {
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
             file.try_lock_exclusive()?;
             let t = Archive::<ReadOnly>::scan(path.as_ref(), file)?;
-            let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.index.read().file)? });
-            Ok(Archive {
-                index: t.index,
-                mmap,
-                block_size: t.block_size,
-                end: t.end,
-                uncommitted: t.uncommitted,
-                next_id: t.next_id,
-                ts: t.ts,
-            })
+            let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.inner.read().file)? });
+            Ok(Archive { inner: t.inner, mmap })
         } else {
             let file = OpenOptions::new()
                 .read(true)
@@ -537,77 +525,83 @@ impl<T> Archive<T> {
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             mmap.0.flush()?;
             Ok(Archive {
-                index: Index(Arc::new(RwLock::new(IndexInner {
+                inner: Arc::new(RwLock::new(ArchiveInner {
                     path_by_id: HashMap::new(),
                     id_by_path: HashMap::new(),
                     deltamap: BTreeMap::new(),
                     imagemap: BTreeMap::new(),
                     file,
-                }))),
+                    block_size,
+                    end: fh_len,
+                    uncommitted: fh_len,
+                    next_id: 0,
+                    ts: MonotonicTimestamper::new(),
+                })),
                 mmap,
-                block_size,
-                end: fh_len,
-                uncommitted: fh_len,
-                next_id: 0,
-                ts: MonotonicTimestamper::new(),
             })
         }
     }
 }
 
+// remap the file reserving space for at least additional_capacity bytes
+fn reserve(
+    mmap: &mut ReadWrite,
+    inner: &ArchiveInner,
+    additional_capacity: usize,
+) -> Result<()> {
+    let len = mmap.len();
+    let new_len = len + max(len << 4, additional_capacity);
+    let new_blocks = (new_len / inner.block_size as usize) + 1;
+    let new_size = new_blocks * inner.block_size as usize;
+    inner.file.set_len(new_size as u64)?;
+    Ok(drop(mem::replace(mmap, ReadWrite(unsafe { MmapMut::map_mut(&inner.file)? }))))
+}
+
+fn check_reserve(
+    mmap: &mut ReadWrite,
+    inner: &ArchiveInner,
+    record_length: usize,
+) -> Result<usize> {
+    if record_length > MAX_RECORD_LEN as usize {
+        bail!(RecordTooLarge);
+    }
+    let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
+    if mmap.len() - inner.end < len {
+        reserve(mmap, inner, len)?;
+    }
+    Ok(len)
+}
+
 impl Archive<ReadWrite> {
-    // remap the file reserving space for at least additional_capacity bytes
-    fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
-        let len = self.mmap.len();
-        let new_len = len + max(len << 4, additional_capacity);
-        let new_blocks = (new_len / self.block_size as usize) + 1;
-        let new_size = new_blocks * self.block_size as usize;
-        let inner = self.index.read();
-        inner.file.set_len(new_size as u64)?;
-        Ok(drop(mem::replace(
-            &mut self.mmap,
-            ReadWrite(unsafe { MmapMut::map_mut(&inner.file)? }),
-        )))
-    }
-
-    fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
-        if record_length > MAX_RECORD_LEN as usize {
-            bail!(RecordTooLarge);
-        }
-        let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
-        if self.mmap.len() - self.end < len {
-            self.reserve(len)?;
-        }
-        Ok(len)
-    }
-
     /// flush uncommitted changes to disk, mark all flushed records as
     /// committed, and update the end of archive marker. Does nothing
     /// if everything is already committed.
     pub fn flush(&mut self) -> Result<()> {
-        if self.uncommitted < self.end {
+        let inner = self.inner.upgradable_read();
+        if inner.uncommitted < inner.end {
             let hl = <RecordHeader as Pack>::const_len().unwrap();
-            if self.mmap.len() - self.end < hl {
-                self.reserve(hl)?;
+            if self.mmap.len() - inner.end < hl {
+                reserve(&mut self.mmap, &*inner, hl)?;
             }
             self.mmap.0.flush()?;
-            let mut n = self.uncommitted;
-            while n < self.end {
+            let mut n = inner.uncommitted;
+            while n < inner.end {
                 let mut hr = <RecordHeader as Pack>::decode(&mut &self.mmap[n..])?;
                 hr.committed = true;
                 <RecordHeader as Pack>::encode(&hr, &mut &mut self.mmap[n..])?;
                 n += hl + hr.record_length as usize;
             }
-            assert_eq!(n, self.end);
+            assert_eq!(n, inner.end);
             let end = RecordHeader {
                 committed: false,
                 record_type: RecordTyp::DeltaBatch,
                 record_length: 0,
                 timestamp: 0,
             };
-            <RecordHeader as Pack>::encode(&end, &mut &mut self.mmap[self.end..])?;
+            <RecordHeader as Pack>::encode(&end, &mut &mut self.mmap[inner.end..])?;
             self.mmap.0.flush()?;
-            self.uncommitted = self.end;
+            let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            inner.uncommitted = inner.end;
         }
         Ok(())
     }
@@ -619,23 +613,22 @@ impl Archive<ReadWrite> {
         &'a mut self,
         paths: impl IntoIterator<Item = &'a Path>,
     ) -> Result<()> {
+        let mut inner = self.inner.write();
         let mut pms = PM_POOL.take();
-        {
-            let mut inner = self.index.write();
-            for path in paths {
-                if !inner.id_by_path.contains_key(path) {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    inner.id_by_path.insert(path.clone(), id);
-                    inner.path_by_id.insert(id, path.clone());
-                    pms.push(PathMapping(path.clone(), id));
-                }
+        for path in paths {
+            if !inner.id_by_path.contains_key(path) {
+                let id = inner.next_id;
+                inner.next_id += 1;
+                inner.id_by_path.insert(path.clone(), id);
+                inner.path_by_id.insert(id, path.clone());
+                pms.push(PathMapping(path.clone(), id));
             }
         }
         if pms.len() > 0 {
+            let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
             let record_length = <Pooled<Vec<PathMapping>> as Pack>::len(&pms);
-            let len = self.check_reserve(record_length)?;
-            let mut buf = &mut self.mmap[self.end..];
+            let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
+            let mut buf = &mut self.mmap[inner.end..];
             let rh = RecordHeader {
                 committed: false,
                 record_type: RecordTyp::PathMappings,
@@ -644,7 +637,8 @@ impl Archive<ReadWrite> {
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, &mut buf)?;
-            self.end += len;
+            let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            inner.end += len;
         }
         Ok(())
     }
@@ -663,40 +657,43 @@ impl Archive<ReadWrite> {
     pub fn add_batch(
         &mut self,
         image: bool,
-        items: impl IntoIterator<Item = (u64, Event)>,
+        batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
-        let mut batch = BATCH_POOL.take();
-        {
-            let inner = self.index.read();
-            for (id, val) in items {
-                if !inner.path_by_id.contains_key(&id) {
-                    bail!("unknown subscription {}, register it first", id);
-                }
-                batch.push(BatchItem(id, val));
+        let inner = self.inner.upgradable_read();
+        for BatchItem(id, _) in batch.iter() {
+            if !inner.path_by_id.contains_key(id) {
+                bail!("unknown subscription {}, register it first", id);
             }
         }
         if batch.len() > 0 {
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
-            let (time_basis, time_offset) = match self.ts.timestamp() {
-                MonoTs::Offset(basis, off) => (basis, off),
-                MonoTs::NewBasis(basis) => {
-                    let record_length = <DateTime<Utc> as Pack>::len(&basis);
-                    let rh = RecordHeader {
-                        committed: false,
-                        record_type: RecordTyp::Timestamp,
-                        record_length: record_length as u32,
-                        timestamp: 0,
-                    };
-                    let len = self.check_reserve(record_length)?;
-                    let mut buf = &mut self.mmap[self.end..];
-                    <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-                    <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
-                    self.end += len;
-                    (basis, 0)
+            let (time_basis, time_offset, inner) = {
+                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+                match inner.ts.timestamp() {
+                    MonoTs::Offset(basis, off) => {
+                        (basis, off, RwLockWriteGuard::downgrade_to_upgradable(inner))
+                    }
+                    MonoTs::NewBasis(basis) => {
+                        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
+                        let record_length = <DateTime<Utc> as Pack>::len(&basis);
+                        let rh = RecordHeader {
+                            committed: false,
+                            record_type: RecordTyp::Timestamp,
+                            record_length: record_length as u32,
+                            timestamp: 0,
+                        };
+                        let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
+                        let mut buf = &mut self.mmap[inner.end..];
+                        <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+                        <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
+                        let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+                        inner.end += len;
+                        (basis, 0, RwLockWriteGuard::downgrade_to_upgradable(inner))
+                    }
                 }
             };
-            let len = self.check_reserve(record_length)?;
-            let mut buf = &mut self.mmap[self.end..];
+            let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
+            let mut buf = &mut self.mmap[inner.end..];
             let rh = RecordHeader {
                 committed: false,
                 record_type: if image {
@@ -711,12 +708,14 @@ impl Archive<ReadWrite> {
             <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
             let timestamp =
                 time_basis + chrono::Duration::microseconds(time_offset as i64);
+            let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            let end = inner.end;
             if image {
-                self.index.write().imagemap.insert(timestamp, self.end);
+                inner.imagemap.insert(timestamp, end);
             } else {
-                self.index.write().deltamap.insert(timestamp, self.end);
+                inner.deltamap.insert(timestamp, end);
             }
-            self.end += len;
+            inner.end += len;
         }
         Ok(())
     }
@@ -727,21 +726,20 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     /// operation, it duplicates the memory map and shares everything
     /// else. Beware, on 32 bit platforms address space might become
     /// an issue if the archive is large.
+    ///
+    /// Since the memory map is seperate if the file grows due to new
+    /// records being written then the mirrored map may not cover the
+    /// entire file. In that case, read operations trying to access
+    /// those records will return None. Access to records in newly
+    /// allocated parts of the file can be enabled by creating a new
+    /// mirror.
     pub fn mirror(&self) -> Result<Archive<ReadOnly>> {
-        let index = self.index.clone();
+        let inner = self.inner.clone();
         let mmap = {
-            let inner = index.read();
-            ReadOnly(unsafe { Mmap::map(&inner.file)? })
+            let g = inner.read();
+            ReadOnly(unsafe { Mmap::map(&g.file)? })
         };
-        Ok(Archive {
-            index,
-            mmap,
-            block_size: self.block_size,
-            end: self.end,
-            uncommitted: self.uncommitted,
-            next_id: self.next_id,
-            ts: self.ts,
-        })
+        Ok(Archive { inner, mmap })
     }
 
     pub fn len(&self) -> usize {
@@ -749,18 +747,22 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     }
 
     pub fn id_for_path(&self, path: &Path) -> Option<u64> {
-        self.index.read().id_by_path.get(path).copied()
+        self.inner.read().id_by_path.get(path).copied()
     }
 
     pub fn path_for_id(&self, id: u64) -> Option<Path> {
-        self.index.read().path_by_id.get(&id).cloned()
+        self.inner.read().path_by_id.get(&id).cloned()
     }
 
-    fn get_batch_at(&self, pos: usize) -> Option<Result<Pooled<Vec<BatchItem>>>> {
+    fn get_batch_at(
+        &self,
+        pos: usize,
+        end: usize,
+    ) -> Option<Result<Pooled<Vec<BatchItem>>>> {
         // there may be a writer appending to the end of the
         // archive. If that is the case, then our map may no longer
         // cover the entire file.
-        if pos >= self.len() {
+        if pos >= end {
             None
         } else {
             let mut buf = &self.mmap[pos..];
@@ -768,7 +770,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                 Err(e) => return Some(Err(e)),
                 Ok(rh) => rh,
             };
-            if pos + rh.record_length as usize > self.end {
+            if pos + rh.record_length as usize > end {
                 return Some(Err(anyhow!(
                     "get_batch: error truncated record at {}",
                     pos
@@ -785,14 +787,16 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         &self,
         cursor: &Cursor,
     ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        let (ts, pos) = self
-            .index
-            .read()
-            .imagemap
-            .range((cursor.start, cursor.end))
-            .next()
-            .map(|(ts, pos)| (*ts, *pos))?;
-        match self.get_batch_at(pos as usize) {
+        let (ts, pos, end) = {
+            let inner = self.inner.read();
+            let (ts, pos) = inner
+                .imagemap
+                .range((cursor.start, cursor.end))
+                .next()
+                .map(|(ts, pos)| (*ts, *pos))?;
+            (ts, pos, inner.end)
+        };
+        match self.get_batch_at(pos as usize, end) {
             None => None,
             Some(Err(e)) => Some(Err(Error::from(e))),
             Some(Ok(batch)) => Some(Ok((ts, batch))),
@@ -815,16 +819,19 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
             Some(dt) => Bound::Excluded(dt),
         };
         let mut current = cursor.current;
-        idxs.extend(
-            self.index
-                .read()
-                .deltamap
-                .range((start, cursor.end))
-                .map(|(ts, pos)| (*ts, *pos))
-                .take(n),
-        );
+        let end = {
+            let inner = self.inner.read();
+            idxs.extend(
+                inner
+                    .deltamap
+                    .range((start, cursor.end))
+                    .map(|(ts, pos)| (*ts, *pos))
+                    .take(n),
+            );
+            inner.end
+        };
         for (ts, pos) in idxs.drain(..) {
-            let batch = match self.get_batch_at(pos as usize) {
+            let batch = match self.get_batch_at(pos as usize, end) {
                 None => break,
                 Some(r) => r?,
             };
