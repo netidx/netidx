@@ -768,14 +768,17 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
     }
 
+    /// reads the image at the beginning of the cursor, returns None
+    /// if no such image exists, otherwise returns the result of
+    /// reading it. Does not modify the cursor position.
     pub fn read_image(
         &mut self,
-        ts: DateTime<Utc>,
+        cursor: &Cursor,
     ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        let (ts, pos) = self.index.read().imagemap(..=ts).next_back()?;
+        let (ts, pos) = self.index.read().imagemap(cursor.start..cursor.end).next()?;
         match self.get_batch_at(pos) {
             Err(e) => Some(Err(Error::from(e))),
-            Ok(batch) => Some(Ok((ts, batch)))
+            Ok(batch) => Some(Ok((ts, batch))),
         }
     }
 
@@ -783,7 +786,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     /// advance it by the number of items read. The cursor will not be
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
-    pub fn read_cursor(
+    pub fn read_deltas(
         &mut self,
         cursor: &mut Cursor,
         n: usize,
