@@ -725,8 +725,8 @@ impl Archive<ReadWrite> {
 impl<T: Deref<Target = [u8]>> Archive<T> {
     /// Create a read-only mirror of the archive. This is a low cost
     /// operation, it duplicates the memory map and shares everything
-    /// else. On 32 bit platforms address space might become an issue
-    /// if the archive is large.
+    /// else. Beware, on 32 bit platforms address space might become
+    /// an issue if the archive is large.
     pub fn mirror(&self) -> Result<Archive<ReadOnly>> {
         let index = self.index.clone();
         let mmap = {
@@ -755,29 +755,34 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     pub fn path_for_id(&self, id: u64) -> Option<Path> {
         self.index.read().path_by_id.get(&id).cloned()
     }
-}
 
-impl Archive<ReadOnly> {
-    fn get_batch_at(&mut self, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
-        if pos > self.len() {
-            self.mmap = ReadOnly(unsafe { Mmap::map(&self.index.read().file)? });
-            if pos > self.len() {
-                bail!("get_batch: index {} out of bounds", pos);
+    fn get_batch_at(&self, pos: usize) -> Option<Result<Pooled<Vec<BatchItem>>>> {
+        // there may be a writer appending to the end of the
+        // archive. If that is the case, then our map may no longer
+        // cover the entire file.
+        if pos >= self.len() {
+            None
+        } else {
+            let mut buf = &self.mmap[pos..];
+            let rh = match <RecordHeader as Pack>::decode(&mut buf).map_err(Error::from) {
+                Err(e) => return Some(Err(e)),
+                Ok(rh) => rh,
+            };
+            if pos + rh.record_length as usize > self.end {
+                return Some(Err(anyhow!(
+                    "get_batch: error truncated record at {}",
+                    pos
+                )));
             }
+            Some(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf).map_err(Error::from))
         }
-        let mut buf = &self.mmap[pos..];
-        let rh = <RecordHeader as Pack>::decode(&mut buf)?;
-        if pos + rh.record_length as usize > self.end {
-            bail!("get_batch: error truncated record at {}", pos);
-        }
-        Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
     }
 
     /// reads the image at the beginning of the cursor, returns None
     /// if no such image exists, otherwise returns the result of
     /// reading it. Does not modify the cursor position.
     pub fn read_image(
-        &mut self,
+        &self,
         cursor: &Cursor,
     ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
         let (ts, pos) = self
@@ -788,8 +793,9 @@ impl Archive<ReadOnly> {
             .next()
             .map(|(ts, pos)| (*ts, *pos))?;
         match self.get_batch_at(pos as usize) {
-            Err(e) => Some(Err(Error::from(e))),
-            Ok(batch) => Some(Ok((ts, batch))),
+            None => None,
+            Some(Err(e)) => Some(Err(Error::from(e))),
+            Some(Ok(batch)) => Some(Ok((ts, batch))),
         }
     }
 
@@ -798,7 +804,7 @@ impl Archive<ReadOnly> {
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
     pub fn read_deltas(
-        &mut self,
+        &self,
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
@@ -808,7 +814,7 @@ impl Archive<ReadOnly> {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
-        let mut current = None;
+        let mut current = cursor.current;
         idxs.extend(
             self.index
                 .read()
@@ -818,7 +824,10 @@ impl Archive<ReadOnly> {
                 .take(n),
         );
         for (ts, pos) in idxs.drain(..) {
-            let batch = self.get_batch_at(pos as usize)?;
+            let batch = match self.get_batch_at(pos as usize) {
+                None => break,
+                Some(r) => r?,
+            };
             current = Some(ts);
             res.push((ts, batch));
         }
