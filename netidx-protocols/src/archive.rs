@@ -11,6 +11,7 @@ use netidx::{
     subscriber::Event,
 };
 use packed_struct::PackedStruct;
+use parking_lot::RwLock;
 use std::{
     self,
     cmp::max,
@@ -21,6 +22,7 @@ use std::{
     mem,
     ops::{Bound, Deref, DerefMut, RangeBounds},
     path::Path as FilePath,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone)]
@@ -152,6 +154,7 @@ lazy_static! {
     static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
     static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(10, 100000);
+    static ref POS_POOL: Pool<Vec<(DateTime<Utc>, u64)>> = Pool::new(10, 100000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -209,7 +212,7 @@ impl MonotonicTimestamper {
                         MonoTs::NewBasis(basis)
                     }
                 }
-                Some(off) if self.offset as i64 + off <= MAX_TIMESTAMP as i64 => {
+                Some(off) if (self.offset as i64 + off) <= MAX_TIMESTAMP as i64 => {
                     self.offset += off as u32;
                     MonoTs::Offset(basis, self.offset)
                 }
@@ -290,6 +293,18 @@ impl fmt::Display for RecordTooLarge {
 
 impl error::Error for RecordTooLarge {}
 
+#[derive(Debug)]
+struct IndexInner {
+    path_by_id: HashMap<u64, Path>,
+    id_by_path: HashMap<Path, u64>,
+    imagemap: BTreeMap<DateTime<Utc>, usize>,
+    deltamap: BTreeMap<DateTime<Utc>, usize>,
+    file: File,
+}
+
+#[derive(Debug, Clone)]
+struct Index(Arc<RwLock<IndexInner>>);
+
 /// This reads and writes the netidx archive format (as written by the
 /// "record" command in the tools). The archive format is intended to
 /// be a compact format for storing recordings of netidx data for long
@@ -364,11 +379,7 @@ impl error::Error for RecordTooLarge {}
 /// 1289 bytes (264 bytes of overhead 20%)
 #[derive(Debug)]
 pub struct Archive<T> {
-    path_by_id: HashMap<u64, Path>,
-    id_by_path: HashMap<Path, u64>,
-    imagemap: BTreeMap<DateTime<Utc>, usize>,
-    deltamap: BTreeMap<DateTime<Utc>, usize>,
-    file: File,
+    index: Index,
     mmap: T,
     block_size: usize,
     end: usize,
@@ -451,11 +462,13 @@ impl<T> Archive<T> {
             }
         };
         Ok(Archive {
-            path_by_id,
-            id_by_path,
-            deltamap,
-            imagemap,
-            file,
+            index: Index(Arc::new(RwLock::new(IndexInner {
+                path_by_id,
+                id_by_path,
+                deltamap,
+                imagemap,
+                file,
+            }))),
             mmap,
             block_size,
             end,
@@ -484,11 +497,13 @@ impl<T> Archive<T> {
             let t = Archive::<ReadOnly>::scan(path.as_ref(), file)?;
             let mmap = ReadWrite(unsafe { MmapMut::map_mut(&t.file)? });
             Ok(Archive {
-                path_by_id: t.path_by_id,
-                id_by_path: t.id_by_path,
-                deltamap: t.deltamap,
-                imagemap: t.imagemap,
-                file: t.file,
+                index: Index(Arc::new(RwLock::new(IndexInner {
+                    path_by_id: t.path_by_id,
+                    id_by_path: t.id_by_path,
+                    deltamap: t.deltamap,
+                    imagemap: t.imagemap,
+                    file: t.file,
+                }))),
                 mmap,
                 block_size: t.block_size,
                 end: t.end,
@@ -520,11 +535,13 @@ impl<T> Archive<T> {
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             mmap.0.flush()?;
             Ok(Archive {
-                path_by_id: HashMap::new(),
-                id_by_path: HashMap::new(),
-                deltamap: BTreeMap::new(),
-                imagemap: BTreeMap::new(),
-                file,
+                index: Index(Arc::new(RwLock::new(IndexInner {
+                    path_by_id: HashMap::new(),
+                    id_by_path: HashMap::new(),
+                    deltamap: BTreeMap::new(),
+                    imagemap: BTreeMap::new(),
+                    file,
+                }))),
                 mmap,
                 block_size,
                 end: fh_len,
@@ -543,7 +560,7 @@ impl Archive<ReadWrite> {
         let new_len = len + max(len << 4, additional_capacity);
         let new_blocks = (new_len / self.block_size as usize) + 1;
         let new_size = new_blocks * self.block_size as usize;
-        self.file.set_len(new_size as u64)?;
+        self.index.write().file.set_len(new_size as u64)?;
         Ok(drop(mem::replace(
             &mut self.mmap,
             ReadWrite(unsafe { MmapMut::map_mut(&self.file)? }),
@@ -600,13 +617,16 @@ impl Archive<ReadWrite> {
         paths: impl IntoIterator<Item = &'a Path>,
     ) -> Result<()> {
         let mut pms = PM_POOL.take();
-        for path in paths {
-            if !self.id_by_path.contains_key(path) {
-                let id = self.next_id;
-                self.next_id += 1;
-                self.id_by_path.insert(path.clone(), id);
-                self.path_by_id.insert(id, path.clone());
-                pms.push(PathMapping(path.clone(), id));
+        {
+            let mut inner = self.index.write();
+            for path in paths {
+                if !inner.id_by_path.contains_key(path) {
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    inner.id_by_path.insert(path.clone(), id);
+                    inner.path_by_id.insert(id, path.clone());
+                    pms.push(PathMapping(path.clone(), id));
+                }
             }
         }
         if pms.len() > 0 {
@@ -643,11 +663,14 @@ impl Archive<ReadWrite> {
         items: impl IntoIterator<Item = (u64, Event)>,
     ) -> Result<()> {
         let mut batch = BATCH_POOL.take();
-        for (id, val) in items {
-            if !self.path_by_id.contains_key(&id) {
-                bail!("unknown subscription {}, register it first", id);
+        {
+            let inner = self.index.read();
+            for (id, val) in items {
+                if !inner.path_by_id.contains_key(&id) {
+                    bail!("unknown subscription {}, register it first", id);
+                }
+                batch.push(BatchItem(id, val));
             }
-            batch.push(BatchItem(id, val));
         }
         if batch.len() > 0 {
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
@@ -686,9 +709,9 @@ impl Archive<ReadWrite> {
             let timestamp =
                 time_basis + chrono::Duration::microseconds(time_offset as i64);
             if image {
-                self.imagemap.insert(timestamp, self.end);
+                self.index.write().imagemap.insert(timestamp, self.end);
             } else {
-                self.deltamap.insert(timestamp, self.end);
+                self.index.write().deltamap.insert(timestamp, self.end);
             }
             self.end += len;
         }
@@ -697,21 +720,45 @@ impl Archive<ReadWrite> {
 }
 
 impl<T: Deref<Target = [u8]>> Archive<T> {
+    /// Create a read-only mirror of the archive. This is a low cost
+    /// operation, it merely duplicates the memory map, although on 32
+    /// bit platforms address space might become an issue if the
+    /// archive is large.
+    pub fn mirror(&self) -> Result<Archive<ReadOnly>> {
+        let index = self.index.clone();
+        let mmap = {
+            let inner = index.read();
+            ReadOnly(unsafe { Mmap::map(&inner.file)? })
+        };
+        Archive {
+            index,
+            mmap,
+            block_size: self.block_size,
+            end: self.end,
+            uncommitted: self.uncommitted,
+            ts: self.ts,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.mmap.len()
     }
 
     pub fn id_for_path(&self, path: &Path) -> Option<u64> {
-        self.id_by_path.get(path).copied()
+        self.index.read().id_by_path.get(path).copied()
     }
 
-    pub fn path_for_id(&self, id: u64) -> Option<&Path> {
-        self.path_by_id.get(&id)
+    pub fn path_for_id(&self, id: u64) -> Option<Path> {
+        self.index.read().path_by_id.get(&id).cloned()
     }
 
-    fn get_batch_at(&self, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
-        if pos > self.end {
-            bail!("get_batch: index {} out of bounds", pos);
+    fn get_batch_at(&mut self, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
+        if pos > self.len() {
+            let inner = self.index.read();
+            self.mmap = ReadOnly(unsafe { Mmap::map(&inner.file) });
+            if pos > self.len() {
+                bail!("get_batch: index {} out of bounds", pos);
+            }
         }
         let mut buf = &self.mmap[pos..];
         let rh = <RecordHeader as Pack>::decode(&mut buf)?;
@@ -721,49 +768,38 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
     }
 
-    /// return an iterator over delta batches within the specified
-    /// time range.
-    pub fn delta_range<'a, R>(
-        &'a self,
-        range: R,
-    ) -> impl DoubleEndedIterator<Item = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> + 'a
-    where
-        R: RangeBounds<DateTime<Utc>>,
-    {
-        self.deltamap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
+    pub fn read_image(
+        &mut self,
+        ts: DateTime<Utc>,
+    ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
+        let (ts, pos) = self.index.read().imagemap(..=ts).next_back()?;
+        match self.get_batch_at(pos) {
+            Err(e) => Some(Err(Error::from(e))),
+            Ok(batch) => Some(Ok((ts, batch)))
+        }
     }
 
-    /// return an iterator over image batches within the specified
-    /// time range.
-    pub fn image_range<'a, R>(
-        &'a self,
-        range: R,
-    ) -> impl DoubleEndedIterator<Item = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> + 'a
-    where
-        R: RangeBounds<DateTime<Utc>>,
-    {
-        self.imagemap.range(range).map(move |(ts, p)| Ok((*ts, self.get_batch_at(*p)?)))
-    }
-
-    /// read up to `n` items from the specified cursor, and advance it
-    /// by the number of items read. The cursor will not be
+    /// read up to `n` delta items from the specified cursor, and
+    /// advance it by the number of items read. The cursor will not be
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
     pub fn read_cursor(
-        &self,
+        &mut self,
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+        let mut idxs = POS_POOL.take();
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
         let mut current = None;
-        for r in self.delta_range((start, cursor.end)).take(n) {
-            let (d, b) = r?;
-            current = Some(d);
-            res.push((d, b));
+        idxs.extend(self.index.read().deltamap.range((start, cursor.end)).take(n));
+        for (ts, pos) in idxs.drain(..) {
+            let batch = self.get_batch_at(pos)?;
+            current = Some(ts);
+            res.push((ts, batch));
         }
         cursor.current = current;
         Ok(res)
