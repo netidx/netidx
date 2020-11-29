@@ -565,7 +565,7 @@ fn reserve(
     additional_capacity: usize,
 ) -> Result<()> {
     let len = mmap.len();
-    let new_len = len + max(len << 4, additional_capacity);
+    let new_len = len + max(len << 8, additional_capacity);
     let new_blocks = (new_len / inner.block_size as usize) + 1;
     let new_size = new_blocks * inner.block_size as usize;
     inner.file.set_len(new_size as u64)?;
