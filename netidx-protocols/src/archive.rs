@@ -161,19 +161,37 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum MonoTs {
+pub enum Timestamp {
     NewBasis(DateTime<Utc>),
     Offset(DateTime<Utc>, u32),
 }
 
+impl Timestamp {
+    pub fn datetime(&self) -> DateTime<Utc> {
+        match self {
+            Timestamp::NewBasis(ts) => *ts,
+            Timestamp::Offset(ts, off) => {
+                *ts + chrono::Duration::microseconds(*off as i64)
+            }
+        }
+    }
+
+    pub fn offset(&self) -> u32 {
+        match self {
+            Timestamp::NewBasis(_) => 0,
+            Timestamp::Offset(_, off) => *off,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-struct MonotonicTimestamper {
+pub struct MonotonicTimestamper {
     basis: Option<DateTime<Utc>>,
     offset: u32,
 }
 
 impl MonotonicTimestamper {
-    fn new() -> Self {
+    pub fn new() -> Self {
         MonotonicTimestamper { basis: None, offset: 0 }
     }
 
@@ -200,26 +218,26 @@ impl MonotonicTimestamper {
         }
     }
 
-    fn timestamp(&mut self) -> MonoTs {
+    pub fn timestamp(&mut self) -> Timestamp {
         use chrono::Duration;
         let now = Utc::now();
         match self.basis {
-            None => MonoTs::NewBasis(self.update_basis(now)),
+            None => Timestamp::NewBasis(self.update_basis(now)),
             Some(basis) => match (now - basis).num_microseconds() {
                 Some(off) if off <= 0 => {
                     if self.offset < MAX_TIMESTAMP {
                         self.offset += 1;
-                        MonoTs::Offset(basis, self.offset)
+                        Timestamp::Offset(basis, self.offset)
                     } else {
                         let basis = self.update_basis(basis + Duration::microseconds(1));
-                        MonoTs::NewBasis(basis)
+                        Timestamp::NewBasis(basis)
                     }
                 }
                 Some(off) if (self.offset as i64 + off) <= MAX_TIMESTAMP as i64 => {
                     self.offset += off as u32;
-                    MonoTs::Offset(basis, self.offset)
+                    Timestamp::Offset(basis, self.offset)
                 }
-                None | Some(_) => MonoTs::NewBasis(self.update_basis(now)),
+                None | Some(_) => Timestamp::NewBasis(self.update_basis(now)),
             },
         }
     }
@@ -311,7 +329,6 @@ struct ArchiveInner {
     end: usize,
     uncommitted: usize,
     next_id: u64,
-    ts: MonotonicTimestamper,
 }
 
 /// This reads and writes the netidx archive format (as written by the
@@ -476,7 +493,6 @@ impl<T> Archive<T> {
                 end,
                 uncommitted: end,
                 next_id: max_id + 1,
-                ts: MonotonicTimestamper::new(),
             })),
             mmap,
         })
@@ -535,7 +551,6 @@ impl<T> Archive<T> {
                     end: fh_len,
                     uncommitted: fh_len,
                     next_id: 0,
-                    ts: MonotonicTimestamper::new(),
                 })),
                 mmap,
             })
@@ -657,6 +672,7 @@ impl Archive<ReadWrite> {
     pub fn add_batch(
         &mut self,
         image: bool,
+        timestamp: Timestamp,
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
         let inner = self.inner.upgradable_read();
@@ -667,29 +683,23 @@ impl Archive<ReadWrite> {
         }
         if batch.len() > 0 {
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
-            let (time_basis, time_offset, inner) = {
-                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
-                match inner.ts.timestamp() {
-                    MonoTs::Offset(basis, off) => {
-                        (basis, off, RwLockWriteGuard::downgrade_to_upgradable(inner))
-                    }
-                    MonoTs::NewBasis(basis) => {
-                        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
-                        let record_length = <DateTime<Utc> as Pack>::len(&basis);
-                        let rh = RecordHeader {
-                            committed: false,
-                            record_type: RecordTyp::Timestamp,
-                            record_length: record_length as u32,
-                            timestamp: 0,
-                        };
-                        let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
-                        let mut buf = &mut self.mmap[inner.end..];
-                        <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-                        <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
-                        let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
-                        inner.end += len;
-                        (basis, 0, RwLockWriteGuard::downgrade_to_upgradable(inner))
-                    }
+            let inner = match timestamp {
+                Timestamp::Offset(_, _) => inner,
+                Timestamp::NewBasis(basis) => {
+                    let record_length = <DateTime<Utc> as Pack>::len(&basis);
+                    let rh = RecordHeader {
+                        committed: false,
+                        record_type: RecordTyp::Timestamp,
+                        record_length: record_length as u32,
+                        timestamp: 0,
+                    };
+                    let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
+                    let mut buf = &mut self.mmap[inner.end..];
+                    <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+                    <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
+                    let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+                    inner.end += len;
+                    RwLockWriteGuard::downgrade_to_upgradable(inner)
                 }
             };
             let len = check_reserve(&mut self.mmap, &*inner, record_length)?;
@@ -702,18 +712,17 @@ impl Archive<ReadWrite> {
                     RecordTyp::DeltaBatch
                 },
                 record_length: record_length as u32,
-                timestamp: time_offset,
+                timestamp: timestamp.offset(),
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
-            let timestamp =
-                time_basis + chrono::Duration::microseconds(time_offset as i64);
+            let ts = timestamp.datetime();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
             let end = inner.end;
             if image {
-                inner.imagemap.insert(timestamp, end);
+                inner.imagemap.insert(ts, end);
             } else {
-                inner.deltamap.insert(timestamp, end);
+                inner.deltamap.insert(ts, end);
             }
             inner.end += len;
         }
@@ -727,10 +736,10 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     /// else. Beware, on 32 bit platforms address space might become
     /// an issue if the archive is large.
     ///
-    /// Since the memory map is seperate if the file grows due to new
+    /// Since the memory map is seperate, if the file grows due to new
     /// records being written then the mirrored map may not cover the
     /// entire file. In that case, read operations trying to access
-    /// those records will return None. Access to records in newly
+    /// those new records will return None. Access to records in newly
     /// allocated parts of the file can be enabled by creating a new
     /// mirror.
     pub fn mirror(&self) -> Result<Archive<ReadOnly>> {
@@ -742,8 +751,16 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         Ok(Archive { inner, mmap })
     }
 
-    pub fn len(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.mmap.len()
+    }
+
+    pub fn delta_batches(&self) -> usize {
+        self.inner.read().deltamap.len()
+    }
+
+    pub fn image_batches(&self) -> usize {
+        self.inner.read().imagemap.len()
     }
 
     pub fn id_for_path(&self, path: &Path) -> Option<u64> {
@@ -803,7 +820,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         }
     }
 
-    /// read up to `n` delta items from the specified cursor, and
+    /// read at most `n` delta items from the specified cursor, and
     /// advance it by the number of items read. The cursor will not be
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
@@ -857,12 +874,9 @@ mod test {
         paths: &[Path],
         batches: usize,
     ) {
-        let mut batch = t
-            .delta_range::<(Bound<DateTime<Utc>>, Bound<DateTime<Utc>>)>((
-                Unbounded, Unbounded,
-            ))
-            .collect::<Vec<_>>();
-        assert_eq!(batch.len(), batches);
+        assert_eq!(t.delta_batches(), batches);
+        let mut cursor = Cursor::new();
+        let mut batch = t.read_deltas(&mut cursor, batches)?;
         let now = Utc::now();
         for r in batch.drain(..) {
             let (ts, b) = r.unwrap();
