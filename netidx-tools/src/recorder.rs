@@ -8,15 +8,19 @@ use netidx::{
     subscriber::{Dval, SubId},
 };
 use netidx_protocols::archive::{
-    Archive as ArchiveInner, BatchItem, Cursor, ReadOnly, ReadWrite,
+    Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, Timestamp,
 };
 use parking_lot::RwLock;
 use std::{collections::HashMap, ops::Bound, sync::Arc};
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::broadcast};
 use uuid::{adaptor::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
-struct Archive(Arc<RwLock<ArchiveInner>>);
+enum BCastMsg {
+    Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),
+    FileRemapped,
+    ServerStop,
+}
 
 fn session_base(publish_base: &Path, id: Uuid) -> Path {
     let mut buf = [u8; SimpleRef::LENGTH];
@@ -30,7 +34,8 @@ static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, P
 static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek";
 
 async fn run_session(
-    archive: Archive,
+    bcast: broadcast::Receiver<BCastMsg>,
+    mut archive: Archive<ReadOnly>,
     publisher: Publisher,
     publish_base: Path,
     session_id: Uuid,
@@ -83,20 +88,10 @@ async fn run_session(
 }
 
 async fn run_publisher(
-    archive: Archive,
+    mut archive: Archive<ReadOnly>,
     publisher: Publisher,
     publish_base: Path,
 ) -> Result<()> {
-    struct Session {
-        published: HashMap<u64, Val>,
-        cursor: Option<Cursor>,
-        start: Val,
-        end: Val,
-        pos: Val,
-        speed: Val,
-        control: Val,
-        idle: bool,
-    }
     let mut sessions: HashMap<Uuid, Session> = HashMap::new();
     let session = publisher.publish(publish_base.append("session"))?;
 }

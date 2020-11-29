@@ -259,7 +259,7 @@ impl Cursor {
         self.current = None;
     }
 
-    pub fn set(&mut self, pos: DateTime<Utc>) {
+    pub fn set_current(&mut self, pos: DateTime<Utc>) {
         if (self.start, self.end).contains(&pos) {
             self.current = Some(pos);
         }
@@ -271,6 +271,24 @@ impl Cursor {
 
     pub fn contains(&self, ts: &DateTime<Utc>) -> bool {
         (self.start, self.end).contains(ts)
+    }
+
+    fn maybe_reset(&mut self) {
+        if let Some(current) = self.current {
+            if !(self.start, self.end).contains(current) {
+                self.current = None;
+            }
+        }
+    }
+    
+    pub fn set_start(&mut self, start: Bound<DateTime<Utc>>) {
+        self.start = start;
+        self.maybe_reset();
+    }
+
+    pub fn set_end(&mut self, end: Bound<DateTime<Utc>>) {
+        self.end = end;
+        self.maybe_reset();
     }
 }
 
@@ -565,7 +583,7 @@ fn reserve(
     additional_capacity: usize,
 ) -> Result<()> {
     let len = mmap.len();
-    let new_len = len + max(len << 8, additional_capacity);
+    let new_len = len + max(len >> 6, additional_capacity);
     let new_blocks = (new_len / inner.block_size as usize) + 1;
     let new_size = new_blocks * inner.block_size as usize;
     inner.file.set_len(new_size as u64)?;
