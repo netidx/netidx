@@ -894,6 +894,7 @@ mod test {
     fn basic_test() {
         let file = FilePath::new("test-data");
         let paths = [Path::from("/foo/bar"), Path::from("/foo/baz")];
+        let mut timestamper = MonotonicTimestamper::new();
         if FilePath::is_file(&file) {
             fs::remove_file(file).unwrap();
         }
@@ -901,9 +902,13 @@ mod test {
             // check that we can open, and write an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             t.add_paths(&paths).unwrap();
-            let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(false, ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))))
-                .unwrap();
+            let batch = paths
+                .iter()
+                .map(|p| {
+                    BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
+                })
+                .collect::<Vec<_>>();
+            t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 1);
             t.len()
@@ -916,9 +921,13 @@ mod test {
         {
             // check that we can reopen, and add to an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
-            let ids = paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-            t.add_batch(false, ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))))
-                .unwrap();
+            let batch = paths
+                .iter()
+                .map(|p| {
+                    BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
+                })
+                .collect::<Vec<_>>();
+            t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 2);
         }
@@ -931,14 +940,17 @@ mod test {
             // check that we can grow the archive by remapping it on the fly
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let mut n = 2;
-            while t.len() == initial_size {
-                let ids =
-                    paths.iter().map(|p| t.id_for_path(p).unwrap()).collect::<Vec<_>>();
-                t.add_batch(
-                    false,
-                    ids.iter().map(|id| (*id, Event::Update(Value::U64(42)))),
-                )
-                .unwrap();
+            while t.capacity() == initial_size {
+                let batch = paths
+                    .iter()
+                    .map(|p| {
+                        BatchItem(
+                            t.id_for_path(p).unwrap(),
+                            Event::Update(Value::U64(42)),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
                 n += 1;
                 check_contents(&t, &paths, n);
             }
