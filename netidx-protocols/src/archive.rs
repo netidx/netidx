@@ -154,7 +154,7 @@ impl Pack for BatchItem {
 
 lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
-    static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100000);
+    pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 100000);
     static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(10, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
@@ -864,10 +864,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
 mod test {
     use super::*;
     use netidx::subscriber::Value;
-    use std::{
-        fs,
-        ops::Bound::{self, *},
-    };
+    use std::fs;
 
     fn check_contents<T: Deref<Target = [u8]>>(
         t: &Archive<T>,
@@ -876,15 +873,14 @@ mod test {
     ) {
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
-        let mut batch = t.read_deltas(&mut cursor, batches)?;
+        let mut batch = t.read_deltas(&mut cursor, batches).unwrap();
         let now = Utc::now();
-        for r in batch.drain(..) {
-            let (ts, b) = r.unwrap();
+        for (ts, b) in batch.drain(..) {
             let elapsed = (now - ts).num_seconds();
             assert!(elapsed <= 10 && elapsed >= -10);
             assert_eq!(Vec::len(&b), paths.len());
             for (BatchItem(id, v), p) in b.iter().zip(paths.iter()) {
-                assert_eq!(Some(p), t.path_for_id(*id));
+                assert_eq!(Some(p), t.path_for_id(*id).as_ref());
                 assert_eq!(v, &Event::Update(Value::U64(42)))
             }
         }
@@ -898,20 +894,18 @@ mod test {
         if FilePath::is_file(&file) {
             fs::remove_file(file).unwrap();
         }
+        let mut batch = BATCH_POOL.take();
         let initial_size = {
             // check that we can open, and write an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             t.add_paths(&paths).unwrap();
-            let batch = paths
-                .iter()
-                .map(|p| {
-                    BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
-                })
-                .collect::<Vec<_>>();
+            batch.extend(paths.iter().map(|p| {
+                BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
+            }));
             t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 1);
-            t.len()
+            t.capacity()
         };
         {
             // check that we can close, reopen, and read the archive back
@@ -921,12 +915,6 @@ mod test {
         {
             // check that we can reopen, and add to an archive
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
-            let batch = paths
-                .iter()
-                .map(|p| {
-                    BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
-                })
-                .collect::<Vec<_>>();
             t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t, &paths, 2);
@@ -941,15 +929,6 @@ mod test {
             let mut t = Archive::<ReadWrite>::open_readwrite(&file).unwrap();
             let mut n = 2;
             while t.capacity() == initial_size {
-                let batch = paths
-                    .iter()
-                    .map(|p| {
-                        BatchItem(
-                            t.id_for_path(p).unwrap(),
-                            Event::Update(Value::U64(42)),
-                        )
-                    })
-                    .collect::<Vec<_>>();
                 t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
                 n += 1;
                 check_contents(&t, &paths, n);
