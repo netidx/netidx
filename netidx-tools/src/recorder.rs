@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, prelude::*};
+use futures::{channel::mpsc, prelude::*, future};
 use netidx::{
     config::Config,
     path::Path,
@@ -12,7 +12,7 @@ use netidx_protocols::archive::{
 };
 use parking_lot::RwLock;
 use std::{collections::HashMap, ops::Bound, sync::Arc};
-use tokio::{runtime::Runtime, sync::broadcast};
+use tokio::{runtime::Runtime, sync::broadcast, time};
 use uuid::{adaptor::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
@@ -40,9 +40,30 @@ async fn run_session(
     publish_base: Path,
     session_id: Uuid,
 ) -> Result<()> {
+    enum Speed {
+        Paused,
+        Limited(usize, time::Sleep),
+        Unlimited,
+        Tail
+    }
+    impl Speed {
+        async fn next(&mut self) {
+            match self {
+                Speed::Paused | Speed::Tail => future::pending().await,
+                Speed::Unlimited => (),
+                Speed::Limited(rate, next) => next.await
+            }
+        }
+    }
+    struct State {
+        published: HashMap<u64, Val>,
+        current: Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+        next: usize,
+        pos: Cursor,
+        speed: Speed,
+    }
     let (control_tx, control_rx) = mpsc::channel(3);
     let session_base = session_base(&publish_base, session_id);
-    let mut published: HashMap<u64, Val> = HashMap::new();
     let mut cursor = Cursor::new();
     let start_doc = publisher.publish(
         session_base.append("control/start/doc"),

@@ -156,7 +156,7 @@ lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
     pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 100000);
     static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
-        Pool::new(10, 100000);
+        Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
 }
 
@@ -274,7 +274,7 @@ impl Cursor {
     }
 
     fn maybe_reset(&mut self) {
-        if let Some(current) = self.current {
+        if let Some(ref current) = self.current {
             if !(self.start, self.end).contains(current) {
                 self.current = None;
             }
