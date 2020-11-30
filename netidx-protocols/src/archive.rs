@@ -803,19 +803,15 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.inner.read().path_by_id.get(&id).cloned()
     }
 
-    fn get_batch_at(
-        &self,
-        pos: usize,
-        uncommitted: usize,
-    ) -> Result<Pooled<Vec<BatchItem>>> {
-        if pos >= uncommitted {
+    fn get_batch_at(&self, pos: usize, end: usize) -> Result<Pooled<Vec<BatchItem>>> {
+        if pos >= end {
             bail!("get_batch: error record out of bounds")
         } else if pos >= self.capacity() {
             bail!(RemapRequired)
         } else {
             let mut buf = &self.mmap[pos..];
             let rh = <RecordHeader as Pack>::decode(&mut buf)?;
-            if pos + rh.record_length as usize > uncommitted {
+            if pos + rh.record_length as usize > end {
                 bail!("get_batch: error truncated record at {}", pos);
             }
             Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
@@ -832,7 +828,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         match cursor.start {
             Bound::Unbounded => Ok(HashMap::new()),
             _ => {
-                let (to_read, uncommitted) = {
+                let (to_read, end) = {
                     // we need to invert the excluded/included to get
                     // the correct initial state.
                     let cs = match cursor.start {
@@ -851,11 +847,11 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                         }
                     };
                     to_read.extend(inner.deltamap.range((s, cs)).map(|v| v.1));
-                    (to_read, inner.uncommitted)
+                    (to_read, inner.end)
                 };
                 let mut image = HashMap::new();
                 for pos in to_read {
-                    let mut batch = self.get_batch_at(pos as usize, uncommitted)?;
+                    let mut batch = self.get_batch_at(pos as usize, end)?;
                     image.extend(batch.drain(..).map(|b| (b.0, b.1)));
                 }
                 Ok(image)
@@ -879,7 +875,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
             Some(dt) => Bound::Excluded(dt),
         };
         let mut current = cursor.current;
-        let uncommitted = {
+        let end = {
             let inner = self.inner.read();
             idxs.extend(
                 inner
@@ -888,10 +884,10 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                     .map(|(ts, pos)| (*ts, *pos))
                     .take(n),
             );
-            inner.uncommitted
+            inner.end
         };
         for (ts, pos) in idxs.drain(..) {
-            let batch = self.get_batch_at(pos as usize, uncommitted)?;
+            let batch = self.get_batch_at(pos as usize, end)?;
             current = Some(ts);
             res.push((ts, batch));
         }
