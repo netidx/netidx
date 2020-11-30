@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, future, prelude::*};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
 use netidx::{
     config::Config,
     path::Path,
@@ -8,7 +8,8 @@ use netidx::{
     subscriber::{Dval, SubId},
 };
 use netidx_protocols::archive::{
-    Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, Timestamp,
+    Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, RemapRequired,
+    Timestamp,
 };
 use parking_lot::RwLock;
 use std::{
@@ -22,8 +23,6 @@ use uuid::{adaptor::SimpleRef, Uuid};
 #[derive(Debug, Clone)]
 enum BCastMsg {
     Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),
-    FileRemapped,
-    ServerStop,
 }
 
 fn session_base(publish_base: &Path, id: Uuid) -> Path {
@@ -38,7 +37,7 @@ static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, P
 static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek";
 
 async fn run_session(
-    bcast: broadcast::Receiver<BCastMsg>,
+    mut bcast: broadcast::Receiver<BCastMsg>,
     mut archive: Archive<ReadOnly>,
     publisher: Publisher,
     publish_base: Path,
@@ -55,57 +54,51 @@ async fn run_session(
         Paused,
         Tail,
     }
-    struct State {
-        published: HashMap<u64, Val>,
-        pos: Cursor,
-        speed: Speed,
-    }
-    impl State {
-        async fn next(
-            &mut self,
-            archive: &Archive<ReadOnly>,
-        ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
-            match &mut self.speed {
-                Speed::Paused | Speed::Tail => future::pending().await,
-                Speed::Unlimited(batches) => match batches.pop_front() {
-                    Some(batch) => Ok(batch),
-                    None => {
-                        batches = task::block_in_place(|| {
-                            archive.read_deltas(self.cursor, 100)
-                        })?;
-                        match batches.pop_front() {
-                            Some(batch) => Ok(batch),
-                            None => {
-                                self.speed = Speed::Tail;
-                                future::pending().await
-                            }
-                        }
-                    }
-                },
-                Speed::Limited { rate: _, next, last, current } => {
-                    use std::time::Duration;
-                    use tokio::time::Instant;
-                    if current.is_empty() {
-                        current = task::block_in_place(|| {
-                            archive.read_deltas(self.cursor, 100)
-                        })?;
-                    }
-                    if current.is_empty() {
-                        self.speed = Speed::Tail;
-                        future::pending().await
-                    } else {
-                        let (ts, batch) = current.pop_front().unwrap();
-                        last = ts;
-                        next.await;
-                        if current.is_empty() {
+    let mut published: HashMap<u64, Val> = HashMap::new();
+    let mut cursor = Cursor::new();
+    let mut speed = Speed::Paused;
+    async fn next(
+        speed: &mut Speed,
+        cursor: &mut Cursor,
+        archive: &Archive<ReadOnly>,
+    ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+        match &mut self.speed {
+            Speed::Paused | Speed::Tail => future::pending().await,
+            Speed::Unlimited(batches) => match batches.pop_front() {
+                Some(batch) => Ok(batch),
+                None => {
+                    batches =
+                        task::block_in_place(|| archive.read_deltas(self.cursor, 100))?;
+                    match batches.pop_front() {
+                        Some(batch) => Ok(batch),
+                        None => {
                             self.speed = Speed::Tail;
-                        } else {
-                            let wait = (current[0].0 - last).num_milliseconds() / rate;
-                            next.reset(Instant::now() + Duration::from_millis(wait));
+                            future::pending().await
                         }
-                        Ok((ts, batch))
                     }
                 }
+            },
+            Speed::Limited { rate: _, next, last, current } => {
+                use std::time::Duration;
+                use tokio::time::Instant;
+                if current.is_empty() {
+                    current =
+                        task::block_in_place(|| archive.read_deltas(self.cursor, 100))?;
+                    if current.is_empty() {
+                        self.speed = Speed::Tail;
+                        return future::pending().await;
+                    }
+                }
+                let (ts, batch) = current.pop_front().unwrap();
+                last = ts;
+                next.await;
+                if current.is_empty() {
+                    self.speed = Speed::Tail;
+                } else {
+                    let wait = (current[0].0 - last).num_milliseconds() / rate;
+                    next.reset(Instant::now() + Duration::from_millis(wait));
+                }
+                Ok((ts, batch))
             }
         }
     }
@@ -120,6 +113,7 @@ async fn run_session(
         session_base.append("control/start/current"),
         Value::String(Chars::from("Unbounded")),
     )?;
+    start.writes(control_tx.clone());
     let end_doc = publisher.publish(
         session_base.append("control/end/doc"),
         Value::String(Chars::from(END_DOC)),
@@ -128,12 +122,14 @@ async fn run_session(
         session_base.append("control/end/current"),
         Value::String(Chars::from("Unbounded")),
     )?;
+    end.writes(control_tx.clone());
     let speed_doc = publisher.publish(
         session_base.append("control/speed/doc"),
         Value::String(Chars::from(SPEED_DOC)),
     )?;
     let speed =
         publisher.publish(session_base.append("control/speed/current"), Value::V32(1))?;
+    speed.writes(control_tx.clone());
     let state_doc = publisher.publish(
         session_base.append("control/state/doc"),
         Value::String(Chars::from(STATE_DOC)),
@@ -142,17 +138,37 @@ async fn run_session(
         session_base.append("control/state/current"),
         Value::String(Chars::from("Stop")),
     )?;
+    state.writes(control_tx.clone());
     let pos_doc = publisher.publish(
         session_base.append("control/pos/doc"),
         Value::String(Chars::from(POS_DOC)),
     )?;
     let pos =
         publisher.publish(session_base.append("control/pos/current"), Value::Null)?;
-    start.writes(control_tx.clone());
-    end.writes(control_tx.clone());
-    speed.writes(control_tx.clone());
-    control.writes(control_tx.clone());
     pos.writes(control_tx);
+    let mut control_rx = control_rx.fuse();
+    loop {
+        select_biased! {
+            r = bcast.recv() => match r {
+                Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                Err(broadcast::error::RecvError::Lagged(_)) => (), // log? recover?
+                Ok(BCastMsg::Batch(ts, batch)) => (),
+            },
+            r = control_rx.next() => match r {
+                None => break Ok(()),
+                Some(mut batch) => (),
+            },
+            r = next(&mut speed, &mut cursor, archive) => match r {
+                Err(e) if e.downcast::<RemapRequired>().is_some() => {
+                    archive = archive.mirror()?;
+                }
+                Err(e) => break Err(e),
+                Ok((ts, batch)) => {
+
+                }
+            }
+        }
+    }
 }
 
 async fn run_publisher(
