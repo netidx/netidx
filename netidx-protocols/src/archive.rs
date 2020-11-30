@@ -18,7 +18,7 @@ use parking_lot::{
 use std::{
     self,
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     error, fmt,
     fs::{File, OpenOptions},
     iter::IntoIterator,
@@ -155,7 +155,7 @@ impl Pack for BatchItem {
 lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
     pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 100000);
-    static ref CURSOR_BATCH_POOL: Pool<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
+    static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
 }
@@ -867,7 +867,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         &self,
         cursor: &mut Cursor,
         n: usize,
-    ) -> Result<Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+    ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
         let mut idxs = POS_POOL.take();
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
@@ -889,7 +889,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         for (ts, pos) in idxs.drain(..) {
             let batch = self.get_batch_at(pos as usize, end)?;
             current = Some(ts);
-            res.push((ts, batch));
+            res.push_barch((ts, batch));
         }
         cursor.current = current;
         Ok(res)

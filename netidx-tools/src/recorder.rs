@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, prelude::*, future};
+use futures::{channel::mpsc, future, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
@@ -11,8 +11,12 @@ use netidx_protocols::archive::{
     Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, Timestamp,
 };
 use parking_lot::RwLock;
-use std::{collections::HashMap, ops::Bound, sync::Arc};
-use tokio::{runtime::Runtime, sync::broadcast, time};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::Bound,
+    sync::Arc,
+};
+use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adaptor::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
@@ -41,26 +45,69 @@ async fn run_session(
     session_id: Uuid,
 ) -> Result<()> {
     enum Speed {
+        Limited {
+            rate: usize,
+            next: time::Sleep,
+            last: DateTime<Utc>,
+            current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+        },
+        Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
         Paused,
-        Limited(usize, time::Sleep),
-        Unlimited,
-        Tail
-    }
-    impl Speed {
-        async fn next(&mut self) {
-            match self {
-                Speed::Paused | Speed::Tail => future::pending().await,
-                Speed::Unlimited => (),
-                Speed::Limited(rate, next) => next.await
-            }
-        }
+        Tail,
     }
     struct State {
         published: HashMap<u64, Val>,
-        current: Pooled<Vec<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
-        next: usize,
         pos: Cursor,
         speed: Speed,
+    }
+    impl State {
+        async fn next(
+            &mut self,
+            archive: &Archive<ReadOnly>,
+        ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+            match &mut self.speed {
+                Speed::Paused | Speed::Tail => future::pending().await,
+                Speed::Unlimited(batches) => match batches.pop_front() {
+                    Some(batch) => Ok(batch),
+                    None => {
+                        batches = task::block_in_place(|| {
+                            archive.read_deltas(self.cursor, 100)
+                        })?;
+                        match batches.pop_front() {
+                            Some(batch) => Ok(batch),
+                            None => {
+                                self.speed = Speed::Tail;
+                                future::pending().await
+                            }
+                        }
+                    }
+                },
+                Speed::Limited { rate: _, next, last, current } => {
+                    use std::time::Duration;
+                    use tokio::time::Instant;
+                    if current.is_empty() {
+                        current = task::block_in_place(|| {
+                            archive.read_deltas(self.cursor, 100)
+                        })?;
+                    }
+                    if current.is_empty() {
+                        self.speed = Speed::Tail;
+                        future::pending().await
+                    } else {
+                        let (ts, batch) = current.pop_front().unwrap();
+                        last = ts;
+                        next.await;
+                        if current.is_empty() {
+                            self.speed = Speed::Tail;
+                        } else {
+                            let wait = (current[0].0 - last).num_milliseconds() / rate;
+                            next.reset(Instant::now() + Duration::from_millis(wait));
+                        }
+                        Ok((ts, batch))
+                    }
+                }
+            }
+        }
     }
     let (control_tx, control_rx) = mpsc::channel(3);
     let session_base = session_base(&publish_base, session_id);
