@@ -280,7 +280,7 @@ impl Cursor {
             }
         }
     }
-    
+
     pub fn set_start(&mut self, start: Bound<DateTime<Utc>>) {
         self.start = start;
         self.maybe_reset();
@@ -335,6 +335,20 @@ impl fmt::Display for RecordTooLarge {
 }
 
 impl error::Error for RecordTooLarge {}
+
+/// This error will be raised on an attempt to read a record that is
+/// beyond the end of the current memory map. In that case you must
+/// remap the file in order to read that record.
+#[derive(Debug, Clone, Copy)]
+pub struct RemapRequired;
+
+impl fmt::Display for RemapRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl error::Error for RemapRequired {}
 
 #[derive(Debug)]
 struct ArchiveInner {
@@ -792,49 +806,60 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     fn get_batch_at(
         &self,
         pos: usize,
-        end: usize,
-    ) -> Option<Result<Pooled<Vec<BatchItem>>>> {
-        // there may be a writer appending to the end of the
-        // archive. If that is the case, then our map may no longer
-        // cover the entire file.
-        if pos >= end {
-            None
+        uncommitted: usize,
+    ) -> Result<Pooled<Vec<BatchItem>>> {
+        if pos >= uncommitted {
+            bail!("get_batch: error record out of bounds")
+        } else if pos >= self.capacity() {
+            bail!(RemapRequired)
         } else {
             let mut buf = &self.mmap[pos..];
-            let rh = match <RecordHeader as Pack>::decode(&mut buf).map_err(Error::from) {
-                Err(e) => return Some(Err(e)),
-                Ok(rh) => rh,
-            };
-            if pos + rh.record_length as usize > end {
-                return Some(Err(anyhow!(
-                    "get_batch: error truncated record at {}",
-                    pos
-                )));
+            let rh = <RecordHeader as Pack>::decode(&mut buf)?;
+            if pos + rh.record_length as usize > uncommitted {
+                bail!("get_batch: error truncated record at {}", pos);
             }
-            Some(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf).map_err(Error::from))
+            Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
         }
     }
 
-    /// reads the image at the beginning of the cursor, returns None
-    /// if no such image exists, otherwise returns the result of
-    /// reading it. Does not modify the cursor position.
-    pub fn read_image(
-        &self,
-        cursor: &Cursor,
-    ) -> Option<Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        let (ts, pos, end) = {
-            let inner = self.inner.read();
-            let (ts, pos) = inner
-                .imagemap
-                .range((cursor.start, cursor.end))
-                .next()
-                .map(|(ts, pos)| (*ts, *pos))?;
-            (ts, pos, inner.end)
-        };
-        match self.get_batch_at(pos as usize, end) {
-            None => None,
-            Some(Err(e)) => Some(Err(Error::from(e))),
-            Some(Ok(batch)) => Some(Ok((ts, batch))),
+    /// Builds an image corresponding to the state at the beginning of
+    /// the cursor. If the cursor beginning is Unbounded, then the
+    /// image will be empty. If there are no images in the archive,
+    /// then all the deltas between the beginning and the cursor start
+    /// will be read, otherwise only the deltas between the closest
+    /// image that is older, and the cursor start need to be read.
+    pub fn build_image(&self, cursor: &Cursor) -> Result<HashMap<u64, Event>> {
+        match cursor.start {
+            Bound::Unbounded => Ok(HashMap::new()),
+            _ => {
+                let (to_read, uncommitted) = {
+                    // we need to invert the excluded/included to get
+                    // the correct initial state.
+                    let cs = match cursor.start {
+                        Bound::Excluded(t) => Bound::Included(t),
+                        Bound::Included(t) => Bound::Excluded(t),
+                        Bound::Unbounded => unreachable!(),
+                    };
+                    let inner = self.inner.read();
+                    let mut to_read: Vec<usize> = Vec::new();
+                    let mut iter = inner.imagemap.range((Bound::Unbounded, cs));
+                    let s = match iter.next_back() {
+                        None => Bound::Unbounded,
+                        Some((ts, pos)) => {
+                            to_read.push(*pos);
+                            Bound::Included(*ts)
+                        }
+                    };
+                    to_read.extend(inner.deltamap.range((s, cs)).map(|v| v.1));
+                    (to_read, inner.uncommitted)
+                };
+                let mut image = HashMap::new();
+                for pos in to_read {
+                    let mut batch = self.get_batch_at(pos as usize, uncommitted)?;
+                    image.extend(batch.drain(..).map(|b| (b.0, b.1)));
+                }
+                Ok(image)
+            }
         }
     }
 
@@ -854,7 +879,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
             Some(dt) => Bound::Excluded(dt),
         };
         let mut current = cursor.current;
-        let end = {
+        let uncommitted = {
             let inner = self.inner.read();
             idxs.extend(
                 inner
@@ -863,13 +888,10 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                     .map(|(ts, pos)| (*ts, *pos))
                     .take(n),
             );
-            inner.end
+            inner.uncommitted
         };
         for (ts, pos) in idxs.drain(..) {
-            let batch = match self.get_batch_at(pos as usize, end) {
-                None => break,
-                Some(r) => r?,
-            };
+            let batch = self.get_batch_at(pos as usize, uncommitted)?;
             current = Some(ts);
             res.push((ts, batch));
         }
