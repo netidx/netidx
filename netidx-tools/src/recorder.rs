@@ -3,9 +3,9 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Publisher, Val, Value},
+    publisher::{BindCfg, Publisher, Val},
     resolver::{Auth, Glob, ResolverRead},
-    subscriber::{Dval, SubId},
+    subscriber::{Dval, Event, SubId},
 };
 use netidx_protocols::archive::{
     Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, RemapRequired,
@@ -61,16 +61,16 @@ async fn run_session(
         speed: &mut Speed,
         cursor: &mut Cursor,
         archive: &Archive<ReadOnly>,
-    ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+    ) -> Result<Pooled<Vec<BatchItem>>> {
         match &mut self.speed {
             Speed::Paused | Speed::Tail => future::pending().await,
             Speed::Unlimited(batches) => match batches.pop_front() {
-                Some(batch) => Ok(batch),
+                Some((_, batch)) => Ok(batch),
                 None => {
                     batches =
-                        task::block_in_place(|| archive.read_deltas(self.cursor, 100))?;
+                        task::block_in_place(|| archive.read_deltas(cursor, 100))?;
                     match batches.pop_front() {
-                        Some(batch) => Ok(batch),
+                        Some((_, batch)) => Ok(batch),
                         None => {
                             self.speed = Speed::Tail;
                             future::pending().await
@@ -83,7 +83,7 @@ async fn run_session(
                 use tokio::time::Instant;
                 if current.is_empty() {
                     current =
-                        task::block_in_place(|| archive.read_deltas(self.cursor, 100))?;
+                        task::block_in_place(|| archive.read_deltas(cursor, 100))?;
                     if current.is_empty() {
                         self.speed = Speed::Tail;
                         return future::pending().await;
@@ -98,9 +98,36 @@ async fn run_session(
                     let wait = (current[0].0 - last).num_milliseconds() / rate;
                     next.reset(Instant::now() + Duration::from_millis(wait));
                 }
-                Ok((ts, batch))
+                Ok(batch)
             }
         }
+    }
+    async fn process_batch(
+        publisher: &Publisher,
+        published: &mut HashMap<u64, Val>,
+        data_base: &Path,
+        archive: &Archive<ReadOnly>,
+        mut batch: Pooled<Vec<BatchItem>>,
+    ) -> Result<()> {
+        for BatchItem(id, ev) in batch.drain(..) {
+            match ev {
+                Event::Unsubscribed => {
+                    published.remove(&id);
+                }
+                Event::Update(v) => match published.get(&id) {
+                    Some(val) => {
+                        val.update(v);
+                    }
+                    None => {
+                        let path = archive.path_for_id(&id).unwrap();
+                        let path = data_base.append(&path);
+                        let val = publisher.publish(path, v)?;
+                        published.insert(id, val);
+                    }
+                },
+            }
+        }
+        publisher.flush().await
     }
     let (control_tx, control_rx) = mpsc::channel(3);
     let session_base = session_base(&publish_base, session_id);
@@ -147,24 +174,61 @@ async fn run_session(
         publisher.publish(session_base.append("control/pos/current"), Value::Null)?;
     pos.writes(control_tx);
     let mut control_rx = control_rx.fuse();
+    let data_base = session_base.append("data");
     loop {
         select_biased! {
             r = bcast.recv() => match r {
                 Err(broadcast::error::RecvError::Closed) => break Ok(()),
-                Err(broadcast::error::RecvError::Lagged(_)) => (), // log? recover?
-                Ok(BCastMsg::Batch(ts, batch)) => (),
+                Err(broadcast::error::RecvError::Lagged(missed)) => match speed {
+                    Speed::Limited {..} | Speed::Unlimited | Speed::Paused => (),
+                    Speed::Tail => {
+                        // log?
+                        archive = archive.mirror()?;
+                        let batch = task::block_in_place(|| {
+                            archive.read_deltas(&mut cursor, missed)
+                        })?;
+                        process_batch(
+                            &publisher,
+                            &mut published,
+                            &data_base,
+                            &archive,
+                            batch
+                        ).await?;
+                    }
+                }
+                Ok(BCastMsg::Batch(ts, batch)) => match speed {
+                    Speed::Limited {..} | Speed::Unlimited | Speed::Paused => ()
+                    Speed::Tail => if cursor.contains(&ts) {
+                        process_batch(
+                            &publisher,
+                            &mut published,
+                            &data_base,
+                            &archive,
+                            batch
+                        ).await?;
+                        cursor.set_current(ts);
+                    }
+                },
             },
             r = control_rx.next() => match r {
                 None => break Ok(()),
-                Some(mut batch) => (),
+                Some(mut batch) => {
+                    
+                },
             },
             r = next(&mut speed, &mut cursor, archive) => match r {
                 Err(e) if e.downcast::<RemapRequired>().is_some() => {
                     archive = archive.mirror()?;
                 }
                 Err(e) => break Err(e),
-                Ok((ts, batch)) => {
-
+                Ok(batch) => {
+                    process_batch(
+                        &publisher,
+                        &mut published,
+                        &data_base,
+                        &archive,
+                        batch
+                    ).await?;
                 }
             }
         }
