@@ -3,7 +3,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Publisher, Val},
+    publisher::{BindCfg, Publisher, Val, Value},
     resolver::{Auth, Glob, ResolverRead},
     subscriber::{Dval, Event, SubId},
 };
@@ -61,16 +61,16 @@ async fn run_session(
         speed: &mut Speed,
         cursor: &mut Cursor,
         archive: &Archive<ReadOnly>,
-    ) -> Result<Pooled<Vec<BatchItem>>> {
+    ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
         match &mut self.speed {
             Speed::Paused | Speed::Tail => future::pending().await,
             Speed::Unlimited(batches) => match batches.pop_front() {
-                Some((_, batch)) => Ok(batch),
+                Some(batch) => Ok(batch),
                 None => {
                     batches =
                         task::block_in_place(|| archive.read_deltas(cursor, 100))?;
                     match batches.pop_front() {
-                        Some((_, batch)) => Ok(batch),
+                        Some(batch) => Ok(batch),
                         None => {
                             self.speed = Speed::Tail;
                             future::pending().await
@@ -98,7 +98,7 @@ async fn run_session(
                     let wait = (current[0].0 - last).num_milliseconds() / rate;
                     next.reset(Instant::now() + Duration::from_millis(wait));
                 }
-                Ok(batch)
+                Ok((ts, batch))
             }
         }
     }
@@ -107,9 +107,10 @@ async fn run_session(
         published: &mut HashMap<u64, Val>,
         data_base: &Path,
         archive: &Archive<ReadOnly>,
-        mut batch: Pooled<Vec<BatchItem>>,
+        pos: &Val,
+        mut batch: (DateTime<Utc>, Pooled<Vec<BatchItem>>),
     ) -> Result<()> {
-        for BatchItem(id, ev) in batch.drain(..) {
+        for BatchItem(id, ev) in batch.1.drain(..) {
             match ev {
                 Event::Unsubscribed => {
                     published.remove(&id);
@@ -127,6 +128,7 @@ async fn run_session(
                 },
             }
         }
+        pos.update(Value::DateTime(batch.0));
         publisher.flush().await
     }
     let (control_tx, control_rx) = mpsc::channel(3);
@@ -184,16 +186,19 @@ async fn run_session(
                     Speed::Tail => {
                         // log?
                         archive = archive.mirror()?;
-                        let batch = task::block_in_place(|| {
+                        let mut batchs = task::block_in_place(|| {
                             archive.read_deltas(&mut cursor, missed)
                         })?;
-                        process_batch(
-                            &publisher,
-                            &mut published,
-                            &data_base,
-                            &archive,
-                            batch
-                        ).await?;
+                        for batch in batches.drain(..) {
+                            process_batch(
+                                &publisher,
+                                &mut published,
+                                &data_base,
+                                &archive,
+                                &pos,
+                                batch
+                            ).await?;
+                        }
                     }
                 }
                 Ok(BCastMsg::Batch(ts, batch)) => match speed {
@@ -204,7 +209,8 @@ async fn run_session(
                             &mut published,
                             &data_base,
                             &archive,
-                            batch
+                            &pos,
+                            (ts, batch)
                         ).await?;
                         cursor.set_current(ts);
                     }
@@ -213,7 +219,9 @@ async fn run_session(
             r = control_rx.next() => match r {
                 None => break Ok(()),
                 Some(mut batch) => {
-                    
+                    for req in batch.drain(..) {
+                        
+                    }
                 },
             },
             r = next(&mut speed, &mut cursor, archive) => match r {
@@ -227,6 +235,7 @@ async fn run_session(
                         &mut published,
                         &data_base,
                         &archive,
+                        &pos,
                         batch
                     ).await?;
                 }
