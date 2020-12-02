@@ -14,6 +14,7 @@ use netidx_protocols::archive::{
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, VecDeque},
+    mem,
     ops::Bound,
     sync::Arc,
 };
@@ -39,32 +40,107 @@ mod publish {
         publish_base.append(id.to_simple_ref().encode_lower(&mut buf));
     }
 
+    fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
+        use diligent_date_parser::parse_date;
+        let s = s.trim();
+        if let Some(dt) = parse_date(s) {
+            Ok(dt.with_timezone(&Utc))
+        } else if s.starts_with(&['+', '-'])
+            && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
+            && s.is_ascii()
+            && s.len() > 2
+        {
+            let dir = s[0];
+            let mag = s[s.len() - 1];
+            match s[1..s.len() - 1].parse::<f64>() {
+                Err(_) => None,
+                Some(quantity) => {
+                    let now = Utc::now();
+                    let quantity = if mag == 'y' {
+                        quantity * 365.24 * 86400.
+                    } else if mag == 'M' {
+                        quantity * (365.24 / 12.) * 86400.
+                    } else if mag == 'd' {
+                        quantity * 86400.
+                    } else if mag == 'h' {
+                        quantity * 3600.
+                    } else if mag == 'm' {
+                        quantity * 60.
+                    } else {
+                        quantity
+                    };
+                    let offset = Duration::nanoseconds((quantity * 1e9).trunc() as i64);
+                    if dir == '+' {
+                        Some(now + offset)
+                    } else {
+                        Some(now - offset)
+                    }
+                }
+            }
+        } else {
+            bail!("{} is not a valid datetime or offset", s)
+        }
+    }
+
+    fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
+        use Value::*;
+        match v {
+            U32(_) | V32(_) | I32(_) | Z32(_) | U64(_) | V64(_) | I64(_) | Z64(_)
+            | F32(_) | F64(_) | Duration(_) | Bytes(_) | True | False | Null | Ok
+            | Error(_) => bail!("unexpected value {:?}", v),
+            DateTime(ts) => Bound::Include(ts),
+            String(c) if c.trim() == "Unbounded" => Ok(Bound::Unbounded),
+            String(c) => parse_dt(&*c),
+        }
+    }
+
+    fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
+        match parse_bound(r.value) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                if let Some(reply) = r.send_result {
+                    reply.send(Value::Error(Chars::from(format!("{}", e))))
+                }
+                None
+            }
+        }
+    }
+
+    fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
+        match b {
+            Bound::Unlimited => Value::String(Chars::from("Unbounded")),
+            Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
     enum State {
         Stop,
         Play,
         Pause,
+        Tail,
     }
 
     impl State {
         fn play(&self) -> bool {
             match self {
                 State::Play => true,
-                State::Pause | State::Stop => false,
+                State::Pause | State::Stop | State::Tail => false,
             }
         }
     }
 
+    #[derive(Debug)]
     enum Speed {
+        Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
         Limited {
             rate: usize,
             next: time::Sleep,
-            last: DateTime<Utc>,
             current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
         },
-        Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
-        Tail,
     }
 
+    #[derive(Debug)]
     struct T {
         publisher: Publisher,
         published: HashMap<u64, Val>,
@@ -165,7 +241,6 @@ mod publish {
                 future::pending().await
             } else {
                 match &mut self.speed {
-                    Speed::Tail => future::pending().await,
                     Speed::Unlimited(batches) => match batches.pop_front() {
                         Some(batch) => Ok(batch),
                         None => {
@@ -175,13 +250,13 @@ mod publish {
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
-                                    self.speed = Speed::Tail;
+                                    self.state = Speed::Tail;
                                     future::pending().await
                                 }
                             }
                         }
                     },
-                    Speed::Limited { rate: _, next, last, current } => {
+                    Speed::Limited { rate, next, current } => {
                         use std::time::Duration;
                         use tokio::time::Instant;
                         if current.is_empty() {
@@ -189,17 +264,16 @@ mod publish {
                                 self.archive.read_deltas(cursor, 100)
                             })?;
                             if current.is_empty() {
-                                self.speed = Speed::Tail;
+                                self.state = State::Tail;
                                 return future::pending().await;
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        last = ts;
                         next.await;
                         if current.is_empty() {
-                            self.speed = Speed::Tail;
+                            self.state = State::Tail;
                         } else {
-                            let wait = (current[0].0 - last).num_milliseconds() / rate;
+                            let wait = (current[0].0 - ts).num_milliseconds() / rate;
                             next.reset(Instant::now() + Duration::from_millis(wait));
                         }
                         Ok((ts, batch))
@@ -223,106 +297,53 @@ mod publish {
                         }
                         None => {
                             let path = self.archive.path_for_id(&id).unwrap();
-                            let path = data_base.append(&path);
-                            let val = publisher.publish(path, v)?;
-                            published.insert(id, val);
+                            let path = self.data_base.append(&path);
+                            let val = self.publisher.publish(path, v)?;
+                            self.published.insert(id, val);
                         }
                     },
                 }
             }
-            pos.update(Value::DateTime(batch.0));
+            self.pos.update(Value::DateTime(batch.0));
             self.publisher.flush().await
         }
-    }
 
-    fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
-        use diligent_date_parser::parse_date;
-        let s = s.trim();
-        if let Some(dt) = parse_date(s) {
-            Ok(dt.with_timezone(&Utc))
-        } else if s.starts_with(&['+', '-'])
-            && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
-            && s.is_ascii()
-            && s.len() > 2
-        {
-            let dir = s[0];
-            let mag = s[s.len() - 1];
-            match s[1..s.len() - 1].parse::<f64>() {
-                Err(_) => None,
-                Some(quantity) => {
-                    let now = Utc::now();
-                    let quantity = if mag == 'y' {
-                        quantity * 365.24 * 86400.
-                    } else if mag == 'M' {
-                        quantity * (365.24 / 12.) * 86400.
-                    } else if mag == 'd' {
-                        quantity * 86400.
-                    } else if mag == 'h' {
-                        quantity * 3600.
-                    } else if mag == 'm' {
-                        quantity * 60.
-                    } else {
-                        quantity
-                    };
-                    let offset = Duration::nanoseconds((quantity * 1e9).trunc() as i64);
-                    if dir == '+' {
-                        Some(now + offset)
-                    } else {
-                        Some(now - offset)
+        fn stop(&mut self) {
+            self.state = State::Stop;
+            self.state_ctl.update(Value::String(Chars::from("Stop")));
+            self.published.clear();
+            match &mut self.speed {
+                Speed::Unlimited(v) => {
+                    v.clear();
+                }
+                Speed::Limited { current, next, .. } => {
+                    current.clear();
+                    next.reset(time::Instant::now());
+                }
+            }
+        }
+
+        fn update_rate(&mut self, new_rate: Option<usize>) {
+            match &mut self.speed {
+                Speed::Limited { rate, current, .. } => match new_rate {
+                    Some(new_rate) => {
+                        *rate = new_rate;
+                    }
+                    None => {
+                        let c = mem::replace(current, Pooled::orphan(VecDeque::new()));
+                        self.speed = Speed::Unlimited(c);
+                    }
+                },
+                Speed::Unlimited(v) => {
+                    if let Some(new_rate) = new_rate {
+                        let v = mem::replace(v, Pooled::orphan(VecDeque::new()));
+                        self.speed = Speed::Limited {
+                            rate: new_rate,
+                            next: time::sleep(time::Instant::now()),
+                            current: v,
+                        };
                     }
                 }
-            }
-        } else {
-            bail!("{} is not a valid datetime or offset", s)
-        }
-    }
-
-    fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
-        use Value::*;
-        match v {
-            U32(_) | V32(_) | I32(_) | Z32(_) | U64(_) | V64(_) | I64(_) | Z64(_)
-            | F32(_) | F64(_) | Duration(_) | Bytes(_) | True | False | Null | Ok
-            | Error(_) => bail!("unexpected value {:?}", v),
-            DateTime(ts) => Bound::Include(ts),
-            String(c) if c.trim() == "Unbounded" => Ok(Bound::Unbounded),
-            String(c) => parse_dt(&*c),
-        }
-    }
-
-    fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
-        match parse_bound(r.value) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                if let Some(reply) = r.send_result {
-                    reply.send(Value::Error(Chars::from(format!("{}", e))))
-                }
-                None
-            }
-        }
-    }
-
-    fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
-        match b {
-            Bound::Unlimited => Value::String(Chars::from("Unbounded")),
-            Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
-        }
-    }
-
-    fn stop(
-        state: &mut State,
-        state_ctl: &Val,
-        speed: &mut Speed,
-        published: &mut HashMap<u64, Val>,
-    ) {
-        *state = State::Stop;
-        state_ctl.update(Value::String(Chars::from("Stop")));
-        published.clear();
-        match speed {
-            Speed::Unlimited(v) => {
-                v.clear();
-            }
-            Speed::Limited { current, .. } => {
-                current.clear();
             }
         }
     }
@@ -335,44 +356,32 @@ mod publish {
         session_id: Uuid,
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
-        let mut t = T::new(publisher, archive, session_id, publish_base)?;
+        let mut t =
+            T::new(publisher, archive, session_id, publish_base, control_tx).await?;
         let mut control_rx = control_rx.fuse();
         loop {
             select_biased! {
                 r = bcast.recv() => match r {
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
-                    Err(broadcast::error::RecvError::Lagged(missed)) => match speed {
-                        Speed::Limited {..} | Speed::Unlimited => (),
-                        Speed::Tail => if state.play() {
+                    Err(broadcast::error::RecvError::Lagged(missed)) => match t.state {
+                        State::Stop | State::Play | State::Pause => (),
+                        State::Tail => {
                             // log?
-                            archive = archive.mirror()?;
+                            t.archive = t.archive.mirror()?;
                             let mut batchs = task::block_in_place(|| {
-                                archive.read_deltas(&mut cursor, missed)
+                                t.archive.read_deltas(&mut cursor, missed)
                             })?;
-                            for batch in batches.drain(..) {
-                                process_batch(
-                                    &publisher,
-                                    &mut published,
-                                    &data_base,
-                                    &archive,
-                                    &pos,
-                                    batch
-                                ).await?;
+                            for (ts, batch) in batches.drain(..) {
+                                t.process_batch((ts, batch)).await?;
+                                t.cursor.set_current(ts);
                             }
                         }
                     }
-                    Ok(BCastMsg::Batch(ts, batch)) => match speed {
-                        Speed::Limited {..} | Speed::Unlimited | Speed::Paused => ()
-                        Speed::Tail => if cursor.contains(&ts) && state.play() {
-                            process_batch(
-                                &publisher,
-                                &mut published,
-                                &data_base,
-                                &archive,
-                                &pos,
-                                (ts, batch)
-                            ).await?;
-                            cursor.set_current(ts);
+                    Ok(BCastMsg::Batch(ts, batch)) => match t.state {
+                        State::Stop | State::Play | State::Pause => (),
+                        Speed::Tail => if t.cursor.contains(&ts) {
+                            t.process_batch((ts, batch)).await?;
+                            t.cursor.set_current(ts);
                         }
                     },
                 },
@@ -380,30 +389,23 @@ mod publish {
                     None => break Ok(()),
                     Some(mut batch) => {
                         for req in batch.drain(..) {
-                            if req.id == start.id() {
+                            if req.id == t.start_ctl.id() {
                                 if let Some(new_start) = get_bound(req) {
-                                    start.update(bound_to_val(new_start));
-                                    cursor.set_start(new_start);
-                                    if cursor.current().is_none() {
-                                        speed = Speed::Stop;
-                                    }
+                                    t.start_ctl.update(bound_to_val(new_start));
+                                    t.cursor.set_start(new_start);
+                                    if t.cursor.current().is_none() { t.stop(); }
                                 }
                             }
-                            if req.id == end.id() {
+                            if req.id == t.end.id() {
                                 if let Some(new_end) = get_bound(req) {
-                                    end.update(bound_to_val(new_end));
-                                    cursor.set_end(new_end);
-                                    if cursor.current().is_none() {
-                                        speed = Speed::Stop;
-                                    }
+                                    t.end_ctl.update(bound_to_val(new_end));
+                                    t.cursor.set_end(new_end);
+                                    if t.cursor.current().is_none() { t.stop(); }
                                 }
                             }
-                            if req.id == speed.id() {
+                            if req.id == t.speed_ctl.id() {
                                 if let Some(mp) = req.val.clone().cast_u64() {
-                                    speed.update(Value::U64(mp));
-                                    if let Speed::Limited { rate, .. } = &mut speed {
-                                        rate = mp as usize;
-                                    }
+                                    t.speed_ctl.update(Value::U64(mp));
                                 } else if let Some(s) = req.val.cast_string() {
                                     if s.trim() == "Unlimited" {
                                         speed = Speed::Unlimited
@@ -415,24 +417,15 @@ mod publish {
                             if req.id == pos.id() {
                             }
                         }
-                        publisher.flush().await
+                        t.publisher.flush().await
                     },
                 },
-                r = next(&mut speed, &mut cursor, archive) => match r {
+                r = t.next() => match r {
                     Err(e) if e.downcast::<RemapRequired>().is_some() => {
-                        archive = archive.mirror()?;
+                        t.archive = t.archive.mirror()?;
                     }
                     Err(e) => break Err(e),
-                    Ok(batch) => {
-                        process_batch(
-                            &publisher,
-                            &mut published,
-                            &data_base,
-                            &archive,
-                            &pos,
-                            batch
-                        ).await?;
-                    }
+                    Ok(batch) => { t.process_batch(batch).await?; }
                 }
             }
         }
