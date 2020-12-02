@@ -323,7 +323,15 @@ mod publish {
             }
         }
 
-        fn update_rate(&mut self, new_rate: Option<usize>) {
+        fn set_speed(&mut self, new_rate: Option<usize>) {
+            match new_rate {
+                None => {
+                    t.speed_ctl.update(Value::String(Chars::from("Unlimited")));
+                }
+                Some(new_rate) => {
+                    t.speed_ctl.update(Value::U64(new_rate));
+                }
+            }
             match &mut self.speed {
                 Speed::Limited { rate, current, .. } => match new_rate {
                     Some(new_rate) => {
@@ -405,11 +413,17 @@ mod publish {
                             }
                             if req.id == t.speed_ctl.id() {
                                 if let Some(mp) = req.val.clone().cast_u64() {
-                                    t.speed_ctl.update(Value::U64(mp));
+                                    t.set_speed(Some(mp as usize));
                                 } else if let Some(s) = req.val.cast_string() {
-                                    if s.trim() == "Unlimited" {
-                                        speed = Speed::Unlimited
+                                    if s.trim().to_lowercase().as_str() == "unlimited" {
+                                        t.set_speed(None);
+                                    } else if let Some(reply) = req.reply {
+                                        let e = Chars::from("invalid speed");
+                                        reply.send(Value::Error(e));
                                     }
+                                } else if let Some(reply) = req.reply {
+                                    let e = Chars::from("invalid speed");
+                                    reply.send(Value::Error(e));
                                 }
                             }
                             if req.id == state.id() {
