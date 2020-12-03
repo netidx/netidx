@@ -82,6 +82,25 @@ mod publish {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum Seek {
+        Absolute(DateTime<Utc>),
+        BatchRelative(i8),
+        TimeRelative(chrono::Duration),
+    }
+
+    fn parse_seek(&self, v: Value) -> Result<DateTime<Utc>> {
+        use Value::*;
+        match v.clone().cast_i64() {
+            Some(steps) => match self.pos_ctl.current().cast_datetime() {
+                None => bail!("can't use relative seek when position is null"),
+                Some(current) => {
+                    
+                }
+            }
+        }
+    }
+    
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
         use Value::*;
         match v {

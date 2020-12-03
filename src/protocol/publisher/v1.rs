@@ -6,7 +6,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use std::{
-    fmt, mem,
+    convert, error, fmt, mem,
     net::SocketAddr,
     num::FpCategory,
     ops::{Add, Div, Mul, Not, Sub},
@@ -725,6 +725,14 @@ impl Pack for Value {
     }
 }
 
+pub trait FromValue {
+    type Error;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error>
+    where
+        Self: Sized;
+}
+
 impl Value {
     /// Whatever value is attempt to turn it into the type specified
     pub fn cast(self, typ: Typ) -> Option<Value> {
@@ -1158,82 +1166,204 @@ impl Value {
         }
     }
 
-    /// cast value to a u32 and then unwrap it
-    pub fn cast_u32(self) -> Option<u32> {
-        self.cast(Typ::U32).and_then(|v| match v {
-            Value::U32(v) => Some(v),
-            _ => None,
+    /// cast value directly to any type implementing `FromValue`
+    pub fn cast_to<T: FromValue + Sized>(self) -> result::Result<T, T::Error> {
+        <T as FromValue>::from_value(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CantCast;
+
+impl fmt::Display for CantCast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "could not cast to the requested type")
+    }
+}
+
+impl error::Error for CantCast {}
+
+impl<T: Into<Value> + Copy> convert::From<&T> for Value {
+    fn from(v: &T) -> Value {
+        (*v).into()
+    }
+}
+
+impl FromValue for u32 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::U32).ok_or(CantCast).and_then(|v| match v {
+            Value::U32(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to an i32 and then unwrap it
-    pub fn cast_i32(self) -> Option<i32> {
-        self.cast(Typ::I32).and_then(|v| match v {
-            Value::I32(v) => Some(v),
-            _ => None,
+impl convert::From<u32> for Value {
+    fn from(v: u32) -> Value {
+        Value::U32(v)
+    }
+}
+
+impl FromValue for i32 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::I32).ok_or(CantCast).and_then(|v| match v {
+            Value::I32(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to a u64 and then unwrap it
-    pub fn cast_u64(self) -> Option<u64> {
-        self.cast(Typ::U64).and_then(|v| match v {
-            Value::U64(v) => Some(v),
-            _ => None,
+impl convert::From<i32> for Value {
+    fn from(v: i32) -> Value {
+        Value::I32(v)
+    }
+}
+
+impl FromValue for u64 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::U64).ok_or(CantCast).and_then(|v| match v {
+            Value::U64(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to an i64 and then unwrap it
-    pub fn cast_i64(self) -> Option<i64> {
-        self.cast(Typ::I64).and_then(|v| match v {
-            Value::I64(v) => Some(v),
-            _ => None,
+impl convert::From<u64> for Value {
+    fn from(v: u64) -> Value {
+        Value::U64(v)
+    }
+}
+
+impl FromValue for i64 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::I64).ok_or(CantCast).and_then(|v| match v {
+            Value::I64(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to an f32 and then unwrap it
-    pub fn cast_f32(self) -> Option<f32> {
-        self.cast(Typ::F32).and_then(|v| match v {
-            Value::F32(v) => Some(v),
-            _ => None,
+impl convert::From<i64> for Value {
+    fn from(v: i64) -> Value {
+        Value::I64(v)
+    }
+}
+
+impl FromValue for f32 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::F32).ok_or(CantCast).and_then(|v| match v {
+            Value::F32(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to an f64 and then unwrap it
-    pub fn cast_f64(self) -> Option<f64> {
-        self.cast(Typ::F64).and_then(|v| match v {
-            Value::F64(v) => Some(v),
-            _ => None,
+impl convert::From<f32> for Value {
+    fn from(v: f32) -> Value {
+        Value::F32(v)
+    }
+}
+
+impl FromValue for f64 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::F64).ok_or(CantCast).and_then(|v| match v {
+            Value::F64(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to a string and then unwrap it
-    pub fn cast_string(self) -> Option<Chars> {
-        self.cast(Typ::String).and_then(|v| match v {
-            Value::String(v) => Some(v),
-            _ => None,
+impl convert::From<f64> for Value {
+    fn from(v: f64) -> Value {
+        Value::F64(v)
+    }
+}
+
+impl FromValue for Chars {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::String).ok_or(CantCast).and_then(|v| match v {
+            Value::String(v) => Ok(v),
+            _ => Err(CantCast),
         })
     }
+}
 
-    pub fn cast_datetime(self) -> Option<DateTime<Utc>> {
-        self.cast(Typ::DateTime).and_then(|v| match v {
-            Value::DateTime(d) => Some(d),
-            _ => None,
+impl convert::From<Chars> for Value {
+    fn from(v: Chars) -> Value {
+        Value::String(v)
+    }
+}
+
+impl FromValue for String {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast_to::<Chars>().map(|c| c.into())
+    }
+}
+
+impl convert::From<String> for Value {
+    fn from(v: String) -> Value {
+        Value::String(Chars::from(v))
+    }
+}
+
+impl FromValue for DateTime<Utc> {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::DateTime).ok_or(CantCast).and_then(|v| match v {
+            Value::DateTime(d) => Ok(d),
+            _ => Err(CantCast),
         })
     }
+}
 
-    pub fn cast_duration(self) -> Option<Duration> {
-        self.cast(Typ::Duration).and_then(|v| match v {
-            Value::Duration(d) => Some(d),
-            _ => None,
+impl convert::From<DateTime<Utc>> for Value {
+    fn from(v: DateTime<Utc>) -> Value {
+        Value::DateTime(v)
+    }
+}
+
+impl FromValue for Duration {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::Duration).ok_or(CantCast).and_then(|v| match v {
+            Value::Duration(d) => Ok(d),
+            _ => Err(CantCast),
         })
     }
+}
 
-    /// cast value to a bool and then unwrap it
-    pub fn cast_bool(self) -> Option<bool> {
-        self.cast(Typ::Bool).and_then(|v| match v {
-            Value::True => Some(true),
-            Value::False => Some(false),
-            _ => None,
+impl convert::From<Duration> for Value {
+    fn from(v: Duration) -> Value {
+        Value::Duration(v)
+    }
+}
+
+impl FromValue for bool {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::Bool).ok_or(CantCast).and_then(|v| match v {
+            Value::True => Ok(true),
+            Value::False => Ok(false),
+            _ => Err(CantCast),
         })
     }
 }
