@@ -324,30 +324,21 @@ mod publish {
                 }
             }
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
-            for (id, ev) in &img {
-                match self.published.get(id) {
-                    Some(val) => match ev {
-                        Event::Unsubscribed => {
-                            self.published.remove(id);
-                        }
-                        Event::Update(v) => {
-                            val.update(v.clone());
-                        }
-                    },
-                    None => match ev {
-                        Event::Unsubscribed => (),
-                        Event::Update(v) => match self.archive.path_for_id(*id) {
-                            None => bail!("unknown id in the image {}", id),
-                            Some(path) => {
-                                let path = self.data_base.append(path.as_str());
-                                let val = self.publisher.publish(path, v.clone())?;
-                                self.published.insert(*id, val);
-                            }
-                        },
-                    },
+            let idx = self.archive.get_index();
+            for (id, path) in idx {
+                let v = match img.get(&id) {
+                    None | Some(Event::Unsubscribed) => Value::Null,
+                    Some(Event::Update(v)) => v.clone()
+                };
+                match self.published.get(&id) {
+                    Some(val) => { val.update(v); }
+                    None => {
+                        let path = self.data_base.append(path.as_str());
+                        let val = self.publisher.publish(path, v)?;
+                        self.published.insert(id, val);
+                    }
                 }
             }
-            self.published.retain(|id, _| img.contains_key(id));
             Ok(())
         }
 
