@@ -159,7 +159,7 @@ lazy_static! {
     static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
-    static ref IDX_POOL: Pool<Vec<u64>> = Pool::new(10, 20_000_000);
+    static ref IDX_POOL: Pool<Vec<(u64, Path)>> = Pool::new(10, 20_000_000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -813,38 +813,53 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.inner.read().path_by_id.get(&id).cloned()
     }
 
-    /// Given a timestamp, move the specified number of steps forward
-    /// and return the timestamp of that position. The specified
-    /// timestamp need not actually be in the archive.
-    pub fn step_foward(&self, mut pos: DateTime<Utc>, steps: u64) -> DateTime<Utc> {
+    /// move the cursor the specified number of batches forward or
+    /// backward. If the cursor has no current position then positive
+    /// offsets begin at the cursor start, and negative offsets begin
+    /// at the cursor end.
+    pub fn step(&self, cursor: &mut Cursor, steps: i8) {
         let inner = self.inner.read();
-        let mut iter = inner.deltamap.range((Bound::Exclude(pos), Bound::Unbounded));
-        for i in 0..steps {
-            match iter.next() {
-                None => break,
-                Some((ts, _)) => {
-                    pos = ts;
+        if steps >= 0 {
+            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
+            let mut iter = inner.deltamap.range((init, cursor.end));
+            for _ in 0..steps as usize {
+                match iter.next() {
+                    None => break,
+                    Some((ts, _)) => {
+                        cursor.current = Some(*ts);
+                    }
+                }
+            }
+        } else {
+            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
+            let mut iter = inner.deltamap.range((cursor.start, init));
+            for _ in 0..steps.abs() as usize {
+                match iter.next_back() {
+                    None => break,
+                    Some((ts, _)) => {
+                        cursor.current = Some(*ts);
+                    }
                 }
             }
         }
-        pos
     }
 
     /// Return a vector of all id/path pairs present in the
     /// archive. This may change if the archive is being written to.
     pub fn get_index(&self) -> Pooled<Vec<(u64, Path)>> {
         let mut idx = IDX_POOL.take();
-        let i = 0;
+        let mut i = 0;
         // we must ensure we don't hold the lock for too long in the
         // case where the index is huge.
-        while i < inner.path_by_id.len() {
+        'main: loop {
             let inner = self.inner.read();
-            let mut n = 0;
-            while n < 1_000 && i < inner.path_by_id.len() {
-                let (id, path) = inner.path_by_id[i];
+            for _ in 0..1000 {
+                let (id, path) = inner.path_by_id.get_index(i).unwrap();
                 idx.push((*id, path.clone()));
                 i += 1;
-                n += 1;
+                if i >= inner.path_by_id.len() {
+                    break 'main
+                }
             }
         }
         idx
