@@ -324,8 +324,8 @@ mod publish {
                 }
             }
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
-            let idx = self.archive.get_index();
-            for (id, path) in idx {
+            let mut idx = self.archive.get_index();
+            for (id, path) in idx.drain(..) {
                 let v = match img.get(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
                     Some(Event::Update(v)) => v.clone()

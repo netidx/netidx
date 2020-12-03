@@ -4,6 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use log::warn;
 use mapr::{Mmap, MmapMut};
+use indexmap::IndexMap;
 use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
@@ -158,6 +159,7 @@ lazy_static! {
     static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
+    static ref IDX_POOL: Pool<Vec<u64>> = Pool::new(10, 20_000_000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -352,7 +354,7 @@ impl error::Error for RemapRequired {}
 
 #[derive(Debug)]
 struct ArchiveInner {
-    path_by_id: HashMap<u64, Path>,
+    path_by_id: IndexMap<u64, Path>,
     id_by_path: HashMap<Path, u64>,
     imagemap: BTreeMap<DateTime<Utc>, usize>,
     deltamap: BTreeMap<DateTime<Utc>, usize>,
@@ -459,7 +461,7 @@ impl<T> Archive<T> {
         if header.version != FILE_VERSION {
             bail!("file version is too new, can't read it")
         }
-        let mut path_by_id = HashMap::new();
+        let mut path_by_id = IndexMap::new();
         let mut id_by_path = HashMap::new();
         let mut imagemap = BTreeMap::new();
         let mut deltamap = BTreeMap::new();
@@ -574,7 +576,7 @@ impl<T> Archive<T> {
             mmap.0.flush()?;
             Ok(Archive {
                 inner: Arc::new(RwLock::new(ArchiveInner {
-                    path_by_id: HashMap::new(),
+                    path_by_id: IndexMap::new(),
                     id_by_path: HashMap::new(),
                     deltamap: BTreeMap::new(),
                     imagemap: BTreeMap::new(),
@@ -803,8 +805,24 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.inner.read().path_by_id.get(&id).cloned()
     }
 
-    pub fn get_index(&self) -> Vec<(u64, Path)> {
-        self.inner.read().path_by_id.iter().map(|(k, v)| (*k, v.clone())).collect()
+    /// Return a vector of all id/path pairs present in the
+    /// archive. This may change if the archive is being written to.
+    pub fn get_index(&self) -> Pooled<Vec<(u64, Path)>> {
+        let mut idx = IDX_POOL.take();
+        let i = 0;
+        // we must ensure we don't hold the lock for too long in the
+        // case where the index is huge.
+        while i < inner.path_by_id.len() {
+            let inner = self.inner.read();
+            let mut n = 0;
+            while n < 1_000 && i < inner.path_by_id.len() {
+                let (id, path) = inner.path_by_id[i];
+                idx.push((*id, path.clone()));
+                i += 1;
+                n += 1;
+            }
+        }
+        idx
     }
 
     fn get_batch_at(&self, pos: usize, end: usize) -> Result<Pooled<Vec<BatchItem>>> {

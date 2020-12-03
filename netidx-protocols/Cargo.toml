@@ -29,3 +29,4 @@ packed_struct_codegen = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 parking_lot = "0.11"
+indexmap = "1"
