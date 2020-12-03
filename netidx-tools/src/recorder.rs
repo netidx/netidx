@@ -1,9 +1,10 @@
 use futures::{channel::mpsc, future, prelude::*, select_biased};
+use anyhow::{Error, Result};
 use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
+    publisher::{BindCfg, FromValue, Publisher, Val, Value, WriteRequest},
     resolver::{Auth, Glob, ResolverRead},
     subscriber::{Dval, Event, SubId},
 };
@@ -89,18 +90,20 @@ mod publish {
         TimeRelative(chrono::Duration),
     }
 
-    fn parse_seek(&self, v: Value) -> Result<DateTime<Utc>> {
-        use Value::*;
-        match v.clone().cast_i64() {
-            Some(steps) => match self.pos_ctl.current().cast_datetime() {
-                None => bail!("can't use relative seek when position is null"),
-                Some(current) => {
-                    
-                }
+    impl FromValue for Seek {
+        type Error = 
+
+        fn parse_seek(&self, v: Value) -> Result<DateTime<Utc>> {
+            use Value::*;
+            match v.clone().cast_i64() {
+                Some(steps) => match self.pos_ctl.current().cast_datetime() {
+                    None => bail!("can't use relative seek when position is null"),
+                    Some(current) => {}
+                },
             }
         }
     }
-    
+
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
         use Value::*;
         match v {
@@ -336,7 +339,7 @@ mod publish {
             self.cursor.reset();
             self.pos_ctl.update(match self.cursor.start() {
                 Bound::Unbounded => Value::Null,
-                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts)
+                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts),
             });
             match &mut self.speed {
                 Speed::Unlimited(v) => {
@@ -352,10 +355,12 @@ mod publish {
             for (id, path) in idx.drain(..) {
                 let v = match img.get(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
-                    Some(Event::Update(v)) => v.clone()
+                    Some(Event::Update(v)) => v.clone(),
                 };
                 match self.published.get(&id) {
-                    Some(val) => { val.update(v); }
+                    Some(val) => {
+                        val.update(v);
+                    }
                     None => {
                         let path = self.data_base.append(path.as_str());
                         let val = self.publisher.publish(path, v)?;
@@ -493,7 +498,7 @@ mod publish {
                                 }
                             }
                             if req.id == pos.id() {
-                                
+
                             }
                         }
                         t.publisher.flush().await

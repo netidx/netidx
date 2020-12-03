@@ -1189,6 +1189,82 @@ impl<T: Into<Value> + Copy> convert::From<&T> for Value {
     }
 }
 
+impl FromValue for u8 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        let v = v.cast_to::<u32>()?;
+        if v <= u8::MAX as u32 {
+            Ok(v as u8)
+        } else {
+            Err(CantCast)
+        }
+    }
+}
+
+impl convert::From<u8> for Value {
+    fn from(v: u8) -> Value {
+        Value::U32(v as u32)
+    }
+}
+
+impl FromValue for i8 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        let v = v.cast_to::<i32>()?;
+        if v <= i8::MAX as i32 && v >= i8::MIN as i32 {
+            Ok(v as i8)
+        } else {
+            Err(CantCast)
+        }
+    }
+}
+
+impl convert::From<i8> for Value {
+    fn from(v: i8) -> Value {
+        Value::I32(v as i32)
+    }
+}
+
+impl FromValue for u16 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        let v = v.cast_to::<u32>()?;
+        if v <= u16::MAX as u32 {
+            Ok(v as u16)
+        } else {
+            Err(CantCast)
+        }
+    }
+}
+
+impl convert::From<u16> for Value {
+    fn from(v: u16) -> Value {
+        Value::U32(v as u32)
+    }
+}
+
+impl FromValue for i16 {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        let v = v.cast_to::<i32>()?;
+        if v <= i16::MAX as i32 && v >= i16::MIN as i32 {
+            Ok(v as i16)
+        } else {
+            Err(CantCast)
+        }
+    }
+}
+
+impl convert::From<i16> for Value {
+    fn from(v: i16) -> Value {
+        Value::I32(v as i32)
+    }
+}
+
 impl FromValue for u32 {
     type Error = CantCast;
 

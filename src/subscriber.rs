@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::v1::{Typ, Value};
+pub use crate::protocol::publisher::v1::{Typ, Value, FromValue};
 use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, ReadChannel, WriteChannel},

@@ -1,11 +1,17 @@
 * 0.5.2:
+  - New tool, netidx recorder, records subscriptions to compact
+    archive files, as well as netidx controlled publishing of archives
+    (or both at the same time).
+  - Implement From on Value for most primitive types.
+  - Add a trait, FromValue, that behaves like FromStr, and implement
+    it for many primitive types
   - Add list_recursive, and list_glob methods to ResolverRead
   - Tune the resolver server to give much higher priority to Resolve
     over List and Table calls to compensate for the potentially large
     traffic caused by list_recursive and list_glob. A List/Table call
     now "costs" 10K Resolve calls, so the max batch size of a read
     client doing only List calls is now 100 instead of 1000K.
-  
+
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate
     integer division) for a noticable speedup processing large
