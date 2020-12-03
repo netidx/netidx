@@ -1170,6 +1170,32 @@ impl Value {
     pub fn cast_to<T: FromValue + Sized>(self) -> result::Result<T, T::Error> {
         <T as FromValue>::from_value(self)
     }
+
+    /// return true if the value is some kind of number, otherwise
+    /// false.
+    pub fn is_number(&self) -> bool {
+        match self {
+            Value::U32(_)
+            | Value::V32(_)
+            | Value::I32(_)
+            | Value::Z32(_)
+            | Value::U64(_)
+            | Value::V64(_)
+            | Value::I64(_)
+            | Value::Z64(_)
+            | Value::F32(_)
+            | Value::F64(_) => true,
+            Value::DateTime(_)
+            | Value::Duration(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::True
+            | Value::False
+            | Value::Null
+            | Value::Ok
+            | Value::Error(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

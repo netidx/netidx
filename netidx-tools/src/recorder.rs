@@ -1,5 +1,5 @@
-use futures::{channel::mpsc, future, prelude::*, select_biased};
 use anyhow::{Error, Result};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
 use netidx::{
     config::Config,
     path::Path,
@@ -41,78 +41,80 @@ mod publish {
         publish_base.append(id.to_simple_ref().encode_lower(&mut buf));
     }
 
-    fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
-        use diligent_date_parser::parse_date;
-        let s = s.trim();
-        if let Some(dt) = parse_date(s) {
-            Ok(dt.with_timezone(&Utc))
-        } else if s.starts_with(&['+', '-'])
-            && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
-            && s.is_ascii()
-            && s.len() > 2
-        {
-            let dir = s[0];
-            let mag = s[s.len() - 1];
-            match s[1..s.len() - 1].parse::<f64>() {
-                Err(_) => None,
-                Some(quantity) => {
-                    let now = Utc::now();
-                    let quantity = if mag == 'y' {
-                        quantity * 365.24 * 86400.
-                    } else if mag == 'M' {
-                        quantity * (365.24 / 12.) * 86400.
-                    } else if mag == 'd' {
-                        quantity * 86400.
-                    } else if mag == 'h' {
-                        quantity * 3600.
-                    } else if mag == 'm' {
-                        quantity * 60.
-                    } else {
-                        quantity
-                    };
-                    let offset = Duration::nanoseconds((quantity * 1e9).trunc() as i64);
-                    if dir == '+' {
-                        Some(now + offset)
-                    } else {
-                        Some(now - offset)
-                    }
-                }
-            }
-        } else {
-            bail!("{} is not a valid datetime or offset", s)
-        }
-    }
-
     #[derive(Debug, Clone, Copy)]
-    enum Seek {
+    enum Pos {
         Absolute(DateTime<Utc>),
         BatchRelative(i8),
         TimeRelative(chrono::Duration),
     }
 
-    impl FromValue for Seek {
-        type Error = 
+    impl FromValue for Pos {
+        type Error = Error;
 
-        fn parse_seek(&self, v: Value) -> Result<DateTime<Utc>> {
-            use Value::*;
-            match v.clone().cast_i64() {
-                Some(steps) => match self.pos_ctl.current().cast_datetime() {
-                    None => bail!("can't use relative seek when position is null"),
-                    Some(current) => {}
-                },
+        fn from_value(v: Value) -> Result<Seek> {
+            use diligent_date_parser::parse_date;
+            match v {
+                Value::DateTime(ts) => Seek::Absolute(ts),
+                v if v.is_number() => Seek::BatchRelative(v.cast_to::<i8>()?),
+                Value::String(c) => {
+                    let s = c.trim();
+                    if let Ok(steps) = s.parse::<i8>() {
+                        Seek::BatchRelative(steps)
+                    } else if let Some(dt) = parse_date(s) {
+                        Ok(Pos::Absolute(dt.with_timezone(&Utc)))
+                    } else if s.starts_with(&['+', '-'])
+                        && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
+                        && s.is_ascii()
+                        && s.len() > 2
+                    {
+                        let dir = s[0];
+                        let mag = s[s.len() - 1];
+                        match s[1..s.len() - 1].parse::<f64>() {
+                            Err(_) => bail!("invalid position expression"),
+                            Some(quantity) => {
+                                let quantity = if mag == 'y' {
+                                    quantity * 365.24 * 86400.
+                                } else if mag == 'M' {
+                                    quantity * (365.24 / 12.) * 86400.
+                                } else if mag == 'd' {
+                                    quantity * 86400.
+                                } else if mag == 'h' {
+                                    quantity * 3600.
+                                } else if mag == 'm' {
+                                    quantity * 60.
+                                } else {
+                                    quantity
+                                };
+                                let offset = chrono::Duration::nanoseconds(
+                                    if dir == '+' { (quantity * 1e9).trunc() as i64 }
+                                    else { (-1 * quantity * 1e9).trunc() as i64 },
+                                );
+                                if dir == '+' {
+                                    Ok(Pos::TimeRelative(offset))
+                                } else {
+                                    Ok(Pos::TimeRelative(offset))
+                                }
+                            }
+                        }
+                    } else {
+                        bail!("{} is not a valid datetime or offset", s)
+                    }
+                }
             }
         }
     }
 
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
-        use Value::*;
         match v {
-            U32(_) | V32(_) | I32(_) | Z32(_) | U64(_) | V64(_) | I64(_) | Z64(_)
-            | F32(_) | F64(_) | Duration(_) | Bytes(_) | True | False | Null | Ok
-            | Error(_) => bail!("unexpected value {:?}", v),
-            DateTime(ts) => Bound::Include(ts),
-            String(c) if c.trim() == "Unbounded" => Ok(Bound::Unbounded),
-            String(c) => parse_dt(&*c),
+            Value::DateTime(ts) => Bound::Included(ts),
+            Value::String(c) if c.trim().to_lowercase().as_str() == "unbounded" => {
+                Ok(Bound::Unbounded)
+            }
+            v => match v.cast_to::<Pos>()? {
+                Pos::Absolute(ts) => Bound::Included(ts),
+                Pos::TimeRelative(offset) => Bounde::Included(Utc::now() + offset),
+                Pos::BatchRelative(_) => bail!("invalid bound")
+            }
         }
     }
 
