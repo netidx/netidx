@@ -314,6 +314,11 @@ mod publish {
         fn stop(&mut self) -> Result<()> {
             self.state = State::Stop;
             self.state_ctl.update(Value::String(Chars::from("Stop")));
+            self.cursor.reset();
+            self.pos_ctl.update(match self.cursor.start() {
+                Bound::Unbounded => Value::Null,
+                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts)
+            });
             match &mut self.speed {
                 Speed::Unlimited(v) => {
                     v.clear();
@@ -385,6 +390,7 @@ mod publish {
         let (control_tx, control_rx) = mpsc::channel(3);
         let mut t =
             T::new(publisher, archive, session_id, publish_base, control_tx).await?;
+        t.stop()?;
         let mut control_rx = control_rx.fuse();
         loop {
             select_biased! {
@@ -468,6 +474,7 @@ mod publish {
                                 }
                             }
                             if req.id == pos.id() {
+                                
                             }
                         }
                         t.publisher.flush().await

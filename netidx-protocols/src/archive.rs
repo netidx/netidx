@@ -247,8 +247,8 @@ impl MonotonicTimestamper {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor {
-    pub start: Bound<DateTime<Utc>>,
-    pub end: Bound<DateTime<Utc>>,
+    start: Bound<DateTime<Utc>>,
+    end: Bound<DateTime<Utc>>,
     current: Option<DateTime<Utc>>,
 }
 
@@ -265,6 +265,14 @@ impl Cursor {
         if (self.start, self.end).contains(&pos) {
             self.current = Some(pos);
         }
+    }
+
+    pub fn start(&self) -> Bound<DateTime<Utc>> {
+        self.start
+    }
+
+    pub fn end(&self) -> Bound<DateTime<Utc>> {
+        self.end
     }
 
     pub fn current(&self) -> Option<DateTime<Utc>> {
