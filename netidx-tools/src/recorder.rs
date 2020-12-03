@@ -31,7 +31,7 @@ mod publish {
 
     static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
     static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
-    static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, Unlimited = as fast as data can be read and sent. Default is Unlimited";
+    static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is Unlimited";
     static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Pause, pause at the current position. Stop, reset playback to the initial state, unpublish everything, and wait. Default Stop.";
     static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek";
 
@@ -134,7 +134,7 @@ mod publish {
     enum Speed {
         Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
         Limited {
-            rate: usize,
+            rate: f64,
             next: time::Sleep,
             current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
         },
@@ -273,7 +273,10 @@ mod publish {
                         if current.is_empty() {
                             self.state = State::Tail;
                         } else {
-                            let wait = (current[0].0 - ts).num_milliseconds() / rate;
+                            let wait = {
+                                let ms = (current[0].0 - ts).num_milliseconds() as f64;
+                                (ms / rate).trunc() as u64
+                            };
                             next.reset(Instant::now() + Duration::from_millis(wait));
                         }
                         Ok((ts, batch))
@@ -308,10 +311,9 @@ mod publish {
             self.publisher.flush().await
         }
 
-        fn stop(&mut self) {
+        fn stop(&mut self) -> Result<()> {
             self.state = State::Stop;
             self.state_ctl.update(Value::String(Chars::from("Stop")));
-            self.published.clear();
             match &mut self.speed {
                 Speed::Unlimited(v) => {
                     v.clear();
@@ -321,6 +323,32 @@ mod publish {
                     next.reset(time::Instant::now());
                 }
             }
+            let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
+            for (id, ev) in &img {
+                match self.published.get(id) {
+                    Some(val) => match ev {
+                        Event::Unsubscribed => {
+                            self.published.remove(id);
+                        }
+                        Event::Update(v) => {
+                            val.update(v.clone());
+                        }
+                    },
+                    None => match ev {
+                        Event::Unsubscribed => (),
+                        Event::Update(v) => match self.archive.path_for_id(*id) {
+                            None => bail!("unknown id in the image {}", id),
+                            Some(path) => {
+                                let path = self.data_base.append(path.as_str());
+                                let val = self.publisher.publish(path, v.clone())?;
+                                self.published.insert(*id, val);
+                            }
+                        },
+                    },
+                }
+            }
+            self.published.retain(|id, _| img.contains_key(id));
+            Ok(())
         }
 
         fn set_speed(&mut self, new_rate: Option<usize>) {
@@ -401,14 +429,14 @@ mod publish {
                                 if let Some(new_start) = get_bound(req) {
                                     t.start_ctl.update(bound_to_val(new_start));
                                     t.cursor.set_start(new_start);
-                                    if t.cursor.current().is_none() { t.stop(); }
+                                    if t.cursor.current().is_none() { t.stop()?; }
                                 }
                             }
                             if req.id == t.end.id() {
                                 if let Some(new_end) = get_bound(req) {
                                     t.end_ctl.update(bound_to_val(new_end));
                                     t.cursor.set_end(new_end);
-                                    if t.cursor.current().is_none() { t.stop(); }
+                                    if t.cursor.current().is_none() { t.stop()?; }
                                 }
                             }
                             if req.id == t.speed_ctl.id() {
@@ -427,6 +455,26 @@ mod publish {
                                 }
                             }
                             if req.id == state.id() {
+                                match req.val.cast_string() {
+                                    None => if let Some(reply) = req.reply {
+                                        let e = Chars::from("expected string");
+                                        reply.send(Value::Error(e))
+                                    }
+                                    Some(s) => {
+                                        let s = s.trim().to_lowercase();
+                                        if s.as_str() == "play" {
+                                            self.state = State::Play;
+                                        } else if s.as_str() == "pause" {
+                                            self.state = State::Pause;
+                                        } else if s.as_str() == "stop" {
+                                            t.stop()?
+                                        } else if let Some(reply) = req.reply {
+                                            let e = format!("invalid command {}", s);
+                                            let e = Chars::from(e);
+                                            reply.send(Value::Error(e));
+                                        }
+                                    }
+                                }
                             }
                             if req.id == pos.id() {
                             }

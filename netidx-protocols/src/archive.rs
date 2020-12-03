@@ -803,6 +803,10 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.inner.read().path_by_id.get(&id).cloned()
     }
 
+    pub fn get_index(&self) -> Vec<(u64, Path)> {
+        self.inner.read().path_by_id.iter().map(|(k, v)| (*k, v.clone())).collect()
+    }
+
     fn get_batch_at(&self, pos: usize, end: usize) -> Result<Pooled<Vec<BatchItem>>> {
         if pos >= end {
             bail!("get_batch: error record out of bounds")
@@ -889,7 +893,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         for (ts, pos) in idxs.drain(..) {
             let batch = self.get_batch_at(pos as usize, end)?;
             current = Some(ts);
-            res.push_barch((ts, batch));
+            res.push_back((ts, batch));
         }
         cursor.current = current;
         Ok(res)
