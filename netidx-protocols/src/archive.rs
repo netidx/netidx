@@ -2,9 +2,9 @@ use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
+use indexmap::IndexMap;
 use log::warn;
 use mapr::{Mmap, MmapMut};
-use indexmap::IndexMap;
 use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
@@ -811,6 +811,23 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
 
     pub fn path_for_id(&self, id: u64) -> Option<Path> {
         self.inner.read().path_by_id.get(&id).cloned()
+    }
+
+    /// Given a timestamp, move the specified number of steps forward
+    /// and return the timestamp of that position. The specified
+    /// timestamp need not actually be in the archive.
+    pub fn step_foward(&self, mut pos: DateTime<Utc>, steps: u64) -> DateTime<Utc> {
+        let inner = self.inner.read();
+        let mut iter = inner.deltamap.range((Bound::Exclude(pos), Bound::Unbounded));
+        for i in 0..steps {
+            match iter.next() {
+                None => break,
+                Some((ts, _)) => {
+                    pos = ts;
+                }
+            }
+        }
+        pos
     }
 
     /// Return a vector of all id/path pairs present in the
