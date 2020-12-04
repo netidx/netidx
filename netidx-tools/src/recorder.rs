@@ -10,7 +10,7 @@ use netidx::{
 };
 use netidx_protocols::archive::{
     Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, RemapRequired,
-    Timestamp,
+    Timestamp, Seek,
 };
 use parking_lot::RwLock;
 use std::{
@@ -41,81 +41,16 @@ mod publish {
         publish_base.append(id.to_simple_ref().encode_lower(&mut buf));
     }
 
-    #[derive(Debug, Clone, Copy)]
-    enum Pos {
-        Absolute(DateTime<Utc>),
-        BatchRelative(i8),
-        TimeRelative(chrono::Duration),
-    }
-
-    impl FromValue for Pos {
-        type Error = Error;
-
-        fn from_value(v: Value) -> Result<Seek> {
-            use diligent_date_parser::parse_date;
-            match v {
-                Value::DateTime(ts) => Seek::Absolute(ts),
-                v if v.is_number() => Seek::BatchRelative(v.cast_to::<i8>()?),
-                Value::String(c) => {
-                    let s = c.trim();
-                    if let Ok(steps) = s.parse::<i8>() {
-                        Seek::BatchRelative(steps)
-                    } else if let Some(dt) = parse_date(s) {
-                        Ok(Pos::Absolute(dt.with_timezone(&Utc)))
-                    } else if s.starts_with(&['+', '-'])
-                        && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
-                        && s.is_ascii()
-                        && s.len() > 2
-                    {
-                        let dir = s[0];
-                        let mag = s[s.len() - 1];
-                        match s[1..s.len() - 1].parse::<f64>() {
-                            Err(_) => bail!("invalid position expression"),
-                            Some(quantity) => {
-                                let quantity = if mag == 'y' {
-                                    quantity * 365.24 * 86400.
-                                } else if mag == 'M' {
-                                    quantity * (365.24 / 12.) * 86400.
-                                } else if mag == 'd' {
-                                    quantity * 86400.
-                                } else if mag == 'h' {
-                                    quantity * 3600.
-                                } else if mag == 'm' {
-                                    quantity * 60.
-                                } else {
-                                    quantity
-                                };
-                                let offset =
-                                    chrono::Duration::nanoseconds(if dir == '+' {
-                                        (quantity * 1e9).trunc() as i64
-                                    } else {
-                                        (-1 * quantity * 1e9).trunc() as i64
-                                    });
-                                if dir == '+' {
-                                    Ok(Pos::TimeRelative(offset))
-                                } else {
-                                    Ok(Pos::TimeRelative(offset))
-                                }
-                            }
-                        }
-                    } else {
-                        bail!("{} is not a valid datetime or offset", s)
-                    }
-                }
-            }
-        }
-    }
-
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
         match v {
             Value::DateTime(ts) => Bound::Included(ts),
             Value::String(c) if c.trim().to_lowercase().as_str() == "unbounded" => {
                 Ok(Bound::Unbounded)
             }
-            v => match v.cast_to::<Pos>()? {
-                Pos::Absolute(ts) => Bound::Included(ts),
-                Pos::TimeRelative(offset) => Bound::Included(Utc::now() + offset),
-                Pos::BatchRelative(_) => bail!("invalid bound"),
+            v => match v.cast_to::<Seek>()? {
+                Seek::Absolute(ts) => Bound::Included(ts),
+                Seek::TimeRelative(offset) => Bound::Included(Utc::now() + offset),
+                Seek::BatchRelative(_) => bail!("invalid bound"),
             },
         }
     }
@@ -336,23 +271,7 @@ mod publish {
             self.publisher.flush().await
         }
 
-        fn stop(&mut self) -> Result<()> {
-            self.state = State::Stop;
-            self.state_ctl.update(Value::String(Chars::from("Stop")));
-            self.cursor.reset();
-            self.pos_ctl.update(match self.cursor.start() {
-                Bound::Unbounded => Value::Null,
-                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts),
-            });
-            match &mut self.speed {
-                Speed::Unlimited(v) => {
-                    v.clear();
-                }
-                Speed::Limited { current, next, .. } => {
-                    current.clear();
-                    next.reset(time::Instant::now());
-                }
-            }
+        fn reimage(&mut self) -> Result<()> {
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
             for (id, path) in idx.drain(..) {
@@ -373,8 +292,44 @@ mod publish {
             }
             Ok(())
         }
+        
+        fn stop(&mut self) -> Result<()> {
+            self.state = State::Stop;
+            self.state_ctl.update(Value::String(Chars::from("Stop")));
+            self.cursor.reset();
+            self.pos_ctl.update(match self.cursor.start() {
+                Bound::Unbounded => Value::Null,
+                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts),
+            });
+            match &mut self.speed {
+                Speed::Unlimited(v) => {
+                    v.clear();
+                }
+                Speed::Limited { current, next, .. } => {
+                    current.clear();
+                    next.reset(time::Instant::now());
+                }
+            }
+            self.reimage()
+        }
 
-        fn seek_to(&mut self, pos: Pos) -> Result<()> {
+        fn seek(&mut self, seek: Seek) -> Result<()> {
+            let current = match &mut self.speed {
+                Speed::Unlimited(v) => v,
+                Speed::Limited { current, next, .. } => {
+                    next.reset(time::Instant::now());
+                    current
+                }
+            };
+            match current.pop_first() {
+                None => (),
+                Some((ts, _)) => {
+                    self.cursor.set_current(ts);
+                    v.clear()
+                }
+            }            
+            self.archive.seek(&mut self.cursor, seek);
+            self.reimage()
         }
 
         fn set_speed(&mut self, new_rate: Option<f64>) {

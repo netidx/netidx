@@ -21,7 +21,6 @@ pub trait Poolable {
 impl<K, V, R> Poolable for HashMap<K, V, R>
 where
     K: Hash + Eq,
-    V: Hash + Eq,
     R: Default + BuildHasher,
 {
     fn empty() -> Self {

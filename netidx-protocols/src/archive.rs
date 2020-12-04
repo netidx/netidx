@@ -6,11 +6,11 @@ use indexmap::IndexMap;
 use log::warn;
 use mapr::{Mmap, MmapMut};
 use netidx::{
+    chars::Chars,
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     subscriber::{Event, FromValue, Value},
-    chars::Chars,
 };
 use packed_struct::PackedStruct;
 use parking_lot::{
@@ -232,6 +232,7 @@ lazy_static! {
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
     static ref IDX_POOL: Pool<Vec<(u64, Path)>> = Pool::new(10, 20_000_000);
+    static ref IMG_POOL: Pool<HashMap<u64, Event>> = Pool::new(10, 20_000_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
 }
 
@@ -1047,9 +1048,12 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
     /// then all the deltas between the beginning and the cursor start
     /// will be read, otherwise only the deltas between the closest
     /// image that is older, and the cursor start need to be read.
-    pub fn build_image(&self, cursor: &Cursor) -> Result<HashMap<u64, Event>> {
+    pub fn build_image(
+        &self,
+        cursor: &Cursor,
+    ) -> Result<Pooled<HashMap<u64, Event>>> {
         match cursor.start {
-            Bound::Unbounded => Ok(HashMap::new()),
+            Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
             _ => {
                 let (to_read, end) = {
                     // we need to invert the excluded/included to get
@@ -1072,7 +1076,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                     to_read.extend(inner.deltamap.range((s, cs)).map(|v| v.1));
                     (to_read, inner.end)
                 };
-                let mut image = HashMap::new();
+                let mut image = IMG_POOL.take();
                 for pos in to_read {
                     let mut batch = self.get_batch_at(pos as usize, end)?;
                     image.extend(batch.drain(..).map(|b| (b.0, b.1)));
