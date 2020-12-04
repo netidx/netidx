@@ -112,7 +112,7 @@ mod publish {
             }
             v => match v.cast_to::<Pos>()? {
                 Pos::Absolute(ts) => Bound::Included(ts),
-                Pos::TimeRelative(offset) => Bounde::Included(Utc::now() + offset),
+                Pos::TimeRelative(offset) => Bound::Included(Utc::now() + offset),
                 Pos::BatchRelative(_) => bail!("invalid bound")
             }
         }
