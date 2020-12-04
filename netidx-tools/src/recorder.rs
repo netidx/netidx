@@ -85,10 +85,12 @@ mod publish {
                                 } else {
                                     quantity
                                 };
-                                let offset = chrono::Duration::nanoseconds(
-                                    if dir == '+' { (quantity * 1e9).trunc() as i64 }
-                                    else { (-1 * quantity * 1e9).trunc() as i64 },
-                                );
+                                let offset =
+                                    chrono::Duration::nanoseconds(if dir == '+' {
+                                        (quantity * 1e9).trunc() as i64
+                                    } else {
+                                        (-1 * quantity * 1e9).trunc() as i64
+                                    });
                                 if dir == '+' {
                                     Ok(Pos::TimeRelative(offset))
                                 } else {
@@ -113,8 +115,8 @@ mod publish {
             v => match v.cast_to::<Pos>()? {
                 Pos::Absolute(ts) => Bound::Included(ts),
                 Pos::TimeRelative(offset) => Bound::Included(Utc::now() + offset),
-                Pos::BatchRelative(_) => bail!("invalid bound")
-            }
+                Pos::BatchRelative(_) => bail!("invalid bound"),
+            },
         }
     }
 
@@ -314,21 +316,20 @@ mod publish {
             mut batch: (DateTime<Utc>, Pooled<Vec<BatchItem>>),
         ) -> Result<()> {
             for BatchItem(id, ev) in batch.1.drain(..) {
-                match ev {
-                    Event::Unsubscribed => {
-                        self.published.remove(&id);
+                let v = match ev {
+                    Event::Unpublished => Value::Null,
+                    Event::Update(v) => v,
+                };
+                match self.published.get(&id) {
+                    Some(val) => {
+                        val.update(v);
                     }
-                    Event::Update(v) => match self.published.get(&id) {
-                        Some(val) => {
-                            val.update(v);
-                        }
-                        None => {
-                            let path = self.archive.path_for_id(&id).unwrap();
-                            let path = self.data_base.append(&path);
-                            let val = self.publisher.publish(path, v)?;
-                            self.published.insert(id, val);
-                        }
-                    },
+                    None => {
+                        let path = self.archive.path_for_id(&id).unwrap();
+                        let path = self.data_base.append(&path);
+                        let val = self.publisher.publish(path, v)?;
+                        self.published.insert(id, val);
+                    }
                 }
             }
             self.pos.update(Value::DateTime(batch.0));
@@ -373,13 +374,13 @@ mod publish {
             Ok(())
         }
 
-        fn set_speed(&mut self, new_rate: Option<usize>) {
+        fn set_speed(&mut self, new_rate: Option<f64>) {
             match new_rate {
                 None => {
                     t.speed_ctl.update(Value::String(Chars::from("Unlimited")));
                 }
                 Some(new_rate) => {
-                    t.speed_ctl.update(Value::U64(new_rate));
+                    t.speed_ctl.update(Value::F64(new_rate));
                 }
             }
             match &mut self.speed {
@@ -455,7 +456,7 @@ mod publish {
                                     if t.cursor.current().is_none() { t.stop()?; }
                                 }
                             }
-                            if req.id == t.end.id() {
+                            if req.id == t.end_ctl.id() {
                                 if let Some(new_end) = get_bound(req) {
                                     t.end_ctl.update(bound_to_val(new_end));
                                     t.cursor.set_end(new_end);
@@ -463,9 +464,9 @@ mod publish {
                                 }
                             }
                             if req.id == t.speed_ctl.id() {
-                                if let Some(mp) = req.val.clone().cast_u64() {
-                                    t.set_speed(Some(mp as usize));
-                                } else if let Some(s) = req.val.cast_string() {
+                                if let Ok(mp) = req.val.clone().cast_to::<f64>() {
+                                    t.set_speed(Some(mp));
+                                } else if let Ok(s) = req.val.cast_to::<Chars>() {
                                     if s.trim().to_lowercase().as_str() == "unlimited" {
                                         t.set_speed(None);
                                     } else if let Some(reply) = req.reply {
@@ -478,12 +479,12 @@ mod publish {
                                 }
                             }
                             if req.id == state.id() {
-                                match req.val.cast_string() {
-                                    None => if let Some(reply) = req.reply {
+                                match req.val.cast_to::<Chars>() {
+                                    Err(_) => if let Some(reply) = req.reply {
                                         let e = Chars::from("expected string");
                                         reply.send(Value::Error(e))
                                     }
-                                    Some(s) => {
+                                    Ok(s) => {
                                         let s = s.trim().to_lowercase();
                                         if s.as_str() == "play" {
                                             self.state = State::Play;
@@ -499,8 +500,16 @@ mod publish {
                                     }
                                 }
                             }
-                            if req.id == pos.id() {
-
+                            if req.id == pos_ctl.id() {
+                                match req.val.cast_to::<Pos>() {
+                                    Err(e) => if let Some(reply) = req.reply {
+                                        let e = Chars::from(format!("{}", e));
+                                        reply.send(Value::Error(e))
+                                    }
+                                    Ok(pos) => {
+                                        
+                                    },
+                                }
                             }
                         }
                         t.publisher.flush().await
