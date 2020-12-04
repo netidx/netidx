@@ -1,5 +1,6 @@
 use anyhow::{Error, Result};
 use futures::{channel::mpsc, future, prelude::*, select_biased};
+use log::{info, warn};
 use netidx::{
     config::Config,
     path::Path,
@@ -10,7 +11,7 @@ use netidx::{
 };
 use netidx_protocols::archive::{
     Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, RemapRequired,
-    Timestamp, Seek,
+    Seek, Timestamp,
 };
 use parking_lot::RwLock;
 use std::{
@@ -35,6 +36,11 @@ mod publish {
     static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is Unlimited";
     static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Pause, pause at the current position. Stop, reset playback to the initial state, unpublish everything, and wait. Default Stop.";
     static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhms] to step forward or back that amount of time, e.g. -1y step back 1 year.";
+
+    fn uuid_string(id: Uuid) -> String {
+        let mut buf = [u8; SimpleRef::LENGTH];
+        id.to_simple_ref().encode_lower(&mut buf).into()
+    }
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
         let mut buf = [u8; SimpleRef::LENGTH];
@@ -274,6 +280,13 @@ mod publish {
         fn reimage(&mut self) -> Result<()> {
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
+            self.pos_ctl.update(match self.cursor.current() {
+                Some(ts) => ts,
+                None => match self.cursor.start() {
+                    Bound::Unbounded => Value::Null,
+                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                },
+            });
             for (id, path) in idx.drain(..) {
                 let v = match img.get(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
@@ -292,7 +305,7 @@ mod publish {
             }
             Ok(())
         }
-        
+
         fn stop(&mut self) -> Result<()> {
             self.state = State::Stop;
             self.state_ctl.update(Value::String(Chars::from("Stop")));
@@ -327,7 +340,7 @@ mod publish {
                     self.cursor.set_current(ts);
                     v.clear()
                 }
-            }            
+            }
             self.archive.seek(&mut self.cursor, seek);
             self.reimage()
         }
@@ -459,8 +472,8 @@ mod publish {
                                 }
                             }
                             if req.id == pos_ctl.id() {
-                                match req.val.cast_to::<Pos>() {
-                                    Ok(pos) => t.seek_to(pos)?,
+                                match req.val.cast_to::<Seek>() {
+                                    Ok(pos) => t.seek(pos)?,
                                     Err(e) => if let Some(reply) = req.reply {
                                         let e = Chars::from(format!("{}", e));
                                         reply.send(Value::Error(e))
@@ -483,12 +496,67 @@ mod publish {
     }
 
     pub(super) async fn run(
-        mut archive: Archive<ReadOnly>,
-        publisher: Publisher,
+        mut bcast: broadcast::Receiver<BCastMsg>,
+        archive: Archive<ReadOnly>,
+        resolver: Config,
+        desired_auth: Auth,
+        bind_cfg: BindCfg,
         publish_base: Path,
     ) -> Result<()> {
-        let mut sessions: HashMap<Uuid, Session> = HashMap::new();
-        let session = publisher.publish(publish_base.append("session"))?;
+        let session_publisher =
+            Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
+                .await?;
+        let session = session_publisher.publish(publish_base.append("session"))?;
+        let (control_rx, control_tx) = mpsc::channel(3);
+        session.writes(control_tx);
+        let control_rx = control_rx.fuse();
+        loop {
+            select_biased! {
+                r = bcast.recv() => match r {
+                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => (),
+                    Ok(_) => (),
+                },
+                r = control_rx.next() => match r {
+                    None => break Ok(()),
+                    Some(mut batch) => {
+                        for req in batch.drain(..) {
+                            if req.id == session.id() {
+                                let publisher = Publisher::new(
+                                    resolver.clone(),
+                                    desired_auth.clone(),
+                                    bind_cfg.clone()
+                                ).await?;
+                                let bcast = bcast.clone();
+                                let archive = archive.mirror();
+                                let publish_base = publish_base.clone();
+                                let session_id = Uuid::new_v4();
+                                let idstr = uuid_string(id);
+                                task::spawn(async move {
+                                    let res = session(
+                                        bcast,
+                                        archive,
+                                        publisher,
+                                        publish_base,
+                                        session_id
+                                    ).await;
+                                    match res {
+                                        Ok(()) => {
+                                            info!("session {} existed", idstr)
+                                        }
+                                        Err(e) => {
+                                            warn!("session {} exited {}", idstr, e)
+                                        }
+                                    }
+                                });
+                                session.update_subscriber(req.addr, idstr.into());
+                                session_publisher.flush().await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -508,6 +576,6 @@ pub(crate) fn run(
             panic!("you must specify bind and publish_base to publish an archive")
         }
     };
-
+    
     let rt = Runtime::new().expect("failed to init tokio runtime");
 }
