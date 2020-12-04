@@ -378,6 +378,14 @@ mod publish {
         }
     }
 
+    async fn wait_client_if_idle(publisher: &Publisher, idle: bool) {
+        if idle {
+            publisher.wait_any_client().await
+        } else {
+            future::pending().await
+        }
+    }
+
     async fn session(
         mut bcast: broadcast::Receiver<BCastMsg>,
         archive: Archive<ReadOnly>,
@@ -390,8 +398,22 @@ mod publish {
             T::new(publisher, archive, session_id, publish_base, control_tx).await?;
         t.stop()?;
         let mut control_rx = control_rx.fuse();
+        let mut sub_rx = sub_rx.fuse();
+        let mut idle = false;
+        let mut idle_check = time::interval(std::time::Duration::from_secs(30)).fuse();
         loop {
             select_biased! {
+                _ = idle_check.next() => {
+                    let no_clients = publisher.clients() == 0;
+                    if no_clients && idle {
+                        break Ok(())
+                    } else {
+                        idle = no_clients;
+                    }
+                },
+                _ = wait_client_if_idle(&publisher, idle) => {
+                    idle = false;
+                },
                 r = bcast.recv() => match r {
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
                     Err(broadcast::error::RecvError::Lagged(missed)) => match t.state {
@@ -419,6 +441,7 @@ mod publish {
                 r = control_rx.next() => match r {
                     None => break Ok(()),
                     Some(mut batch) => {
+                        idle = false;
                         for req in batch.drain(..) {
                             if req.id == t.start_ctl.id() {
                                 if let Some(new_start) = get_bound(req) {
@@ -489,7 +512,12 @@ mod publish {
                         t.archive = t.archive.mirror()?;
                     }
                     Err(e) => break Err(e),
-                    Ok(batch) => { t.process_batch(batch).await?; }
+                    Ok(batch) => {
+                        if publisher.clients() > 0 {
+                            idle = false;
+                        }
+                        t.process_batch(batch).await?;
+                    }
                 }
             }
         }
@@ -576,6 +604,6 @@ pub(crate) fn run(
             panic!("you must specify bind and publish_base to publish an archive")
         }
     };
-    
+
     let rt = Runtime::new().expect("failed to init tokio runtime");
 }
