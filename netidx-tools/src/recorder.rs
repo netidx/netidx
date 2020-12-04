@@ -374,6 +374,9 @@ mod publish {
             Ok(())
         }
 
+        fn seek_to(&mut self, pos: Pos) -> Result<()> {
+        }
+
         fn set_speed(&mut self, new_rate: Option<f64>) {
             match new_rate {
                 None => {
@@ -502,13 +505,11 @@ mod publish {
                             }
                             if req.id == pos_ctl.id() {
                                 match req.val.cast_to::<Pos>() {
+                                    Ok(pos) => t.seek_to(pos)?,
                                     Err(e) => if let Some(reply) = req.reply {
                                         let e = Chars::from(format!("{}", e));
                                         reply.send(Value::Error(e))
                                     }
-                                    Ok(pos) => {
-                                        
-                                    },
                                 }
                             }
                         }

@@ -9,7 +9,7 @@ use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    subscriber::Event,
+    subscriber::{Event, FromValue},
 };
 use packed_struct::PackedStruct;
 use parking_lot::{
@@ -26,6 +26,7 @@ use std::{
     mem,
     ops::{Bound, Deref, DerefMut, RangeBounds},
     path::Path as FilePath,
+    str::FromStr,
     sync::Arc,
 };
 
@@ -75,6 +76,7 @@ enum RecordTyp {
 
 const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
+static EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
 
 // Every record in the archive starts with this header
 #[derive(PackedStruct, Debug, Clone)]
@@ -111,6 +113,76 @@ impl Pack for RecordHeader {
         let mut v = [0u8; 8];
         buf.copy_to_slice(&mut v);
         RecordHeader::unpack(&v).map_err(|_| PackError::InvalidFormat)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Seek {
+    Absolute(DateTime<Utc>),
+    BatchRelative(i8),
+    TimeRelative(chrono::Duration),
+}
+
+impl FromStr for Seek {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        use diligent_date_parser::parse_date;
+        let s = s.trim();
+        if let Ok(steps) = s.parse::<i8>() {
+            Ok(Seek::BatchRelative(steps))
+        } else if let Some(dt) = parse_date(s) {
+            Ok(Seek::Absolute(dt.with_timezone(&Utc)))
+        } else if s.starts_with(&['+', '-'])
+            && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
+            && s.is_ascii()
+            && s.len() > 2
+        {
+            let dir = s[0];
+            let mag = s[s.len() - 1];
+            match s[1..s.len() - 1].parse::<f64>() {
+                Err(_) => bail!("invalid position expression"),
+                Some(quantity) => {
+                    let quantity = if mag == 'y' {
+                        quantity * 365.24 * 86400.
+                    } else if mag == 'M' {
+                        quantity * (365.24 / 12.) * 86400.
+                    } else if mag == 'd' {
+                        quantity * 86400.
+                    } else if mag == 'h' {
+                        quantity * 3600.
+                    } else if mag == 'm' {
+                        quantity * 60.
+                    } else {
+                        quantity
+                    };
+                    let offset = chrono::Duration::nanoseconds(if dir == '+' {
+                        (quantity * 1e9).trunc() as i64
+                    } else {
+                        (-1 * quantity * 1e9).trunc() as i64
+                    });
+                    if dir == '+' {
+                        Ok(Seek::TimeRelative(offset))
+                    } else {
+                        Ok(Seek::TimeRelative(offset))
+                    }
+                }
+            }
+        } else {
+            bail!("{} is not a valid seek expression", s)
+        }
+    }
+}
+
+impl FromValue for Seek {
+    type Error = Error;
+
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::DateTime(ts) => Seek::Absolute(ts),
+            v if v.is_number() => Seek::BatchRelative(v.cast_to::<i8>()?),
+            Value::String(c) => c.parse::<Seek>(),
+        }
     }
 }
 
@@ -261,9 +333,57 @@ impl Cursor {
         self.current = None;
     }
 
+    /// Move the current to the specified position in the archive. If
+    /// `pos` is outside the bounds of the cursor, then set the
+    /// current to the closest value that is in bounds.
     pub fn set_current(&mut self, pos: DateTime<Utc>) {
         if (self.start, self.end).contains(&pos) {
             self.current = Some(pos);
+        } else {
+            use chrono::Duration;
+            match (self.start, self.end) {
+                (Bound::Unbounded, Bound::Unbounded) => unreachable!(),
+                (Bound::Unbounded, Bound::Included(ts)) => {
+                    self.current = Some(ts);
+                }
+                (Bound::Unbounded, Bound::Excluded(ts)) => {
+                    self.current = Some(ts - EPSILON);
+                }
+                (Bound::Included(ts), Bound::Unbounded) => {
+                    self.current = Some(ts);
+                }
+                (Bound::Excluded(ts), Bound::Unbounded) => {
+                    self.current = Some(ts + EPSILON);
+                }
+                (Bound::Included(start), Bound::Included(end)) => {
+                    if ts < start {
+                        self.current = Some(start);
+                    } else {
+                        self.current = Some(end);
+                    }
+                }
+                (Bound::Excluded(start), Bound::Excluded(end)) => {
+                    if ts <= start {
+                        self.current = Some(start + EPSILON);
+                    } else {
+                        self.current = Some(end - EPSILON);
+                    }
+                }
+                (Bound::Excluded(start), Bound::Included(end)) => {
+                    if ts <= start {
+                        self.current = Some(start + EPSILON);
+                    } else {
+                        self.current = Some(end);
+                    }
+                }
+                (Bound::Included(start), Bound::Excluded(end)) => {
+                    if ts < start {
+                        self.current = Some(start);
+                    } else {
+                        self.current = Some(end - EPSILON);
+                    }
+                }
+            }
         }
     }
 
@@ -813,31 +933,72 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
         self.inner.read().path_by_id.get(&id).cloned()
     }
 
-    /// move the cursor the specified number of batches forward or
-    /// backward. If the cursor has no current position then positive
-    /// offsets begin at the cursor start, and negative offsets begin
-    /// at the cursor end.
-    pub fn step(&self, cursor: &mut Cursor, steps: i8) {
-        let inner = self.inner.read();
-        if steps >= 0 {
-            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
-            let mut iter = inner.deltamap.range((init, cursor.end));
-            for _ in 0..steps as usize {
-                match iter.next() {
-                    None => break,
-                    Some((ts, _)) => {
-                        cursor.current = Some(*ts);
+    /// Move the cursor according to the `Seek` instruction. If the
+    /// cursor has no current position then positive offsets begin at
+    /// the cursor start, and negative offsets begin at the cursor
+    /// end. If the seek instruction would move the cursor out of
+    /// bounds, then it will move to the closest in bounds position.
+    pub fn seek(&self, cursor: &mut Cursor, seek: Seek) {
+        match seek {
+            Seek::Absolute(ts) => {
+                cursor.set_current(ts);
+            }
+            Seek::TimeRelative(offset) => match cursor.current() {
+                Some(ts) => cursor.set_current(ts + offset),
+                None => {
+                    if offset.num_microseconds() >= 0 {
+                        match cursor.start() {
+                            Bound::Included(ts) => cursor.set_current(ts + offset),
+                            Bound::Excluded(ts) => {
+                                cursor.set_current(ts + EPSILON + offset)
+                            }
+                            Bound::Unbounded => {
+                                match self.inner.read().deltamap.keys().next() {
+                                    None => (),
+                                    Some(ts) => cursor.set_current(ts + offset),
+                                }
+                            }
+                        };
+                    } else {
+                        match cursor.end() {
+                            Bound::Included(ts) => cursor.set_current(ts + offset),
+                            Bound::Excluded(ts) => {
+                                cursor.set_current(ts - EPSILON + offset)
+                            }
+                            Bound::Unbounded => {
+                                match self.inner.read().deltamap.keys().next_back() {
+                                    None => (),
+                                    Some(ts) => cursor.set_current(ts + offset),
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        } else {
-            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
-            let mut iter = inner.deltamap.range((cursor.start, init));
-            for _ in 0..steps.abs() as usize {
-                match iter.next_back() {
-                    None => break,
-                    Some((ts, _)) => {
-                        cursor.current = Some(*ts);
+            },
+            Seek::BatchRelative(steps) => {
+                let inner = self.inner.read();
+                if steps >= 0 {
+                    let init =
+                        cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
+                    let mut iter = inner.deltamap.range((init, cursor.end));
+                    for _ in 0..steps as usize {
+                        match iter.next() {
+                            None => break,
+                            Some((ts, _)) => {
+                                cursor.current = Some(*ts);
+                            }
+                        }
+                    }
+                } else {
+                    let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
+                    let mut iter = inner.deltamap.range((cursor.start, init));
+                    for _ in 0..steps.abs() as usize {
+                        match iter.next_back() {
+                            None => break,
+                            Some((ts, _)) => {
+                                cursor.current = Some(*ts);
+                            }
+                        }
                     }
                 }
             }
@@ -858,7 +1019,7 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                 idx.push((*id, path.clone()));
                 i += 1;
                 if i >= inner.path_by_id.len() {
-                    break 'main
+                    break 'main;
                 }
             }
         }
