@@ -9,7 +9,8 @@ use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    subscriber::{Event, FromValue},
+    subscriber::{Event, FromValue, Value},
+    chars::Chars,
 };
 use packed_struct::PackedStruct;
 use parking_lot::{
@@ -76,7 +77,6 @@ enum RecordTyp {
 
 const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
-static EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
 
 // Every record in the archive starts with this header
 #[derive(PackedStruct, Debug, Clone)]
@@ -133,16 +133,16 @@ impl FromStr for Seek {
             Ok(Seek::BatchRelative(steps))
         } else if let Some(dt) = parse_date(s) {
             Ok(Seek::Absolute(dt.with_timezone(&Utc)))
-        } else if s.starts_with(&['+', '-'])
-            && s.ends_with(&['y', 'M', 'd', 'h', 'm', 's'])
+        } else if s.starts_with(['+', '-'].as_ref())
+            && s.ends_with(['y', 'M', 'd', 'h', 'm', 's'].as_ref())
             && s.is_ascii()
             && s.len() > 2
         {
-            let dir = s[0];
-            let mag = s[s.len() - 1];
+            let dir = s.chars().next().unwrap();
+            let mag = s.chars().next_back().unwrap();
             match s[1..s.len() - 1].parse::<f64>() {
                 Err(_) => bail!("invalid position expression"),
-                Some(quantity) => {
+                Ok(quantity) => {
                     let quantity = if mag == 'y' {
                         quantity * 365.24 * 86400.
                     } else if mag == 'M' {
@@ -159,7 +159,7 @@ impl FromStr for Seek {
                     let offset = chrono::Duration::nanoseconds(if dir == '+' {
                         (quantity * 1e9).trunc() as i64
                     } else {
-                        (-1 * quantity * 1e9).trunc() as i64
+                        (-1. * quantity * 1e9).trunc() as i64
                     });
                     if dir == '+' {
                         Ok(Seek::TimeRelative(offset))
@@ -179,9 +179,9 @@ impl FromValue for Seek {
 
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::DateTime(ts) => Seek::Absolute(ts),
-            v if v.is_number() => Seek::BatchRelative(v.cast_to::<i8>()?),
-            Value::String(c) => c.parse::<Seek>(),
+            Value::DateTime(ts) => Ok(Seek::Absolute(ts)),
+            v if v.is_number() => Ok(Seek::BatchRelative(v.cast_to::<i8>()?)),
+            v => v.cast_to::<Chars>()?.parse::<Seek>(),
         }
     }
 }
@@ -232,6 +232,7 @@ lazy_static! {
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
     static ref IDX_POOL: Pool<Vec<(u64, Path)>> = Pool::new(10, 20_000_000);
+    static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -340,47 +341,46 @@ impl Cursor {
         if (self.start, self.end).contains(&pos) {
             self.current = Some(pos);
         } else {
-            use chrono::Duration;
             match (self.start, self.end) {
                 (Bound::Unbounded, Bound::Unbounded) => unreachable!(),
                 (Bound::Unbounded, Bound::Included(ts)) => {
                     self.current = Some(ts);
                 }
                 (Bound::Unbounded, Bound::Excluded(ts)) => {
-                    self.current = Some(ts - EPSILON);
+                    self.current = Some(ts - *EPSILON);
                 }
                 (Bound::Included(ts), Bound::Unbounded) => {
                     self.current = Some(ts);
                 }
                 (Bound::Excluded(ts), Bound::Unbounded) => {
-                    self.current = Some(ts + EPSILON);
+                    self.current = Some(ts + *EPSILON);
                 }
                 (Bound::Included(start), Bound::Included(end)) => {
-                    if ts < start {
+                    if pos < start {
                         self.current = Some(start);
                     } else {
                         self.current = Some(end);
                     }
                 }
                 (Bound::Excluded(start), Bound::Excluded(end)) => {
-                    if ts <= start {
-                        self.current = Some(start + EPSILON);
+                    if pos <= start {
+                        self.current = Some(start + *EPSILON);
                     } else {
-                        self.current = Some(end - EPSILON);
+                        self.current = Some(end - *EPSILON);
                     }
                 }
                 (Bound::Excluded(start), Bound::Included(end)) => {
-                    if ts <= start {
-                        self.current = Some(start + EPSILON);
+                    if pos <= start {
+                        self.current = Some(start + *EPSILON);
                     } else {
                         self.current = Some(end);
                     }
                 }
                 (Bound::Included(start), Bound::Excluded(end)) => {
-                    if ts < start {
+                    if pos < start {
                         self.current = Some(start);
                     } else {
-                        self.current = Some(end - EPSILON);
+                        self.current = Some(end - *EPSILON);
                     }
                 }
             }
@@ -946,16 +946,16 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
             Seek::TimeRelative(offset) => match cursor.current() {
                 Some(ts) => cursor.set_current(ts + offset),
                 None => {
-                    if offset.num_microseconds() >= 0 {
+                    if offset >= chrono::Duration::microseconds(0) {
                         match cursor.start() {
                             Bound::Included(ts) => cursor.set_current(ts + offset),
                             Bound::Excluded(ts) => {
-                                cursor.set_current(ts + EPSILON + offset)
+                                cursor.set_current(ts + *EPSILON + offset)
                             }
                             Bound::Unbounded => {
                                 match self.inner.read().deltamap.keys().next() {
                                     None => (),
-                                    Some(ts) => cursor.set_current(ts + offset),
+                                    Some(ts) => cursor.set_current(*ts + offset),
                                 }
                             }
                         };
@@ -963,12 +963,12 @@ impl<T: Deref<Target = [u8]>> Archive<T> {
                         match cursor.end() {
                             Bound::Included(ts) => cursor.set_current(ts + offset),
                             Bound::Excluded(ts) => {
-                                cursor.set_current(ts - EPSILON + offset)
+                                cursor.set_current(ts - *EPSILON + offset)
                             }
                             Bound::Unbounded => {
                                 match self.inner.read().deltamap.keys().next_back() {
                                     None => (),
-                                    Some(ts) => cursor.set_current(ts + offset),
+                                    Some(ts) => cursor.set_current(*ts + offset),
                                 }
                             }
                         }
