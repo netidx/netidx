@@ -25,11 +25,11 @@ use std::{
     fs::{File, OpenOptions},
     iter::IntoIterator,
     mem,
-    ops::{Bound, Deref, DerefMut, RangeBounds},
+    ops::{Bound, RangeBounds},
     path::Path as FilePath,
     str::FromStr,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -119,7 +119,7 @@ impl Pack for RecordHeader {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
 pub struct Id(u64);
 
 impl Pack for Id {
@@ -475,20 +475,21 @@ impl error::Error for RemapRequired {}
 fn scan_records(
     path_by_id: &mut IndexMap<Id, Path>,
     id_by_path: &mut HashMap<Path, Id>,
-    imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
-    deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    mut imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    mut deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
     max_id: &mut u64,
     uncommitted_ok: bool,
+    total_size: usize,
     buf: &mut impl Buf,
-) -> Result<()> {
-    let mut max_id = 0;
+) -> Result<usize> {
     loop {
+        let pos = total_size - buf.remaining();
         if buf.remaining() < <RecordHeader as Pack>::const_len().unwrap() {
             if !uncommitted_ok {
                 warn!("file missing End marker");
             }
-            break Ok(max_id);
+            break Ok(pos);
         }
         let rh = RecordHeader::decode(buf)
             .map_err(Error::from)
@@ -496,20 +497,20 @@ fn scan_records(
         if !rh.committed {
             // End of archive marked by uncommitted record with length 0
             if rh.record_length == 0 {
-                break Ok(max_id);
+                break Ok(pos);
             } else if !uncommitted_ok {
                 warn!("uncommitted records before end marker {}", pos);
-                break Ok(max_id);
+                break Ok(pos);
             }
         }
         if buf.remaining() < rh.record_length as usize {
             warn!("truncated record at {}", pos);
-            break Ok(max_id);
+            break Ok(pos);
         }
         use chrono::Duration;
         match rh.record_type {
             RecordTyp::DeltaBatch => {
-                if let Some(deltamap) = deltamap {
+                if let Some(deltamap) = &mut deltamap {
                     let timestamp =
                         *time_basis + Duration::microseconds(rh.timestamp as i64);
                     deltamap.insert(timestamp, pos);
@@ -517,10 +518,10 @@ fn scan_records(
                 buf.advance(rh.record_length as usize); // skip the contents
             }
             RecordTyp::Timestamp => {
-                *time_basis = <DateTime<Utc> as Pack>::decode(&mut buf)?;
+                *time_basis = <DateTime<Utc> as Pack>::decode(buf)?;
             }
             RecordTyp::ImageBatch => {
-                if let Some(imagemap) = imagemap {
+                if let Some(imagemap) = &mut imagemap {
                     let timestamp =
                         *time_basis + Duration::microseconds(rh.timestamp as i64);
                     imagemap.insert(timestamp, pos);
@@ -528,7 +529,7 @@ fn scan_records(
                 buf.advance(rh.record_length as usize); // skip the contents
             }
             RecordTyp::PathMappings => {
-                let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(&mut buf)
+                let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(buf)
                     .map_err(Error::from)
                     .context("invalid path mappings record")?;
                 for pm in m.drain(..) {
@@ -539,9 +540,9 @@ fn scan_records(
                         );
                     }
                     if let Some(old) = path_by_id.insert(pm.1, pm.0.clone()) {
-                        warn!("duplicate id mapping for {}, {}, {}", &*pm.0, old, pm.1)
+                        warn!("duplicate id mapping for {}, {}, {:?}", &*pm.0, old, pm.1)
                     }
-                    *max_id = max(pm.1, *max_id);
+                    *max_id = max(pm.1 .0, *max_id);
                 }
             }
         }
@@ -563,7 +564,7 @@ fn scan_file(
     if buf.remaining() < <FileHeader as Pack>::const_len().unwrap() {
         bail!("invalid file header: too short")
     }
-    let header = <FileHeader as Pack>::decode(&mut buf)
+    let header = <FileHeader as Pack>::decode(buf)
         .map_err(Error::from)
         .context("invalid file header")?;
     // this is the first version, so no upgrading can be done yet
@@ -578,9 +579,9 @@ fn scan_file(
         time_basis,
         max_id,
         uncommitted_ok,
+        total_bytes,
         buf,
-    )?;
-    Ok(total_bytes - buf.remaining())
+    )
 }
 
 /// This reads and writes the netidx archive format (as written by the
@@ -688,7 +689,6 @@ impl ArchiveWriter {
                 block_size,
                 mmap,
             };
-            let mut buf = &mut *t.mmap;
             let end = scan_file(
                 &mut t.path_by_id,
                 &mut t.id_by_path,
@@ -697,11 +697,11 @@ impl ArchiveWriter {
                 &mut time_basis,
                 &mut t.next_id,
                 false,
-                &mut buf,
+                &mut &*t.mmap,
             )?;
             t.next_id += 1;
-            t.end = end;
-            t.committed.store(end, Ordering::Relaxed);
+            t.end.store(end, Ordering::Relaxed);
+            t.committed = end;
             Ok(t)
         } else {
             let file = OpenOptions::new()
@@ -725,7 +725,7 @@ impl ArchiveWriter {
                 timestamp: 0,
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-            mmap.0.flush()?;
+            mmap.flush()?;
             Ok(ArchiveWriter {
                 path_by_id: IndexMap::new(),
                 id_by_path: HashMap::new(),
@@ -743,8 +743,8 @@ impl ArchiveWriter {
     fn reserve(&mut self, additional_capacity: usize) -> Result<()> {
         let len = self.mmap.len();
         let new_len = len + max(len >> 6, additional_capacity);
-        let new_blocks = (new_len / inner.block_size as usize) + 1;
-        let new_size = new_blocks * inner.block_size as usize;
+        let new_blocks = (new_len / self.block_size as usize) + 1;
+        let new_size = new_blocks * self.block_size as usize;
         self.file.set_len(new_size as u64)?;
         Ok(drop(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? })))
     }
@@ -754,7 +754,7 @@ impl ArchiveWriter {
             bail!(RecordTooLarge);
         }
         let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
-        if self.mmap.len() - self.end < len {
+        if self.mmap.len() - self.end.load(Ordering::Relaxed) < len {
             self.reserve(len)?;
         }
         Ok(len)
@@ -777,7 +777,7 @@ impl ArchiveWriter {
                 timestamp: 0,
             };
             <RecordHeader as Pack>::encode(&end_marker, &mut &mut self.mmap[end..])?;
-            self.mmap.0.flush()?;
+            self.mmap.flush()?;
             while self.committed < end {
                 let mut hr =
                     <RecordHeader as Pack>::decode(&mut &self.mmap[self.committed..])?;
@@ -788,7 +788,7 @@ impl ArchiveWriter {
                 )?;
                 self.committed += hl + hr.record_length as usize;
             }
-            self.mmap.0.flush_async()?;
+            self.mmap.flush_async()?;
         }
         Ok(())
     }
@@ -846,8 +846,8 @@ impl ArchiveWriter {
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
         if batch.len() > 0 {
-            for BatchItem(id, _) in batch {
-                if !self.path_by_id.contains_key(&id) {
+            for BatchItem(id, _) in batch.iter() {
+                if !self.path_by_id.contains_key(id) {
                     bail!("unknown id: {:?} in batch", id)
                 }
             }
@@ -902,7 +902,7 @@ impl ArchiveWriter {
     /// If you need lots of readers it's best to create just one using
     /// this method, and then clone it, that way the same memory map
     /// can be shared by all the readers.
-    pub fn reader(&self) -> Result<Archive<ReadOnly>> {
+    pub fn reader(&self) -> Result<ArchiveReader> {
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(ArchiveIndex::new())),
             file: self.file.clone(),
@@ -949,14 +949,13 @@ impl ArchiveReader {
     /// you must open an [ArchiveWriter](ArchiveWriter) and then use
     /// the [ArchiveWriter::reader](ArchiveWriter::reader) method to
     /// get a reader.
-    pub fn open(path: impl AsRef<FilePath>) -> Result<Archive<ReadOnly>> {
+    pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
-        let block_size = allocation_granularity(path)? as usize;
         file.try_lock_exclusive()?;
         let mmap = unsafe { Mmap::map(&file)? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
-        index.end = scan_file(
+        let end = scan_file(
             &mut index.path_by_id,
             &mut index.id_by_path,
             Some(&mut index.imagemap),
@@ -966,16 +965,17 @@ impl ArchiveReader {
             false,
             &mut &*mmap,
         )?;
+        index.end = end;
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(index)),
             file: Arc::new(file),
-            end: Arc::new(AtomicUsize::new(index.end)),
+            end: Arc::new(AtomicUsize::new(end)),
             mmap: Arc::new(RwLock::new(mmap)),
         })
     }
 
     pub fn capacity(&self) -> usize {
-        self.mmap.read.len()
+        self.mmap.read().len()
     }
 
     pub fn delta_batches(&self) -> usize {
@@ -991,34 +991,42 @@ impl ArchiveReader {
     }
 
     pub fn path_for_id(&self, id: &Id) -> Option<Path> {
-        self.index.read().path_by_id.get(&id).cloned()
+        self.index.read().path_by_id.get(id).cloned()
     }
 
+    /// Check if the memory map needs to be remapped due to growth,
+    /// and check if additional records exist that need to be
+    /// indexed. This method is only relevant if this `ArchiveReader`
+    /// was created from an `ArchiveWriter`, this method is called
+    /// automatically by `read_deltas` and `build_image`.
     pub fn check_remap_rescan(&self) -> Result<()> {
         let end = self.end.load(Ordering::Acquire);
         let mmap = self.mmap.upgradable_read();
         let mmap = if end > mmap.len() {
-            let mut mmap = mmap.upgrade();
+            let mut mmap = RwLockUpgradableReadGuard::upgrade(mmap);
             drop(mem::replace(&mut *mmap, unsafe { Mmap::map(&*self.file)? }));
-            mmap.downgrade()
+            RwLockWriteGuard::downgrade_to_upgradable(mmap)
         } else {
             mmap
         };
         let index = self.index.upgradable_read();
         if index.end < end {
-            let mut index = index.upgrade();
+            let mut index = RwLockUpgradableReadGuard::upgrade(index);
             let mut max_id = 0;
-            index.end = scan_records(
-                &mut index.path_by_id,
-                &mut index.id_by_path,
-                Some(&mut index.imagemap),
-                Some(&mut index.deltamap),
-                &mut index.time_basis,
+            let r = &mut *index;
+            r.end = scan_records(
+                &mut r.path_by_id,
+                &mut r.id_by_path,
+                Some(&mut r.imagemap),
+                Some(&mut r.deltamap),
+                &mut r.time_basis,
                 &mut max_id,
                 true,
-                &mut &mmap[index.end..end],
+                mmap.len(),
+                &mut &mmap[r.end..end],
             )?;
         }
+        Ok(())
     }
 
     /// Move the cursor according to the `Seek` instruction. If the
@@ -1101,7 +1109,7 @@ impl ArchiveReader {
         // we must ensure we don't hold the lock for too long in the
         // case where the index is huge.
         'main: loop {
-            let inner = self.inner.read();
+            let inner = self.index.read();
             for _ in 0..1000 {
                 let (id, path) = inner.path_by_id.get_index(i).unwrap();
                 idx.push((*id, path.clone()));
@@ -1114,12 +1122,19 @@ impl ArchiveReader {
         idx
     }
 
-    fn get_batch_at(mmap: &Mmap, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
-        if pos >= mmap.len() {
+    fn get_batch_at(
+        mmap: &Mmap,
+        pos: usize,
+        end: usize,
+    ) -> Result<Pooled<Vec<BatchItem>>> {
+        if pos >= end {
             bail!("record out of bounds")
         } else {
-            let mut buf = &self.mmap[pos..];
+            let mut buf = &mmap[pos..];
             let rh = <RecordHeader as Pack>::decode(&mut buf)?;
+            if pos + rh.record_length as usize > end {
+                bail!("get_batch: error truncated record at {}", pos);
+            }
             Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
         }
     }
@@ -1135,7 +1150,7 @@ impl ArchiveReader {
         match cursor.start {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
             _ => {
-                let mut to_read = {
+                let (mut to_read, end) = {
                     // we need to invert the excluded/included to get
                     // the correct initial state.
                     let cs = match cursor.start {
@@ -1154,12 +1169,13 @@ impl ArchiveReader {
                         }
                     };
                     to_read.extend(index.deltamap.range((s, cs)).map(|v| v.1));
-                    to_read
+                    (to_read, index.end)
                 };
                 let mut image = IMG_POOL.take();
                 let mmap = self.mmap.read();
                 for pos in to_read.drain(..) {
-                    let mut batch = ArchiveReader::get_batch_at(&*mmap, pos as usize)?;
+                    let mut batch =
+                        ArchiveReader::get_batch_at(&*mmap, pos as usize, end)?;
                     image.extend(batch.drain(..).map(|b| (b.0, b.1)));
                 }
                 Ok(image)
@@ -1183,7 +1199,7 @@ impl ArchiveReader {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
-        {
+        let end = {
             let index = self.index.read();
             idxs.extend(
                 index
@@ -1191,12 +1207,13 @@ impl ArchiveReader {
                     .range((start, cursor.end))
                     .map(|(ts, pos)| (*ts, *pos))
                     .take(n),
-            )
+            );
+            index.end
         };
         let mut current = cursor.current;
         let mmap = self.mmap.read();
         for (ts, pos) in idxs.drain(..) {
-            let batch = ArchiveReader::get_batch_at(&*mmap, pos as usize)?;
+            let batch = ArchiveReader::get_batch_at(&*mmap, pos as usize, end)?;
             current = Some(ts);
             res.push_back((ts, batch));
         }
