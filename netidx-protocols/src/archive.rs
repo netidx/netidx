@@ -251,9 +251,10 @@ lazy_static! {
     static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
-    static ref IDX_POOL: Pool<Vec<(u64, Path)>> = Pool::new(10, 20_000_000);
-    static ref IMG_POOL: Pool<HashMap<u64, Event>> = Pool::new(10, 20_000_000);
+    static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 20_000_000);
+    static ref IMG_POOL: Pool<HashMap<Id, Event>> = Pool::new(10, 20_000_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
+    static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 20_000_000);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -943,7 +944,11 @@ pub struct ArchiveReader {
 }
 
 impl ArchiveReader {
-    /// Open the specified archive read only
+    /// Open the specified archive read only. Note, it is possible to
+    /// read and write to an archive simultaneously, however to do so
+    /// you must open an [ArchiveWriter](ArchiveWriter) and then use
+    /// the [ArchiveWriter::reader](ArchiveWriter::reader) method to
+    /// get a reader.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Archive<ReadOnly>> {
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
         let block_size = allocation_granularity(path)? as usize;
@@ -989,7 +994,7 @@ impl ArchiveReader {
         self.index.read().path_by_id.get(&id).cloned()
     }
 
-    fn check_remap_rescan(&self) -> Result<()> {
+    pub fn check_remap_rescan(&self) -> Result<()> {
         let end = self.end.load(Ordering::Acquire);
         let mmap = self.mmap.upgradable_read();
         let mmap = if end > mmap.len() {
@@ -1036,7 +1041,7 @@ impl ArchiveReader {
                                 cursor.set_current(ts + *EPSILON + offset)
                             }
                             Bound::Unbounded => {
-                                match self.inner.read().deltamap.keys().next() {
+                                match self.index.read().deltamap.keys().next() {
                                     None => (),
                                     Some(ts) => cursor.set_current(*ts + offset),
                                 }
@@ -1049,7 +1054,7 @@ impl ArchiveReader {
                                 cursor.set_current(ts - *EPSILON + offset)
                             }
                             Bound::Unbounded => {
-                                match self.inner.read().deltamap.keys().next_back() {
+                                match self.index.read().deltamap.keys().next_back() {
                                     None => (),
                                     Some(ts) => cursor.set_current(*ts + offset),
                                 }
@@ -1059,11 +1064,11 @@ impl ArchiveReader {
                 }
             },
             Seek::BatchRelative(steps) => {
-                let inner = self.inner.read();
+                let index = self.index.read();
                 if steps >= 0 {
                     let init =
                         cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
-                    let mut iter = inner.deltamap.range((init, cursor.end));
+                    let mut iter = index.deltamap.range((init, cursor.end));
                     for _ in 0..steps as usize {
                         match iter.next() {
                             None => break,
@@ -1074,7 +1079,7 @@ impl ArchiveReader {
                     }
                 } else {
                     let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
-                    let mut iter = inner.deltamap.range((cursor.start, init));
+                    let mut iter = index.deltamap.range((cursor.start, init));
                     for _ in 0..steps.abs() as usize {
                         match iter.next_back() {
                             None => break,
@@ -1090,7 +1095,7 @@ impl ArchiveReader {
 
     /// Return a vector of all id/path pairs present in the
     /// archive. This may change if the archive is being written to.
-    pub fn get_index(&self) -> Pooled<Vec<(u64, Path)>> {
+    pub fn get_index(&self) -> Pooled<Vec<(Id, Path)>> {
         let mut idx = IDX_POOL.take();
         let mut i = 0;
         // we must ensure we don't hold the lock for too long in the
@@ -1109,17 +1114,12 @@ impl ArchiveReader {
         idx
     }
 
-    fn get_batch_at(&self, pos: usize, end: usize) -> Result<Pooled<Vec<BatchItem>>> {
-        if pos >= end {
-            bail!("get_batch: error record out of bounds")
-        } else if pos >= self.capacity() {
-            bail!(RemapRequired)
+    fn get_batch_at(mmap: &Mmap, pos: usize) -> Result<Pooled<Vec<BatchItem>>> {
+        if pos >= mmap.len() {
+            bail!("record out of bounds")
         } else {
             let mut buf = &self.mmap[pos..];
             let rh = <RecordHeader as Pack>::decode(&mut buf)?;
-            if pos + rh.record_length as usize > end {
-                bail!("get_batch: error truncated record at {}", pos);
-            }
             Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
         }
     }
@@ -1130,11 +1130,12 @@ impl ArchiveReader {
     /// then all the deltas between the beginning and the cursor start
     /// will be read, otherwise only the deltas between the closest
     /// image that is older, and the cursor start need to be read.
-    pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<HashMap<u64, Event>>> {
+    pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<HashMap<Id, Event>>> {
+        self.check_remap_rescan()?;
         match cursor.start {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
             _ => {
-                let (to_read, end) = {
+                let mut to_read = {
                     // we need to invert the excluded/included to get
                     // the correct initial state.
                     let cs = match cursor.start {
@@ -1142,9 +1143,9 @@ impl ArchiveReader {
                         Bound::Included(t) => Bound::Excluded(t),
                         Bound::Unbounded => unreachable!(),
                     };
-                    let inner = self.inner.read();
-                    let mut to_read: Vec<usize> = Vec::new();
-                    let mut iter = inner.imagemap.range((Bound::Unbounded, cs));
+                    let index = self.index.read();
+                    let mut to_read = TO_READ_POOL.take();
+                    let mut iter = index.imagemap.range((Bound::Unbounded, cs));
                     let s = match iter.next_back() {
                         None => Bound::Unbounded,
                         Some((ts, pos)) => {
@@ -1152,12 +1153,13 @@ impl ArchiveReader {
                             Bound::Included(*ts)
                         }
                     };
-                    to_read.extend(inner.deltamap.range((s, cs)).map(|v| v.1));
-                    (to_read, inner.end)
+                    to_read.extend(index.deltamap.range((s, cs)).map(|v| v.1));
+                    to_read
                 };
                 let mut image = IMG_POOL.take();
-                for pos in to_read {
-                    let mut batch = self.get_batch_at(pos as usize, end)?;
+                let mmap = self.mmap.read();
+                for pos in to_read.drain(..) {
+                    let mut batch = ArchiveReader::get_batch_at(&*mmap, pos as usize)?;
                     image.extend(batch.drain(..).map(|b| (b.0, b.1)));
                 }
                 Ok(image)
@@ -1174,26 +1176,27 @@ impl ArchiveReader {
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+        self.check_remap_rescan()?;
         let mut idxs = POS_POOL.take();
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
-        let mut current = cursor.current;
-        let end = {
-            let inner = self.inner.read();
+        {
+            let index = self.index.read();
             idxs.extend(
-                inner
+                index
                     .deltamap
                     .range((start, cursor.end))
                     .map(|(ts, pos)| (*ts, *pos))
                     .take(n),
-            );
-            inner.end
+            )
         };
+        let mut current = cursor.current;
+        let mmap = self.mmap.read();
         for (ts, pos) in idxs.drain(..) {
-            let batch = self.get_batch_at(pos as usize, end)?;
+            let batch = ArchiveReader::get_batch_at(&*mmap, pos as usize)?;
             current = Some(ts);
             res.push_back((ts, batch));
         }
