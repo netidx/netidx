@@ -10,8 +10,8 @@ use netidx::{
     subscriber::{Dval, Event, SubId},
 };
 use netidx_protocols::archive::{
-    Archive, BatchItem, Cursor, MonotonicTimestamper, ReadOnly, ReadWrite, RemapRequired,
-    Seek, Timestamp,
+    ArchiveReader, ArchiveWriter, BatchItem, Cursor, MonotonicTimestamper, Seek,
+    Timestamp,
 };
 use parking_lot::RwLock;
 use std::{
@@ -114,7 +114,7 @@ mod publish {
         cursor: Cursor,
         speed: Speed,
         state: State,
-        archive: Archive<ReadOnly>,
+        archive: ArchiveReader,
         session_base: Path,
         data_base: Path,
         start_doc: Val,
@@ -132,7 +132,7 @@ mod publish {
     impl T {
         async fn new(
             publisher: Publisher,
-            archive: Archive<ReadOnly>,
+            archive: ArchiveReader,
             session_id: Uuid,
             publish_base: Path,
             control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
@@ -432,16 +432,18 @@ mod publish {
                     }
                     Ok(BCastMsg::Batch(ts, batch)) => match t.state {
                         State::Stop | State::Play | State::Pause => (),
-                        Speed::Tail => if t.cursor.contains(&ts) {
-                            t.process_batch((ts, batch)).await?;
-                            t.cursor.set_current(ts);
+                        Speed::Tail => {
+                            let pos = t.cursor.current().unwrap_or(chrono::MIN_DATETIME);
+                            if t.cursor.contains(&ts) && pos < ts {
+                                t.process_batch((ts, batch)).await?;
+                                t.cursor.set_current(ts);
+                            }
                         }
                     },
                 },
                 r = control_rx.next() => match r {
                     None => break Ok(()),
                     Some(mut batch) => {
-                        idle = false;
                         for req in batch.drain(..) {
                             if req.id == t.start_ctl.id() {
                                 if let Some(new_start) = get_bound(req) {
@@ -508,16 +510,8 @@ mod publish {
                     },
                 },
                 r = t.next() => match r {
-                    Err(e) if e.downcast::<RemapRequired>().is_some() => {
-                        t.archive = t.archive.mirror()?;
-                    }
                     Err(e) => break Err(e),
-                    Ok(batch) => {
-                        if publisher.clients() > 0 {
-                            idle = false;
-                        }
-                        t.process_batch(batch).await?;
-                    }
+                    Ok(batch) => { t.process_batch(batch).await?; }
                 }
             }
         }

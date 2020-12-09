@@ -458,20 +458,6 @@ impl fmt::Display for RecordTooLarge {
 
 impl error::Error for RecordTooLarge {}
 
-/// This error will be raised on an attempt to read a record that is
-/// beyond the end of the current memory map. In that case you must
-/// remap the file in order to read that record.
-#[derive(Debug, Clone, Copy)]
-pub struct RemapRequired;
-
-impl fmt::Display for RemapRequired {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl error::Error for RemapRequired {}
-
 fn scan_records(
     path_by_id: &mut IndexMap<Id, Path>,
     id_by_path: &mut HashMap<Path, Id>,
