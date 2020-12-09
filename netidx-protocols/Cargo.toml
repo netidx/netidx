@@ -15,7 +15,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx = { path = "..", version = "0.5", default_features = false }
+netidx = { path = "../netidx", version = "0.5", default_features = false }
 serde = "1"
 serde_derive = "1"
 combine = "4"

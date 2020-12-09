@@ -15,17 +15,6 @@ categories = ["network-programming"]
 name = "netidx"
 path = "src/main.rs"
 
-[profile.release]
-codegen-units = 1
-opt-level = 3
-lto = true
-debug = false
-
-[profile.dev]
-opt-level = "z"
-lto = "thin"
-debug = 1
-
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 
@@ -37,7 +26,9 @@ krb5_iov = ["netidx/krb5_iov"]
 futures = "0.3"
 tokio = { version = "0.3", features = ["full"] }
 serde = "1.0"
-netidx = { path = "..", version = "0.5" , default_features = false }
+netidx = { path = "../netidx", version = "0.5" , default_features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.5", default_features = false }
+chrono = { version = "0.4" }
 serde_json = "1.0"
 structopt = "0.3"
 bytes = "0.6"

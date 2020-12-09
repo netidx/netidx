@@ -1,8 +1,10 @@
 use anyhow::{Error, Result};
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use log::{info, warn};
+use chrono::prelude::*;
 use netidx::{
     config::Config,
+    chars::Chars,
     path::Path,
     pool::Pooled,
     publisher::{BindCfg, FromValue, Publisher, Val, Value, WriteRequest},
@@ -21,7 +23,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
-use uuid::{adaptor::SimpleRef, Uuid};
+use uuid::{adapter::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
@@ -38,12 +40,12 @@ mod publish {
     static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhms] to step forward or back that amount of time, e.g. -1y step back 1 year.";
 
     fn uuid_string(id: Uuid) -> String {
-        let mut buf = [u8; SimpleRef::LENGTH];
+        let mut buf = [0u8; SimpleRef::LENGTH];
         id.to_simple_ref().encode_lower(&mut buf).into()
     }
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
-        let mut buf = [u8; SimpleRef::LENGTH];
+        let mut buf = [0u8; SimpleRef::LENGTH];
         publish_base.append(id.to_simple_ref().encode_lower(&mut buf));
     }
 
@@ -163,23 +165,23 @@ mod publish {
                 session_base.append("control/start/current"),
                 Value::String(Chars::from("Unbounded")),
             )?;
-            start.writes(control_tx.clone());
+            start_ctl.writes(control_tx.clone());
             let end_ctl = publisher.publish(
                 session_base.append("control/end/current"),
                 Value::String(Chars::from("Unbounded")),
             )?;
-            end.writes(control_tx.clone());
+            end_ctl.writes(control_tx.clone());
             let speed_ctl = publisher
                 .publish(session_base.append("control/speed/current"), Value::V32(1))?;
-            speed.writes(control_tx.clone());
+            speed_ctl.writes(control_tx.clone());
             let state_ctl = publisher.publish(
                 session_base.append("control/state/current"),
                 Value::String(Chars::from("Stop")),
             )?;
-            state.writes(control_tx.clone());
+            state_ctl.writes(control_tx.clone());
             let pos_ctl = publisher
                 .publish(session_base.append("control/pos/current"), Value::Null)?;
-            pos.writes(control_tx);
+            pos_ctl.writes(control_tx);
             publisher.flush().await;
             Ok(T {
                 publisher,
@@ -212,7 +214,7 @@ mod publish {
                         Some(batch) => Ok(batch),
                         None => {
                             batches = task::block_in_place(|| {
-                                self.archive.read_deltas(cursor, 100)
+                                self.archive.read_deltas(&mut self.cursor, 100)
                             })?;
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
@@ -228,7 +230,7 @@ mod publish {
                         use tokio::time::Instant;
                         if current.is_empty() {
                             current = task::block_in_place(|| {
-                                self.archive.read_deltas(cursor, 100)
+                                self.archive.read_deltas(&mut self.cursor, 100)
                             })?;
                             if current.is_empty() {
                                 self.state = State::Tail;
@@ -338,7 +340,7 @@ mod publish {
                 None => (),
                 Some((ts, _)) => {
                     self.cursor.set_current(ts);
-                    v.clear()
+                    current.clear()
                 }
             }
             self.archive.seek(&mut self.cursor, seek);
@@ -348,10 +350,10 @@ mod publish {
         fn set_speed(&mut self, new_rate: Option<f64>) {
             match new_rate {
                 None => {
-                    t.speed_ctl.update(Value::String(Chars::from("Unlimited")));
+                    self.speed_ctl.update(Value::String(Chars::from("Unlimited")));
                 }
                 Some(new_rate) => {
-                    t.speed_ctl.update(Value::F64(new_rate));
+                    self.speed_ctl.update(Value::F64(new_rate));
                 }
             }
             match &mut self.speed {
@@ -388,7 +390,7 @@ mod publish {
 
     async fn session(
         mut bcast: broadcast::Receiver<BCastMsg>,
-        archive: Archive<ReadOnly>,
+        archive: ArchiveReader,
         publisher: Publisher,
         publish_base: Path,
         session_id: Uuid,
@@ -398,7 +400,6 @@ mod publish {
             T::new(publisher, archive, session_id, publish_base, control_tx).await?;
         t.stop()?;
         let mut control_rx = control_rx.fuse();
-        let mut sub_rx = sub_rx.fuse();
         let mut idle = false;
         let mut idle_check = time::interval(std::time::Duration::from_secs(30)).fuse();
         loop {
@@ -421,8 +422,8 @@ mod publish {
                         State::Tail => {
                             // log?
                             t.archive = t.archive.mirror()?;
-                            let mut batchs = task::block_in_place(|| {
-                                t.archive.read_deltas(&mut cursor, missed)
+                            let mut batches = task::block_in_place(|| {
+                                t.archive.read_deltas(&mut t.cursor, missed)
                             })?;
                             for (ts, batch) in batches.drain(..) {
                                 t.process_batch((ts, batch)).await?;
@@ -474,7 +475,7 @@ mod publish {
                                     reply.send(Value::Error(e));
                                 }
                             }
-                            if req.id == state.id() {
+                            if req.id == t.state_ctl.id() {
                                 match req.val.cast_to::<Chars>() {
                                     Err(_) => if let Some(reply) = req.reply {
                                         let e = Chars::from("expected string");
@@ -496,7 +497,7 @@ mod publish {
                                     }
                                 }
                             }
-                            if req.id == pos_ctl.id() {
+                            if req.id == t.pos_ctl.id() {
                                 match req.val.cast_to::<Seek>() {
                                     Ok(pos) => t.seek(pos)?,
                                     Err(e) => if let Some(reply) = req.reply {
