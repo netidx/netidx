@@ -1,21 +1,17 @@
-use anyhow::{Error, Result};
+use anyhow::Result;
+use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use log::{info, warn};
-use chrono::prelude::*;
 use netidx::{
-    config::Config,
     chars::Chars,
+    config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, FromValue, Publisher, Val, Value, WriteRequest},
-    resolver::{Auth, Glob, ResolverRead},
-    subscriber::{Dval, Event, SubId},
+    publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
+    resolver::Auth,
+    subscriber::Event,
 };
-use netidx_protocols::archive::{
-    ArchiveReader, ArchiveWriter, BatchItem, Cursor, MonotonicTimestamper, Seek,
-    Timestamp,
-};
-use parking_lot::RwLock;
+use netidx_protocols::archive::{ArchiveReader, BatchItem, Cursor, Id, Seek, Timestamp};
 use std::{
     collections::{HashMap, VecDeque},
     mem,
@@ -46,18 +42,18 @@ mod publish {
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
         let mut buf = [0u8; SimpleRef::LENGTH];
-        publish_base.append(id.to_simple_ref().encode_lower(&mut buf));
+        publish_base.append(id.to_simple_ref().encode_lower(&mut buf))
     }
 
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
         match v {
-            Value::DateTime(ts) => Bound::Included(ts),
+            Value::DateTime(ts) => Ok(Bound::Included(ts)),
             Value::String(c) if c.trim().to_lowercase().as_str() == "unbounded" => {
                 Ok(Bound::Unbounded)
             }
             v => match v.cast_to::<Seek>()? {
-                Seek::Absolute(ts) => Bound::Included(ts),
-                Seek::TimeRelative(offset) => Bound::Included(Utc::now() + offset),
+                Seek::Absolute(ts) => Ok(Bound::Included(ts)),
+                Seek::TimeRelative(offset) => Ok(Bound::Included(Utc::now() + offset)),
                 Seek::BatchRelative(_) => bail!("invalid bound"),
             },
         }
@@ -77,7 +73,7 @@ mod publish {
 
     fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
         match b {
-            Bound::Unlimited => Value::String(Chars::from("Unbounded")),
+            Bound::Unbounded => Value::String(Chars::from("Unbounded")),
             Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
         }
     }
@@ -109,10 +105,9 @@ mod publish {
         },
     }
 
-    #[derive(Debug)]
     struct T {
         publisher: Publisher,
-        published: HashMap<u64, Val>,
+        published: HashMap<Id, Val>,
         cursor: Cursor,
         speed: Speed,
         state: State,
@@ -182,7 +177,7 @@ mod publish {
             let pos_ctl = publisher
                 .publish(session_base.append("control/pos/current"), Value::Null)?;
             pos_ctl.writes(control_tx);
-            publisher.flush().await;
+            publisher.flush(None).await;
             Ok(T {
                 publisher,
                 published: HashMap::new(),
@@ -213,13 +208,15 @@ mod publish {
                     Speed::Unlimited(batches) => match batches.pop_front() {
                         Some(batch) => Ok(batch),
                         None => {
-                            batches = task::block_in_place(|| {
-                                self.archive.read_deltas(&mut self.cursor, 100)
+                            let archive = &self.archive;
+                            let cursor = &mut self.cursor;
+                            *batches = task::block_in_place(|| {
+                                archive.read_deltas(cursor, 100)
                             })?;
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
-                                    self.state = Speed::Tail;
+                                    self.state = State::Tail;
                                     future::pending().await
                                 }
                             }
@@ -228,9 +225,12 @@ mod publish {
                     Speed::Limited { rate, next, current } => {
                         use std::time::Duration;
                         use tokio::time::Instant;
+                        let mut next = next;
                         if current.is_empty() {
-                            current = task::block_in_place(|| {
-                                self.archive.read_deltas(&mut self.cursor, 100)
+                            let archive = &self.archive;
+                            let cursor = &mut self.cursor;
+                            *current = task::block_in_place(|| {
+                                archive.read_deltas(cursor, 100)
                             })?;
                             if current.is_empty() {
                                 self.state = State::Tail;
@@ -238,13 +238,13 @@ mod publish {
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        next.await;
+                        (&mut next).await;
                         if current.is_empty() {
                             self.state = State::Tail;
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
-                                (ms / rate).trunc() as u64
+                                (ms / *rate).trunc() as u64
                             };
                             next.reset(Instant::now() + Duration::from_millis(wait));
                         }
@@ -256,11 +256,11 @@ mod publish {
 
         async fn process_batch(
             &mut self,
-            mut batch: (DateTime<Utc>, Pooled<Vec<BatchItem>>),
+            batch: (DateTime<Utc>, &mut Vec<BatchItem>),
         ) -> Result<()> {
             for BatchItem(id, ev) in batch.1.drain(..) {
                 let v = match ev {
-                    Event::Unpublished => Value::Null,
+                    Event::Unsubscribed => Value::Null,
                     Event::Update(v) => v,
                 };
                 match self.published.get(&id) {
@@ -275,15 +275,15 @@ mod publish {
                     }
                 }
             }
-            self.pos.update(Value::DateTime(batch.0));
-            self.publisher.flush().await
+            self.pos_ctl.update(Value::DateTime(batch.0));
+            Ok(self.publisher.flush(None).await)
         }
 
         fn reimage(&mut self) -> Result<()> {
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
             self.pos_ctl.update(match self.cursor.current() {
-                Some(ts) => ts,
+                Some(ts) => Value::DateTime(ts),
                 None => match self.cursor.start() {
                     Bound::Unbounded => Value::Null,
                     Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
@@ -299,7 +299,7 @@ mod publish {
                         val.update(v);
                     }
                     None => {
-                        let path = self.data_base.append(path.as_str());
+                        let path = self.data_base.append(path.as_ref());
                         let val = self.publisher.publish(path, v)?;
                         self.published.insert(id, val);
                     }
@@ -314,7 +314,7 @@ mod publish {
             self.cursor.reset();
             self.pos_ctl.update(match self.cursor.start() {
                 Bound::Unbounded => Value::Null,
-                Bound::Include(ts) | Bound::Exclude(ts) => Value::DateTime(ts),
+                Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
             });
             match &mut self.speed {
                 Speed::Unlimited(v) => {
@@ -336,7 +336,7 @@ mod publish {
                     current
                 }
             };
-            match current.pop_first() {
+            match current.pop_front() {
                 None => (),
                 Some((ts, _)) => {
                     self.cursor.set_current(ts);
@@ -371,7 +371,7 @@ mod publish {
                         let v = mem::replace(v, Pooled::orphan(VecDeque::new()));
                         self.speed = Speed::Limited {
                             rate: new_rate,
-                            next: time::sleep(time::Instant::now()),
+                            next: time::sleep(std::time::Duration::from_secs(0)),
                             current: v,
                         };
                     }
@@ -397,7 +397,8 @@ mod publish {
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
         let mut t =
-            T::new(publisher, archive, session_id, publish_base, control_tx).await?;
+            T::new(publisher.clone(), archive, session_id, publish_base, control_tx)
+                .await?;
         t.stop()?;
         let mut control_rx = control_rx.fuse();
         let mut idle = false;
@@ -412,32 +413,34 @@ mod publish {
                         idle = no_clients;
                     }
                 },
-                _ = wait_client_if_idle(&publisher, idle) => {
+                _ = wait_client_if_idle(&publisher, idle).fuse() => {
                     idle = false;
                 },
-                r = bcast.recv() => match r {
+                r = bcast.recv().fuse() => match r {
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
                     Err(broadcast::error::RecvError::Lagged(missed)) => match t.state {
                         State::Stop | State::Play | State::Pause => (),
                         State::Tail => {
-                            // log?
-                            t.archive = t.archive.mirror()?;
+                            let archive = &t.archive;
+                            let cursor = &mut t.cursor;
                             let mut batches = task::block_in_place(|| {
-                                t.archive.read_deltas(&mut t.cursor, missed)
+                                archive.read_deltas(cursor, missed as usize)
                             })?;
-                            for (ts, batch) in batches.drain(..) {
-                                t.process_batch((ts, batch)).await?;
+                            for (ts, mut batch) in batches.drain(..) {
+                                t.process_batch((ts, &mut *batch)).await?;
                                 t.cursor.set_current(ts);
                             }
                         }
                     }
                     Ok(BCastMsg::Batch(ts, batch)) => match t.state {
                         State::Stop | State::Play | State::Pause => (),
-                        Speed::Tail => {
+                        State::Tail => {
+                            let dt = ts.datetime();
                             let pos = t.cursor.current().unwrap_or(chrono::MIN_DATETIME);
-                            if t.cursor.contains(&ts) && pos < ts {
-                                t.process_batch((ts, batch)).await?;
-                                t.cursor.set_current(ts);
+                            if t.cursor.contains(&dt) && pos < dt {
+                                let mut batch = (*batch).clone();
+                                t.process_batch((dt, &mut batch)).await?;
+                                t.cursor.set_current(dt);
                             }
                         }
                     },
@@ -452,75 +455,71 @@ mod publish {
                                     t.cursor.set_start(new_start);
                                     if t.cursor.current().is_none() { t.stop()?; }
                                 }
-                            }
-                            if req.id == t.end_ctl.id() {
+                            } else if req.id == t.end_ctl.id() {
                                 if let Some(new_end) = get_bound(req) {
                                     t.end_ctl.update(bound_to_val(new_end));
                                     t.cursor.set_end(new_end);
                                     if t.cursor.current().is_none() { t.stop()?; }
                                 }
-                            }
-                            if req.id == t.speed_ctl.id() {
-                                if let Ok(mp) = req.val.clone().cast_to::<f64>() {
+                            } else if req.id == t.speed_ctl.id() {
+                                if let Ok(mp) = req.value.clone().cast_to::<f64>() {
                                     t.set_speed(Some(mp));
-                                } else if let Ok(s) = req.val.cast_to::<Chars>() {
+                                } else if let Ok(s) = req.value.cast_to::<Chars>() {
                                     if s.trim().to_lowercase().as_str() == "unlimited" {
                                         t.set_speed(None);
-                                    } else if let Some(reply) = req.reply {
+                                    } else if let Some(reply) = req.send_result {
                                         let e = Chars::from("invalid speed");
                                         reply.send(Value::Error(e));
                                     }
-                                } else if let Some(reply) = req.reply {
+                                } else if let Some(reply) = req.send_result {
                                     let e = Chars::from("invalid speed");
                                     reply.send(Value::Error(e));
                                 }
-                            }
-                            if req.id == t.state_ctl.id() {
-                                match req.val.cast_to::<Chars>() {
-                                    Err(_) => if let Some(reply) = req.reply {
+                            } else if req.id == t.state_ctl.id() {
+                                match req.value.cast_to::<Chars>() {
+                                    Err(_) => if let Some(reply) = req.send_result {
                                         let e = Chars::from("expected string");
                                         reply.send(Value::Error(e))
                                     }
                                     Ok(s) => {
                                         let s = s.trim().to_lowercase();
                                         if s.as_str() == "play" {
-                                            self.state = State::Play;
+                                            t.state = State::Play;
                                         } else if s.as_str() == "pause" {
-                                            self.state = State::Pause;
+                                            t.state = State::Pause;
                                         } else if s.as_str() == "stop" {
                                             t.stop()?
-                                        } else if let Some(reply) = req.reply {
+                                        } else if let Some(reply) = req.send_result {
                                             let e = format!("invalid command {}", s);
                                             let e = Chars::from(e);
                                             reply.send(Value::Error(e));
                                         }
                                     }
                                 }
-                            }
-                            if req.id == t.pos_ctl.id() {
-                                match req.val.cast_to::<Seek>() {
+                            } else if req.id == t.pos_ctl.id() {
+                                match req.value.cast_to::<Seek>() {
                                     Ok(pos) => t.seek(pos)?,
-                                    Err(e) => if let Some(reply) = req.reply {
+                                    Err(e) => if let Some(reply) = req.send_result {
                                         let e = Chars::from(format!("{}", e));
                                         reply.send(Value::Error(e))
                                     }
                                 }
                             }
                         }
-                        t.publisher.flush().await
+                        t.publisher.flush(None).await
                     },
                 },
-                r = t.next() => match r {
+                r = t.next().fuse() => match r {
                     Err(e) => break Err(e),
-                    Ok(batch) => { t.process_batch(batch).await?; }
+                    Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
                 }
             }
         }
     }
 
     pub(super) async fn run(
-        mut bcast: broadcast::Receiver<BCastMsg>,
-        archive: Archive<ReadOnly>,
+        bcast: broadcast::Sender<BCastMsg>,
+        archive: ArchiveReader,
         resolver: Config,
         desired_auth: Auth,
         bind_cfg: BindCfg,
@@ -529,57 +528,43 @@ mod publish {
         let session_publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
                 .await?;
-        let session = session_publisher.publish(publish_base.append("session"))?;
-        let (control_rx, control_tx) = mpsc::channel(3);
-        session.writes(control_tx);
-        let control_rx = control_rx.fuse();
-        loop {
-            select_biased! {
-                r = bcast.recv() => match r {
-                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
-                    Err(broadcast::error::RecvError::Lagged(_)) => (),
-                    Ok(_) => (),
-                },
-                r = control_rx.next() => match r {
-                    None => break Ok(()),
-                    Some(mut batch) => {
-                        for req in batch.drain(..) {
-                            if req.id == session.id() {
-                                let publisher = Publisher::new(
-                                    resolver.clone(),
-                                    desired_auth.clone(),
-                                    bind_cfg.clone()
-                                ).await?;
-                                let bcast = bcast.clone();
-                                let archive = archive.mirror();
-                                let publish_base = publish_base.clone();
-                                let session_id = Uuid::new_v4();
-                                let idstr = uuid_string(id);
-                                task::spawn(async move {
-                                    let res = session(
-                                        bcast,
-                                        archive,
-                                        publisher,
-                                        publish_base,
-                                        session_id
-                                    ).await;
-                                    match res {
-                                        Ok(()) => {
-                                            info!("session {} existed", idstr)
-                                        }
-                                        Err(e) => {
-                                            warn!("session {} exited {}", idstr, e)
-                                        }
-                                    }
-                                });
-                                session.update_subscriber(req.addr, idstr.into());
-                                session_publisher.flush().await;
+        let session_ctl =
+            session_publisher.publish(publish_base.append("session"), Value::Null)?;
+        let (control_tx, mut control_rx) = mpsc::channel(3);
+        session_ctl.writes(control_tx);
+        while let Some(mut batch) = control_rx.next().await {
+            for req in batch.drain(..) {
+                if req.id == session_ctl.id() {
+                    let publisher = Publisher::new(
+                        resolver.clone(),
+                        desired_auth.clone(),
+                        bind_cfg.clone(),
+                    )
+                    .await?;
+                    let bcast = bcast.subscribe();
+                    let archive = archive.clone();
+                    let publish_base = publish_base.clone();
+                    let session_id = Uuid::new_v4();
+                    let idstr = uuid_string(session_id);
+                    session_ctl.update_subscriber(&req.addr, idstr.clone().into());
+                    task::spawn(async move {
+                        let res =
+                            session(bcast, archive, publisher, publish_base, session_id)
+                                .await;
+                        match res {
+                            Ok(()) => {
+                                info!("session {} existed", idstr)
+                            }
+                            Err(e) => {
+                                warn!("session {} exited {}", idstr, e)
                             }
                         }
-                    }
+                    });
+                    session_publisher.flush(None).await;
                 }
             }
         }
+        Ok(())
     }
 }
 
