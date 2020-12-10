@@ -279,6 +279,118 @@ mod publish {
             Ok(self.publisher.flush(None).await)
         }
 
+        async fn process_bcast(
+            &mut self,
+            msg: Result<BCastMsg, broadcast::error::RecvError>,
+        ) -> Result<()> {
+            match msg {
+                Err(broadcast::error::RecvError::Closed) => {
+                    bail!("broadcast channel closed")
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => match self.state {
+                    State::Stop | State::Play | State::Pause => Ok(()),
+                    State::Tail => {
+                        let archive = &self.archive;
+                        let cursor = &mut self.cursor;
+                        let mut batches = task::block_in_place(|| {
+                            archive.read_deltas(cursor, missed as usize)
+                        })?;
+                        for (ts, mut batch) in batches.drain(..) {
+                            self.process_batch((ts, &mut *batch)).await?;
+                            self.cursor.set_current(ts);
+                        }
+                        Ok(())
+                    }
+                },
+                Ok(BCastMsg::Batch(ts, batch)) => match self.state {
+                    State::Stop | State::Play | State::Pause => Ok(()),
+                    State::Tail => {
+                        let dt = ts.datetime();
+                        let pos = self.cursor.current().unwrap_or(chrono::MIN_DATETIME);
+                        if self.cursor.contains(&dt) && pos < dt {
+                            let mut batch = (*batch).clone();
+                            self.process_batch((dt, &mut batch)).await?;
+                            self.cursor.set_current(dt);
+                        }
+                        Ok(())
+                    }
+                },
+            }
+        }
+
+        async fn process_control_batch(
+            &mut self,
+            mut batch: Pooled<Vec<WriteRequest>>,
+        ) -> Result<()> {
+            for req in batch.drain(..) {
+                if req.id == self.start_ctl.id() {
+                    if let Some(new_start) = get_bound(req) {
+                        self.start_ctl.update(bound_to_val(new_start));
+                        self.cursor.set_start(new_start);
+                        if self.cursor.current().is_none() {
+                            self.stop()?;
+                        }
+                    }
+                } else if req.id == self.end_ctl.id() {
+                    if let Some(new_end) = get_bound(req) {
+                        self.end_ctl.update(bound_to_val(new_end));
+                        self.cursor.set_end(new_end);
+                        if self.cursor.current().is_none() {
+                            self.stop()?;
+                        }
+                    }
+                } else if req.id == self.speed_ctl.id() {
+                    if let Ok(mp) = req.value.clone().cast_to::<f64>() {
+                        self.set_speed(Some(mp));
+                    } else if let Ok(s) = req.value.cast_to::<Chars>() {
+                        if s.trim().to_lowercase().as_str() == "unlimited" {
+                            self.set_speed(None);
+                        } else if let Some(reply) = req.send_result {
+                            let e = Chars::from("invalid speed");
+                            reply.send(Value::Error(e));
+                        }
+                    } else if let Some(reply) = req.send_result {
+                        let e = Chars::from("invalid speed");
+                        reply.send(Value::Error(e));
+                    }
+                } else if req.id == self.state_ctl.id() {
+                    match req.value.cast_to::<Chars>() {
+                        Err(_) => {
+                            if let Some(reply) = req.send_result {
+                                let e = Chars::from("expected string");
+                                reply.send(Value::Error(e))
+                            }
+                        }
+                        Ok(s) => {
+                            let s = s.trim().to_lowercase();
+                            if s.as_str() == "play" {
+                                self.state = State::Play;
+                            } else if s.as_str() == "pause" {
+                                self.state = State::Pause;
+                            } else if s.as_str() == "stop" {
+                                self.stop()?
+                            } else if let Some(reply) = req.send_result {
+                                let e = format!("invalid command {}", s);
+                                let e = Chars::from(e);
+                                reply.send(Value::Error(e));
+                            }
+                        }
+                    }
+                } else if req.id == self.pos_ctl.id() {
+                    match req.value.cast_to::<Seek>() {
+                        Ok(pos) => self.seek(pos)?,
+                        Err(e) => {
+                            if let Some(reply) = req.send_result {
+                                let e = Chars::from(format!("{}", e));
+                                reply.send(Value::Error(e))
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(self.publisher.flush(None).await)
+        }
+
         fn reimage(&mut self) -> Result<()> {
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
@@ -416,98 +528,10 @@ mod publish {
                 _ = wait_client_if_idle(&publisher, idle).fuse() => {
                     idle = false;
                 },
-                r = bcast.recv().fuse() => match r {
-                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
-                    Err(broadcast::error::RecvError::Lagged(missed)) => match t.state {
-                        State::Stop | State::Play | State::Pause => (),
-                        State::Tail => {
-                            let archive = &t.archive;
-                            let cursor = &mut t.cursor;
-                            let mut batches = task::block_in_place(|| {
-                                archive.read_deltas(cursor, missed as usize)
-                            })?;
-                            for (ts, mut batch) in batches.drain(..) {
-                                t.process_batch((ts, &mut *batch)).await?;
-                                t.cursor.set_current(ts);
-                            }
-                        }
-                    }
-                    Ok(BCastMsg::Batch(ts, batch)) => match t.state {
-                        State::Stop | State::Play | State::Pause => (),
-                        State::Tail => {
-                            let dt = ts.datetime();
-                            let pos = t.cursor.current().unwrap_or(chrono::MIN_DATETIME);
-                            if t.cursor.contains(&dt) && pos < dt {
-                                let mut batch = (*batch).clone();
-                                t.process_batch((dt, &mut batch)).await?;
-                                t.cursor.set_current(dt);
-                            }
-                        }
-                    },
-                },
+                m = bcast.recv().fuse() => t.process_bcast(m).await?,
                 r = control_rx.next() => match r {
                     None => break Ok(()),
-                    Some(mut batch) => {
-                        for req in batch.drain(..) {
-                            if req.id == t.start_ctl.id() {
-                                if let Some(new_start) = get_bound(req) {
-                                    t.start_ctl.update(bound_to_val(new_start));
-                                    t.cursor.set_start(new_start);
-                                    if t.cursor.current().is_none() { t.stop()?; }
-                                }
-                            } else if req.id == t.end_ctl.id() {
-                                if let Some(new_end) = get_bound(req) {
-                                    t.end_ctl.update(bound_to_val(new_end));
-                                    t.cursor.set_end(new_end);
-                                    if t.cursor.current().is_none() { t.stop()?; }
-                                }
-                            } else if req.id == t.speed_ctl.id() {
-                                if let Ok(mp) = req.value.clone().cast_to::<f64>() {
-                                    t.set_speed(Some(mp));
-                                } else if let Ok(s) = req.value.cast_to::<Chars>() {
-                                    if s.trim().to_lowercase().as_str() == "unlimited" {
-                                        t.set_speed(None);
-                                    } else if let Some(reply) = req.send_result {
-                                        let e = Chars::from("invalid speed");
-                                        reply.send(Value::Error(e));
-                                    }
-                                } else if let Some(reply) = req.send_result {
-                                    let e = Chars::from("invalid speed");
-                                    reply.send(Value::Error(e));
-                                }
-                            } else if req.id == t.state_ctl.id() {
-                                match req.value.cast_to::<Chars>() {
-                                    Err(_) => if let Some(reply) = req.send_result {
-                                        let e = Chars::from("expected string");
-                                        reply.send(Value::Error(e))
-                                    }
-                                    Ok(s) => {
-                                        let s = s.trim().to_lowercase();
-                                        if s.as_str() == "play" {
-                                            t.state = State::Play;
-                                        } else if s.as_str() == "pause" {
-                                            t.state = State::Pause;
-                                        } else if s.as_str() == "stop" {
-                                            t.stop()?
-                                        } else if let Some(reply) = req.send_result {
-                                            let e = format!("invalid command {}", s);
-                                            let e = Chars::from(e);
-                                            reply.send(Value::Error(e));
-                                        }
-                                    }
-                                }
-                            } else if req.id == t.pos_ctl.id() {
-                                match req.value.cast_to::<Seek>() {
-                                    Ok(pos) => t.seek(pos)?,
-                                    Err(e) => if let Some(reply) = req.send_result {
-                                        let e = Chars::from(format!("{}", e));
-                                        reply.send(Value::Error(e))
-                                    }
-                                }
-                            }
-                        }
-                        t.publisher.flush(None).await
-                    },
+                    Some(batch) => t.process_control_batch(batch).await?
                 },
                 r = t.next().fuse() => match r {
                     Err(e) => break Err(e),
