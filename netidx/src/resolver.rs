@@ -226,6 +226,7 @@ lazy_static! {
     static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
     static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
     static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
+    static ref LISTRECPOOL: Pool<Vec<Path>> = Pool::new(10, 1000000);
 }
 
 #[derive(Debug)]
@@ -524,8 +525,8 @@ impl ResolverRead {
 
     /// list all the non leaf children of the specified path to any
     /// depth, result order unspecified. Possibly expensive.
-    pub async fn list_recursive(&self, base: Path) -> Result<Vec<Path>> {
-        let mut leaf = Vec::new();
+    pub async fn list_recursive(&self, base: Path) -> Result<Pooled<Vec<Path>>> {
+        let mut leaf = LISTRECPOOL.take();
         let mut query = vec![base];
         while query.len() > 0 {
             let mut res = self.list_many(query.iter().cloned()).await?;
@@ -544,8 +545,8 @@ impl ResolverRead {
 
     /// Search the resolver server for paths matching the specified
     /// unix style `Glob`. Possibly expensive.
-    pub async fn list_glob(&self, glob: &Glob) -> Result<Vec<Path>> {
-        let mut matches = Vec::new();
+    pub async fn list_glob(&self, glob: &Glob) -> Result<Pooled<Vec<Path>>> {
+        let mut matches = LISTRECPOOL.take();
         match &glob.scoped {
             Scoped::Subtree(pat) => {
                 for p in self.list_recursive(glob.base.clone()).await?.drain(..) {

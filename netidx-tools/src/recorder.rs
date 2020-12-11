@@ -8,8 +8,8 @@ use netidx::{
     path::Path,
     pool::Pooled,
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
-    resolver::Auth,
-    subscriber::Event,
+    resolver::{Auth, Glob},
+    subscriber::{Subscriber, Event},
 };
 use netidx_protocols::archive::{
     ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, Seek, Timestamp,
@@ -592,12 +592,28 @@ mod publish {
     }
 }
 
+mod record {
+    use super::*;
+
+    pub(super) async fn run(
+        bcast: broadcast::Sender<BCastMsg>,
+        archive: ArchiveWriter,
+        resolver: Config,
+        desired_auth: Auth,
+        spec: Vec<Glob>,
+    ) -> Result<()> {
+        let subscriber = Subscriber::new(resolver, desired_auth)?;
+        let resolver = subscriber.resolver();
+        Ok(())
+    }
+}
+
 async fn run_async(
     config: Config,
     publish_args: Option<(BindCfg, Path)>,
     auth: Auth,
     archive: String,
-    spec: Vec<String>,
+    spec: Vec<Glob>,
 ) {
     let (bcast_tx, bcast_rx) = broadcast::channel(100);
     drop(bcast_rx);
@@ -648,6 +664,11 @@ pub(crate) fn run(
     if spec.is_empty() && publish_args.is_none() {
         panic!("you must specify a publish config, some paths to log, or both")
     }
+    let spec = spec
+        .into_iter()
+        .map(|p| Glob::new(Path::from(p)))
+        .collect::<Result<Vec<Glob>>>()
+        .unwrap();
     let rt = Runtime::new().expect("failed to init tokio runtime");
     rt.block_on(run_async(config, publish_args, auth, archive, spec))
 }
