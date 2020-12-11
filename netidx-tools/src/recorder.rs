@@ -11,7 +11,9 @@ use netidx::{
     resolver::Auth,
     subscriber::Event,
 };
-use netidx_protocols::archive::{ArchiveReader, BatchItem, Cursor, Id, Seek, Timestamp};
+use netidx_protocols::archive::{
+    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, Seek, Timestamp,
+};
 use std::{
     collections::{HashMap, VecDeque},
     mem,
@@ -592,9 +594,46 @@ mod publish {
     }
 }
 
+async fn run_async(
+    config: Config,
+    publish_args: Option<(BindCfg, Path)>,
+    auth: Auth,
+    archive: String,
+    spec: Vec<String>,
+) {
+    let (bcast_tx, bcast_rx) = broadcast::channel(100);
+    drop(bcast_rx);
+    let writer = if spec.is_empty() {
+        None
+    } else {
+        Some(ArchiveWriter::open(archive.as_str()).unwrap())
+    };
+    if let Some((bind_cfg, publish_base)) = publish_args {
+        let reader = writer
+            .as_ref()
+            .map(|w| w.reader().unwrap())
+            .unwrap_or_else(|| ArchiveReader::open(archive.as_str()).unwrap());
+        task::spawn(async move {
+            let res = publish::run(
+                bcast_tx.clone(),
+                reader,
+                config.clone(),
+                auth.clone(),
+                bind_cfg,
+                publish_base,
+            )
+            .await;
+            match res {
+                Ok(()) => info!("archive publisher exited"),
+                Err(e) => warn!("archive publisher exited with error: {}", e),
+            }
+        });
+    }
+}
+
 pub(crate) fn run(
     config: Config,
-    foreground: bool,
+    _foreground: bool,
     bind: Option<BindCfg>,
     publish_base: Option<Path>,
     auth: Auth,
@@ -608,6 +647,9 @@ pub(crate) fn run(
             panic!("you must specify bind and publish_base to publish an archive")
         }
     };
-
+    if spec.is_empty() && publish_args.is_none() {
+        panic!("you must specify a publish config, some paths to log, or both")
+    }
     let rt = Runtime::new().expect("failed to init tokio runtime");
+    rt.block_on(run_async(config, publish_args, auth, archive, spec))
 }
