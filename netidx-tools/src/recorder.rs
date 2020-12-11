@@ -114,17 +114,16 @@ mod publish {
         speed: Speed,
         state: State,
         archive: ArchiveReader,
-        session_base: Path,
         data_base: Path,
-        start_doc: Val,
+        _start_doc: Val,
         start_ctl: Val,
-        end_doc: Val,
+        _end_doc: Val,
         end_ctl: Val,
-        speed_doc: Val,
+        _speed_doc: Val,
         speed_ctl: Val,
-        state_doc: Val,
+        _state_doc: Val,
         state_ctl: Val,
-        pos_doc: Val,
+        _pos_doc: Val,
         pos_ctl: Val,
     }
 
@@ -138,23 +137,23 @@ mod publish {
         ) -> Result<T> {
             let session_base = session_base(&publish_base, session_id);
             let data_base = session_base.append("data");
-            let start_doc = publisher.publish(
+            let _start_doc = publisher.publish(
                 session_base.append("control/start/doc"),
                 Value::String(Chars::from(START_DOC)),
             )?;
-            let end_doc = publisher.publish(
+            let _end_doc = publisher.publish(
                 session_base.append("control/end/doc"),
                 Value::String(Chars::from(END_DOC)),
             )?;
-            let speed_doc = publisher.publish(
+            let _speed_doc = publisher.publish(
                 session_base.append("control/speed/doc"),
                 Value::String(Chars::from(SPEED_DOC)),
             )?;
-            let state_doc = publisher.publish(
+            let _state_doc = publisher.publish(
                 session_base.append("control/state/doc"),
                 Value::String(Chars::from(STATE_DOC)),
             )?;
-            let pos_doc = publisher.publish(
+            let _pos_doc = publisher.publish(
                 session_base.append("control/pos/doc"),
                 Value::String(Chars::from(POS_DOC)),
             )?;
@@ -187,17 +186,16 @@ mod publish {
                 speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
                 state: State::Stop,
                 archive,
-                session_base,
                 data_base,
-                start_doc,
+                _start_doc,
                 start_ctl,
-                end_doc,
+                _end_doc,
                 end_ctl,
-                speed_doc,
+                _speed_doc,
                 speed_ctl,
-                state_doc,
+                _state_doc,
                 state_ctl,
-                pos_doc,
+                _pos_doc,
                 pos_ctl,
             })
         }
