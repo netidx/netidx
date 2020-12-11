@@ -942,7 +942,7 @@ impl ArchiveReader {
     /// get a reader.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
-        file.try_lock_exclusive()?;
+        file.try_lock_shared()?;
         let mmap = unsafe { Mmap::map(&file)? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
