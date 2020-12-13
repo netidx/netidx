@@ -1,4 +1,5 @@
 use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
+use chrono::prelude::*
 use crate::view;
 use anyhow::{anyhow, Result};
 use cairo;
@@ -635,12 +636,12 @@ impl LinePlot {
             };
             match (xtyp, ytyp) {
                 (Some(Typ::DateTime), Some(Typ::DateTime)) => {
-                    let xmin = x_min.cast_datetime().unwrap();
+                    let xmin = x_min.cast_to::<DateTime<Utc>>().unwrap();
                     let xmax =
-                        max(xmin + Duration::seconds(1), x_max.cast_datetime().unwrap());
-                    let ymin = y_min.cast_datetime().unwrap();
+                        max(xmin + Duration::seconds(1), x_max.cast_to::<DateTime<Utc>>().unwrap());
+                    let ymin = y_min.cast_to::<DateTime<Utc>>().unwrap();
                     let ymax =
-                        max(ymin + Duration::seconds(1), y_max.cast_datetime().unwrap());
+                        max(ymin + Duration::seconds(1), y_max.cast_to::<DateTime<Utc>>().unwrap());
                     let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
                     draw_mesh(spec, &mut chart)?;
                     for s in series.borrow().iter() {
@@ -648,23 +649,23 @@ impl LinePlot {
                             .x_data
                             .iter()
                             .cloned()
-                            .filter_map(|v| v.cast_datetime())
+                            .filter_map(|v| v.cast_to::<DateTime<Utc>>())
                             .zip(
                                 s.y_data
                                     .iter()
                                     .cloned()
-                                    .filter_map(|v| v.cast_datetime()),
+                                    .filter_map(|v| v.cast_to::<DateTime<Utc>>()),
                             );
                         let style = to_style(s.line_color);
                         chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
-                (Some(Typ::DateTime), Some(_)) if y_min.clone().cast_f64().is_some() => {
-                    let xmin = x_min.cast_datetime().unwrap();
+                (Some(Typ::DateTime), Some(_)) if y_min.clone().cast_to::<f64>().is_some() => {
+                    let xmin = x_min.cast_to::<DateTime<Utc>>().unwrap();
                     let xmax =
-                        max(xmin + Duration::seconds(1), x_max.cast_datetime().unwrap());
-                    let ymin = y_min.cast_f64().unwrap();
-                    let ymax = f64::max(ymin + 1., y_max.cast_f64().unwrap());
+                        max(xmin + Duration::seconds(1), x_max.cast_to::<DateTime<Utc>>().unwrap());
+                    let ymin = y_min.cast_to::<f64>().unwrap();
+                    let ymax = f64::max(ymin + 1., y_max.cast_to::<f64>().unwrap());
                     let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
                     draw_mesh(spec, &mut chart)?;
                     for s in series.borrow().iter() {
@@ -672,46 +673,46 @@ impl LinePlot {
                             .x_data
                             .iter()
                             .cloned()
-                            .filter_map(|v| v.cast_datetime())
-                            .zip(s.y_data.iter().cloned().filter_map(|v| v.cast_f64()));
+                            .filter_map(|v| v.cast_to::<DateTime<Utc>>())
+                            .zip(s.y_data.iter().cloned().filter_map(|v| v.cast_to::<f64>()));
                         let style = to_style(s.line_color);
                         chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
-                (Some(_), Some(Typ::DateTime)) if x_min.clone().cast_f64().is_some() => {
-                    let xmin = x_min.cast_f64().unwrap();
-                    let xmax = f64::max(xmin + 1., x_max.cast_f64().unwrap());
-                    let ymin = y_min.cast_datetime().unwrap();
+                (Some(_), Some(Typ::DateTime)) if x_min.clone().cast_to::<f64>().is_some() => {
+                    let xmin = x_min.cast_to::<f63>().unwrap();
+                    let xmax = f64::max(xmin + 1., x_max.cast_to::<f64>().unwrap());
+                    let ymin = y_min.cast_to::<DateTime<Utc>>().unwrap();
                     let ymax =
-                        max(ymin + Duration::seconds(1), y_max.cast_datetime().unwrap());
+                        max(ymin + Duration::seconds(1), y_max.cast_to::<DateTime<Utc>>().unwrap());
                     let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
                     draw_mesh(spec, &mut chart)?;
                     for s in series.borrow().iter() {
                         let data =
-                            s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_to::<f64>()).zip(
                                 s.y_data
                                     .iter()
                                     .cloned()
-                                    .filter_map(|v| v.cast_datetime()),
+                                    .filter_map(|v| v.cast_to::<DateTime<Utc>>()),
                             );
                         let style = to_style(s.line_color);
                         chart.draw_series(LineSeries::new(data, &style))?;
                     }
                 }
                 (Some(_), Some(_))
-                    if x_min.clone().cast_f64().is_some()
-                        && y_min.clone().cast_f64().is_some() =>
+                    if x_min.clone().cast_to::<f64>().is_some()
+                        && y_min.clone().cast_to::<f64>().is_some() =>
                 {
-                    let xmin = x_min.cast_f64().unwrap();
-                    let xmax = f64::max(xmin + 1., x_max.cast_f64().unwrap());
-                    let ymin = y_min.cast_f64().unwrap();
-                    let ymax = f64::max(ymin + 1., y_max.cast_f64().unwrap());
+                    let xmin = x_min.cast_to::<f64>().unwrap();
+                    let xmax = f64::max(xmin + 1., x_max.cast_to::<f64>().unwrap());
+                    let ymin = y_min.cast_to::<f64>().unwrap();
+                    let ymax = f64::max(ymin + 1., y_max.cast_to::<f64>().unwrap());
                     let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
                     draw_mesh(spec, &mut chart)?;
                     for s in series.borrow().iter() {
                         let data =
-                            s.x_data.iter().cloned().filter_map(|v| v.cast_f64()).zip(
-                                s.y_data.iter().cloned().filter_map(|v| v.cast_f64()),
+                            s.x_data.iter().cloned().filter_map(|v| v.cast_to::<f64>()).zip(
+                                s.y_data.iter().cloned().filter_map(|v| v.cast_to::<f64>()),
                             );
                         let style = to_style(s.line_color);
                         chart.draw_series(LineSeries::new(data, &style))?;
@@ -753,7 +754,7 @@ impl LinePlot {
                 s.y_data.push_back(v);
                 queue_draw = true;
             }
-            let keep = self.keep_points.current().and_then(|v| v.cast_u64()).unwrap_or(0);
+            let keep = self.keep_points.current().and_then(|v| v.cast_to::<u64>()).unwrap_or(0);
             while s.x_data.len() > keep as usize {
                 s.x_data.pop_front();
             }
