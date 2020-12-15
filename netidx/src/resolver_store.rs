@@ -102,7 +102,7 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 pub(crate) struct Store {
     by_path: HashMap<Path, Set<Addr>>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
-    by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
+    paths: BTreeMap<Path, u64>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
@@ -115,26 +115,16 @@ impl Store {
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
     ) -> Self {
-        let mut t = Store {
+        Store {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
-            by_level: HashMap::with_hasher(FxBuildHasher::default()),
+            paths: BTreeMap::new(),
             columns: HashMap::new(),
             defaults: BTreeSet::new(),
             parent,
             children,
             addrs: HCAddrs::new(),
-        };
-        let children = t.children.keys().cloned().collect::<Vec<_>>();
-        for child in children {
-            // since we want child to be in levels as well as
-            // dirname(child) we add a fake level below child. This
-            // will never be seen, since all requests for any path
-            // under child result in a referral, and anyway it won't
-            // even be added anywhere.
-            t.add_parents(child.append("z").as_ref());
         }
-        t
     }
 
     fn remove_parents(&mut self, mut p: &str) {
@@ -147,29 +137,21 @@ impl Store {
                 None => break,
                 Some(parent) => p = parent,
             }
-            let n = Path::levels(p) + 1;
             let save = self.by_path.contains_key(p)
                 || self.children.contains_key(p)
                 || self
-                    .by_level
-                    .get(&n)
-                    .map(|l| {
-                        let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
-                            Included(p_with_sep),
-                            Unbounded,
-                        ));
-                        r.next()
-                            .map(|o| o.as_ref().starts_with(p_with_sep))
-                            .unwrap_or(false)
-                    })
+                    .paths
+                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                        Included(p_with_sep),
+                        Unbounded,
+                    ))
+                    .next()
+                    .map(|(o, _)| o.as_ref().starts_with(p_with_sep))
                     .unwrap_or(false);
             if save {
-                break;
+                self.paths.get_mut(p).into_iter().for_each(|c| *c += 1)
             } else {
-                let n = n - 1;
-                self.by_level.get_mut(&n).into_iter().for_each(|l| {
-                    l.remove(p);
-                })
+                self.paths.remove(p);
             }
         }
     }
@@ -180,10 +162,11 @@ impl Store {
                 None => break,
                 Some(parent) => p = parent,
             }
-            let n = Path::levels(p);
-            let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
-            if !l.contains(p) {
-                l.insert(Path::from(String::from(p)));
+            match self.paths.get_mut(p) {
+                None => {
+                    self.paths.insert(Path::from(String::from(p)), 1);
+                }
+                Some(c) => *c += 1,
             }
         }
     }
@@ -226,7 +209,7 @@ impl Store {
                     path: Path::from("/"),
                     ttl: r.ttl,
                     addrs: r.addrs.clone(),
-                    krb5_spns: r.krb5_spns.clone()
+                    krb5_spns: r.krb5_spns.clone(),
                 });
             }
         }
@@ -297,14 +280,11 @@ impl Store {
         *addrs = self.addrs.add_address(addrs, Addr(addr));
         if addrs.len() > len {
             self.add_column(&path);
-            let n = Path::levels(path.as_ref());
-            self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
-        }
-        if len == 0 {
+            *self.paths.entry(path).or_insert(0) += 1;
             self.add_parents(path.as_ref());
         }
         if default {
-            self.defaults.insert(path);
+            self.defaults.insert(path.clone());
         }
     }
 
@@ -329,17 +309,16 @@ impl Store {
                         *addrs = new_addrs;
                         if addrs.len() < len {
                             self.remove_column(&path);
+                            self.paths.get_mut(&path).into_iter().for_each(|c| *c += 1);
+                            self.remove_parents(path.as_ref());
                         }
                     }
                     None => {
                         self.by_path.remove(&path);
                         self.defaults.remove(&path);
-                        let n = Path::levels(path.as_ref());
-                        self.by_level.get_mut(&n).into_iter().for_each(|s| {
-                            s.remove(&path);
-                        });
-                        self.remove_parents(path.as_ref());
                         self.remove_column(&path);
+                        self.paths.remove(&path);
+                        self.remove_parents(path.as_ref());
                     }
                 }
             }
@@ -432,18 +411,20 @@ impl Store {
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let parent = Path::to_btnf(parent);
-        let n = Path::levels(parent.trim_end_matches(path::SEP));
         let mut paths = PATH_POOL.take();
-        if let Some(l) = self.by_level.get(&(n + 1)) {
-            paths.extend(
-                l.range::<str, (Bound<&str>, Bound<&str>)>((
-                    Excluded(parent.as_str()),
+        let n = Path::levels(parent.trim_end_matches(path::SEP)) + 1;
+        paths.extend(
+            self.paths
+                .range::<str, (Bound<&str>, Bound<&str>)>((
+                    Excluded(parent.as_ref()),
                     Unbounded,
                 ))
-                .take_while(|p| p.as_ref().starts_with(parent.as_str()))
+                .map(|(p, _)| p)
+                .take_while(|p| {
+                    p.as_ref().starts_with(parent.as_ref()) && Path::levels(p) == n
+                })
                 .cloned(),
-            )
-        }
+        );
         paths
     }
 
