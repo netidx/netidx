@@ -125,6 +125,7 @@ pub mod chars;
 pub mod config;
 mod os;
 pub mod path;
+pub mod glob;
 mod protocol;
 pub mod publisher;
 pub mod resolver;

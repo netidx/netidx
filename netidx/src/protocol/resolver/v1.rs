@@ -1,6 +1,7 @@
 use crate::{
     chars::Chars,
-    pack::{Pack, PackError, Z64},
+    glob::Glob,
+    pack::{self, Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
 };
@@ -24,6 +25,22 @@ impl Pack for CtxId {
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         Ok(CtxId(<u64 as Pack>::decode(buf)?))
+    }
+}
+
+atomic_id!(MonitorId);
+
+impl Pack for MonitorId {
+    fn len(&self) -> usize {
+        pack::varint_len(self.0)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Ok(pack::encode_varint(self.0, buf))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        Ok(MonitorId(pack::decode_varint(buf)?))
     }
 }
 
@@ -345,6 +362,8 @@ pub enum ToRead {
     List(Path),
     /// Describe the table rooted at the specified path
     Table(Path),
+    /// List paths matching any of the specified globs.
+    ListMatching(Vec<Glob>),
 }
 
 impl Pack for ToRead {
@@ -353,6 +372,7 @@ impl Pack for ToRead {
             ToRead::Resolve(path) | ToRead::List(path) | ToRead::Table(path) => {
                 <Path as Pack>::len(path)
             }
+            ToRead::ListMatching(g) => <Vec<Glob> as Pack>::len(g),
         }
     }
 
@@ -370,23 +390,19 @@ impl Pack for ToRead {
                 buf.put_u8(2);
                 <Path as Pack>::encode(path, buf)
             }
+            ToRead::ListMatching(globs) => {
+                buf.put_u8(3);
+                <Vec<Glob> as Pack>::encode(globs, buf)
+            }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => {
-                let path = <Path as Pack>::decode(buf)?;
-                Ok(ToRead::Resolve(path))
-            }
-            1 => {
-                let path = <Path as Pack>::decode(buf)?;
-                Ok(ToRead::List(path))
-            }
-            2 => {
-                let path = <Path as Pack>::decode(buf)?;
-                Ok(ToRead::Table(path))
-            }
+            0 => Ok(ToRead::Resolve(<Path as Pack>::decode(buf)?)),
+            1 => Ok(ToRead::List(<Path as Pack>::decode(buf)?)),
+            2 => Ok(ToRead::Table(<Path as Pack>::decode(buf)?)),
+            3 => Ok(ToRead::ListMatching(<Vec<Glob> as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -494,9 +510,34 @@ impl Pack for Table {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListMatching {
+    matched: Pooled<Vec<Path>>,
+    referrals: Pooled<Vec<Referral>>,
+}
+
+impl Pack for ListMatching {
+    fn len(&self) -> usize {
+        <Pooled<Vec<Path>> as Pack>::len(&self.matched)
+            + <Pooled<Vec<Referral>> as Pack>::len(&self.referrals)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        <Pooled<Vec<Path>> as Pack>::encode(&self.matched, buf)?;
+        <Pooled<Vec<Referral>> as Pack>::encode(&self.referrals, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let matched = <Pooled<Vec<Path>> as Pack>::decode(buf)?;
+        let referrals = <Pooled<Vec<Referral>> as Pack>::decode(buf)?;
+        Ok(ListMatching { matched, referrals })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
     Resolved(Resolved),
     List(Pooled<Vec<Path>>),
+    ListMatching(ListMatching),
     Table(Table),
     Referral(Referral),
     Denied,
@@ -510,6 +551,7 @@ impl Pack for FromRead {
             FromRead::List(l) => <Pooled<Vec<Path>> as Pack>::len(l),
             FromRead::Table(t) => <Table as Pack>::len(t),
             FromRead::Referral(r) => <Referral as Pack>::len(r),
+            FromRead::ListMatching(m) => <ListMatching as Pack>::len(m),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::len(e),
         }
@@ -538,6 +580,10 @@ impl Pack for FromRead {
                 buf.put_u8(5);
                 <Chars as Pack>::encode(e, buf)
             }
+            FromRead::ListMatching(l) => {
+                buf.put_u8(6);
+                <ListMatching as Pack>::encode(l, buf)
+            }
         }
     }
 
@@ -549,6 +595,7 @@ impl Pack for FromRead {
             3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
             4 => Ok(FromRead::Denied),
             5 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
+            6 => Ok(FromRead::ListMatching(<ListMatching as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
