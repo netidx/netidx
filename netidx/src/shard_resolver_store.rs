@@ -6,9 +6,11 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{
-        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite,
+        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite, ListMatching,
     },
-    resolver_store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL},
+    resolver_store::{
+        self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
+    },
     secstore::SecStore,
 };
 use anyhow::Result;
@@ -43,6 +45,7 @@ lazy_static! {
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640, 15000);
     static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10000);
     static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10000);
+    static ref REF_HPOOL: Pool<HashSet<Referral>> = Pool::new(32, 100);
     static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000, 1024);
     static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000, 1024);
 }
@@ -333,6 +336,12 @@ impl Store {
                         }
                         c += 10000;
                     }
+                    Some(ToRead::ListMatching(set)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToRead::ListMatching(set.clone())));
+                        }
+                        c += 100000;
+                    }
                 }
                 n += 1;
             }
@@ -402,6 +411,30 @@ impl Store {
                             let mut paths = PATH_POOL.take();
                             paths.extend(hpaths.drain());
                             con.queue_send(&FromRead::List(paths))?;
+                        }
+                        (_, FromRead::ListMatching(mut lm)) => {
+                            let mut hpaths = PATH_HPOOL.take();
+                            let mut hrefs = REF_HPOOL.take();
+                            hpaths.extend(lm.matched.drain(..));
+                            hrefs.extend(lm.referrals.drain(..));
+                            for i in 1..replies.len() {
+                                if let (_, FromRead::ListMatching(mut lm)) =
+                                    replies[i].pop_front().unwrap()
+                                {
+                                    hpaths.extend(lm.matched.drain(..));
+                                    hrefs.extend(lm.referrals.drain(..));
+                                } else {
+                                    panic!("desynced listmatching")
+                                }
+                            }
+                            let mut matched = PATH_POOL.take();
+                            let mut referrals = REF_POOL.take();
+                            matched.extend(hpaths.drain());
+                            referrals.extend(hrefs.drain());
+                            con.queue_send(&FromRead::ListMatching(ListMatching {
+                                matched,
+                                referrals,
+                            }))?;
                         }
                         (_, FromRead::Table(Table { mut rows, mut cols })) => {
                             let mut hrows = PATH_HPOOL.take();

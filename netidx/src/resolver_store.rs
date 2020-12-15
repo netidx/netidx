@@ -31,6 +31,7 @@ lazy_static! {
     static ref SIGNED_ADDRS_POOL: Pool<Vec<(SocketAddr, Bytes)>> = Pool::new(256, 100);
     pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
     pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
+    pub(crate) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
 }
 
 pub(crate) const MAX_WRITE_BATCH: usize = 100_000;

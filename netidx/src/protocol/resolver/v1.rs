@@ -448,7 +448,7 @@ impl Pack for Resolved {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Referral {
     pub path: Path,
     pub ttl: u64,
@@ -511,8 +511,8 @@ impl Pack for Table {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListMatching {
-    matched: Pooled<Vec<Path>>,
-    referrals: Pooled<Vec<Referral>>,
+    pub(crate) matched: Pooled<Vec<Path>>,
+    pub(crate) referrals: Pooled<Vec<Referral>>,
 }
 
 impl Pack for ListMatching {

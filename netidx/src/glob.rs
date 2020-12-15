@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use globset;
-use std::{ops::Deref, result, cmp::{PartialEq, Eq}};
+use std::{ops::Deref, result, cmp::{PartialEq, Eq}, sync::Arc};
 
 /// Unix style globs for matching paths in the resolver. All common
 /// unix globing features are supported.
@@ -108,15 +108,18 @@ impl Pack for Glob {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GlobSet {
+#[derive(Debug)]
+struct GlobSetInner {
     raw: Pooled<Vec<Glob>>,
     glob: globset::GlobSet,
 }
 
+#[derive(Debug, Clone)]
+pub struct GlobSet(Arc<GlobSetInner>);
+
 impl PartialEq for GlobSet {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
+        &self.0.raw == &other.0.raw
     }
 }
 
@@ -133,11 +136,11 @@ impl GlobSet {
             builder.add(glob.glob.clone());
             raw.push(glob);
         }
-        Ok(GlobSet { raw, glob: builder.build()? })
+        Ok(GlobSet(Arc::new(GlobSetInner { raw, glob: builder.build()? })))
     }
 
     fn is_match(&self, path: &Path) -> bool {
-        self.glob.is_match(path.as_ref())
+        self.0.glob.is_match(path.as_ref())
     }
 }
 
@@ -145,17 +148,17 @@ impl Deref for GlobSet {
     type Target = Vec<Glob>;
 
     fn deref(&self) -> &Self::Target {
-        &*self.raw
+        &*self.0.raw
     }
 }
 
 impl Pack for GlobSet {
     fn len(&self) -> usize {
-        <Pooled<Vec<Glob>> as Pack>::len(&self.raw)
+        <Pooled<Vec<Glob>> as Pack>::len(&self.0.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
-        <Pooled<Vec<Glob>> as Pack>::encode(&self.raw, buf)
+        <Pooled<Vec<Glob>> as Pack>::encode(&self.0.raw, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
@@ -165,6 +168,6 @@ impl Pack for GlobSet {
             builder.add(glob.glob.clone());
         }
         let glob = builder.build().map_err(|_| PackError::InvalidFormat)?;
-        Ok(GlobSet { raw, glob })
+        Ok(GlobSet(Arc::new(GlobSetInner { raw, glob })))
     }
 }
