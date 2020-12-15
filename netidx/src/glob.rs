@@ -1,18 +1,14 @@
 use crate::{
+    auth::Scope,
     pack::{Pack, PackError},
     path::Path,
+    pool::{Pool, Pooled},
     utils,
 };
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use globset;
-use std::result;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    Subtree,
-    Finite(usize),
-}
+use std::{ops::Deref, result, cmp::{PartialEq, Eq}};
 
 /// Unix style globs for matching paths in the resolver. All common
 /// unix globing features are supported.
@@ -109,5 +105,66 @@ impl Pack for Glob {
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
         Glob::new(<Path as Pack>::decode(buf)?).map_err(|_| PackError::InvalidFormat)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobSet {
+    raw: Pooled<Vec<Glob>>,
+    glob: globset::GlobSet,
+}
+
+impl PartialEq for GlobSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Eq for GlobSet {}
+
+impl GlobSet {
+    fn new(globs: impl IntoIterator<Item = Glob>) -> Result<GlobSet> {
+        lazy_static! {
+            static ref GLOB: Pool<Vec<Glob>> = Pool::new(10, 100);
+        }
+        let mut builder = globset::GlobSetBuilder::new();
+        let mut raw = GLOB.take();
+        for glob in globs {
+            builder.add(glob.glob.clone());
+            raw.push(glob);
+        }
+        Ok(GlobSet { raw, glob: builder.build()? })
+    }
+
+    fn is_match(&self, path: &Path) -> bool {
+        self.glob.is_match(path.as_ref())
+    }
+}
+
+impl Deref for GlobSet {
+    type Target = Vec<Glob>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.raw
+    }
+}
+
+impl Pack for GlobSet {
+    fn len(&self) -> usize {
+        <Pooled<Vec<Glob>> as Pack>::len(&self.raw)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
+        <Pooled<Vec<Glob>> as Pack>::encode(&self.raw, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
+        let raw = <Pooled<Vec<Glob>> as Pack>::decode(buf)?;
+        let mut builder = globset::GlobSetBuilder::new();
+        for glob in raw.iter() {
+            builder.add(glob.glob.clone());
+        }
+        let glob = builder.build().map_err(|_| PackError::InvalidFormat)?;
+        Ok(GlobSet { raw, glob })
     }
 }

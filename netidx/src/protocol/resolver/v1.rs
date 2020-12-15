@@ -1,6 +1,6 @@
 use crate::{
     chars::Chars,
-    glob::Glob,
+    glob::GlobSet,
     pack::{self, Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
@@ -362,8 +362,8 @@ pub enum ToRead {
     List(Path),
     /// Describe the table rooted at the specified path
     Table(Path),
-    /// List paths matching any of the specified globs.
-    ListMatching(Vec<Glob>),
+    /// List paths matching the specified glob set.
+    ListMatching(GlobSet),
 }
 
 impl Pack for ToRead {
@@ -372,7 +372,7 @@ impl Pack for ToRead {
             ToRead::Resolve(path) | ToRead::List(path) | ToRead::Table(path) => {
                 <Path as Pack>::len(path)
             }
-            ToRead::ListMatching(g) => <Vec<Glob> as Pack>::len(g),
+            ToRead::ListMatching(g) => <GlobSet as Pack>::len(g),
         }
     }
 
@@ -392,7 +392,7 @@ impl Pack for ToRead {
             }
             ToRead::ListMatching(globs) => {
                 buf.put_u8(3);
-                <Vec<Glob> as Pack>::encode(globs, buf)
+                <GlobSet as Pack>::encode(globs, buf)
             }
         }
     }
@@ -402,7 +402,7 @@ impl Pack for ToRead {
             0 => Ok(ToRead::Resolve(<Path as Pack>::decode(buf)?)),
             1 => Ok(ToRead::List(<Path as Pack>::decode(buf)?)),
             2 => Ok(ToRead::Table(<Path as Pack>::decode(buf)?)),
-            3 => Ok(ToRead::ListMatching(<Vec<Glob> as Pack>::decode(buf)?)),
+            3 => Ok(ToRead::ListMatching(<GlobSet as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }

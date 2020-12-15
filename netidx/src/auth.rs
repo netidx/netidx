@@ -1,6 +1,11 @@
 use crate::{config, os::Mapper, path::Path, protocol::resolver::v1::Referral};
 use anyhow::{anyhow, Error, Result};
-use std::{collections::{BTreeMap, HashMap}, convert::TryFrom, iter, sync::Arc};
+use std::{
+    collections::{BTreeMap, Bound, HashMap},
+    convert::TryFrom,
+    iter,
+    sync::Arc,
+};
 
 bitflags! {
     pub struct Permissions: u32 {
@@ -47,7 +52,7 @@ impl TryFrom<&str> for Permissions {
                         "unrecognized permission bit {}, valid bits are !swlpd",
                         c
                     ))
-               }
+                }
             }
         }
         Ok(p)
@@ -121,8 +126,23 @@ impl UserDb {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Subtree,
+    Finite(usize),
+}
+
+impl Scope {
+    fn contains(&self, levels: usize) -> bool {
+        match self {
+            Scope::Subtree => true,
+            Scope::Finite(n) => levels <= *n,
+        }
+    }
+}
+
 #[derive(Debug)]
-pub(crate) struct PMap(HashMap<Path, HashMap<Entity, Permissions>>);
+pub(crate) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
     pub(crate) fn from_file(
@@ -131,7 +151,7 @@ impl PMap {
         root: &str,
         children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
-        let mut pmap = HashMap::with_capacity(file.0.len());
+        let mut pmap = BTreeMap::new();
         for (path, tbl) in file.0.iter() {
             if !path.starts_with(root) {
                 bail!("permission entry for parent: {}, entry: {}", root, path)
@@ -159,6 +179,39 @@ impl PMap {
     ) -> bool {
         let actual_rights = self.permissions(path, user);
         actual_rights & desired_rights == desired_rights
+    }
+
+    pub(crate) fn allowed_in_scope(
+        &self,
+        base_path: &str,
+        scope: &Scope,
+        desired_rights: Permissions,
+        user: &UserInfo,
+    ) -> bool {
+        let rights_at_base = self.permissions(base_path, user);
+        let mut rights = rights_at_base;
+        let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
+            Bound::Excluded(base_path),
+            Bound::Unbounded,
+        ));
+        while let Some((path, set)) = iter.next() {
+            if !path.starts_with(base_path) || !scope.contains(Path::levels(&*path)) {
+                break;
+            }
+            let deny =
+                user.entities().fold(Permissions::empty(), |dp, e| match set.get(e) {
+                    None => dp,
+                    Some(p) => {
+                        if p.contains(Permissions::DENY) {
+                            dp | *p
+                        } else {
+                            dp
+                        }
+                    }
+                });
+            rights &= !deny;
+        }
+        rights & desired_rights == desired_rights
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
