@@ -1,5 +1,5 @@
 use crate::{
-    auth::Permissions,
+    auth::{Permissions, Scope},
     chars::Chars,
     pack::Z64,
     path::{self, Path},
@@ -213,6 +213,35 @@ impl Store {
         }
     }
 
+    pub(crate) fn referrals_in_scope(
+        &self,
+        refs: &mut Vec<Referral>,
+        base_path: &impl AsRef<str>,
+        scope: &Scope,
+    ) {
+        let base_path = Path::to_btnf(base_path);
+        if let Some(r) = self.parent.as_ref() {
+            if !base_path.starts_with(r.path.as_ref()) {
+                refs.push(Referral {
+                    path: Path::from("/"),
+                    ttl: r.ttl,
+                    addrs: r.addrs.clone(),
+                    krb5_spns: r.krb5_spns.clone()
+                });
+            }
+        }
+        let mut iter = self.children.range::<str, (Bound<&str>, Bound<&str>)>((
+            Excluded(base_path.as_ref()),
+            Unbounded,
+        ));
+        while let Some((p, r)) = iter.next() {
+            if !p.starts_with(base_path.as_ref()) || !scope.contains(Path::levels(&*p)) {
+                break;
+            }
+            refs.push(r.clone())
+        }
+    }
+
     fn add_column<S: AsRef<str>>(&mut self, path: &S) {
         let (root, name) = match column_path_parts(path) {
             None => return,
@@ -402,16 +431,8 @@ impl Store {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
-        let parent = if parent == &Path::root() {
-            parent.as_ref()
-        } else {
-            parent.trim_end_matches(path::SEP)
-        };
-        let n = Path::levels(parent);
-        let mut parent = String::from(parent);
-        if !parent.ends_with(path::SEP) {
-            parent.push(path::SEP);
-        }
+        let parent = Path::to_btnf(parent);
+        let n = Path::levels(parent.trim_end_matches(path::SEP));
         let mut paths = PATH_POOL.take();
         if let Some(l) = self.by_level.get(&(n + 1)) {
             paths.extend(

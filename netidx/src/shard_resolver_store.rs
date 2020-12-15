@@ -6,7 +6,7 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{
-        FromRead, FromWrite, Referral, Resolved, Table, ToRead, ToWrite, ListMatching,
+        FromRead, FromWrite, ListMatching, Referral, Resolved, Table, ToRead, ToWrite,
     },
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
@@ -188,6 +188,16 @@ impl Shard {
                     } else {
                         (id, FromRead::Denied)
                     }
+                }
+            }
+            ToRead::ListMatching(set) => {
+                let mut referrals = REF_POOL.take();
+                for glob in set.iter() {
+                    store.referrals_in_scope(
+                        &mut *referrals,
+                        glob.base(),
+                        glob.scope(),
+                    )
                 }
             }
             ToRead::Table(path) => {

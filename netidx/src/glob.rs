@@ -31,7 +31,7 @@ use std::{ops::Deref, result, cmp::{PartialEq, Eq}, sync::Arc};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
     raw: Path,
-    base: Path,
+    base: String,
     scope: Scope,
     glob: globset::Glob,
 }
@@ -66,7 +66,7 @@ impl Glob {
                     cur
                 }
             });
-        let base = Path::from(String::from(base));
+        let base = Path::to_btnf(base).into_owned();
         let scope =
             if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
                 Scope::Subtree
@@ -77,7 +77,7 @@ impl Glob {
         Ok(Glob { raw, base, scope, glob })
     }
 
-    pub fn base(&self) -> &Path {
+    pub fn base(&self) -> &str {
         &self.base
     }
 

@@ -196,6 +196,31 @@ impl Path {
         Path::from("/")
     }
 
+    /// Return true if the path is already in btree normal form
+    pub(crate) fn is_btnf<T: AsRef<str> + ?Sized>(path: &T) -> bool {
+        let mut chars = path.as_ref().chars();
+        match chars.next_back() {
+            None => true,
+            Some(c) if c == SEP => match chars.next_back() {
+                None => true,
+                Some(c) if c != SEP => true,
+                Some(_) => false
+            },
+            Some(_) => false
+        }
+    }
+
+    /// If necessary transform the specified path into btree normal form.
+    pub(crate) fn to_btnf<'a, T: AsRef<str> + ?Sized>(path: &'a T) -> Cow<'a, str> {
+        if Path::is_btnf(path) {
+            Cow::Borrowed(path.as_ref())
+        } else {
+            let mut path = String::from(path.as_ref().trim_end_matches(SEP));
+            path.push(SEP);
+            Cow::Owned(path)
+        }
+    }
+    
     /// returns true if the path starts with /, false otherwise
     pub fn is_absolute<T: AsRef<str> + ?Sized>(p: &T) -> bool {
         p.as_ref().starts_with(SEP)

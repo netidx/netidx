@@ -127,13 +127,13 @@ impl UserDb {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
+pub(crate) enum Scope {
     Subtree,
     Finite(usize),
 }
 
 impl Scope {
-    fn contains(&self, levels: usize) -> bool {
+    pub(crate) fn contains(&self, levels: usize) -> bool {
         match self {
             Scope::Subtree => true,
             Scope::Finite(n) => levels <= *n,
@@ -188,6 +188,8 @@ impl PMap {
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
+        let base_path = Path::to_btnf(base_path);
+        let base_path = base_path.as_ref();
         let rights_at_base = self.permissions(base_path, user);
         let mut rights = rights_at_base;
         let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
