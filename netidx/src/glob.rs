@@ -136,10 +136,11 @@ impl GlobSet {
             builder.add(glob.glob.clone());
             raw.push(glob);
         }
+        raw.sort_unstable_by_key(|g| g.base());
         Ok(GlobSet(Arc::new(GlobSetInner { raw, glob: builder.build()? })))
     }
 
-    fn is_match(&self, path: &Path) -> bool {
+    pub fn is_match(&self, path: &Path) -> bool {
         self.0.glob.is_match(path.as_ref())
     }
 }
@@ -162,11 +163,12 @@ impl Pack for GlobSet {
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
-        let raw = <Pooled<Vec<Glob>> as Pack>::decode(buf)?;
+        let mut raw = <Pooled<Vec<Glob>> as Pack>::decode(buf)?;
         let mut builder = globset::GlobSetBuilder::new();
         for glob in raw.iter() {
             builder.add(glob.glob.clone());
         }
+        raw.sort_unstable_by_key(|g| g.base());
         let glob = builder.build().map_err(|_| PackError::InvalidFormat)?;
         Ok(GlobSet(Arc::new(GlobSetInner { raw, glob })))
     }
