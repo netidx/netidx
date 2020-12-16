@@ -197,10 +197,10 @@ impl Store {
         }
     }
 
-    pub(crate) fn referrals_in_scope(
+    pub(crate) fn referrals_in_scope<T: AsRef<str> + ?Sized>(
         &self,
         refs: &mut Vec<Referral>,
-        base_path: &impl AsRef<str>,
+        base_path: &T,
         scope: &Scope,
     ) {
         let base_path = Path::to_btnf(base_path);

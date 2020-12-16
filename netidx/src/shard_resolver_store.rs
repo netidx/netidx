@@ -191,13 +191,33 @@ impl Shard {
                 }
             }
             ToRead::ListMatching(set) => {
-                let mut referrals = REF_POOL.take();
-                for glob in set.iter() {
-                    store.referrals_in_scope(
-                        &mut *referrals,
-                        glob.base(),
-                        glob.scope(),
-                    )
+                let allowed = secstore
+                    .map(|s| {
+                        let pmap = s.pmap();
+                        set.iter().all(|g| {
+                            pmap.allowed_in_scope(
+                                g.base(),
+                                g.scope(),
+                                Permissions::LIST,
+                                &*uifo,
+                            )
+                        })
+                    })
+                    .unwrap_or(true);
+                if !allowed {
+                    (id, FromRead::Denied)
+                } else {
+                    let mut referrals = REF_POOL.take();
+                    for glob in set.iter() {
+                        store.referrals_in_scope(
+                            &mut *referrals,
+                            glob.base(),
+                            glob.scope(),
+                        )
+                    }
+                    let matched = store.list_matching(&set);
+                    let lm = ListMatching { referrals, matched };
+                    (id, FromRead::ListMatching(lm))
                 }
             }
             ToRead::Table(path) => {
