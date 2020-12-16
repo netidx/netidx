@@ -45,7 +45,6 @@ lazy_static! {
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640, 15000);
     static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10000);
     static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10000);
-    static ref REF_HPOOL: Pool<HashSet<Referral>> = Pool::new(32, 100);
     static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000, 1024);
     static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000, 1024);
 }
@@ -70,6 +69,7 @@ struct Shard {
 
 impl Shard {
     fn new(
+        shard: usize,
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
         secstore: Option<SecStore>,
@@ -90,6 +90,7 @@ impl Shard {
                         None => break,
                         Some((req, reply)) => {
                             let r = Shard::process_read_batch(
+                                shard,
                                 &mut store,
                                 secstore.as_ref(),
                                 resolver,
@@ -123,6 +124,7 @@ impl Shard {
     }
 
     fn process_read_batch(
+        shard: usize,
         store: &mut resolver_store::Store,
         secstore: Option<&SecStore>,
         resolver: SocketAddr,
@@ -208,12 +210,14 @@ impl Shard {
                     (id, FromRead::Denied)
                 } else {
                     let mut referrals = REF_POOL.take();
-                    for glob in set.iter() {
-                        store.referrals_in_scope(
-                            &mut *referrals,
-                            glob.base(),
-                            glob.scope(),
-                        )
+                    if shard == 0 {
+                        for glob in set.iter() {
+                            store.referrals_in_scope(
+                                &mut *referrals,
+                                glob.base(),
+                                glob.scope(),
+                            )
+                        }
                     }
                     let matched = store.list_matching(&set);
                     let lm = ListMatching { referrals, matched };
@@ -307,8 +311,14 @@ impl Store {
         let shard_mask = shards - 1;
         let shards = (0..shards)
             .into_iter()
-            .map(|_| {
-                Shard::new(parent.clone(), children.clone(), secstore.clone(), resolver)
+            .map(|i| {
+                Shard::new(
+                    i,
+                    parent.clone(),
+                    children.clone(),
+                    secstore.clone(),
+                    resolver,
+                )
             })
             .collect();
         Arc::new(Store { shards, shard_mask, build_hasher: FxBuildHasher::default() })
@@ -444,23 +454,19 @@ impl Store {
                         }
                         (_, FromRead::ListMatching(mut lm)) => {
                             let mut hpaths = PATH_HPOOL.take();
-                            let mut hrefs = REF_HPOOL.take();
+                            let referrals = lm.referrals;
                             hpaths.extend(lm.matched.drain(..));
-                            hrefs.extend(lm.referrals.drain(..));
                             for i in 1..replies.len() {
                                 if let (_, FromRead::ListMatching(mut lm)) =
                                     replies[i].pop_front().unwrap()
                                 {
                                     hpaths.extend(lm.matched.drain(..));
-                                    hrefs.extend(lm.referrals.drain(..));
                                 } else {
                                     panic!("desynced listmatching")
                                 }
                             }
                             let mut matched = PATH_POOL.take();
-                            let mut referrals = REF_POOL.take();
                             matched.extend(hpaths.drain());
-                            referrals.extend(hrefs.drain());
                             con.queue_send(&FromRead::ListMatching(ListMatching {
                                 matched,
                                 referrals,

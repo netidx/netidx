@@ -448,7 +448,7 @@ impl Pack for Resolved {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Referral {
     pub path: Path,
     pub ttl: u64,

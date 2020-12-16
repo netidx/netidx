@@ -279,13 +279,13 @@ impl Store {
         let addrs = self.by_path.entry(path.clone()).or_insert_with(Set::new);
         let len = addrs.len();
         *addrs = self.addrs.add_address(addrs, Addr(addr));
-        if addrs.len() > len {
-            self.add_column(&path);
-            *self.paths.entry(path).or_insert(0) += 1;
-            self.add_parents(path.as_ref());
-        }
         if default {
             self.defaults.insert(path.clone());
+        }
+        if addrs.len() > len {
+            self.add_column(&path);
+            self.add_parents(path.as_ref());
+            *self.paths.entry(path).or_insert(0) += 1;
         }
     }
 

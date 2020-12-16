@@ -136,7 +136,7 @@ impl GlobSet {
             builder.add(glob.glob.clone());
             raw.push(glob);
         }
-        raw.sort_unstable_by_key(|g| g.base());
+        raw.sort_unstable_by(|g0, g1| g0.base().cmp(g1.base()));
         Ok(GlobSet(Arc::new(GlobSetInner { raw, glob: builder.build()? })))
     }
 
@@ -168,7 +168,7 @@ impl Pack for GlobSet {
         for glob in raw.iter() {
             builder.add(glob.glob.clone());
         }
-        raw.sort_unstable_by_key(|g| g.base());
+        raw.sort_unstable_by(|g0, g1| g0.base().cmp(g1.base()));
         let glob = builder.build().map_err(|_| PackError::InvalidFormat)?;
         Ok(GlobSet(Arc::new(GlobSetInner { raw, glob })))
     }
