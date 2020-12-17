@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    glob::GlobSet,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
@@ -22,7 +23,7 @@ use std::{
     collections::{
         BTreeMap,
         Bound::{self, Included, Unbounded},
-        HashMap,
+        HashMap, HashSet
     },
     iter::IntoIterator,
     marker::PhantomData,
@@ -43,6 +44,7 @@ impl ToPath for ToRead {
     fn path(&self) -> Option<&Path> {
         match self {
             ToRead::List(p) | ToRead::Table(p) | ToRead::Resolve(p) => Some(p),
+            ToRead::ListMatching(_) => None,
         }
     }
 }
@@ -247,6 +249,37 @@ where
     ti_pool: Pool<Vec<(usize, T)>>,
 }
 
+impl<C, T, F> ResolverWrapInner<C, T, F>
+where
+    C: Connection<T, F> + Clone + 'static,
+    T: ToPath + Clone + Send + Sync + 'static,
+    F: ToReferral + Clone + Send + Sync + 'static,
+{
+    fn send_to_server(
+        &mut self,
+        server: Option<Path>,
+        batch: Pooled<Vec<(usize, T)>>,
+    ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>> {
+        match server {
+            None => self.default.send(batch),
+            Some(path) => match self.by_path.get_mut(&path) {
+                Some(con) => con.send(batch),
+                None => {
+                    let r = self.router.get_referral(&path).unwrap().clone();
+                    let mut con = C::new(
+                        Config::from(r),
+                        self.desired_auth.clone(),
+                        self.writer_addr,
+                        self.secrets.clone(),
+                    );
+                    self.by_path.insert(path, con.clone());
+                    con.send(batch)
+                }
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static>(
     Arc<Mutex<ResolverWrapInner<C, T, F>>>,
@@ -299,37 +332,20 @@ where
                     inner.by_path.clear(); // a workable sledgehammer
                 }
                 for (r, batch) in inner.router.route_batch(&inner.ti_pool, batch) {
-                    match r {
-                        None => waiters.push(inner.default.send(batch)),
-                        Some(rp) => match inner.by_path.get_mut(&rp) {
-                            Some(con) => waiters.push(con.send(batch)),
-                            None => {
-                                let r = inner.router.get_referral(&rp).unwrap().clone();
-                                let mut con = C::new(
-                                    Config::from(r),
-                                    inner.desired_auth.clone(),
-                                    inner.writer_addr,
-                                    inner.secrets.clone(),
-                                );
-                                inner.by_path.insert(rp, con.clone());
-                                waiters.push(con.send(batch))
-                            }
-                        },
-                    }
+                    waiters.push(inner.send_to_server(r, batch))
                 }
                 (inner.fi_pool.take(), inner.f_pool.take())
             };
-            let qresult = future::join_all(waiters).await;
             let mut referral = false;
-            for r in qresult {
+            for r in future::join_all(waiters).await {
                 let mut r = r?;
                 for (id, reply) in r.drain(..) {
                     match reply.referral() {
+                        Err(m) => finished.push((id, m)),
                         Ok(r) => {
                             self.0.lock().router.add_referral(r);
                             referral = true;
                         }
-                        Err(m) => finished.push((id, m)),
                     }
                 }
             }
@@ -343,89 +359,6 @@ where
                 bail!("maximum referral depth {} reached, giving up", MAX_REFERRALS);
             }
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Scoped {
-    OneLevel(Vec<GlobMatcher>),
-    Subtree(GlobMatcher),
-}
-
-/// Unix style globs for matching paths in the resolver. All common
-/// unix globing features are supported.
-/// * ? matches any character except the path separator
-/// * * matches zero or more characters, but not the path separator
-/// * ** recursively matches containers. It's only legal uses are /**/foo, /foo/**/bar, and /foo/bar/**, which match respectively, any path ending in foo, any path starting with /foo and ending in bar, and any path starting with /foo/bar.
-/// * {a, b}, matches a or b where a and b are glob patterns, {} can't be nested however.
-/// * [ab], [!ab], matches respectively the char a or b, and any char but a or b.
-/// * any of the above metacharacters can be escaped with a \, a literal \ may be produced with \\.
-///
-/// e.g.
-/// `/solar/{stats,settings}/*` -> all leaf paths under /solar/stats or /solar/settings.
-/// `/s*/s*/**` -> any path who's first two levels start with s.
-/// `/**/?` -> any path who's final component is a single character
-/// `/marketdata/{IBM,MSFT,AMZN}/last`
-#[derive(Debug, Clone)]
-pub struct Glob {
-    raw: Path,
-    base: Path,
-    scoped: Scoped,
-}
-
-impl Glob {
-    pub fn new(raw: Path) -> Result<Glob> {
-        if !Path::is_absolute(&raw) {
-            bail!("glob paths must be absolute")
-        }
-        let (lvl, base) =
-            Path::dirnames(&raw).enumerate().fold((0, "/"), |cur, (lvl, p)| {
-                let mut s = p;
-                let is_glob = loop {
-                    if s.is_empty() {
-                        break false;
-                    } else {
-                        match s.find("?*{[") {
-                            None => break false,
-                            Some(i) => {
-                                if utils::is_escaped(s, '\\', i) {
-                                    s = &s[i + 1..];
-                                } else {
-                                    break true;
-                                }
-                            }
-                        }
-                    }
-                };
-                if !is_glob {
-                    (lvl, p)
-                } else {
-                    cur
-                }
-            });
-        let base = Path::from(String::from(base));
-        let sc =
-            if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
-                let g = GlobBuilder::new(&raw)
-                    .backslash_escape(true)
-                    .literal_separator(true)
-                    .build()?
-                    .compile_matcher();
-                Scoped::Subtree(g)
-            } else {
-                let g = Path::dirnames(&raw)
-                    .skip(lvl)
-                    .map(|p| {
-                        Ok(GlobBuilder::new(p)
-                            .backslash_escape(true)
-                            .literal_separator(true)
-                            .build()?
-                            .compile_matcher())
-                    })
-                    .collect::<Result<Vec<GlobMatcher>>>()?;
-                Scoped::OneLevel(g)
-            };
-        Ok(Glob { raw, base, scoped: sc })
     }
 }
 
@@ -495,85 +428,47 @@ impl ResolverRead {
         }
     }
 
-    /// list the children of the specified paths, results in send order.
-    pub async fn list_many<I>(&self, batch: I) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>>
-    where
-        I: IntoIterator<Item = Path>,
-    {
-        let mut to = RAWTOREADPOOL.take();
-        to.extend(batch.into_iter().map(ToRead::List));
-        let mut result = self.send(&to).await?;
-        if result.len() != to.len() {
-            bail!(
-                "expected number of list results {} expected {}",
-                result.len(),
-                to.len()
-            );
-        } else {
-            let mut out = LISTPOOL.take();
-            for l in result.drain(..) {
-                match l {
-                    FromRead::List(paths) => {
-                        out.push(paths);
-                    }
-                    m => bail!("unexpected list response {:?}", m),
+    /// list all paths in the cluster matching the specified globset
+    pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
+        let mut pending = vec![None];
+        let mut results = LISTRECPOOL.take();
+        let mut done = HashSet::new();
+        let mut referral_cycles = 0;
+        while pending.len() > 0 {
+            let mut waiters = Vec::new();
+            {
+                let mut inner = self.0.0.lock();
+                for server in pending.drain(..) {
+                    let mut to = TOREADPOOL.take();
+                    to.push((0, ToRead::ListMatching(globset.clone())));
+                    done.insert(server.clone());
+                    waiters.push(inner.send_to_server(server, to));
                 }
             }
-            Ok(out)
-        }
-    }
-
-    /// list all the non leaf children of the specified path to any
-    /// depth, result order unspecified. Possibly expensive.
-    pub async fn list_recursive(&self, base: Path) -> Result<Pooled<Vec<Path>>> {
-        let mut leaf = LISTRECPOOL.take();
-        let mut query = vec![base];
-        while query.len() > 0 {
-            let mut res = self.list_many(query.iter().cloned()).await?;
-            let mut new_query = Vec::new();
-            for (p, mut res) in query.iter().zip(res.drain(..)) {
-                if res.is_empty() {
-                    leaf.push(p.clone());
-                } else {
-                    new_query.extend(res.drain(..));
-                }
-            }
-            query = new_query;
-        }
-        Ok(leaf)
-    }
-
-    /// Search the resolver server for paths matching the specified
-    /// unix style `Glob`. Possibly expensive.
-    pub async fn list_glob(&self, glob: &Glob) -> Result<Pooled<Vec<Path>>> {
-        let mut matches = LISTRECPOOL.take();
-        match &glob.scoped {
-            Scoped::Subtree(pat) => {
-                for p in self.list_recursive(glob.base.clone()).await?.drain(..) {
-                    if pat.is_match(&*p) {
-                        matches.push(p);
-                    }
-                }
-            }
-            Scoped::OneLevel(pats) => {
-                let mut query = vec![glob.base.clone()];
-                for pat in pats.iter() {
-                    let mut res = self.list_many(query.iter().cloned()).await?;
-                    let mut new_query = Vec::new();
-                    for (p, mut res) in query.iter().zip(res.drain(..)) {
-                        if res.is_empty() {
-                            matches.push(p.clone());
-                        } else {
-                            new_query.extend(
-                                res.drain(..).filter(|p| pat.is_match(p.as_ref())),
-                            );
+            for r in future::join_all(waiters).await {
+                let mut r = r?;
+                for (_, reply) in r.drain(..) {
+                    match reply {
+                        FromRead::ListMatching(mut lm) => {
+                            results.extend(lm.matched.drain(..));
+                            for r in lm.referrals.drain(..) {
+                                let k = Some(r.path.clone());
+                                if !done.contains(&k) {
+                                    self.0.0.lock().router.add_referral(r);
+                                    pending.push(k);
+                                }
+                            }
                         }
+                        m => bail!("unexpected list_matching response {:?}", m)
                     }
-                    query = new_query;
                 }
             }
+            referral_cycles += 1;
+            if referral_cycles > MAX_REFERRALS {
+                bail!("max referrals reached")
+            }
         }
-        Ok(matches)
+        Ok(results)
     }
 
     pub async fn table(&self, path: Path) -> Result<Table> {

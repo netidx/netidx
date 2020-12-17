@@ -427,23 +427,21 @@ impl Store {
         paths
     }
 
-    fn list_rec<'a, 'b>(&'a self, parent: &'b str) -> impl Iterator<Item = &'b Path>
-    where
-        'a: 'b,
-    {
-        self.paths
-            .range::<str, (Bound<&str>, Bound<&str>)>((Excluded(parent), Unbounded))
-            .map(|(p, _)| p)
-            .take_while(move |p| p.starts_with(parent))
-    }
-
     pub(crate) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
         let mut paths = PATH_POOL.take();
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
             if !cur.map(|p| glob.base().starts_with(p)).unwrap_or(false) {
-                for path in self.list_rec(glob.base()) {
-                    if pat.is_match(path) {
+                let iter = self
+                    .paths
+                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                        Excluded(glob.base()),
+                        Unbounded,
+                    ))
+                    .map(|(p, _)| p)
+                    .take_while(move |p| p.starts_with(glob.base()));
+                for path in iter {
+                    if self.by_path.contains_key(path) && pat.is_match(path) {
                         paths.push(path.clone());
                     }
                 }
