@@ -7,8 +7,7 @@ use crate::{
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
-    },
-    utils,
+    }
 };
 pub use crate::{
     protocol::resolver::v1::{Resolved, Table},
@@ -17,7 +16,6 @@ pub use crate::{
 use anyhow::Result;
 use futures::future;
 use fxhash::FxBuildHasher;
-use globset::{self, GlobBuilder, GlobMatcher};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{

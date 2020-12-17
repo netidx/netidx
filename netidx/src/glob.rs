@@ -8,7 +8,12 @@ use crate::{
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use globset;
-use std::{ops::Deref, result, cmp::{PartialEq, Eq}, sync::Arc};
+use std::{
+    cmp::{Eq, PartialEq},
+    ops::Deref,
+    result,
+    sync::Arc,
+};
 
 /// Unix style globs for matching paths in the resolver. All common
 /// unix globing features are supported.
@@ -81,7 +86,7 @@ impl Glob {
         &self.base
     }
 
-    pub fn scope(&self) -> &Scope {
+    pub(crate) fn scope(&self) -> &Scope {
         &self.scope
     }
 
@@ -111,6 +116,7 @@ impl Pack for Glob {
 #[derive(Debug)]
 struct GlobSetInner {
     raw: Pooled<Vec<Glob>>,
+    published_only: bool,
     glob: globset::GlobSet,
 }
 
@@ -126,7 +132,14 @@ impl PartialEq for GlobSet {
 impl Eq for GlobSet {}
 
 impl GlobSet {
-    fn new(globs: impl IntoIterator<Item = Glob>) -> Result<GlobSet> {
+    /// create a new globset from the specified globs. if
+    /// published_only is true, then the globset will only match
+    /// published paths, otherwise it will match both structural and
+    /// published paths.
+    pub fn new(
+        published_only: bool,
+        globs: impl IntoIterator<Item = Glob>,
+    ) -> Result<GlobSet> {
         lazy_static! {
             static ref GLOB: Pool<Vec<Glob>> = Pool::new(10, 100);
         }
@@ -137,11 +150,19 @@ impl GlobSet {
             raw.push(glob);
         }
         raw.sort_unstable_by(|g0, g1| g0.base().cmp(g1.base()));
-        Ok(GlobSet(Arc::new(GlobSetInner { raw, glob: builder.build()? })))
+        Ok(GlobSet(Arc::new(GlobSetInner {
+            raw,
+            published_only,
+            glob: builder.build()?,
+        })))
     }
 
     pub fn is_match(&self, path: &Path) -> bool {
         self.0.glob.is_match(path.as_ref())
+    }
+
+    pub fn published_only(&self) -> bool {
+        self.0.published_only
     }
 }
 
@@ -155,14 +176,17 @@ impl Deref for GlobSet {
 
 impl Pack for GlobSet {
     fn len(&self) -> usize {
-        <Pooled<Vec<Glob>> as Pack>::len(&self.0.raw)
+        <bool as Pack>::len(&self.0.published_only)
+            + <Pooled<Vec<Glob>> as Pack>::len(&self.0.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
+        <bool as Pack>::encode(&self.0.published_only, buf)?;
         <Pooled<Vec<Glob>> as Pack>::encode(&self.0.raw, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
+        let published_only = <bool as Pack>::decode(buf)?;
         let mut raw = <Pooled<Vec<Glob>> as Pack>::decode(buf)?;
         let mut builder = globset::GlobSetBuilder::new();
         for glob in raw.iter() {
@@ -170,6 +194,6 @@ impl Pack for GlobSet {
         }
         raw.sort_unstable_by(|g0, g1| g0.base().cmp(g1.base()));
         let glob = builder.build().map_err(|_| PackError::InvalidFormat)?;
-        Ok(GlobSet(Arc::new(GlobSetInner { raw, glob })))
+        Ok(GlobSet(Arc::new(GlobSetInner { raw, published_only, glob })))
     }
 }

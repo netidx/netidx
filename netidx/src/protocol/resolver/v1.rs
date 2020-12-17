@@ -1,7 +1,7 @@
 use crate::{
     chars::Chars,
     glob::GlobSet,
-    pack::{self, Pack, PackError, Z64},
+    pack::{Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
 };
@@ -25,22 +25,6 @@ impl Pack for CtxId {
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         Ok(CtxId(<u64 as Pack>::decode(buf)?))
-    }
-}
-
-atomic_id!(MonitorId);
-
-impl Pack for MonitorId {
-    fn len(&self) -> usize {
-        pack::varint_len(self.0)
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Ok(pack::encode_varint(self.0, buf))
-    }
-
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(MonitorId(pack::decode_varint(buf)?))
     }
 }
 

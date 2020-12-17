@@ -441,7 +441,9 @@ impl Store {
                     .map(|(p, _)| p)
                     .take_while(move |p| p.starts_with(glob.base()));
                 for path in iter {
-                    if self.by_path.contains_key(path) && pat.is_match(path) {
+                    if pat.is_match(path)
+                        && (!pat.published_only() || self.by_path.contains_key(path))
+                    {
                         paths.push(path.clone());
                     }
                 }
