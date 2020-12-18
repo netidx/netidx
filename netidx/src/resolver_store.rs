@@ -103,7 +103,7 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 pub(crate) struct Store {
     by_path: HashMap<Path, Set<Addr>>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
-    paths: BTreeMap<Path, u64>,
+    by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
@@ -119,7 +119,7 @@ impl Store {
         Store {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
-            paths: BTreeMap::new(),
+            by_level: HashMap::with_hasher(FxBuildHasher::default()),
             columns: HashMap::new(),
             defaults: BTreeSet::new(),
             parent,
@@ -134,18 +134,27 @@ impl Store {
                 None => break,
                 Some(parent) => p = parent,
             }
+            let n = Path::levels(p) + 1;
             let save = self.by_path.contains_key(p)
                 || self.children.contains_key(p)
                 || self
-                    .paths
-                    .range::<str, (Bound<&str>, Bound<&str>)>((Included(p), Unbounded))
-                    .next()
-                    .map(|(o, _)| Path::is_parent(p, o))
+                    .by_level
+                    .get(&n)
+                    .map(|l| {
+                        let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
+                            Excluded(p),
+                            Unbounded,
+                        ));
+                        r.next().map(|o| Path::is_parent(p, o)).unwrap_or(false)
+                    })
                     .unwrap_or(false);
             if save {
-                self.paths.get_mut(p).into_iter().for_each(|c| *c += 1)
+                break;
             } else {
-                self.paths.remove(p);
+                let n = n - 1;
+                self.by_level.get_mut(&n).into_iter().for_each(|l| {
+                    l.remove(p);
+                })
             }
         }
     }
@@ -156,11 +165,10 @@ impl Store {
                 None => break,
                 Some(parent) => p = parent,
             }
-            match self.paths.get_mut(p) {
-                None => {
-                    self.paths.insert(Path::from(String::from(p)), 1);
-                }
-                Some(c) => *c += 1,
+            let n = Path::levels(p);
+            let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
+            if !l.contains(p) {
+                l.insert(Path::from(String::from(p)));
             }
         }
     }
@@ -275,7 +283,8 @@ impl Store {
         if addrs.len() > len {
             self.add_column(&path);
             self.add_parents(path.as_ref());
-            *self.paths.entry(path).or_insert(0) += 1;
+            let n = Path::levels(path.as_ref());
+            self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
         }
     }
 
@@ -295,12 +304,15 @@ impl Store {
             None => (),
             Some(addrs) => {
                 let len = addrs.len();
+                let n = Path::levels(path.as_ref());
                 match self.addrs.remove_address(addrs, &Addr(addr)) {
                     Some(new_addrs) => {
                         *addrs = new_addrs;
                         if addrs.len() < len {
                             self.remove_column(&path);
-                            self.paths.get_mut(&path).into_iter().for_each(|c| *c += 1);
+                            self.by_level.get_mut(&n).into_iter().for_each(|s| {
+                                s.remove(&path);
+                            });
                             self.remove_parents(path.as_ref());
                         }
                     }
@@ -308,7 +320,9 @@ impl Store {
                         self.by_path.remove(&path);
                         self.defaults.remove(&path);
                         self.remove_column(&path);
-                        self.paths.remove(&path);
+                        self.by_level.get_mut(&n).into_iter().for_each(|s| {
+                            s.remove(&path);
+                        });
                         self.remove_parents(path.as_ref());
                     }
                 }
@@ -399,18 +413,18 @@ impl Store {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
+        let n = Path::levels(parent);
         let mut paths = PATH_POOL.take();
-        let n = Path::levels(parent) + 1;
-        paths.extend(
-            self.paths
-                .range::<str, (Bound<&str>, Bound<&str>)>((
+        if let Some(l) = self.by_level.get(&(n + 1)) {
+            paths.extend(
+                l.range::<str, (Bound<&str>, Bound<&str>)>((
                     Excluded(parent.as_ref()),
                     Unbounded,
                 ))
-                .map(|(p, _)| p)
-                .take_while(|p| Path::is_parent(parent, p) && Path::levels(p) == n)
+                .take_while(|p| Path::is_parent(parent, p))
                 .cloned(),
-        );
+            )
+        }
         paths
     }
 
@@ -420,20 +434,28 @@ impl Store {
         for glob in pat.iter() {
             if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
                 let base = glob.base();
-                let iter = self
-                    .paths
-                    .range::<str, (Bound<&str>, Bound<&str>)>((
-                        Excluded(base),
-                        Unbounded,
-                    ))
-                    .map(|(p, _)| p)
-                    .take_while(move |p| Path::is_parent(base, p));
-                for path in iter {
-                    if pat.is_match(path)
-                        && (!pat.published_only() || self.by_path.contains_key(path))
-                    {
-                        paths.push(path.clone());
+                let mut n = Path::levels(base) + 1;
+                while glob.scope().contains(n) {
+                    match self.by_level.get(&n) {
+                        None => break,
+                        Some(l) => {
+                            let iter = l
+                                .range::<str, (Bound<&str>, Bound<&str>)>((
+                                    Excluded(base),
+                                    Unbounded,
+                                ))
+                                .take_while(move |p| Path::is_parent(base, p));
+                            for path in iter {
+                                if pat.is_match(path)
+                                    && (!pat.published_only()
+                                        || self.by_path.contains_key(path))
+                                {
+                                    paths.push(path.clone());
+                                }
+                            }
+                        }
                     }
+                    n += 1;
                 }
             }
             cur = Some(glob.base());

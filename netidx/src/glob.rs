@@ -76,7 +76,7 @@ impl Glob {
             if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
                 Scope::Subtree
             } else {
-                Scope::Finite(lvl)
+                Scope::Finite(Path::levels(&raw) - lvl)
             };
         let glob = globset::Glob::new(&*raw)?;
         Ok(Glob { raw, base, scope, glob })
