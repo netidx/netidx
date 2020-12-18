@@ -181,13 +181,14 @@ impl Pack for String {
 
 impl Pack for Arc<str> {
     fn len(&self) -> usize {
-        let s: &str = self.deref();
+        let s: &str = &*self;
         let len = s.len();
         varint_len(len as u64) + len
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.len() as u64, buf);
+        let s: &str = &*self;
+        encode_varint(s.len() as u64, buf);
         Ok(buf.put_slice(self.as_bytes()))
     }
 
