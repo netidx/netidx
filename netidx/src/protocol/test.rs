@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
-    assert_eq!(t.len(), BytesMut::len(&bytes));
+    assert_eq!(t.encoded_len(), BytesMut::len(&bytes));
     let u = T::decode(&mut bytes).expect("decode failed");
     assert_eq!(t, u)
 }

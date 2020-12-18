@@ -209,9 +209,10 @@ impl Path {
     /// # Examples
     /// ```
     /// use netidx::path::Path;
-    /// assert!(Path::is_parent("/foo/bar", "/foo/bar/baz"))
-    /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"))
-    /// assert!(Path::is_parent("/foo/bar", "/foo/bar"))
+    /// assert!(Path::is_parent("/", "/foo/bar/baz"));
+    /// assert!(Path::is_parent("/foo/bar", "/foo/bar/baz"));
+    /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"));
+    /// assert!(Path::is_parent("/foo/bar", "/foo/bar"));
     /// ```
     pub fn is_parent<T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
         parent: &T,
@@ -219,9 +220,10 @@ impl Path {
     ) -> bool {
         let parent = parent.as_ref();
         let other = other.as_ref();
-        other.starts_with(parent)
-            && (other.len() == parent.len()
-                || other.as_bytes()[parent.len()] == SEP as u8)
+        parent == "/" ||
+            (other.starts_with(parent)
+             && (other.len() == parent.len()
+                 || other.as_bytes()[parent.len()] == SEP as u8))
     }
 
     /// This will escape the path seperator and the escape character

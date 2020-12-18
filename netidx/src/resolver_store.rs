@@ -3,7 +3,7 @@ use crate::{
     chars::Chars,
     glob::GlobSet,
     pack::Z64,
-    path::{self, Path},
+    path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::Referral,
     secstore::SecStoreInner,
@@ -400,7 +400,7 @@ impl Store {
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let mut paths = PATH_POOL.take();
-        let n = Path::levels(parent.trim_end_matches(path::SEP)) + 1;
+        let n = Path::levels(parent) + 1;
         paths.extend(
             self.paths
                 .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -419,14 +419,15 @@ impl Store {
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
             if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
+                let base = glob.base();
                 let iter = self
                     .paths
                     .range::<str, (Bound<&str>, Bound<&str>)>((
-                        Excluded(glob.base()),
+                        Excluded(base),
                         Unbounded,
                     ))
                     .map(|(p, _)| p)
-                    .take_while(move |p| Path::is_parent(glob.base(), p));
+                    .take_while(move |p| Path::is_parent(base, p));
                 for path in iter {
                     if pat.is_match(path)
                         && (!pat.published_only() || self.by_path.contains_key(path))
