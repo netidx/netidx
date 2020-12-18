@@ -153,11 +153,12 @@ impl PMap {
     ) -> Result<Self> {
         let mut pmap = BTreeMap::new();
         for (path, tbl) in file.0.iter() {
-            if !path.starts_with(root) {
+            let path = Path::from(path);
+            if !Path::is_parent(root, &path) {
                 bail!("permission entry for parent: {}, entry: {}", root, path)
             }
             for child in children.keys() {
-                if path.starts_with(child.as_ref()) {
+                if Path::is_parent(child, &path) {
                     bail!("permission entry for child: {}, entry: {}", child, path)
                 }
             }
@@ -166,7 +167,7 @@ impl PMap {
                 let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };
                 entry.insert(entity, Permissions::try_from(perm.as_str())?);
             }
-            pmap.insert(Path::from(path), entry);
+            pmap.insert(path, entry);
         }
         Ok(PMap(pmap))
     }
@@ -188,8 +189,6 @@ impl PMap {
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
-        let base_path = Path::to_btnf(base_path);
-        let base_path = base_path.as_ref();
         let rights_at_base = self.permissions(base_path, user);
         let mut rights = rights_at_base;
         let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
@@ -197,7 +196,8 @@ impl PMap {
             Bound::Unbounded,
         ));
         while let Some((path, set)) = iter.next() {
-            if !path.starts_with(base_path) || !scope.contains(Path::levels(&*path)) {
+            if !Path::is_parent(base_path, path) || !scope.contains(Path::levels(&*path))
+            {
                 break;
             }
             let deny =

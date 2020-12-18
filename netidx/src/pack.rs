@@ -13,6 +13,7 @@ use std::{
     mem, net,
     ops::{Deref, DerefMut},
     time::Duration,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -133,7 +134,8 @@ impl Pack for net::SocketAddr {
 
 impl Pack for Bytes {
     fn len(&self) -> usize {
-        varint_len(Bytes::len(self) as u64) + Bytes::len(self)
+        let len = Bytes::len(self);
+        varint_len(len as u64) + len
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -147,6 +149,59 @@ impl Pack for Bytes {
             Err(PackError::TooBig)
         } else {
             Ok(buf.copy_to_bytes(len as usize))
+        }
+    }
+}
+
+impl Pack for String {
+    fn len(&self) -> usize {
+        let len = String::len(self);
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(String::len(self) as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            let mut v = vec![0; len];
+            buf.copy_to_slice(&mut v);
+            match String::from_utf8(v) {
+                Ok(s) => Ok(s),
+                Err(_) => Err(PackError::InvalidFormat),
+            }
+        }
+    }
+}
+
+impl Pack for Arc<str> {
+    fn len(&self) -> usize {
+        let s: &str = self.deref();
+        let len = s.len();
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            let mut v = vec![0; len];
+            buf.copy_to_slice(&mut v);
+            match String::from_utf8(v) {
+                Ok(s) => Ok(Arc::from(s)),
+                Err(_) => Err(PackError::InvalidFormat),
+            }
         }
     }
 }

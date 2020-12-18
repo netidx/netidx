@@ -230,6 +230,13 @@ pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &
     })
 }
 
+pub fn rsplit_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &str> {
+    s.rsplit({
+        let mut esc = false;
+        move |c| is_sep(&mut esc, c, escape, sep)
+    })
+}
+
 thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }

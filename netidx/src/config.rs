@@ -1,4 +1,8 @@
-use crate::{path::Path, protocol::resolver::v1::Referral, utils};
+use crate::{
+    path::Path,
+    protocol::resolver::v1::Referral,
+    utils,
+};
 use anyhow::Result;
 use serde_json::from_str;
 use std::{
@@ -156,9 +160,7 @@ impl From<Referral> for Config {
                 if r.krb5_spns.is_empty() {
                     Auth::Anonymous
                 } else {
-                    Auth::Krb5(
-                        r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect(),
-                    )
+                    Auth::Krb5(r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect())
                 }
             },
         }

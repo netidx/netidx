@@ -130,10 +130,6 @@ impl Store {
 
     fn remove_parents(&mut self, mut p: &str) {
         loop {
-            let p_with_sep = match Path::dirname_with_sep(p) {
-                None => break,
-                Some(p) => p,
-            };
             match Path::dirname(p) {
                 None => break,
                 Some(parent) => p = parent,
@@ -142,12 +138,9 @@ impl Store {
                 || self.children.contains_key(p)
                 || self
                     .paths
-                    .range::<str, (Bound<&str>, Bound<&str>)>((
-                        Included(p_with_sep),
-                        Unbounded,
-                    ))
+                    .range::<str, (Bound<&str>, Bound<&str>)>((Included(p), Unbounded))
                     .next()
-                    .map(|(o, _)| o.as_ref().starts_with(p_with_sep))
+                    .map(|(o, _)| Path::is_parent(p, o))
                     .unwrap_or(false);
             if save {
                 self.paths.get_mut(p).into_iter().for_each(|c| *c += 1)
@@ -174,7 +167,7 @@ impl Store {
 
     pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
         if let Some(r) = self.parent.as_ref() {
-            if !path.starts_with(r.path.as_ref()) {
+            if !Path::is_parent(&r.path, path) {
                 return Some(Referral {
                     path: Path::from("/"),
                     ttl: r.ttl,
@@ -192,7 +185,7 @@ impl Store {
             .next_back();
         match r {
             None => None,
-            Some((p, r)) if path.starts_with(p.as_ref()) => Some(r.clone()),
+            Some((p, r)) if Path::is_parent(p, path) => Some(r.clone()),
             Some(_) => None,
         }
     }
@@ -203,9 +196,9 @@ impl Store {
         base_path: &T,
         scope: &Scope,
     ) {
-        let base_path = Path::to_btnf(base_path);
+        let base_path = base_path.as_ref();
         if let Some(r) = self.parent.as_ref() {
-            if !base_path.starts_with(r.path.as_ref()) {
+            if !Path::is_parent(&r.path, base_path) {
                 refs.push(Referral {
                     path: Path::from("/"),
                     ttl: r.ttl,
@@ -214,15 +207,12 @@ impl Store {
                 });
             }
         }
-        let mut iter = self.children.range::<str, (Bound<&str>, Bound<&str>)>((
-            Excluded(base_path.as_ref()),
-            Unbounded,
-        ));
-        while let Some((p, r)) = iter.next() {
-            if !p.starts_with(base_path.as_ref()) || !scope.contains(Path::levels(&*p)) {
-                break;
+        for (p, r) in self.children.iter() {
+            if Path::is_parent(base_path, p) && scope.contains(Path::levels(&*p)) {
+                refs.push(r.clone())
+            } else if Path::is_parent(p, base_path) {
+                refs.push(r.clone())
             }
-            refs.push(r.clone())
         }
     }
 
@@ -343,16 +333,14 @@ impl Store {
             .next_back();
         match default {
             None => SIGNED_ADDRS_POOL.take(),
-            Some(p) if path.starts_with(p.as_ref()) => {
-                match self.by_path.get(p.as_ref()) {
-                    None => SIGNED_ADDRS_POOL.take(),
-                    Some(a) => {
-                        let mut addrs = SIGNED_ADDRS_POOL.take();
-                        addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
-                        addrs
-                    }
+            Some(p) if Path::is_parent(p, path) => match self.by_path.get(p.as_ref()) {
+                None => SIGNED_ADDRS_POOL.take(),
+                Some(a) => {
+                    let mut addrs = SIGNED_ADDRS_POOL.take();
+                    addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
+                    addrs
                 }
-            }
+            },
             Some(_) => SIGNED_ADDRS_POOL.take(),
         }
     }
@@ -411,7 +399,6 @@ impl Store {
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
-        let parent = Path::to_btnf(parent);
         let mut paths = PATH_POOL.take();
         let n = Path::levels(parent.trim_end_matches(path::SEP)) + 1;
         paths.extend(
@@ -421,7 +408,7 @@ impl Store {
                     Unbounded,
                 ))
                 .map(|(p, _)| p)
-                .take_while(|p| p.starts_with(parent.as_ref()) && Path::levels(p) == n)
+                .take_while(|p| Path::is_parent(parent, p) && Path::levels(p) == n)
                 .cloned(),
         );
         paths
@@ -431,7 +418,7 @@ impl Store {
         let mut paths = PATH_POOL.take();
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
-            if !cur.map(|p| glob.base().starts_with(p)).unwrap_or(false) {
+            if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
                 let iter = self
                     .paths
                     .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -439,7 +426,7 @@ impl Store {
                         Unbounded,
                     ))
                     .map(|(p, _)| p)
-                    .take_while(move |p| p.starts_with(glob.base()));
+                    .take_while(move |p| Path::is_parent(glob.base(), p));
                 for path in iter {
                     if pat.is_match(path)
                         && (!pat.published_only() || self.by_path.contains_key(path))

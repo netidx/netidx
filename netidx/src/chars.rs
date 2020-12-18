@@ -3,6 +3,7 @@ use bytes::{Bytes, Buf, BufMut};
 use std::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     convert::AsRef,
+    borrow::Borrow,
     fmt,
     hash::{Hash, Hasher},
     ops::Deref,
@@ -107,6 +108,12 @@ impl Deref for Chars {
 
     fn deref(&self) -> &str {
         unsafe { str::from_utf8_unchecked(&*self.0) }
+    }
+}
+
+impl Borrow<str> for Chars {
+    fn borrow(&self) -> &str {
+        &*self
     }
 }
 

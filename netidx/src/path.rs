@@ -1,11 +1,11 @@
 use crate::{
-    pack::{Pack, PackError, varint_len, encode_varint, decode_varint},
     chars::Chars,
+    pack::{Pack, PackError},
     utils,
 };
+use bytes::{Buf, BufMut};
 use std::{
-    borrow::Borrow,
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
@@ -15,10 +15,35 @@ use std::{
     str::{self, FromStr},
     sync::Arc,
 };
-use bytes::{Buf, BufMut};
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
+
+fn is_canonical(s: &str) -> bool {
+    for _ in Path::parts(s).filter(|p| *p == "") {
+        return false;
+    }
+    true
+}
+
+fn canonize(s: &str) -> String {
+    let mut res = String::with_capacity(s.len());
+    if s.len() > 0 {
+        if s.starts_with(SEP) {
+            res.push(SEP)
+        }
+        let mut first = true;
+        for p in Path::parts(s).filter(|p| *p != "") {
+            if first {
+                first = false;
+            } else {
+                res.push(SEP)
+            }
+            res.push_str(p);
+        }
+    }
+    res
+}
 
 /// A path in the namespace. Paths are immutable and reference
 /// counted.  Path components are seperated by /, which may be escaped
@@ -31,25 +56,15 @@ pub struct Path(Arc<str>);
 
 impl Pack for Path {
     fn len(&self) -> usize {
-        varint_len(self.0.len() as u64) + self.0.len()
+        <Arc<str> as Pack>::len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.0.len() as u64, buf);
-        Ok(buf.put_slice(self.0.as_bytes()))
+        <Arc<str> as Pack>::encode(&self.0, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let len = decode_varint(buf)?;
-        if len as usize > buf.remaining() {
-            Err(PackError::TooBig)
-        } else {
-            let bytes = buf.copy_to_bytes(len as usize);
-            match str::from_utf8(&*bytes) {
-                Err(_) => Err(PackError::InvalidFormat),
-                Ok(s) => Ok(Path(Arc::from(s)))
-            }            
-        }
+        Ok(Path::from(<Arc<str> as Pack>::decode(buf)?))
     }
 }
 
@@ -119,38 +134,26 @@ impl<'a> From<&'a String> for Path {
     }
 }
 
+impl From<Arc<str>> for Path {
+    fn from(s: Arc<str>) -> Path {
+        if is_canonical(&*s) {
+            Path(s)
+        } else {
+            Path(Arc::from(canonize(&*s)))
+        }
+    }
+}
+
 impl FromStr for Path {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Path(Arc::from(s)))
-    }
-}
-
-fn is_canonical(s: &str) -> bool {
-    for _ in Path::parts(s).filter(|p| *p == "") {
-        return false;
-    }
-    true
-}
-
-fn canonize(s: &str) -> String {
-    let mut res = String::with_capacity(s.len());
-    if s.len() > 0 {
-        if s.starts_with(SEP) {
-            res.push(SEP)
-        }
-        let mut first = true;
-        for p in Path::parts(s).filter(|p| *p != "") {
-            if first {
-                first = false;
-            } else {
-                res.push(SEP)
-            }
-            res.push_str(p);
+        if is_canonical(s) {
+            Ok(Path(Arc::from(s)))
+        } else {
+            Ok(Path(Arc::from(canonize(s))))
         }
     }
-    res
 }
 
 enum DirNames<'a> {
@@ -196,34 +199,29 @@ impl Path {
         Path::from("/")
     }
 
-    /// Return true if the path is already in btree normal form
-    pub(crate) fn is_btnf<T: AsRef<str> + ?Sized>(path: &T) -> bool {
-        let mut chars = path.as_ref().chars();
-        match chars.next_back() {
-            None => true,
-            Some(c) if c == SEP => match chars.next_back() {
-                None => true,
-                Some(c) if c != SEP => true,
-                Some(_) => false
-            },
-            Some(_) => false
-        }
-    }
-
-    /// If necessary transform the specified path into btree normal form.
-    pub(crate) fn to_btnf<'a, T: AsRef<str> + ?Sized>(path: &'a T) -> Cow<'a, str> {
-        if Path::is_btnf(path) {
-            Cow::Borrowed(path.as_ref())
-        } else {
-            let mut path = String::from(path.as_ref().trim_end_matches(SEP));
-            path.push(SEP);
-            Cow::Owned(path)
-        }
-    }
-    
     /// returns true if the path starts with /, false otherwise
     pub fn is_absolute<T: AsRef<str> + ?Sized>(p: &T) -> bool {
         p.as_ref().starts_with(SEP)
+    }
+
+    /// true if this path is a parent to the specified path. A path is it's own parent.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx::path::Path;
+    /// assert!(Path::is_parent("/foo/bar", "/foo/bar/baz"))
+    /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"))
+    /// assert!(Path::is_parent("/foo/bar", "/foo/bar"))
+    /// ```
+    pub fn is_parent<T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
+        parent: &T,
+        other: &U,
+    ) -> bool {
+        let parent = parent.as_ref();
+        let other = other.as_ref();
+        other.starts_with(parent)
+            && (other.len() == parent.len()
+                || other.as_bytes()[parent.len()] == SEP as u8)
     }
 
     /// This will escape the path seperator and the escape character
@@ -385,7 +383,7 @@ impl Path {
 
     pub fn dirname_with_sep<T: AsRef<str> + ?Sized>(s: &T) -> Option<&str> {
         let s = s.as_ref();
-        Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i+1]) })
+        Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i + 1]) })
     }
 
     /// return the last part of the path, or return None if the path

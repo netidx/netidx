@@ -87,7 +87,7 @@ impl Router {
                 Some(path) => {
                     let mut r = self.cached.range::<str, (Bound<&str>, Bound<&str>)>((
                         Unbounded,
-                        Included(&*path),
+                        Included(path.as_ref()),
                     ));
                     loop {
                         match r.next_back() {
@@ -99,7 +99,7 @@ impl Router {
                                 break;
                             }
                             Some((p, (exp, _))) => {
-                                if !path.starts_with(p.as_ref()) {
+                                if !Path::is_parent(p, path) {
                                     continue;
                                 } else {
                                     if &now < exp {
@@ -132,13 +132,14 @@ impl Router {
         })
     }
 
-    fn get_referral(&self, path: &Path) -> Option<&Referral> {
-        self.cached.get(path.as_ref()).map(|(_, r)| r)
+    fn get_referral(&self, path: &str) -> Option<&Referral> {
+        self.cached.get(path).map(|(_, r)| r)
     }
 
     fn add_referral(&mut self, r: Referral) {
         let exp = Instant::now() + Duration::from_secs(r.ttl);
-        self.cached.insert(r.path.clone(), (exp, r));
+        let key = r.path.clone();
+        self.cached.insert(key, (exp, r));
     }
 }
 
@@ -428,7 +429,7 @@ impl ResolverRead {
 
     /// list all paths in the cluster matching the specified globset
     pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
-        let mut pending = vec![None];
+        let mut pending: Vec<Option<Path>> = vec![None];
         let mut results = LISTRECPOOL.take();
         let mut done = HashSet::new();
         let mut referral_cycles = 0;
@@ -439,7 +440,10 @@ impl ResolverRead {
                 for server in pending.drain(..) {
                     let mut to = TOREADPOOL.take();
                     to.push((0, ToRead::ListMatching(globset.clone())));
-                    done.insert(server.clone());
+                    match &server {
+                        Some(p) if p.as_ref() == "/" => (),
+                        x => { done.insert(x.clone()); }
+                    }
                     waiters.push(inner.send_to_server(server, to));
                 }
             }

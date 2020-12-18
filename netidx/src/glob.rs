@@ -36,7 +36,7 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
     raw: Path,
-    base: String,
+    base: Path,
     scope: Scope,
     glob: globset::Glob,
 }
@@ -71,7 +71,7 @@ impl Glob {
                     cur
                 }
             });
-        let base = Path::to_btnf(base).into_owned();
+        let base = Path::from(Arc::from(base));
         let scope =
             if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
                 Scope::Subtree

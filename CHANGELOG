@@ -1,11 +1,16 @@
-* 0.5.2:
+* 0.6.0:
+  - Plug a couple of holes that could allow non canonical paths to be
+    created
+  - Fix a bunch of bugs coming from an incorrect test for path
+    parenthood.
   - New tool, netidx recorder, records subscriptions to compact
-    archive files, as well as netidx controlled publishing of archives
-    (or both at the same time).
+    archive files, and also publishes archive files.
   - Implement From on Value for most primitive types.
   - Add a trait, FromValue, that behaves like FromStr, and implement
     it for many primitive types
-  - Add list_recursive, and list_glob methods to ResolverRead
+  - Add list_matching, get_changeid methods to ResolverRead. Both
+    methods can't be used with older resolver servers, however older
+    clients can still talk to a newer resolver server.
   - Tune the resolver server to give much higher priority to Resolve
     over List and Table calls to compensate for the potentially large
     traffic caused by list_recursive and list_glob. A List/Table call
