@@ -20,7 +20,7 @@ type Result<T> = result::Result<T, PackError>;
 atomic_id!(Id);
 
 impl Pack for Id {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         pack::varint_len(self.0)
     }
 
@@ -60,12 +60,13 @@ pub enum Hello {
 }
 
 impl Pack for Hello {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         1 + match self {
             Hello::Anonymous => 0,
-            Hello::Token(tok) => <Bytes as Pack>::len(tok),
+            Hello::Token(tok) => <Bytes as Pack>::encoded_len(tok),
             Hello::ResolverAuthenticate(addr, tok) => {
-                <SocketAddr as Pack>::len(addr) + <Bytes as Pack>::len(tok)
+                <SocketAddr as Pack>::encoded_len(addr)
+                    + <Bytes as Pack>::encoded_len(tok)
             }
         }
     }
@@ -122,18 +123,20 @@ pub enum To {
 }
 
 impl Pack for To {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         1 + match self {
             To::Subscribe { path, resolver, timestamp, permissions, token } => {
-                <Path as Pack>::len(path)
-                    + <SocketAddr as Pack>::len(resolver)
-                    + <u64 as Pack>::len(timestamp)
-                    + <u32 as Pack>::len(permissions)
-                    + <Bytes as Pack>::len(token)
+                <Path as Pack>::encoded_len(path)
+                    + <SocketAddr as Pack>::encoded_len(resolver)
+                    + <u64 as Pack>::encoded_len(timestamp)
+                    + <u32 as Pack>::encoded_len(permissions)
+                    + <Bytes as Pack>::encoded_len(token)
             }
-            To::Unsubscribe(id) => Id::len(id),
+            To::Unsubscribe(id) => Id::encoded_len(id),
             To::Write(id, v, reply) => {
-                Id::len(id) + Value::len(v) + <bool as Pack>::len(reply)
+                Id::encoded_len(id)
+                    + Value::encoded_len(v)
+                    + <bool as Pack>::encoded_len(reply)
             }
         }
     }
@@ -606,7 +609,7 @@ impl Not for Value {
 }
 
 impl Pack for Value {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         1 + match self {
             Value::U32(_) => mem::size_of::<u32>(),
             Value::V32(v) => pack::varint_len(*v as u64),
@@ -620,11 +623,11 @@ impl Pack for Value {
             Value::F64(_) => mem::size_of::<f64>(),
             Value::DateTime(_) => 12,
             Value::Duration(_) => 12,
-            Value::String(c) => <Chars as Pack>::len(c),
-            Value::Bytes(b) => <Bytes as Pack>::len(b),
+            Value::String(c) => <Chars as Pack>::encoded_len(c),
+            Value::Bytes(b) => <Bytes as Pack>::encoded_len(b),
             Value::True | Value::False | Value::Null => 0,
             Value::Ok => 0,
-            Value::Error(c) => <Chars as Pack>::len(c),
+            Value::Error(c) => <Chars as Pack>::encoded_len(c),
         }
     }
 
@@ -1497,17 +1500,19 @@ pub enum From {
 }
 
 impl Pack for From {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         1 + match self {
-            From::NoSuchValue(p) => <Path as Pack>::len(p),
-            From::Denied(p) => <Path as Pack>::len(p),
-            From::Unsubscribed(id) => Id::len(id),
+            From::NoSuchValue(p) => <Path as Pack>::encoded_len(p),
+            From::Denied(p) => <Path as Pack>::encoded_len(p),
+            From::Unsubscribed(id) => Id::encoded_len(id),
             From::Subscribed(p, id, v) => {
-                <Path as Pack>::len(p) + Id::len(id) + Value::len(v)
+                <Path as Pack>::encoded_len(p)
+                    + Id::encoded_len(id)
+                    + Value::encoded_len(v)
             }
-            From::Update(id, v) => Id::len(id) + Value::len(v),
+            From::Update(id, v) => Id::encoded_len(id) + Value::encoded_len(v),
             From::Heartbeat => 0,
-            From::WriteResult(id, v) => Id::len(id) + Value::len(v),
+            From::WriteResult(id, v) => Id::encoded_len(id) + Value::encoded_len(v),
         }
     }
 

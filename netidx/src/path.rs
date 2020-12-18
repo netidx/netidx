@@ -55,8 +55,8 @@ fn canonize(s: &str) -> String {
 pub struct Path(Arc<str>);
 
 impl Pack for Path {
-    fn len(&self) -> usize {
-        <Arc<str> as Pack>::len(&self.0)
+    fn encoded_len(&self) -> usize {
+        <Arc<str> as Pack>::encoded_len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {

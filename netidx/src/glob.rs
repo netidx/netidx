@@ -100,8 +100,8 @@ impl Glob {
 }
 
 impl Pack for Glob {
-    fn len(&self) -> usize {
-        <Path as Pack>::len(&self.raw)
+    fn encoded_len(&self) -> usize {
+        <Path as Pack>::encoded_len(&self.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
@@ -175,9 +175,9 @@ impl Deref for GlobSet {
 }
 
 impl Pack for GlobSet {
-    fn len(&self) -> usize {
-        <bool as Pack>::len(&self.0.published_only)
-            + <Pooled<Vec<Glob>> as Pack>::len(&self.0.raw)
+    fn encoded_len(&self) -> usize {
+        <bool as Pack>::encoded_len(&self.0.published_only)
+            + <Pooled<Vec<Glob>> as Pack>::encoded_len(&self.0.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {

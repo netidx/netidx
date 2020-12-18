@@ -93,10 +93,10 @@ pub enum Event {
 }
 
 impl Pack for Event {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         match self {
             Event::Unsubscribed => 1,
-            Event::Update(v) => Pack::len(v),
+            Event::Update(v) => Pack::encoded_len(v),
         }
     }
 

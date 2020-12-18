@@ -106,7 +106,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// Queue a message for sending. This only encodes the message and
     /// writes it to the buffer, you must call flush actually send it.
     pub(crate) fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<()> {
-        let len = msg.len();
+        let len = msg.encoded_len();
         if len > MAX_BATCH as usize {
             return Err(anyhow!("message length {} exceeds max size {}", len, MAX_BATCH));
         }

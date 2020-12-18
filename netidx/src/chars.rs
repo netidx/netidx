@@ -63,8 +63,8 @@ impl AsRef<str> for Chars {
 }
 
 impl Pack for Chars {
-    fn len(&self) -> usize {
-        Pack::len(&self.0)
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {

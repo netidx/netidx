@@ -12,8 +12,8 @@ use std::{
     hash::{BuildHasher, Hash},
     mem, net,
     ops::{Deref, DerefMut},
-    time::Duration,
     sync::Arc,
+    time::Duration,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,8 +32,10 @@ impl fmt::Display for PackError {
 impl error::Error for PackError {}
 
 pub trait Pack {
-    fn const_len() -> Option<usize> { None }
-    fn len(&self) -> usize;
+    fn const_encoded_len() -> Option<usize> {
+        None
+    }
+    fn encoded_len(&self) -> usize;
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError>;
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError>
     where
@@ -53,8 +55,8 @@ thread_local! {
 }
 
 impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
-    fn len(&self) -> usize {
-        <T as Pack>::len(&**self)
+    fn encoded_len(&self) -> usize {
+        <T as Pack>::encoded_len(&**self)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -81,7 +83,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
 }
 
 impl Pack for net::SocketAddr {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         match self {
             net::SocketAddr::V4(_) => 7,
             net::SocketAddr::V6(_) => 27,
@@ -133,7 +135,7 @@ impl Pack for net::SocketAddr {
 }
 
 impl Pack for Bytes {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         let len = Bytes::len(self);
         varint_len(len as u64) + len
     }
@@ -154,7 +156,7 @@ impl Pack for Bytes {
 }
 
 impl Pack for String {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         let len = String::len(self);
         varint_len(len as u64) + len
     }
@@ -180,7 +182,7 @@ impl Pack for String {
 }
 
 impl Pack for Arc<str> {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         let s: &str = &*self;
         let len = s.len();
         varint_len(len as u64) + len
@@ -254,11 +256,11 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
 }
 
 impl Pack for u128 {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<u128>())
     }
 
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         mem::size_of::<u128>()
     }
 
@@ -272,11 +274,11 @@ impl Pack for u128 {
 }
 
 impl Pack for u64 {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<u64>())
     }
 
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         mem::size_of::<u64>()
     }
 
@@ -307,7 +309,7 @@ impl DerefMut for Z64 {
 }
 
 impl Pack for Z64 {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         varint_len(**self)
     }
 
@@ -321,11 +323,11 @@ impl Pack for Z64 {
 }
 
 impl Pack for u32 {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<u32>())
     }
 
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         mem::size_of::<u32>()
     }
 
@@ -339,9 +341,10 @@ impl Pack for u32 {
 }
 
 impl<T: Pack> Pack for Vec<T> {
-    fn len(&self) -> usize {
-        self.iter()
-            .fold(varint_len(self.len() as u64), |len, t| len + <T as Pack>::len(t))
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(Vec::len(self) as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -376,9 +379,9 @@ where
     V: Pack + Hash + Eq,
     R: Default + BuildHasher,
 {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         self.iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
-            len + <K as Pack>::len(k) + <V as Pack>::len(v)
+            len + <K as Pack>::encoded_len(k) + <V as Pack>::encoded_len(v)
         })
     }
 
@@ -414,10 +417,10 @@ where
 }
 
 impl<T: Pack> Pack for Option<T> {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         1 + match self {
             None => 0,
-            Some(v) => <T as Pack>::len(v),
+            Some(v) => <T as Pack>::encoded_len(v),
         }
     }
 
@@ -441,8 +444,8 @@ impl<T: Pack> Pack for Option<T> {
 }
 
 impl<T: Pack, U: Pack> Pack for (T, U) {
-    fn len(&self) -> usize {
-        <T as Pack>::len(&self.0) + <U as Pack>::len(&self.1)
+    fn encoded_len(&self) -> usize {
+        <T as Pack>::encoded_len(&self.0) + <U as Pack>::encoded_len(&self.1)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -458,11 +461,11 @@ impl<T: Pack, U: Pack> Pack for (T, U) {
 }
 
 impl Pack for bool {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<bool>())
     }
 
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         mem::size_of::<bool>()
     }
 
@@ -480,12 +483,12 @@ impl Pack for bool {
 }
 
 impl Pack for DateTime<Utc> {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<i64>() + mem::size_of::<u32>())
     }
 
-    fn len(&self) -> usize {
-        <DateTime<Utc> as Pack>::const_len().unwrap()
+    fn encoded_len(&self) -> usize {
+        <DateTime<Utc> as Pack>::const_encoded_len().unwrap()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -503,12 +506,12 @@ impl Pack for DateTime<Utc> {
 }
 
 impl Pack for Duration {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<i64>() + mem::size_of::<u32>())
     }
 
-    fn len(&self) -> usize {
-        <Duration as Pack>::const_len().unwrap()
+    fn encoded_len(&self) -> usize {
+        <Duration as Pack>::const_encoded_len().unwrap()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
