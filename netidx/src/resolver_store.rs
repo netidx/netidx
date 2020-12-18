@@ -116,7 +116,7 @@ impl Store {
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
     ) -> Self {
-        Store {
+        let mut t = Store {
             by_path: HashMap::new(),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
@@ -125,7 +125,17 @@ impl Store {
             parent,
             children,
             addrs: HCAddrs::new(),
+        };
+        let children = t.children.keys().cloned().collect::<Vec<_>>();
+        for child in children {
+            // since we want child to be in levels as well as
+            // dirname(child) we add a fake level below child. This
+            // will never be seen, since all requests for any path
+            // under child result in a referral, and anyway it won't
+            // even be added anywhere.
+            t.add_parents(child.append("z").as_ref());
         }
+        t
     }
 
     fn remove_parents(&mut self, mut p: &str) {
@@ -446,7 +456,9 @@ impl Store {
                                 ))
                                 .take_while(move |p| Path::is_parent(base, p));
                             for path in iter {
+                                let dn = Path::dirname(path).unwrap_or("/");
                                 if pat.is_match(path)
+                                    && !self.children.contains_key(dn)
                                     && (!pat.published_only()
                                         || self.by_path.contains_key(path))
                                 {
