@@ -1,5 +1,6 @@
 use crate::{
     auth::Scope,
+    chars::Chars,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -35,48 +36,57 @@ use std::{
 /// `/marketdata/{IBM,MSFT,AMZN}/last`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
-    raw: Path,
+    raw: Chars,
     base: Path,
     scope: Scope,
     glob: globset::Glob,
 }
 
 impl Glob {
-    pub fn new(raw: Path) -> Result<Glob> {
+    pub fn new(raw: Chars) -> Result<Glob> {
         if !Path::is_absolute(&raw) {
             bail!("glob paths must be absolute")
         }
-        let (lvl, base) =
-            Path::dirnames(&raw).enumerate().fold((0, "/"), |cur, (lvl, p)| {
-                let mut s = p;
-                let is_glob = loop {
-                    if s.is_empty() {
-                        break false;
-                    } else {
-                        match s.find("?*{[") {
-                            None => break false,
-                            Some(i) => {
-                                if utils::is_escaped(s, '\\', i) {
-                                    s = &s[i + 1..];
-                                } else {
-                                    break true;
+        let base = {
+            let mut cur = "/";
+            let mut iter = Path::dirnames(&raw);
+            loop {
+                match iter.next() {
+                    None => break cur,
+                    Some(p) => {
+                        let mut s = p;
+                        let is_glob = loop {
+                            if s.is_empty() {
+                                break false;
+                            } else {
+                                match s.find(&['?', '*', '{', '['][..]) {
+                                    None => break false,
+                                    Some(i) => {
+                                        if utils::is_escaped(s, '\\', i) {
+                                            s = &s[i + 1..];
+                                        } else {
+                                            break true;
+                                        }
+                                    }
                                 }
                             }
+                        };
+                        if is_glob {
+                            break cur;
+                        } else {
+                            cur = p;
                         }
                     }
-                };
-                if !is_glob {
-                    (lvl, p)
-                } else {
-                    cur
                 }
-            });
+            }
+        };
+        let lvl = Path::levels(base);
         let base = Path::from(Arc::from(base));
         let scope =
             if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
                 Scope::Subtree
             } else {
-                Scope::Finite(Path::levels(&raw) - lvl)
+                Scope::Finite(Path::levels(&raw))
             };
         let glob = globset::Glob::new(&*raw)?;
         Ok(Glob { raw, base, scope, glob })
@@ -101,15 +111,15 @@ impl Glob {
 
 impl Pack for Glob {
     fn encoded_len(&self) -> usize {
-        <Path as Pack>::encoded_len(&self.raw)
+        <Chars as Pack>::encoded_len(&self.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
-        <Path as Pack>::encode(&self.raw, buf)
+        <Chars as Pack>::encode(&self.raw, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
-        Glob::new(<Path as Pack>::decode(buf)?).map_err(|_| PackError::InvalidFormat)
+        Glob::new(<Chars as Pack>::decode(buf)?).map_err(|_| PackError::InvalidFormat)
     }
 }
 

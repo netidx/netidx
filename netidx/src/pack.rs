@@ -64,17 +64,17 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        POOLS.with(|pools| {
+        let mut t = POOLS.with(|pools| {
             let mut pools = pools.borrow_mut();
             let pool: &mut Pool<T> = pools
                 .entry(TypeId::of::<T>())
                 .or_insert_with(|| Box::new(Pool::<T>::new(10000, 10000)))
                 .downcast_mut()
                 .unwrap();
-            let mut t = pool.take();
-            <T as Pack>::decode_into(&mut *t, buf)?;
-            Ok(t)
-        })
+            pool.take()
+        });
+        <T as Pack>::decode_into(&mut *t, buf)?;
+        Ok(t)
     }
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {

@@ -7,7 +7,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes};
 use fxhash::FxBuildHasher;
-use std::{collections::HashMap, net::SocketAddr, result};
+use std::{collections::HashMap, hash::{Hash, Hasher}, net::SocketAddr, result, cmp::{PartialEq, Eq}};
 
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
@@ -435,13 +435,27 @@ impl Pack for Resolved {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Referral {
     pub path: Path,
     pub ttl: u64,
     pub addrs: Pooled<Vec<SocketAddr>>,
     pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
 }
+
+impl Hash for Referral {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Hash::hash(&self.addrs, state)
+    }
+}
+
+impl PartialEq for Referral {
+    fn eq(&self, other: &Referral) -> bool {
+        self.addrs == other.addrs
+    }
+}
+
+impl Eq for Referral {}
 
 impl Pack for Referral {
     fn encoded_len(&self) -> usize {

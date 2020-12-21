@@ -7,6 +7,7 @@ use std::{
     default::Default,
     fmt::Debug,
     hash::{BuildHasher, Hash},
+    hash::{Hash, Hasher},
     mem,
     ops::{Deref, DerefMut},
     sync::{Arc, Weak},
@@ -145,6 +146,12 @@ impl<T: Poolable + Sync + Send + 'static + PartialOrd> PartialOrd for Pooled<T> 
 impl<T: Poolable + Sync + Send + 'static + Ord> Ord for Pooled<T> {
     fn cmp(&self, other: &Pooled<T>) -> Ordering {
         self.object.cmp(&other.object)
+    }
+}
+
+impl<T: Poolable + Sync + Send + 'static + Hash> Hash for Pooled<T> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        Hash::hash(&self.object, state)
     }
 }
 

@@ -4,10 +4,12 @@ mod resolver {
     use super::*;
     use crate::{
         path::Path,
+        glob::{Glob, GlobSet},
+        chars::Chars,
         resolver::{Auth, ResolverRead, ResolverWrite},
         resolver_server::Server,
     };
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, iter};
     use tokio::runtime::Runtime;
 
     fn p(p: &'static str) -> Path {
@@ -141,6 +143,21 @@ mod resolver {
         assert_eq!(
             &*l,
             &[p("/app/huge1/sub/x"), p("/app/huge1/sub/y"), p("/app/huge1/sub/z")]
+        );
+        let pat = Glob::new(Chars::from("/app/huge*/*")).unwrap();
+        let pset = GlobSet::new(true, iter::once(pat)).unwrap();
+        let mut l = r.list_matching(&pset).await.unwrap();
+        l.sort();
+        assert_eq!(
+            &*l,
+            &[
+                p("/app/huge0/x"),
+                p("/app/huge0/y"),
+                p("/app/huge0/z"),
+                p("/app/huge1/x"),
+                p("/app/huge1/y"),
+                p("/app/huge1/z")
+            ]
         );
     }
 

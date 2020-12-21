@@ -7,7 +7,7 @@ use crate::{
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
-    }
+    },
 };
 pub use crate::{
     protocol::resolver::v1::{Resolved, Table},
@@ -21,7 +21,7 @@ use std::{
     collections::{
         BTreeMap,
         Bound::{self, Included, Unbounded},
-        HashMap, HashSet
+        HashMap, HashSet,
     },
     iter::IntoIterator,
     marker::PhantomData,
@@ -60,7 +60,7 @@ impl ToPath for ToWrite {
 
 #[derive(Debug)]
 struct Router {
-    cached: BTreeMap<Path, (Instant, Referral)>,
+    cached: BTreeMap<Path, (Instant, Arc<Referral>)>,
 }
 
 impl Router {
@@ -72,7 +72,7 @@ impl Router {
         &mut self,
         pool: &Pool<Vec<(usize, T)>>,
         batch: &Pooled<Vec<T>>,
-    ) -> impl Iterator<Item = (Option<Path>, Pooled<Vec<(usize, T)>>)>
+    ) -> impl Iterator<Item = (Option<Arc<Referral>>, Pooled<Vec<(usize, T)>>)>
     where
         T: ToPath + Clone + Send + Sync + 'static,
     {
@@ -98,13 +98,13 @@ impl Router {
                                     .push((id, v));
                                 break;
                             }
-                            Some((p, (exp, _))) => {
+                            Some((p, (exp, r))) => {
                                 if !Path::is_parent(p, path) {
                                     continue;
                                 } else {
                                     if &now < exp {
                                         batches
-                                            .entry(Some(p.clone()))
+                                            .entry(Some(r.clone()))
                                             .or_insert_with(|| pool.take())
                                             .push((id, v))
                                     } else {
@@ -132,14 +132,16 @@ impl Router {
         })
     }
 
-    fn get_referral(&self, path: &str) -> Option<&Referral> {
+    fn get_referral(&self, path: &str) -> Option<&Arc<Referral>> {
         self.cached.get(path).map(|(_, r)| r)
     }
 
-    fn add_referral(&mut self, r: Referral) {
+    fn add_referral(&mut self, r: Referral) -> Arc<Referral> {
         let exp = Instant::now() + Duration::from_secs(r.ttl);
         let key = r.path.clone();
-        self.cached.insert(key, (exp, r));
+        let r = Arc::new(r);
+        self.cached.insert(key, (exp, r.clone()));
+        r
     }
 }
 
@@ -239,7 +241,7 @@ where
     router: Router,
     desired_auth: Auth,
     default: C,
-    by_path: HashMap<Path, C>,
+    by_referral: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     phantom: PhantomData<(T, F)>,
@@ -254,24 +256,27 @@ where
     T: ToPath + Clone + Send + Sync + 'static,
     F: ToReferral + Clone + Send + Sync + 'static,
 {
+    fn connect_to_referral(&mut self, r: Referral) -> C {
+        C::new(
+            Config::from(r),
+            self.desired_auth.clone(),
+            self.writer_addr,
+            self.secrets.clone(),
+        )
+    }
+
     fn send_to_server(
         &mut self,
-        server: Option<Path>,
+        server: Option<Arc<Referral>>,
         batch: Pooled<Vec<(usize, T)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>> {
         match server {
             None => self.default.send(batch),
-            Some(path) => match self.by_path.get_mut(&path) {
+            Some(r) => match self.by_referral.get_mut(&r) {
                 Some(con) => con.send(batch),
                 None => {
-                    let r = self.router.get_referral(&path).unwrap().clone();
-                    let mut con = C::new(
-                        Config::from(r),
-                        self.desired_auth.clone(),
-                        self.writer_addr,
-                        self.secrets.clone(),
-                    );
-                    self.by_path.insert(path, con.clone());
+                    let mut con = self.connect_to_referral((*r).clone());
+                    self.by_referral.insert(r.clone(), con.clone());
                     con.send(batch)
                 }
             },
@@ -306,7 +311,7 @@ where
             router,
             desired_auth,
             default,
-            by_path: HashMap::new(),
+            by_referral: HashMap::new(),
             writer_addr,
             secrets,
             f_pool,
@@ -327,8 +332,8 @@ where
             let (mut finished, mut res) = {
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
-                if inner.by_path.len() > MAX_REFERRALS {
-                    inner.by_path.clear(); // a workable sledgehammer
+                if inner.by_referral.len() > MAX_REFERRALS {
+                    inner.by_referral.clear(); // a workable sledgehammer
                 }
                 for (r, batch) in inner.router.route_batch(&inner.ti_pool, batch) {
                     waiters.push(inner.send_to_server(r, batch))
@@ -429,22 +434,22 @@ impl ResolverRead {
 
     /// list all paths in the cluster matching the specified globset
     pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
-        let mut pending: Vec<Option<Path>> = vec![None];
+        let mut pending: Vec<Option<Referral>> = vec![None];
+        let mut done: HashSet<Option<Referral>> = HashSet::new();
         let mut results = LISTRECPOOL.take();
-        let mut done = HashSet::new();
         let mut referral_cycles = 0;
         while pending.len() > 0 {
             let mut waiters = Vec::new();
             {
-                let mut inner = self.0.0.lock();
+                let mut inner = self.0 .0.lock();
                 for server in pending.drain(..) {
-                    let mut to = TOREADPOOL.take();
-                    to.push((0, ToRead::ListMatching(globset.clone())));
-                    match &server {
-                        Some(p) if p.as_ref() == "/" => (),
-                        x => { done.insert(x.clone()); }
+                    if !done.contains(&server) {
+                        done.insert(server.clone());
+                        let server = server.map(|r| inner.router.add_referral(r));
+                        let mut to = TOREADPOOL.take();
+                        to.push((0, ToRead::ListMatching(globset.clone())));
+                        waiters.push(inner.send_to_server(server, to));
                     }
-                    waiters.push(inner.send_to_server(server, to));
                 }
             }
             for r in future::join_all(waiters).await {
@@ -454,14 +459,10 @@ impl ResolverRead {
                         FromRead::ListMatching(mut lm) => {
                             results.extend(lm.matched.drain(..));
                             for r in lm.referrals.drain(..) {
-                                let k = Some(r.path.clone());
-                                if !done.contains(&k) {
-                                    self.0.0.lock().router.add_referral(r);
-                                    pending.push(k);
-                                }
+                                pending.push(Some(r));
                             }
                         }
-                        m => bail!("unexpected list_matching response {:?}", m)
+                        m => bail!("unexpected list_matching response {:?}", m),
                     }
                 }
             }

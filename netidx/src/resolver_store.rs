@@ -443,8 +443,8 @@ impl Store {
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
             if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
-                let base = glob.base();
-                let mut n = Path::levels(base) + 1;
+                let base = dbg!(glob.base());
+                let mut n = dbg!(Path::levels(base) + 1);
                 while glob.scope().contains(n) {
                     match self.by_level.get(&n) {
                         None => break,
@@ -456,6 +456,7 @@ impl Store {
                                 ))
                                 .take_while(move |p| Path::is_parent(base, p));
                             for path in iter {
+                                dbg!(&path);
                                 let dn = Path::dirname(path).unwrap_or("/");
                                 if pat.is_match(path)
                                     && !self.children.contains_key(dn)
