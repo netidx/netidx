@@ -16,6 +16,8 @@
     traffic caused by list_recursive and list_glob. A List/Table call
     now "costs" 10K Resolve calls, so the max batch size of a read
     client doing only List calls is now 100 instead of 1000K.
+  - Fix a bug in the resolver that could cause a referral loop with
+    deeply nested resolver clusters.
 
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate
