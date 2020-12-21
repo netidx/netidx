@@ -132,10 +132,6 @@ impl Router {
         })
     }
 
-    fn get_referral(&self, path: &str) -> Option<&Arc<Referral>> {
-        self.cached.get(path).map(|(_, r)| r)
-    }
-
     fn add_referral(&mut self, r: Referral) -> Arc<Referral> {
         let exp = Instant::now() + Duration::from_secs(r.ttl);
         let key = r.path.clone();
