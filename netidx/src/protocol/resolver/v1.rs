@@ -455,7 +455,7 @@ impl From<config::Config> for Referral {
     fn from(c: config::Config) -> Referral {
         Referral {
             path: Path::from("/"),
-            ttl: 600,
+            ttl: u32::MAX as u64,
             addrs: Pooled::orphan(c.addrs),
             krb5_spns: match c.auth {
                 config::Auth::Anonymous => {

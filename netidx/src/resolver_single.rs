@@ -1,14 +1,13 @@
 use crate::{
     channel::Channel,
     chars::Chars,
-    config::{self, Config},
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, ReadyForOwnershipCheck, Referral, Secret, ServerAuthWrite,
+        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
     },
     utils,
 };
@@ -74,7 +73,7 @@ macro_rules! cwt {
 }
 
 async fn connect_read(
-    resolver: &Config,
+    resolver: &Referral,
     desired_auth: &Auth,
 ) -> Result<Channel<ClientCtx>> {
     let mut addrs = resolver.addrs.clone();
@@ -96,14 +95,15 @@ async fn connect_read(
         let mut con = Channel::new(con);
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
-        let (auth, ctx) = match (desired_auth, &resolver.auth) {
-            (Auth::Anonymous, _) => (ClientAuthRead::Anonymous, None),
-            (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
+        let (auth, ctx) = match desired_auth {
+            Auth::Anonymous => (ClientAuthRead::Anonymous, None),
+            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
                 bail!("authentication unavailable")
             }
-            (Auth::Krb5 { upn, .. }, config::Auth::Krb5(spns)) => {
+            Auth::Krb5 { upn, .. } => {
                 let upn = upn.as_ref().map(|s| s.as_str());
-                let target_spn = spns
+                let target_spn = resolver
+                    .krb5_spns
                     .get(&addr)
                     .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
                 let (ctx, tok) =
@@ -141,7 +141,7 @@ type ReadBatch =
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
-    resolver: Config,
+    resolver: Arc<Referral>,
     desired_auth: Auth,
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
@@ -228,7 +228,7 @@ async fn connection_read(
 pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
-    pub(crate) fn new(resolver: Config, desired_auth: Auth) -> ResolverRead {
+    pub(crate) fn new(resolver: Arc<Referral>, desired_auth: Auth) -> ResolverRead {
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         task::spawn(async move {
             connection_read(to_rx, resolver, desired_auth).await;
@@ -254,7 +254,7 @@ macro_rules! wt {
 }
 
 async fn connect_write(
-    resolver: &Config,
+    resolver: &Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashSet<Path>>>,
@@ -270,20 +270,21 @@ async fn connect_write(
     wt!(con.send_one(&1u64))??;
     let _version: u64 = wt!(con.receive())??;
     let sec = Duration::from_secs(1);
-    let (auth, ctx) = match (desired_auth, &resolver.auth) {
-        (Auth::Anonymous, _) => (ClientAuthWrite::Anonymous, None),
-        (Auth::Krb5 { .. }, config::Auth::Anonymous) => {
+    let (auth, ctx) = match desired_auth {
+        Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
+        Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
             bail!("authentication unavailable")
         }
-        (Auth::Krb5 { upn, spn }, config::Auth::Krb5(spns)) => match security_context {
+        Auth::Krb5 { upn, spn } => match security_context {
             Some(ctx) if ctx.ttl().unwrap_or(sec) > sec => {
                 (ClientAuthWrite::Reuse, Some(ctx.clone()))
             }
             _ => {
                 let upnr = upn.as_ref().map(|s| s.as_str());
-                let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
-                    anyhow!("no target spn for resolver {:?}", resolver_addr)
-                })?;
+                let target_spn =
+                    resolver.krb5_spns.get(&resolver_addr).ok_or_else(|| {
+                        anyhow!("no target spn for resolver {:?}", resolver_addr)
+                    })?;
                 let (ctx, token) = create_ctx(upnr, target_spn)?;
                 let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
                 (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
@@ -379,7 +380,7 @@ async fn connection_write(
         Arc<Pooled<Vec<(usize, ToWrite)>>>,
         oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
     )>,
-    resolver: Config,
+    resolver: Arc<Referral>,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashSet<Path>>>,
@@ -553,7 +554,7 @@ type WriteBatch =
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
-    resolver: Config,
+    resolver: Arc<Referral>,
     desired_auth: Auth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
@@ -616,7 +617,7 @@ pub(crate) struct ResolverWrite(mpsc::UnboundedSender<WriteBatch>);
 
 impl ResolverWrite {
     pub(crate) fn new(
-        resolver: Config,
+        resolver: Arc<Referral>,
         desired_auth: Auth,
         write_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,

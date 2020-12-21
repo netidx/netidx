@@ -168,7 +168,7 @@ where
     F: ToReferral + Send + Sync + 'static,
 {
     fn new(
-        resolver: Config,
+        resolver: Arc<Referral>,
         desired_auth: Auth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -181,7 +181,7 @@ where
 
 impl Connection<ToRead, FromRead> for SingleRead {
     fn new(
-        resolver: Config,
+        resolver: Arc<Referral>,
         desired_auth: Auth,
         _writer_addr: SocketAddr,
         _secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -199,7 +199,7 @@ impl Connection<ToRead, FromRead> for SingleRead {
 
 impl Connection<ToWrite, FromWrite> for SingleWrite {
     fn new(
-        resolver: Config,
+        resolver: Arc<Referral>,
         desired_auth: Auth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -251,15 +251,6 @@ where
     T: ToPath + Clone + Send + Sync + 'static,
     F: ToReferral + Clone + Send + Sync + 'static,
 {
-    fn connect_to_referral(&mut self, r: Referral) -> C {
-        C::new(
-            Config::from(r),
-            self.desired_auth.clone(),
-            self.writer_addr,
-            self.secrets.clone(),
-        )
-    }
-
     fn send_to_server(
         &mut self,
         server: Option<Arc<Referral>>,
@@ -269,8 +260,13 @@ where
         match self.by_referral.get_mut(&r) {
             Some(con) => con.send(batch),
             None => {
-                let mut con = self.connect_to_referral((*r).clone());
-                self.by_referral.insert(r.clone(), con.clone());
+                let mut con = C::new(
+                    r.clone(),
+                    self.desired_auth.clone(),
+                    self.writer_addr,
+                    self.secrets.clone(),
+                );
+                self.by_referral.insert(r, con.clone());
                 con.send(batch)
             }
         }
