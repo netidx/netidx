@@ -1,5 +1,6 @@
 use crate::{
     chars::Chars,
+    config,
     glob::GlobSet,
     pack::{Pack, PackError, Z64},
     path::Path,
@@ -7,7 +8,14 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes};
 use fxhash::FxBuildHasher;
-use std::{collections::HashMap, hash::{Hash, Hasher}, net::SocketAddr, result, cmp::{PartialEq, Eq}};
+use std::{
+    cmp::{Eq, PartialEq},
+    collections::HashMap,
+    convert::From,
+    hash::{Hash, Hasher},
+    net::SocketAddr,
+    result,
+};
 
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
@@ -441,6 +449,27 @@ pub struct Referral {
     pub ttl: u64,
     pub addrs: Pooled<Vec<SocketAddr>>,
     pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+}
+
+impl From<config::Config> for Referral {
+    fn from(c: config::Config) -> Referral {
+        Referral {
+            path: Path::from("/"),
+            ttl: 600,
+            addrs: Pooled::orphan(c.addrs),
+            krb5_spns: match c.auth {
+                config::Auth::Anonymous => {
+                    Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
+                }
+                config::Auth::Krb5(mut spns) => {
+                    let mut h =
+                        Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()));
+                    h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
+                    h
+                }
+            },
+        }
+    }
 }
 
 impl Hash for Referral {

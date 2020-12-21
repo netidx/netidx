@@ -132,10 +132,9 @@ impl Router {
         })
     }
 
-    fn add_referral(&mut self, r: Referral) -> Arc<Referral> {
+    fn add_referral(&mut self, r: Arc<Referral>) -> Arc<Referral> {
         let exp = Instant::now() + Duration::from_secs(r.ttl);
         let key = r.path.clone();
-        let r = Arc::new(r);
         self.cached.insert(key, (exp, r.clone()));
         r
     }
@@ -236,7 +235,7 @@ where
 {
     router: Router,
     desired_auth: Auth,
-    default: C,
+    default: Arc<Referral>,
     by_referral: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -266,16 +265,14 @@ where
         server: Option<Arc<Referral>>,
         batch: Pooled<Vec<(usize, T)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>> {
-        match server {
-            None => self.default.send(batch),
-            Some(r) => match self.by_referral.get_mut(&r) {
-                Some(con) => con.send(batch),
-                None => {
-                    let mut con = self.connect_to_referral((*r).clone());
-                    self.by_referral.insert(r.clone(), con.clone());
-                    con.send(batch)
-                }
-            },
+        let r = server.unwrap_or_else(|| self.default.clone());
+        match self.by_referral.get_mut(&r) {
+            Some(con) => con.send(batch),
+            None => {
+                let mut con = self.connect_to_referral((*r).clone());
+                self.by_referral.insert(r.clone(), con.clone());
+                con.send(batch)
+            }
         }
     }
 }
@@ -302,11 +299,10 @@ where
         let secrets =
             Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let router = Router::new();
-        let default = C::new(default, desired_auth.clone(), writer_addr, secrets.clone());
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
             desired_auth,
-            default,
+            default: Arc::new(Referral::from(default)),
             by_referral: HashMap::new(),
             writer_addr,
             secrets,
@@ -343,7 +339,7 @@ where
                     match reply.referral() {
                         Err(m) => finished.push((id, m)),
                         Ok(r) => {
-                            self.0.lock().router.add_referral(r);
+                            self.0.lock().router.add_referral(Arc::new(r));
                             referral = true;
                         }
                     }
@@ -430,8 +426,8 @@ impl ResolverRead {
 
     /// list all paths in the cluster matching the specified globset
     pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
-        let mut pending: Vec<Option<Referral>> = vec![None];
-        let mut done: HashSet<Option<Referral>> = HashSet::new();
+        let mut pending: Vec<Option<Arc<Referral>>> = vec![None];
+        let mut done: HashSet<Arc<Referral>> = HashSet::new();
         let mut results = LISTRECPOOL.take();
         let mut referral_cycles = 0;
         while pending.len() > 0 {
@@ -439,12 +435,13 @@ impl ResolverRead {
             {
                 let mut inner = self.0 .0.lock();
                 for server in pending.drain(..) {
+                    let server = server.unwrap_or_else(|| inner.default.clone());
                     if !done.contains(&server) {
                         done.insert(server.clone());
-                        let server = server.map(|r| inner.router.add_referral(r));
+                        let server = inner.router.add_referral(server);
                         let mut to = TOREADPOOL.take();
                         to.push((0, ToRead::ListMatching(globset.clone())));
-                        waiters.push(inner.send_to_server(server, to));
+                        waiters.push(inner.send_to_server(Some(server), to));
                     }
                 }
             }
@@ -455,7 +452,7 @@ impl ResolverRead {
                         FromRead::ListMatching(mut lm) => {
                             results.extend(lm.matched.drain(..));
                             for r in lm.referrals.drain(..) {
-                                pending.push(Some(r));
+                                pending.push(Some(Arc::new(r)));
                             }
                         }
                         m => bail!("unexpected list_matching response {:?}", m),
