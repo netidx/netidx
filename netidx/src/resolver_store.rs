@@ -103,7 +103,7 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 pub(crate) struct Store {
     by_path: HashMap<Path, Set<Addr>>,
     by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
-    by_level: HashMap<usize, BTreeSet<Path>, FxBuildHasher>,
+    by_level: HashMap<usize, BTreeMap<Path, Z64>, FxBuildHasher>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
@@ -155,13 +155,16 @@ impl Store {
                             Excluded(p),
                             Unbounded,
                         ));
-                        r.next().map(|o| Path::is_parent(p, o)).unwrap_or(false)
+                        r.next().map(|(o, _)| Path::is_parent(p, o)).unwrap_or(false)
                     })
                     .unwrap_or(false);
+            let n = n - 1;
             if save {
-                break;
+                let m = self.by_level.entry(n).or_insert_with(BTreeMap::new);
+                if let Some(cn) = m.get_mut(p) {
+                    **cn += 1;
+                }
             } else {
-                let n = n - 1;
                 self.by_level.get_mut(&n).into_iter().for_each(|l| {
                     l.remove(p);
                 })
@@ -176,9 +179,14 @@ impl Store {
                 Some(parent) => p = parent,
             }
             let n = Path::levels(p);
-            let l = self.by_level.entry(n).or_insert_with(BTreeSet::new);
-            if !l.contains(p) {
-                l.insert(Path::from(String::from(p)));
+            let l = self.by_level.entry(n).or_insert_with(BTreeMap::new);
+            match l.get_mut(p) {
+                Some(cn) => {
+                    **cn += 1;
+                }
+                None => {
+                    l.insert(Path::from(String::from(p)), Z64(1));
+                }
             }
         }
     }
@@ -294,7 +302,10 @@ impl Store {
             self.add_column(&path);
             self.add_parents(path.as_ref());
             let n = Path::levels(path.as_ref());
-            self.by_level.entry(n).or_insert_with(BTreeSet::new).insert(path.clone());
+            self.by_level
+                .entry(n)
+                .or_insert_with(BTreeMap::new)
+                .insert(path.clone(), Z64(1));
         }
     }
 
@@ -431,6 +442,7 @@ impl Store {
                     Excluded(parent.as_ref()),
                     Unbounded,
                 ))
+                .map(|(p, _)| p)
                 .take_while(|p| Path::is_parent(parent, p))
                 .cloned(),
             )
@@ -454,6 +466,7 @@ impl Store {
                                     Excluded(base),
                                     Unbounded,
                                 ))
+                                .map(|(p, _)| p)
                                 .take_while(move |p| Path::is_parent(base, p));
                             for path in iter {
                                 let dn = Path::dirname(path).unwrap_or("/");
@@ -473,6 +486,13 @@ impl Store {
             cur = Some(glob.base());
         }
         paths
+    }
+
+    pub(crate) fn get_change_nr(&self, path: &Path) -> Z64 {
+        self.by_level
+            .get(&Path::levels(path))
+            .and_then(|l| l.get(path).map(|cn| *cn))
+            .unwrap_or(Z64(0))
     }
 
     pub(crate) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {

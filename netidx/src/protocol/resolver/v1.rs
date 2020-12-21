@@ -358,14 +358,17 @@ pub enum ToRead {
     Table(Path),
     /// List paths matching the specified glob set.
     ListMatching(GlobSet),
+    /// Get the change nr for the specified path
+    GetChangeNr(Path),
 }
 
 impl Pack for ToRead {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            ToRead::Resolve(path) | ToRead::List(path) | ToRead::Table(path) => {
-                <Path as Pack>::encoded_len(path)
-            }
+            ToRead::Resolve(path)
+            | ToRead::List(path)
+            | ToRead::Table(path)
+            | ToRead::GetChangeNr(path) => <Path as Pack>::encoded_len(path),
             ToRead::ListMatching(g) => <GlobSet as Pack>::encoded_len(g),
         }
     }
@@ -388,6 +391,10 @@ impl Pack for ToRead {
                 buf.put_u8(3);
                 <GlobSet as Pack>::encode(globs, buf)
             }
+            ToRead::GetChangeNr(path) => {
+                buf.put_u8(4);
+                <Path as Pack>::encode(path, buf)
+            }
         }
     }
 
@@ -397,6 +404,7 @@ impl Pack for ToRead {
             1 => Ok(ToRead::List(<Path as Pack>::decode(buf)?)),
             2 => Ok(ToRead::Table(<Path as Pack>::decode(buf)?)),
             3 => Ok(ToRead::ListMatching(<GlobSet as Pack>::decode(buf)?)),
+            4 => Ok(ToRead::GetChangeNr(<Path as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -541,7 +549,7 @@ impl Pack for Table {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListMatching {
+pub(crate) struct ListMatching {
     pub(crate) matched: Pooled<Vec<Path>>,
     pub(crate) referrals: Pooled<Vec<Referral>>,
 }
@@ -565,10 +573,42 @@ impl Pack for ListMatching {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GetChangeNr {
+    pub(crate) change_number: Z64,
+    pub(crate) resolver: SocketAddr,
+    pub(crate) referrals: Pooled<Vec<Referral>>,
+}
+
+impl Pack for GetChangeNr {
+    fn encoded_len(&self) -> usize {
+        <Z64 as Pack>::encoded_len(&self.change_number)
+            + <SocketAddr as Pack>::encoded_len(&self.resolver)
+            + <Pooled<Vec<Referral>> as Pack>::encoded_len(&self.referrals)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        <Z64 as Pack>::encode(&self.change_number, buf)?;
+        <SocketAddr as Pack>::encode(&self.resolver, buf)?;
+        <Pooled<Vec<Referral>> as Pack>::encode(&self.referrals, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let change_number = <Z64 as Pack>::decode(buf)?;
+        let resolver = <SocketAddr as Pack>::decode(buf)?;
+        Ok(GetChangeNr {
+            change_number,
+            resolver,
+            referrals: <Pooled<Vec<Referral>> as Pack>::decode(buf)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
     Resolved(Resolved),
     List(Pooled<Vec<Path>>),
     ListMatching(ListMatching),
+    GetChangeNr(GetChangeNr),
     Table(Table),
     Referral(Referral),
     Denied,
@@ -583,6 +623,7 @@ impl Pack for FromRead {
             FromRead::Table(t) => <Table as Pack>::encoded_len(t),
             FromRead::Referral(r) => <Referral as Pack>::encoded_len(r),
             FromRead::ListMatching(m) => <ListMatching as Pack>::encoded_len(m),
+            FromRead::GetChangeNr(m) => <GetChangeNr as Pack>::encoded_len(m),
             FromRead::Denied => 0,
             FromRead::Error(e) => <Chars as Pack>::encoded_len(e),
         }
@@ -615,6 +656,10 @@ impl Pack for FromRead {
                 buf.put_u8(6);
                 <ListMatching as Pack>::encode(l, buf)
             }
+            FromRead::GetChangeNr(l) => {
+                buf.put_u8(7);
+                <GetChangeNr as Pack>::encode(l, buf)
+            }
         }
     }
 
@@ -627,6 +672,7 @@ impl Pack for FromRead {
             4 => Ok(FromRead::Denied),
             5 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
             6 => Ok(FromRead::ListMatching(<ListMatching as Pack>::decode(buf)?)),
+            7 => Ok(FromRead::GetChangeNr(<GetChangeNr as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }

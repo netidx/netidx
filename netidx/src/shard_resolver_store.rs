@@ -1,12 +1,13 @@
 use crate::{
-    auth::{Permissions, UserInfo},
+    auth::{Permissions, Scope, UserInfo},
     channel::Channel,
     os::ServerCtx,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{
-        FromRead, FromWrite, ListMatching, Referral, Resolved, Table, ToRead, ToWrite,
+        FromRead, FromWrite, GetChangeNr, ListMatching, Referral, Resolved, Table,
+        ToRead, ToWrite,
     },
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
@@ -224,6 +225,22 @@ impl Shard {
                     (id, FromRead::ListMatching(lm))
                 }
             }
+            ToRead::GetChangeNr(path) => {
+                let allowed = secstore
+                    .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
+                    .unwrap_or(true);
+                if !allowed {
+                    (id, FromRead::Denied)
+                } else {
+                    let mut referrals = REF_POOL.take();
+                    if shard == 0 {
+                        store.referrals_in_scope(&mut referrals, &*path, &Scope::Subtree);
+                    }
+                    let change_number = store.get_change_nr(&path);
+                    let cn = GetChangeNr { change_number, referrals, resolver };
+                    (id, FromRead::GetChangeNr(cn))
+                }
+            }
             ToRead::Table(path) => {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
@@ -364,6 +381,12 @@ impl Store {
                         by_shard[s].push((n, ToRead::Resolve(path)));
                         c += 1;
                     }
+                    Some(ToRead::GetChangeNr(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToRead::GetChangeNr(path.clone())));
+                        }
+                        c += 1;
+                    }
                     Some(ToRead::List(path)) => {
                         for b in by_shard.iter_mut() {
                             b.push((n, ToRead::List(path.clone())));
@@ -470,6 +493,25 @@ impl Store {
                             con.queue_send(&FromRead::ListMatching(ListMatching {
                                 matched,
                                 referrals,
+                            }))?;
+                        }
+                        (_, FromRead::GetChangeNr(cn)) => {
+                            let referrals = cn.referrals;
+                            let resolver = cn.resolver;
+                            let mut change_number = cn.change_number;
+                            for i in 1..replies.len() {
+                                if let (_, FromRead::GetChangeNr(cn)) =
+                                    replies[i].pop_front().unwrap()
+                                {
+                                    *change_number += *cn.change_number;
+                                } else {
+                                    panic!("desynced getchangenumber")
+                                }
+                            }
+                            con.queue_send(&FromRead::GetChangeNr(GetChangeNr {
+                                referrals,
+                                resolver,
+                                change_number,
                             }))?;
                         }
                         (_, FromRead::Table(Table { mut rows, mut cols })) => {

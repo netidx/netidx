@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     glob::GlobSet,
+    pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
@@ -350,6 +351,21 @@ where
             if referrals > MAX_REFERRALS {
                 bail!("maximum referral depth {} reached, giving up", MAX_REFERRALS);
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangeTracker {
+    path: Path,
+    by_resolver: HashMap<SocketAddr, Z64, FxBuildHasher>,
+}
+
+impl ChangeTracker {
+    pub fn new(path: Path) -> Self {
+        ChangeTracker {
+            path,
+            by_resolver: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
 }
