@@ -44,7 +44,7 @@ impl ToPath for ToRead {
     fn path(&self) -> Option<&Path> {
         match self {
             ToRead::List(p) | ToRead::Table(p) | ToRead::Resolve(p) => Some(p),
-            ToRead::ListMatching(_) => None,
+            ToRead::ListMatching(_) | ToRead::GetChangeNr(_) => None,
         }
     }
 }

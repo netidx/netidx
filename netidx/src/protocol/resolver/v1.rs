@@ -549,9 +549,9 @@ impl Pack for Table {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ListMatching {
-    pub(crate) matched: Pooled<Vec<Path>>,
-    pub(crate) referrals: Pooled<Vec<Referral>>,
+pub struct ListMatching {
+    pub matched: Pooled<Vec<Path>>,
+    pub referrals: Pooled<Vec<Referral>>,
 }
 
 impl Pack for ListMatching {
@@ -573,10 +573,10 @@ impl Pack for ListMatching {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GetChangeNr {
-    pub(crate) change_number: Z64,
-    pub(crate) resolver: SocketAddr,
-    pub(crate) referrals: Pooled<Vec<Referral>>,
+pub struct GetChangeNr {
+    pub change_number: Z64,
+    pub resolver: SocketAddr,
+    pub referrals: Pooled<Vec<Referral>>,
 }
 
 impl Pack for GetChangeNr {
