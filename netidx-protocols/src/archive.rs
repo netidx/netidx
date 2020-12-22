@@ -43,12 +43,12 @@ static FILE_MAGIC: &'static [u8] = b"netidx archive";
 const FILE_VERSION: u32 = 0;
 
 impl Pack for FileHeader {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(FILE_MAGIC.len() + mem::size_of::<u32>())
     }
 
-    fn len(&self) -> usize {
-        <FileHeader as Pack>::const_len().unwrap()
+    fn encoded_len(&self) -> usize {
+        <FileHeader as Pack>::const_encoded_len().unwrap()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -100,12 +100,12 @@ pub struct RecordHeader {
 }
 
 impl Pack for RecordHeader {
-    fn const_len() -> Option<usize> {
+    fn const_encoded_len() -> Option<usize> {
         Some(8)
     }
 
-    fn len(&self) -> usize {
-        <RecordHeader as Pack>::const_len().unwrap()
+    fn encoded_len(&self) -> usize {
+        <RecordHeader as Pack>::const_encoded_len().unwrap()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -123,7 +123,7 @@ impl Pack for RecordHeader {
 pub struct Id(u64);
 
 impl Pack for Id {
-    fn len(&self) -> usize {
+    fn encoded_len(&self) -> usize {
         varint_len(self.0)
     }
 
@@ -140,8 +140,8 @@ impl Pack for Id {
 struct PathMapping(Path, Id);
 
 impl Pack for PathMapping {
-    fn len(&self) -> usize {
-        <Path as Pack>::len(&self.0) + <Id as Pack>::len(&self.1)
+    fn encoded_len(&self) -> usize {
+        <Path as Pack>::encoded_len(&self.0) + <Id as Pack>::encoded_len(&self.1)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -160,8 +160,8 @@ impl Pack for PathMapping {
 pub struct BatchItem(pub Id, pub Event);
 
 impl Pack for BatchItem {
-    fn len(&self) -> usize {
-        <Id as Pack>::len(&self.0) + Pack::len(&self.1)
+    fn encoded_len(&self) -> usize {
+        <Id as Pack>::encoded_len(&self.0) + Pack::encoded_len(&self.1)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -472,7 +472,7 @@ fn scan_records(
     let total_size = buf.remaining();
     loop {
         let pos = dbg!(start_pos + (total_size - buf.remaining()));
-        if buf.remaining() < <RecordHeader as Pack>::const_len().unwrap() {
+        if buf.remaining() < <RecordHeader as Pack>::const_encoded_len().unwrap() {
             if !uncommitted_ok {
                 warn!("file missing End marker");
             }
@@ -548,7 +548,7 @@ fn scan_file(
 ) -> Result<usize> {
     let total_bytes = buf.remaining();
     // check the file header
-    if buf.remaining() < <FileHeader as Pack>::const_len().unwrap() {
+    if buf.remaining() < <FileHeader as Pack>::const_encoded_len().unwrap() {
         bail!("invalid file header: too short")
     }
     let header = <FileHeader as Pack>::decode(buf)
@@ -698,8 +698,8 @@ impl ArchiveWriter {
                 .open(path.as_ref())?;
             file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path.as_ref())? as usize;
-            let fh_len = <FileHeader as Pack>::const_len().unwrap();
-            let rh_len = <RecordHeader as Pack>::const_len().unwrap();
+            let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
+            let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
             file.set_len(max(block_size, fh_len + rh_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
@@ -740,7 +740,7 @@ impl ArchiveWriter {
         if record_length > MAX_RECORD_LEN as usize {
             bail!(RecordTooLarge);
         }
-        let len = <RecordHeader as Pack>::const_len().unwrap() + record_length;
+        let len = <RecordHeader as Pack>::const_encoded_len().unwrap() + record_length;
         if self.mmap.len() - self.end.load(Ordering::Relaxed) < len {
             self.reserve(len)?;
         }
@@ -753,7 +753,7 @@ impl ArchiveWriter {
     pub fn flush(&mut self) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
         if self.committed < end {
-            let hl = <RecordHeader as Pack>::const_len().unwrap();
+            let hl = <RecordHeader as Pack>::const_encoded_len().unwrap();
             if self.mmap.len() - end < hl {
                 self.reserve(hl)?;
             }
@@ -798,7 +798,7 @@ impl ArchiveWriter {
             }
         }
         if pms.len() > 0 {
-            let record_length = <Pooled<Vec<PathMapping>> as Pack>::len(&pms);
+            let record_length = <Pooled<Vec<PathMapping>> as Pack>::encoded_len(&pms);
             let len = self.check_reserve(record_length)?;
             let end = self.end.load(Ordering::Relaxed);
             let mut buf = &mut self.mmap[end..];
@@ -838,11 +838,11 @@ impl ArchiveWriter {
                     bail!("unknown id: {:?} in batch", id)
                 }
             }
-            let record_length = <Pooled<Vec<BatchItem>> as Pack>::len(&batch);
+            let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             match timestamp {
                 Timestamp::Offset(_, _) => (),
                 Timestamp::NewBasis(basis) => {
-                    let record_length = <DateTime<Utc> as Pack>::len(&basis);
+                    let record_length = <DateTime<Utc> as Pack>::encoded_len(&basis);
                     let rh = RecordHeader {
                         committed: false,
                         record_type: RecordTyp::Timestamp,
@@ -921,7 +921,7 @@ impl ArchiveIndex {
             imagemap: BTreeMap::new(),
             deltamap: BTreeMap::new(),
             time_basis: chrono::MIN_DATETIME,
-            end: <FileHeader as Pack>::const_len().unwrap(),
+            end: <FileHeader as Pack>::const_encoded_len().unwrap(),
         }
     }
 }

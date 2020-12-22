@@ -9,6 +9,8 @@
   - Fix a bunch of bugs coming from an incorrect test for path
     parenthood. Including a potential referral loop with a complex
     cluster.
+  - Change the len and const_len method names of Pack to encoded_len,
+    and const_encoded_len to avoid confusion.
   - Implement From on Value for most primitive types.
   - Add a trait, FromValue, that behaves like FromStr, and implement
     it for many primitive types. Refactor cast_* methods into

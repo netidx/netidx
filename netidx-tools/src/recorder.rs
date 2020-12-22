@@ -8,7 +8,8 @@ use netidx::{
     path::Path,
     pool::Pooled,
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
-    resolver::{Auth, Glob},
+    resolver::Auth,
+    glob::{Glob, GlobSet},
     subscriber::{Subscriber, Event},
 };
 use netidx_protocols::archive::{
