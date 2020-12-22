@@ -1,23 +1,22 @@
 * 0.6.0:
+  - New tool, netidx recorder, records subscriptions to compact
+    archive files and publishes archive files.
+  - Add list_matching and check_changed methods to ResolverRead. Both
+    methods can't be used with older resolver servers, however older
+    clients can still talk to a newer resolver server.
   - Plug a couple of holes that could allow non canonical paths to be
     created
   - Fix a bunch of bugs coming from an incorrect test for path
-    parenthood.
-  - New tool, netidx recorder, records subscriptions to compact
-    archive files, and also publishes archive files.
+    parenthood. Including a potential referral loop with a complex
+    cluster.
   - Implement From on Value for most primitive types.
   - Add a trait, FromValue, that behaves like FromStr, and implement
-    it for many primitive types
-  - Add list_matching, get_changeid methods to ResolverRead. Both
-    methods can't be used with older resolver servers, however older
-    clients can still talk to a newer resolver server.
+    it for many primitive types. Refactor cast_* methods into
+    cast_to::<T> where T: FromValue.
   - Tune the resolver server to give much higher priority to Resolve
-    over List and Table calls to compensate for the potentially large
-    traffic caused by list_recursive and list_glob. A List/Table call
-    now "costs" 10K Resolve calls, so the max batch size of a read
-    client doing only List calls is now 100 instead of 1000K.
-  - Fix a bug in the resolver that could cause a referral loop with
-    deeply nested resolver clusters.
+    over List, Table and especially ListMatching calls.
+  - Reorganize the project so rust-analyzer will work on all the sub
+    projects.
 
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate
