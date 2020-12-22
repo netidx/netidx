@@ -503,11 +503,11 @@ impl ResolverRead {
     /// Changes to the value of already published paths is not a
     /// change in this context.
     ///
-    /// This method is meant to be used as a light weight alternative
-    /// to e.g. list, or list_matching in order to discover when
-    /// structural changes are made by publishers that result in the
-    /// need to adjust subscriptions. It is much cheaper and faster to
-    /// call this method than `list` or `list_matching`.
+    /// This method is meant to be used as a light alternative to
+    /// list, or list_matching in order to discover when structural
+    /// changes are made by publishers that result in the need to
+    /// adjust subscriptions. It is much cheaper and faster to call
+    /// this method than `list` or `list_matching`.
     ///
     /// The first call with a new `ChangeTracker` will always result
     /// in `true`. If `true` is returned at any point it is not a
