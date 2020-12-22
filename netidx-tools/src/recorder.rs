@@ -5,18 +5,18 @@ use log::{info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
+    glob::{Glob, GlobSet},
     path::Path,
     pool::Pooled,
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
-    resolver::Auth,
-    glob::{Glob, GlobSet},
-    subscriber::{Subscriber, Event},
+    resolver::{Auth, ChangeTracker, ResolverRead},
+    subscriber::{Dval, Event, SubId, Subscriber},
 };
 use netidx_protocols::archive::{
-    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, Seek, Timestamp,
+    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, Seek, Timestamp, BATCH_POOL, MonotonicTimestamper
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     mem,
     ops::Bound,
     sync::Arc,
@@ -596,15 +596,135 @@ mod publish {
 mod record {
     use super::*;
 
+    #[derive(Debug)]
+    struct CTS(BTreeMap<Path, ChangeTracker>);
+
+    impl CTS {
+        fn new(globs: &Vec<Glob>) -> CTS {
+            let mut btm = BTreeMap::new();
+            for glob in globs {
+                let base = glob.base();
+                match btm
+                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                        Bound::Unbounded,
+                        Bound::Excluded(base),
+                    ))
+                    .next_back()
+                {
+                    Some((p, _)) if Path::is_parent(p, base) => (),
+                    None | Some(_) => {
+                        let base = Path::from(Arc::from(base));
+                        btm.insert(base, ChangeTracker::new(base.clone()));
+                    }
+                }
+            }
+            CTS(btm)
+        }
+
+        async fn changed(&mut self, r: &ResolverRead) -> Result<bool> {
+            let res =
+                future::join_all(self.0.iter_mut().map(|(_, ct)| r.check_changed(ct)))
+                    .await;
+            for r in res {
+                if r? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+
+    async fn maybe_check(
+        need_check: bool,
+        resolver: &ResolverRead,
+        cts: &mut CTS
+    ) -> Result<bool> {
+        if !need_check {
+            future::pending().await
+        } else {
+            cts.changed(resolver).await
+        }
+    }
+
+    async fn maybe_list(
+        need_list: bool,
+        resolver: &ResolverRead,
+        pat: &GlobSet
+    ) -> Result<Pooled<Vec<Path>>> {
+        if !need_list {
+            future::pending().await
+        } else {
+            resolver.list_matching(pat).await
+        }
+    }
+
     pub(super) async fn run(
         bcast: broadcast::Sender<BCastMsg>,
-        archive: ArchiveWriter,
+        mut archive: ArchiveWriter,
         resolver: Config,
         desired_auth: Auth,
         spec: Vec<Glob>,
     ) -> Result<()> {
+        let (tx_batch, rx_batch) = mpsc::channel(3);
+        let mut rx_batch = rx_batch.fuse();
+        let mut by_subid: HashMap<SubId, Id> = HashMap::new();
+        let mut subscribed: HashMap<Path, Dval> = HashMap::new();
         let subscriber = Subscriber::new(resolver, desired_auth)?;
         let resolver = subscriber.resolver();
+        let mut cts = CTS::new(&spec);
+        let spec = GlobSet::new(true, spec)?;
+        let mut poll = time::interval(time::Duration::from_secs(1)).fuse();
+        let mut to_add = Vec::new();
+        let mut timest = MonotonicTimestamper::new();
+        let mut need_check = false;
+        let mut need_list = false;
+        loop {
+            select_biased! {
+                _ = poll.next() => {
+                    need_check = true;
+                },
+                r = maybe_check(need_check, &resolver, &mut cts).fuse() => {
+                    need_check = false;
+                    need_list = r?;
+                },
+                r = maybe_list(need_list, &resolver, &spec).fuse() => {
+                    need_list = false;
+                    let mut paths = r?;
+                    for path in paths.drain(..) {
+                        if !subscribed.contains_key(&path) {
+                            let dv = subscriber.durable_subscribe(path.clone());
+                            let id = dv.id();
+                            dv.updates(true, tx_batch.clone());
+                            subscribed.insert(path.clone(), dv);
+                            to_add.push((path, id));
+                        }
+                    }
+                    task::block_in_place(|| {
+                        let i = to_add.iter().map(|(ref p, _)| p);
+                        archive.add_paths(i)
+                    })?;
+                    for (path, subid) in to_add.drain(..) {
+                        if !by_subid.contains_key(&subid) {
+                            let id = archive.id_for_path(&path).unwrap();
+                            by_subid.insert(subid, id);
+                        }
+                    }
+                },
+                batch = rx_batch.next() => match batch {
+                    None => break,
+                    Some(mut batch) => {
+                        let mut tbatch = BATCH_POOL.take();
+                        let ts = timest.timestamp();
+                        for (subid, ev) in batch.drain(..) {
+                            tbatch.push(BatchItem(by_subid[&subid], ev));
+                        }
+                        let tbatch = Arc::new(tbatch);
+                        task::block_in_place(|| archive.add_batch(false, ts, &*tbatch))?;
+                        let _ = bcast.send(BCastMsg::Batch(ts, tbatch));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -667,7 +787,8 @@ pub(crate) fn run(
     }
     let spec = spec
         .into_iter()
-        .map(|p| Glob::new(Path::from(p)))
+        .map(Chars::from)
+        .map(Glob::new)
         .collect::<Result<Vec<Glob>>>()
         .unwrap();
     let rt = Runtime::new().expect("failed to init tokio runtime");
