@@ -23,6 +23,7 @@ use std::{
         BTreeMap,
         Bound::{self, Included, Unbounded},
         HashMap, HashSet,
+        hash_map::Entry,
     },
     iter::IntoIterator,
     marker::PhantomData,
@@ -436,11 +437,13 @@ impl ResolverRead {
         }
     }
 
-    /// list all paths in the cluster matching the specified globset
-    pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
+    async fn send_and_aggregate<F: FnMut(FromRead) -> Result<Pooled<Vec<Referral>>>>(
+        &self,
+        message: ToRead,
+        mut process_reply: F,
+    ) -> Result<()> {
         let mut pending: Vec<Option<Arc<Referral>>> = vec![None];
         let mut done: HashSet<Arc<Referral>> = HashSet::new();
-        let mut results = LISTRECPOOL.take();
         let mut referral_cycles = 0;
         while pending.len() > 0 {
             let mut waiters = Vec::new();
@@ -452,7 +455,7 @@ impl ResolverRead {
                         done.insert(server.clone());
                         let server = inner.router.add_referral(server);
                         let mut to = TOREADPOOL.take();
-                        to.push((0, ToRead::ListMatching(globset.clone())));
+                        to.push((0, message.clone()));
                         waiters.push(inner.send_to_server(Some(server), to));
                     }
                 }
@@ -460,14 +463,9 @@ impl ResolverRead {
             for r in future::join_all(waiters).await {
                 let mut r = r?;
                 for (_, reply) in r.drain(..) {
-                    match reply {
-                        FromRead::ListMatching(mut lm) => {
-                            results.extend(lm.matched.drain(..));
-                            for r in lm.referrals.drain(..) {
-                                pending.push(Some(Arc::new(r)));
-                            }
-                        }
-                        m => bail!("unexpected list_matching response {:?}", m),
+                    let mut referrals = process_reply(reply)?;
+                    for r in referrals.drain(..) {
+                        pending.push(Some(Arc::new(r)));
                     }
                 }
             }
@@ -476,7 +474,68 @@ impl ResolverRead {
                 bail!("max referrals reached")
             }
         }
+        Ok(())
+    }
+
+    /// list all paths in the cluster matching the specified globset
+    pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
+        let mut results = LISTRECPOOL.take();
+        let m = ToRead::ListMatching(globset.clone());
+        self.send_and_aggregate(m, |reply| match reply {
+            FromRead::ListMatching(mut lm) => {
+                results.extend(lm.matched.drain(..));
+                Ok(lm.referrals)
+            }
+            m => bail!("unexpected list_matching response {:?}", m),
+        })
+        .await?;
         Ok(results)
+    }
+
+    /// Check whether that have been any changes to the specified path
+    /// or any of it's children on any server in the resolver
+    /// cluster. A change in this context consists of,
+    ///
+    /// * A new publisher publishing an existing path
+    /// * A publisher publishing a new path
+    /// * A publisher no longer publishing a path
+    ///
+    /// Changes to the value of already published paths is not a
+    /// change in this context.
+    ///
+    /// This method is meant to be used as a light weight alternative
+    /// to e.g. list, or list_matching in order to discover when
+    /// structural changes are made by publishers that result in the
+    /// need to adjust subscriptions. It is much cheaper and faster to
+    /// call this method than `list` or `list_matching`.
+    ///
+    /// The first call with a new `ChangeTracker` will always result
+    /// in `true`. If `true` is returned at any point it is not a
+    /// guarantee that there were changes, but it is a strong
+    /// possibility. If `false` is returned it is guaranteed that
+    /// there was no change.
+    pub async fn check_changed(&self, tracker: &mut ChangeTracker) -> Result<bool> {
+        let m = ToRead::GetChangeNr(tracker.path.clone());
+        let mut res = false;
+        self.send_and_aggregate(m, |reply| match reply {
+            FromRead::GetChangeNr(cn) => match tracker.by_resolver.entry(cn.resolver) {
+                Entry::Vacant(e) => {
+                    res = true;
+                    e.insert(cn.change_number);
+                    Ok(cn.referrals)
+                }
+                Entry::Occupied(mut e) => {
+                    if **e.get() < *cn.change_number {
+                        res = true;
+                    }
+                    *e.get_mut() = cn.change_number;
+                    Ok(cn.referrals)
+                }
+            }
+            m => bail!("unexpected response to GetChangeNr, {:?}", m)
+        })
+        .await?;
+        Ok(res)
     }
 
     pub async fn table(&self, path: Path) -> Result<Table> {
