@@ -6,7 +6,7 @@ mod resolver {
         path::Path,
         glob::{Glob, GlobSet},
         chars::Chars,
-        resolver::{Auth, ResolverRead, ResolverWrite},
+        resolver::{Auth, ResolverRead, ResolverWrite, ChangeTracker},
         resolver_server::Server,
     };
     use std::{net::SocketAddr, iter};
@@ -217,13 +217,21 @@ mod resolver {
         .iter()
         .map(|r| Path::from(*r))
         .collect::<Vec<_>>();
+        let mut ct_root = ChangeTracker::new(Path::from("/"));
+        let mut ct_app = ChangeTracker::new(Path::from("/app"));
+        let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
+        assert!(r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(r_root.check_changed(&mut ct_app).await.unwrap());
         let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
         w.publish(paths.iter().cloned()).await.unwrap();
+        assert!(r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(r_root.check_changed(&mut ct_app).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
         // CR estokes: it is not strictly guaranteed that both servers
         // in the cluster will have finished publishing all the paths
         // when this method returns, as such this test could fail
         // spuriously.
-        let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
         check_list(&r_root).await;
         check_resolve(&ctx, &r_root, &paths, waddr).await;
         let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
@@ -235,6 +243,8 @@ mod resolver {
         let r_huge1_sub = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
         check_list(&r_huge1_sub).await;
         check_resolve(&ctx, &r_huge1_sub, &paths, waddr).await;
+        assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
     }
 
     #[test]
