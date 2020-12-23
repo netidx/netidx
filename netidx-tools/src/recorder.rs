@@ -1,11 +1,6 @@
 use anyhow::Result;
 use chrono::prelude::*;
-use futures::{
-    channel::mpsc,
-    future,
-    prelude::*,
-    select_biased,
-};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{info, warn};
 use netidx::{
@@ -698,7 +693,7 @@ mod record {
         let mut poll = poll_interval.map(time::interval);
         let mut to_add = Vec::new();
         let mut timest = MonotonicTimestamper::new();
-        let mut last_image = archive.len();
+        let mut last_image;
         let mut need_check = false;
         let mut need_list = false;
         loop {
@@ -775,9 +770,12 @@ async fn run_async(
     config: Config,
     publish_args: Option<(BindCfg, Path)>,
     auth: Auth,
+    image_frequency: Option<usize>,
+    poll_interval: Option<time::Duration>,
     archive: String,
     spec: Vec<Glob>,
 ) {
+    let mut wait = Vec::new();
     let (bcast_tx, bcast_rx) = broadcast::channel(100);
     drop(bcast_rx);
     let writer = if spec.is_empty() {
@@ -790,12 +788,15 @@ async fn run_async(
             .as_ref()
             .map(|w| w.reader().unwrap())
             .unwrap_or_else(|| ArchiveReader::open(archive.as_str()).unwrap());
-        task::spawn(async move {
+        let bcast_tx = bcast_tx.clone();
+        let config = config.clone();
+        let auth = auth.clone();
+        wait.push(task::spawn(async move {
             let res = publish::run(
-                bcast_tx.clone(),
+                bcast_tx,
                 reader,
-                config.clone(),
-                auth.clone(),
+                config,
+                auth,
                 bind_cfg,
                 publish_base,
             )
@@ -804,8 +805,26 @@ async fn run_async(
                 Ok(()) => info!("archive publisher exited"),
                 Err(e) => warn!("archive publisher exited with error: {}", e),
             }
-        });
+        }));
     }
+    if !spec.is_empty() {
+        wait.push(task::spawn(async move {
+            let res = record::run(
+                bcast_tx,
+                writer.unwrap(),
+                config,
+                auth,
+                poll_interval,
+                image_frequency,
+                spec
+            ).await;
+            match res {
+                Ok(()) => info!("archive writer exited"),
+                Err(e) => warn!("archive writer exited with error: {}", e),
+            }
+        }));
+    }
+    future::join_all(wait).await;
 }
 
 pub(crate) fn run(
@@ -814,9 +833,17 @@ pub(crate) fn run(
     bind: Option<BindCfg>,
     publish_base: Option<Path>,
     auth: Auth,
+    image_frequency: usize,
+    poll_interval: u64,
     archive: String,
     spec: Vec<String>,
 ) {
+    let image_frequency = if image_frequency == 0 { None } else { Some(image_frequency) };
+    let poll_interval = if poll_interval == 0 {
+        None
+    } else {
+        Some(time::Duration::from_secs(poll_interval))
+    };
     let publish_args = match (bind, publish_base) {
         (None, None) => None,
         (Some(bind), Some(publish_base)) => Some((bind, publish_base)),
@@ -834,5 +861,13 @@ pub(crate) fn run(
         .collect::<Result<Vec<Glob>>>()
         .unwrap();
     let rt = Runtime::new().expect("failed to init tokio runtime");
-    rt.block_on(run_async(config, publish_args, auth, archive, spec))
+    rt.block_on(run_async(
+        config,
+        publish_args,
+        auth,
+        image_frequency,
+        poll_interval,
+        archive,
+        spec,
+    ))
 }

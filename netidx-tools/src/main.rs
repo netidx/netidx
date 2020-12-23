@@ -1,17 +1,19 @@
 #![recursion_limit = "2048"]
-#[macro_use] extern crate netidx;
-#[macro_use] extern crate anyhow;
+#[macro_use]
+extern crate netidx;
+#[macro_use]
+extern crate anyhow;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
 mod publisher;
+mod recorder;
 mod resolver;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
-mod recorder;
 
 #[cfg(unix)]
 mod resolver_server;
@@ -110,12 +112,26 @@ enum Sub {
         bind: Option<BindCfg>,
         #[structopt(long = "spn", help = "krb5 use <spn>")]
         spn: Option<String>,
-        #[structopt(long = "publish-base",
-                    help = "base path for republishing the archive")]
+        #[structopt(
+            long = "publish-base",
+            help = "base path for republishing the archive"
+        )]
         publish_base: Option<Path>,
+        #[structopt(
+            long = "image-frequency",
+            help = "How often to write a full image, 0 for never (67108864)",
+            default_value = "67108864"
+        )]
+        image_frequency: usize,
+        #[structopt(
+            long = "poll-interval",
+            help = "How often to poll the resolver, 0 for never (1)",
+            default_value = "1"
+        )]
+        poll_interval: u64,
         #[structopt(long = "archive", help = "path to the archive file")]
         archive: String,
-        #[structopt(long = "spec", help = "pattern to archive, can be repeated")]
+        #[structopt(long = "spec", help = "glob pattern to archive, can be repeated")]
         spec: Vec<String>,
     },
     #[structopt(name = "stress", about = "stress test")]
@@ -237,9 +253,28 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             subscriber::run(cfg, paths, auth)
         }
-        Sub::Record { foreground, bind, spn, publish_base, archive, spec } => {
+        Sub::Record {
+            foreground,
+            bind,
+            spn,
+            publish_base,
+            image_frequency,
+            poll_interval,
+            archive,
+            spec,
+        } => {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
-            recorder::run(cfg, foreground, bind, publish_base, auth, archive, spec)
+            recorder::run(
+                cfg,
+                foreground,
+                bind,
+                publish_base,
+                auth,
+                image_frequency,
+                poll_interval,
+                archive,
+                spec,
+            )
         }
         Sub::Stress { cmd } => match cmd {
             Stress::Subscriber => {
