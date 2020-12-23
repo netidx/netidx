@@ -40,3 +40,4 @@ parking_lot = "0.11"
 fs3 = "0.5"
 mapr = "0.8"
 uuid = { version = "0.8", features = ["v4"] }
+fxhash = "0.2"

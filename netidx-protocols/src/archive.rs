@@ -887,6 +887,10 @@ impl ArchiveWriter {
         self.mmap.len()
     }
 
+    pub fn len(&self) -> usize {
+        self.end.load(Ordering::Relaxed)
+    }
+
     /// Create an archive reader from this writer by creating a
     /// read-only duplicate of the memory map.
     ///

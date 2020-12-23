@@ -1,6 +1,12 @@
 use anyhow::Result;
 use chrono::prelude::*;
-use futures::{channel::mpsc, future, prelude::*, select_biased};
+use futures::{
+    channel::mpsc,
+    future,
+    prelude::*,
+    select_biased,
+};
+use fxhash::FxBuildHasher;
 use log::{info, warn};
 use netidx::{
     chars::Chars,
@@ -13,7 +19,8 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber},
 };
 use netidx_protocols::archive::{
-    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, Seek, Timestamp, BATCH_POOL, MonotonicTimestamper
+    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper, Seek,
+    Timestamp, BATCH_POOL,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -614,7 +621,8 @@ mod record {
                     Some((p, _)) if Path::is_parent(p, base) => (),
                     None | Some(_) => {
                         let base = Path::from(Arc::from(base));
-                        btm.insert(base, ChangeTracker::new(base.clone()));
+                        let ct = ChangeTracker::new(base.clone());
+                        btm.insert(base, ct);
                     }
                 }
             }
@@ -637,7 +645,7 @@ mod record {
     async fn maybe_check(
         need_check: bool,
         resolver: &ResolverRead,
-        cts: &mut CTS
+        cts: &mut CTS,
     ) -> Result<bool> {
         if !need_check {
             future::pending().await
@@ -649,7 +657,7 @@ mod record {
     async fn maybe_list(
         need_list: bool,
         resolver: &ResolverRead,
-        pat: &GlobSet
+        pat: &GlobSet,
     ) -> Result<Pooled<Vec<Path>>> {
         if !need_list {
             future::pending().await
@@ -658,29 +666,44 @@ mod record {
         }
     }
 
+    async fn maybe_poll(poll: &mut Option<time::Interval>) {
+        match poll {
+            None => future::pending().await,
+            Some(poll) => {
+                poll.tick().await;
+            }
+        }
+    }
+
     pub(super) async fn run(
         bcast: broadcast::Sender<BCastMsg>,
         mut archive: ArchiveWriter,
         resolver: Config,
         desired_auth: Auth,
+        poll_interval: Option<time::Duration>,
+        image_frequency: Option<usize>,
         spec: Vec<Glob>,
     ) -> Result<()> {
         let (tx_batch, rx_batch) = mpsc::channel(3);
         let mut rx_batch = rx_batch.fuse();
-        let mut by_subid: HashMap<SubId, Id> = HashMap::new();
+        let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
+            HashMap::with_hasher(FxBuildHasher::default());
+        let mut image: HashMap<SubId, Event, FxBuildHasher> =
+            HashMap::with_hasher(FxBuildHasher::default());
         let mut subscribed: HashMap<Path, Dval> = HashMap::new();
         let subscriber = Subscriber::new(resolver, desired_auth)?;
         let resolver = subscriber.resolver();
         let mut cts = CTS::new(&spec);
         let spec = GlobSet::new(true, spec)?;
-        let mut poll = time::interval(time::Duration::from_secs(1)).fuse();
+        let mut poll = poll_interval.map(time::interval);
         let mut to_add = Vec::new();
         let mut timest = MonotonicTimestamper::new();
+        let mut last_image = archive.len();
         let mut need_check = false;
         let mut need_list = false;
         loop {
             select_biased! {
-                _ = poll.next() => {
+                _ = maybe_poll(&mut poll).fuse() => {
                     need_check = true;
                 },
                 r = maybe_check(need_check, &resolver, &mut cts).fuse() => {
@@ -715,12 +738,31 @@ mod record {
                     Some(mut batch) => {
                         let mut tbatch = BATCH_POOL.take();
                         let ts = timest.timestamp();
-                        for (subid, ev) in batch.drain(..) {
-                            tbatch.push(BatchItem(by_subid[&subid], ev));
+                        task::block_in_place(|| {
+                            for (subid, ev) in batch.drain(..) {
+                                if image_frequency.is_some() {
+                                    image.insert(subid, ev.clone());
+                                }
+                                tbatch.push(BatchItem(by_subid[&subid], ev));
+                            }
+                            archive.add_batch(false, ts, &tbatch)
+                        })?;
+                        last_image = archive.len();
+                        let _ = bcast.send(BCastMsg::Batch(ts, Arc::new(tbatch)));
+                        match image_frequency {
+                            None => (),
+                            Some(freq) if archive.len() - last_image < freq => (),
+                            Some(_) => {
+                                let mut ibatch = BATCH_POOL.take();
+                                let ts = timest.timestamp();
+                                task::block_in_place(|| {
+                                    for (id, ev) in image.iter() {
+                                        ibatch.push(BatchItem(by_subid[id], ev.clone()));
+                                    }
+                                    archive.add_batch(true, ts, &ibatch)
+                                })?;
+                            }
                         }
-                        let tbatch = Arc::new(tbatch);
-                        task::block_in_place(|| archive.add_batch(false, ts, &*tbatch))?;
-                        let _ = bcast.send(BCastMsg::Batch(ts, tbatch));
                     }
                 }
             }
