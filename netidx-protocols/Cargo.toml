@@ -1,6 +1,6 @@
 [package]
 name = "netidx-protocols"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -15,7 +15,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx = { path = "../netidx", version = "0.5", default_features = false }
+netidx = { path = "../netidx", version = "0.6", default_features = false }
 serde = "1"
 serde_derive = "1"
 combine = "4"
