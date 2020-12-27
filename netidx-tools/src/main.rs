@@ -129,6 +129,18 @@ enum Sub {
             default_value = "1"
         )]
         poll_interval: u64,
+        #[structopt(
+            long = "flush-frequency",
+            help = "How often to flush changes in pages, 0 only on exit (8 pages)",
+            default_value = "8"
+        )]
+        flush_frequency: usize,
+        #[structopt(
+            long = "flush-interval",
+            help = "How often to flush changes (seconds), 0 disable (30)",
+            default_value = "30"
+        )]
+        flush_interval: u64,
         #[structopt(long = "archive", help = "path to the archive file")]
         archive: String,
         #[structopt(long = "spec", help = "glob pattern to archive, can be repeated")]
@@ -260,6 +272,8 @@ fn main() {
             publish_base,
             image_frequency,
             poll_interval,
+            flush_frequency,
+            flush_interval,
             archive,
             spec,
         } => {
@@ -272,6 +286,8 @@ fn main() {
                 auth,
                 image_frequency,
                 poll_interval,
+                flush_frequency,
+                flush_interval,
                 archive,
                 spec,
             )

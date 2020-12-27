@@ -25,7 +25,7 @@ use std::{
     fs::{File, OpenOptions},
     iter::IntoIterator,
     mem,
-    ops::{Bound, RangeBounds},
+    ops::{Bound, RangeBounds, Drop},
     path::Path as FilePath,
     str::FromStr,
     sync::{
@@ -653,6 +653,12 @@ pub struct ArchiveWriter {
     mmap: MmapMut,
 }
 
+impl Drop for ArchiveWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
 impl ArchiveWriter {
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
@@ -775,7 +781,6 @@ impl ArchiveWriter {
                 )?;
                 self.committed += hl + hr.record_length as usize;
             }
-            self.mmap.flush_async()?;
         }
         Ok(())
     }
@@ -889,6 +894,10 @@ impl ArchiveWriter {
 
     pub fn len(&self) -> usize {
         self.end.load(Ordering::Relaxed)
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 
     /// Create an archive reader from this writer by creating a

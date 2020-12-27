@@ -29,6 +29,7 @@ use uuid::{adapter::SimpleRef, Uuid};
 #[derive(Debug, Clone)]
 enum BCastMsg {
     Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),
+    Stop,
 }
 
 mod publish {
@@ -318,6 +319,7 @@ mod publish {
                         Ok(())
                     }
                 },
+                Ok(BCastMsg::Stop) => bail!("stop signal"),
             }
         }
 
@@ -557,41 +559,59 @@ mod publish {
                 .await?;
         let session_ctl =
             session_publisher.publish(publish_base.append("session"), Value::Null)?;
-        let (control_tx, mut control_rx) = mpsc::channel(3);
+        let (control_tx, control_rx) = mpsc::channel(3);
+        let mut control_rx = control_rx.fuse();
+        let mut bcast_rx = bcast.subscribe();
         session_ctl.writes(control_tx);
-        while let Some(mut batch) = control_rx.next().await {
-            for req in batch.drain(..) {
-                if req.id == session_ctl.id() {
-                    let publisher = Publisher::new(
-                        resolver.clone(),
-                        desired_auth.clone(),
-                        bind_cfg.clone(),
-                    )
-                    .await?;
-                    let bcast = bcast.subscribe();
-                    let archive = archive.clone();
-                    let publish_base = publish_base.clone();
-                    let session_id = Uuid::new_v4();
-                    let idstr = uuid_string(session_id);
-                    session_ctl.update_subscriber(&req.addr, idstr.clone().into());
-                    task::spawn(async move {
-                        let res =
-                            session(bcast, archive, publisher, publish_base, session_id)
-                                .await;
-                        match res {
-                            Ok(()) => {
-                                info!("session {} existed", idstr)
-                            }
-                            Err(e) => {
-                                warn!("session {} exited {}", idstr, e)
+        loop {
+            select_biased! {
+                m = bcast_rx.recv().fuse() => match m {
+                    Err(_) | Ok(BCastMsg::Batch(_, _)) => (),
+                    Ok(BCastMsg::Stop) => break Ok(()),
+                },
+                m = control_rx.next() => match m {
+                    None => break Ok(()),
+                    Some(mut batch) => {
+                        for req in batch.drain(..) {
+                            if req.id == session_ctl.id() {
+                                let publisher = Publisher::new(
+                                    resolver.clone(),
+                                    desired_auth.clone(),
+                                    bind_cfg.clone(),
+                                )
+                                    .await?;
+                                let bcast = bcast.subscribe();
+                                let archive = archive.clone();
+                                let publish_base = publish_base.clone();
+                                let session_id = Uuid::new_v4();
+                                let idstr = uuid_string(session_id);
+                                session_ctl
+                                    .update_subscriber(&req.addr, idstr.clone().into());
+                                task::spawn(async move {
+                                    let res =
+                                        session(
+                                            bcast,
+                                            archive,
+                                            publisher,
+                                            publish_base,
+                                            session_id
+                                        ).await;
+                                    match res {
+                                        Ok(()) => {
+                                            info!("session {} existed", idstr)
+                                        }
+                                        Err(e) => {
+                                            warn!("session {} exited {}", idstr, e)
+                                        }
+                                    }
+                                });
+                                session_publisher.flush(None).await;
                             }
                         }
-                    });
-                    session_publisher.flush(None).await;
-                }
+                    }
+                },
             }
         }
-        Ok(())
     }
 }
 
@@ -661,7 +681,7 @@ mod record {
         }
     }
 
-    async fn maybe_poll(poll: &mut Option<time::Interval>) {
+    async fn maybe_interval(poll: &mut Option<time::Interval>) {
         match poll {
             None => future::pending().await,
             Some(poll) => {
@@ -677,6 +697,8 @@ mod record {
         desired_auth: Auth,
         poll_interval: Option<time::Duration>,
         image_frequency: Option<usize>,
+        flush_frequency: Option<usize>,
+        flush_interval: Option<time::Duration>,
         spec: Vec<Glob>,
     ) -> Result<()> {
         let (tx_batch, rx_batch) = mpsc::channel(3);
@@ -690,17 +712,33 @@ mod record {
         let resolver = subscriber.resolver();
         let mut cts = CTS::new(&spec);
         let spec = GlobSet::new(true, spec)?;
+        let flush_frequency = flush_frequency.map(|f| archive.block_size() * f);
+        let mut bcast_rx = bcast.subscribe();
         let mut poll = poll_interval.map(time::interval);
+        let mut flush = flush_interval.map(time::interval);
         let mut to_add = Vec::new();
         let mut timest = MonotonicTimestamper::new();
-        let mut last_image;
+        let mut last_image = archive.len();
+        let mut last_flush = archive.len();
         let mut need_check = false;
         let mut need_list = false;
         loop {
             select_biased! {
-                _ = maybe_poll(&mut poll).fuse() => {
+                m = bcast_rx.recv().fuse() => match m {
+                    Err(_) | Ok(BCastMsg::Batch(_, _)) => (),
+                    Ok(BCastMsg::Stop) => break,
+                },
+                _ = maybe_interval(&mut poll).fuse() => {
                     need_check = true;
                 },
+                _ = maybe_interval(&mut flush).fuse() => {
+                    if archive.len() > last_flush {
+                        task::block_in_place(|| -> Result<()> {
+                            archive.flush()?;
+                            Ok(last_flush = archive.len())
+                        })?;
+                    }
+                }
                 r = maybe_check(need_check, &resolver, &mut cts).fuse() => {
                     need_check = false;
                     need_list = r?;
@@ -733,31 +771,38 @@ mod record {
                     Some(mut batch) => {
                         let mut tbatch = BATCH_POOL.take();
                         let ts = timest.timestamp();
-                        task::block_in_place(|| {
+                        task::block_in_place(|| -> Result<()> {
                             for (subid, ev) in batch.drain(..) {
                                 if image_frequency.is_some() {
                                     image.insert(subid, ev.clone());
                                 }
                                 tbatch.push(BatchItem(by_subid[&subid], ev));
                             }
-                            archive.add_batch(false, ts, &tbatch)
-                        })?;
-                        last_image = archive.len();
-                        let _ = bcast.send(BCastMsg::Batch(ts, Arc::new(tbatch)));
-                        match image_frequency {
-                            None => (),
-                            Some(freq) if archive.len() - last_image < freq => (),
-                            Some(_) => {
-                                let mut ibatch = BATCH_POOL.take();
-                                let ts = timest.timestamp();
-                                task::block_in_place(|| {
+                            archive.add_batch(false, ts, &tbatch)?;
+                            match image_frequency {
+                                None => (),
+                                Some(freq) if archive.len() - last_image < freq => (),
+                                Some(_) => {
+                                    let mut b = BATCH_POOL.take();
+                                    let ts = timest.timestamp();
                                     for (id, ev) in image.iter() {
-                                        ibatch.push(BatchItem(by_subid[id], ev.clone()));
+                                        b.push(BatchItem(by_subid[id], ev.clone()));
                                     }
-                                    archive.add_batch(true, ts, &ibatch)
-                                })?;
+                                    archive.add_batch(true, ts, &b)?;
+                                    last_image = archive.len();
+                                }
                             }
-                        }
+                            match flush_frequency {
+                                None => (),
+                                Some(freq) if archive.len() - last_flush < freq => (),
+                                Some(_) => {
+                                    archive.flush()?;
+                                    last_flush = archive.len();
+                                }
+                            }
+                            Ok(())
+                        })?;
+                        let _ = bcast.send(BCastMsg::Batch(ts, Arc::new(tbatch)));
                     }
                 }
             }
@@ -766,12 +811,32 @@ mod record {
     }
 }
 
+#[cfg(unix)]
+async fn should_exit() -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut quit = signal(SignalKind::quit())?;
+    let mut intr = signal(SignalKind::interrupt())?;
+    select_biased! {
+        _ = term.recv().fuse() => Ok(()),
+        _ = quit.recv().fuse() => Ok(()),
+        _ = intr.recv().fuse() => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+async fn should_exit() -> Result<()> {
+    Ok(signal::ctrl_c().await?)
+}
+
 async fn run_async(
     config: Config,
     publish_args: Option<(BindCfg, Path)>,
     auth: Auth,
     image_frequency: Option<usize>,
     poll_interval: Option<time::Duration>,
+    flush_frequency: Option<usize>,
+    flush_interval: Option<time::Duration>,
     archive: String,
     spec: Vec<Glob>,
 ) {
@@ -792,15 +857,9 @@ async fn run_async(
         let config = config.clone();
         let auth = auth.clone();
         wait.push(task::spawn(async move {
-            let res = publish::run(
-                bcast_tx,
-                reader,
-                config,
-                auth,
-                bind_cfg,
-                publish_base,
-            )
-            .await;
+            let res =
+                publish::run(bcast_tx, reader, config, auth, bind_cfg, publish_base)
+                    .await;
             match res {
                 Ok(()) => info!("archive publisher exited"),
                 Err(e) => warn!("archive publisher exited with error: {}", e),
@@ -808,6 +867,7 @@ async fn run_async(
         }));
     }
     if !spec.is_empty() {
+        let bcast_tx = bcast_tx.clone();
         wait.push(task::spawn(async move {
             let res = record::run(
                 bcast_tx,
@@ -816,15 +876,26 @@ async fn run_async(
                 auth,
                 poll_interval,
                 image_frequency,
-                spec
-            ).await;
+                flush_frequency,
+                flush_interval,
+                spec,
+            )
+            .await;
             match res {
                 Ok(()) => info!("archive writer exited"),
                 Err(e) => warn!("archive writer exited with error: {}", e),
             }
         }));
     }
-    future::join_all(wait).await;
+    let mut dead = future::join_all(wait).fuse();
+    loop {
+        select_biased! {
+            _ = should_exit().fuse() => {
+                let _ = bcast_tx.send(BCastMsg::Stop);
+            },
+            _ = dead => break
+        }
+    }
 }
 
 pub(crate) fn run(
@@ -835,6 +906,8 @@ pub(crate) fn run(
     auth: Auth,
     image_frequency: usize,
     poll_interval: u64,
+    flush_frequency: usize,
+    flush_interval: u64,
     archive: String,
     spec: Vec<String>,
 ) {
@@ -843,6 +916,12 @@ pub(crate) fn run(
         None
     } else {
         Some(time::Duration::from_secs(poll_interval))
+    };
+    let flush_frequency = if flush_frequency == 0 { None } else { Some(flush_frequency) };
+    let flush_interval = if flush_interval == 0 {
+        None
+    } else {
+        Some(time::Duration::from_secs(flush_interval))
     };
     let publish_args = match (bind, publish_base) {
         (None, None) => None,
@@ -867,6 +946,8 @@ pub(crate) fn run(
         auth,
         image_frequency,
         poll_interval,
+        flush_frequency,
+        flush_interval,
         archive,
         spec,
     ))
