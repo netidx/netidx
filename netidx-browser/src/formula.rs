@@ -118,7 +118,7 @@ impl Mean {
         if self.from.update(from, tgt, value) {
             for v in &*self.from.0.borrow() {
                 if let Some(v) = v {
-                    if let Some(v) = v.clone().cast_f64() {
+                    if let Ok(v) = v.clone().cast_to::<f64>() {
                         self.total.set(self.total.get() + v);
                         self.samples.set(self.samples.get() + 1);
                     }
