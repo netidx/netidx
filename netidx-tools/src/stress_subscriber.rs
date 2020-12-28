@@ -37,39 +37,36 @@ pub(crate) fn run(config: Config, auth: Auth) {
         let mut n: usize = 0;
         let mut batch_size: usize = 0;
         let mut nbatches: usize = 0;
-        let mut interval = time::interval(Duration::from_secs(1)).fuse();
+        let mut interval = time::interval(Duration::from_secs(1));
         loop {
             select_biased! {
-                now = interval.next() => match now {
-                    None => break,
-                    Some(now) => {
-                        let elapsed = now - last_stat;
-                        let since_start = now - start;
-                        let mut subscribed = 0;
-                        let mut unsubscribed = 0;
-                        for s in subs.iter() {
-                            match s.last() {
-                                Event::Unsubscribed => {
-                                    unsubscribed += 1;
-                                }
-                                Event::Update(_) => {
-                                    subscribed += 1;
-                                }
+                now = interval.tick().fuse() => {
+                    let elapsed = now - last_stat;
+                    let since_start = now - start;
+                    let mut subscribed = 0;
+                    let mut unsubscribed = 0;
+                    for s in subs.iter() {
+                        match s.last() {
+                            Event::Unsubscribed => {
+                                unsubscribed += 1;
+                            }
+                            Event::Update(_) => {
+                                subscribed += 1;
                             }
                         }
-                        println!(
-                            "sub: {} !sub: {} rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
-                            subscribed,
-                            unsubscribed,
-                            n as f64 / elapsed.as_secs_f64(),
-                            total as f64 / since_start.as_secs_f64(),
-                            batch_size as f64 / nbatches as f64
-                        );
-                        nbatches = 0;
-                        batch_size = 0;
-                        n = 0;
-                        last_stat = now;
                     }
+                    println!(
+                        "sub: {} !sub: {} rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
+                        subscribed,
+                        unsubscribed,
+                        n as f64 / elapsed.as_secs_f64(),
+                        total as f64 / since_start.as_secs_f64(),
+                        batch_size as f64 / nbatches as f64
+                    );
+                    nbatches = 0;
+                    batch_size = 0;
+                    n = 0;
+                    last_stat = now;
                 },
                 batch = vals.next() => match batch {
                     None => break,

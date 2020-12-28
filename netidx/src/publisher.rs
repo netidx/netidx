@@ -541,7 +541,7 @@ impl BindCfg {
 
 fn rand_port(current: u16) -> u16 {
     let mut rng = rand::thread_rng();
-    current + rng.gen_range(0u16, 10u16)
+    current + rng.gen_range(0u16..10u16)
 }
 
 /// Publish values and centrally flush queued updates. Publisher is
@@ -1167,7 +1167,7 @@ async fn client_loop(
     updates: Arc<SegQueue<ToClientMsg>>,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     addr: SocketAddr,
-    flushes: Receiver<Option<Duration>>,
+    mut flushes: Receiver<Option<Duration>>,
     s: TcpStream,
     desired_auth: Auth,
 ) -> Result<()> {
@@ -1178,8 +1178,7 @@ async fn client_loop(
         (Pooled<Vec<WriteRequest>>, fmpsc::Sender<Pooled<Vec<WriteRequest>>>),
         FxBuildHasher,
     > = HashMap::with_hasher(FxBuildHasher::default());
-    let mut flushes = flushes.fuse();
-    let mut hb = time::interval(HB).fuse();
+    let mut hb = time::interval(HB);
     let mut msg_sent = false;
     let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
     let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
@@ -1188,7 +1187,7 @@ async fn client_loop(
     hello_client(&t, &secrets, &mut con, &desired_auth).await?;
     loop {
         select_biased! {
-            _ = hb.next() => {
+            _ = hb.tick().fuse() => {
                 if !msg_sent {
                     con.queue_send(&publisher::v1::From::Heartbeat)?;
                     con.flush().await?;
@@ -1233,7 +1232,7 @@ async fn client_loop(
                     con.flush().await?
                 }
             },
-            to_cl = flushes.next() => match to_cl {
+            to_cl = flushes.recv().fuse() => match to_cl {
                 None => break Ok(()),
                 Some(timeout) => {
                     while let Some(m) = updates.pop() {

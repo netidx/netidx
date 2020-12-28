@@ -5,7 +5,6 @@ use crate::{
     os::{self, Krb5Ctx, Mapper, ServerCtx},
 };
 use anyhow::{anyhow, Result};
-use arc_swap::{ArcSwap, Guard};
 use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
@@ -33,7 +32,7 @@ impl SecStoreInner {
 #[derive(Clone)]
 pub(crate) struct SecStore {
     spn: Arc<String>,
-    pmap: ArcSwap<PMap>,
+    pmap: Arc<PMap>,
     pub(crate) store: Arc<RwLock<SecStoreInner>>,
 }
 
@@ -47,7 +46,7 @@ impl SecStore {
         let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
         Ok(SecStore {
             spn: Arc::new(spn),
-            pmap: ArcSwap::from(Arc::new(pmap)),
+            pmap: Arc::new(pmap),
             store: Arc::new(RwLock::new(SecStoreInner {
                 ctxts: HashMap::with_hasher(FxBuildHasher::default()),
                 userdb,
@@ -55,13 +54,8 @@ impl SecStore {
         })
     }
 
-    pub(crate) fn pmap(&self) -> Guard<'static, Arc<PMap>> {
-        self.pmap.load()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn update_pmap(&self, pmap: PMap) {
-        self.pmap.swap(Arc::new(pmap));
+    pub(crate) fn pmap(&self) -> &PMap {
+        &*self.pmap
     }
 
     pub(crate) fn get(&self, id: &SocketAddr) -> Option<ServerCtx> {

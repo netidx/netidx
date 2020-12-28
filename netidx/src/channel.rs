@@ -54,7 +54,7 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
         let mut padding = BytesMut::new();
         let mut trailer = BytesMut::new();
         let res = loop {
-            match rx.next().await {
+            match rx.recv().await {
                 None => break Ok(()),
                 Some(m) => match m {
                     ToFlush::SetCtx(c) => {
@@ -269,7 +269,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
 
     /// Read a load of bytes from the socket into the read buffer
     pub(crate) async fn fill_buffer(&mut self) -> Result<()> {
-        if let Some(chunk) = self.incoming.next().await {
+        if let Some(chunk) = self.incoming.recv().await {
             self.buf = chunk;
             Ok(())
         } else {
@@ -293,11 +293,11 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
             while self.buf.has_remaining() {
                 batch.push(T::decode(&mut self.buf)?);
             }
-            match self.incoming.try_recv() {
-                Ok(b) => {
+            match self.incoming.recv().now_or_never() {
+                Some(Some(b)) => {
                     self.buf = b;
                 }
-                Err(_) => break,
+                Some(None) | None => break,
             }
         }
         Ok(())

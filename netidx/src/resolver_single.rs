@@ -13,7 +13,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use futures::{future::select_ok, prelude::*, select_biased, stream::Fuse};
+use futures::{future::select_ok, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
@@ -86,7 +86,7 @@ async fn connect_read(
             bail!("can't connect to any resolver servers");
         }
         if n % addrs.len() == 0 && tries > 0 {
-            let wait = thread_rng().gen_range(1, 12);
+            let wait = thread_rng().gen_range(1..12);
             time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
@@ -146,7 +146,7 @@ async fn connection_read(
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
-        match receiver.next().await {
+        match receiver.recv().await {
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
@@ -155,7 +155,7 @@ async fn connection_read(
                         break;
                     }
                     if tries > 1 {
-                        let wait = thread_rng().gen_range(1, 12);
+                        let wait = thread_rng().gen_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await
                     }
                     tries += 1;
@@ -376,7 +376,7 @@ async fn connect_write(
 }
 
 async fn connection_write(
-    receiver: mpsc::Receiver<(
+    mut receiver: mpsc::Receiver<(
         Arc<Pooled<Vec<(usize, ToWrite)>>>,
         oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
     )>,
@@ -394,19 +394,18 @@ async fn connection_write(
     let linger = Duration::from_secs(TTL / 10);
     let now = Instant::now();
     let mut act = false;
-    let mut receiver = receiver.fuse();
-    let mut hb = time::interval_at(now + hb, hb).fuse();
-    let mut dc = time::interval_at(now + linger, linger).fuse();
-    fn set_ttl(ttl: u64, hb: &mut Fuse<Interval>, dc: &mut Fuse<Interval>) {
+    let mut hb = time::interval_at(now + hb, hb);
+    let mut dc = time::interval_at(now + linger, linger);
+    fn set_ttl(ttl: u64, hb: &mut Interval, dc: &mut Interval) {
         let linger = Duration::from_secs(max(1, ttl / 10));
         let heartbeat = Duration::from_secs(max(1, ttl / 2));
         let now = Instant::now();
-        *hb = time::interval_at(now + heartbeat, heartbeat).fuse();
-        *dc = time::interval_at(now + linger, linger).fuse();
+        *hb = time::interval_at(now + heartbeat, heartbeat);
+        *dc = time::interval_at(now + linger, linger);
     }
     'main: loop {
         select_biased! {
-            _ = dc.next() => {
+            _ = dc.tick().fuse() => {
                 if act {
                    act = false;
                 } else if con.is_some() {
@@ -414,7 +413,7 @@ async fn connection_write(
                     con = None;
                 }
             },
-            _ = hb.next() => {
+            _ = hb.tick().fuse() => {
                 if act {
                     act = false;
                 } else {
@@ -446,7 +445,7 @@ async fn connection_write(
                                             "write connection to {:?} failed {}",
                                             resolver_addr, e
                                         );
-                                        let wait = thread_rng().gen_range(1, 12);
+                                        let wait = thread_rng().gen_range(1..12);
                                         time::sleep(Duration::from_secs(wait)).await;
                                     }
                                 }
@@ -455,7 +454,7 @@ async fn connection_write(
                     }
                 }
             },
-            batch = receiver.next() => match batch {
+            batch = receiver.recv().fuse() => match batch {
                 None => break,
                 Some((tx_batch, reply)) => {
                     act = true;
@@ -467,7 +466,7 @@ async fn connection_write(
                             break 'batch;
                         }
                         if tries > 0 {
-                            let wait = thread_rng().gen_range(1, 12);
+                            let wait = thread_rng().gen_range(1..12);
                             time::sleep(Duration::from_secs(wait)).await;
                         }
                         tries += 1;
@@ -586,7 +585,7 @@ async fn write_mgr(
         }
         senders
     };
-    while let Some((batch, reply)) = receiver.next().await {
+    while let Some((batch, reply)) = receiver.recv().await {
         let tx_batch = Arc::new(batch);
         let mut waiters = Vec::new();
         {

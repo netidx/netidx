@@ -19,6 +19,7 @@
     over List, Table and especially ListMatching calls.
   - Reorganize the project so rust-analyzer will work on all the sub
     projects.
+  - Move to Tokio 1.0 and Bytes 1.0
 
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate

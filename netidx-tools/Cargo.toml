@@ -24,14 +24,15 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 futures = "0.3"
-tokio = { version = "0.3", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+async-stream = "0.3"
 serde = "1.0"
 netidx = { path = "../netidx", version = "0.6" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.6", default_features = false }
 chrono = { version = "0.4" }
 serde_json = "1.0"
 structopt = "0.3"
-bytes = "0.6"
+bytes = "1"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.8"

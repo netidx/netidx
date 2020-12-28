@@ -5,6 +5,7 @@ use crate::{
     config,
     os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
+    pool::{Pool, Pooled},
     protocol::{
         publisher,
         resolver::v1::{
@@ -13,7 +14,6 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
-    pool::{Pool, Pooled},
     secstore::SecStore,
     shard_resolver_store::Store,
     utils,
@@ -93,8 +93,7 @@ async fn client_loop_write(
     let mut rx_stop = rx_stop.fuse();
     let mut batch = WRITE_BATCHES.take();
     let mut act = false;
-    let mut timeout =
-        time::interval_at(Instant::now() + cfg.writer_ttl, cfg.writer_ttl).fuse();
+    let mut timeout = time::interval_at(Instant::now() + cfg.writer_ttl, cfg.writer_ttl);
     async fn receive_batch(
         con: &mut Option<Channel<ServerCtx>>,
         batch: &mut Vec<ToWrite>,
@@ -108,7 +107,7 @@ async fn client_loop_write(
         select_biased! {
             _ = server_stop => break Ok(()),
             _ = rx_stop => break Ok(()),
-            _ = timeout.next() => {
+            _ = timeout.tick().fuse() => {
                 if act {
                     act = false;
                 } else {
@@ -367,12 +366,11 @@ async fn client_loop_read(
     let mut batch = READ_BATCHES.take();
     let mut server_stop = server_stop.fuse();
     let mut act = false;
-    let mut timeout =
-        time::interval_at(Instant::now() + cfg.reader_ttl, cfg.reader_ttl).fuse();
+    let mut timeout = time::interval_at(Instant::now() + cfg.reader_ttl, cfg.reader_ttl);
     loop {
         select_biased! {
             _ = server_stop => break Ok(()),
-            _ = timeout.next() => {
+            _ = timeout.tick().fuse() => {
                 if act {
                     act = false;
                 } else {

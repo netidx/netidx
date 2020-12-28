@@ -76,18 +76,15 @@ impl Shard {
         secstore: Option<SecStore>,
         resolver: SocketAddr,
     ) -> Self {
-        let (read, read_rx) = unbounded_channel();
-        let (write, write_rx) = unbounded_channel();
-        let (internal, internal_rx) = unbounded_channel();
+        let (read, mut read_rx) = unbounded_channel();
+        let (write, mut write_rx) = unbounded_channel();
+        let (internal, mut internal_rx) = unbounded_channel();
         let t = Shard { read, write, internal };
         task::spawn(async move {
             let mut store = resolver_store::Store::new(parent, children);
-            let mut read_rx = read_rx.fuse();
-            let mut write_rx = write_rx.fuse();
-            let mut internal_rx = internal_rx.fuse();
             loop {
                 select! {
-                    batch = read_rx.next() => match batch {
+                    batch = read_rx.recv().fuse() => match batch {
                         None => break,
                         Some((req, reply)) => {
                             let r = Shard::process_read_batch(
@@ -100,7 +97,7 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    batch = write_rx.next() => match batch {
+                    batch = write_rx.recv().fuse() => match batch {
                         None => break,
                         Some((req, reply)) => {
                             let r = Shard::process_write_batch(
@@ -111,7 +108,7 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    addr = internal_rx.next() => match addr {
+                    addr = internal_rx.recv().fuse() => match addr {
                         None => break,
                         Some((addr, reply)) => {
                             let _ = reply.send(store.published_for_addr(&addr));

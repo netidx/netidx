@@ -121,7 +121,18 @@ impl Ctx {
             subscriber,
             subscriptions: HashMap::new(),
             requests: {
-                let stdin = BufReader::new(io::stdin()).lines().map_err(Error::from);
+                let stdin = Box::pin({
+                    let mut stdin = BufReader::new(io::stdin()).lines();
+                    async_stream::stream! {
+                        loop {
+                            match stdin.next_line().await {
+                                Ok(None) => break,
+                                Ok(Some(line)) => yield Ok(line),
+                                Err(e) => yield Err(Error::from(e)),
+                            }
+                        }
+                    }
+                });
                 Box::new(Batched::new(
                     stream::iter(paths)
                         .map(|mut p| {

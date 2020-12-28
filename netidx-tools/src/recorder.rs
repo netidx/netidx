@@ -106,7 +106,7 @@ mod publish {
         Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
         Limited {
             rate: f64,
-            next: time::Sleep,
+            next: time::Instant,
             current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
         },
     }
@@ -229,7 +229,6 @@ mod publish {
                     Speed::Limited { rate, next, current } => {
                         use std::time::Duration;
                         use tokio::time::Instant;
-                        let mut next = next;
                         if current.is_empty() {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
@@ -242,7 +241,7 @@ mod publish {
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        (&mut next).await;
+                        time::sleep_until(*next).await;
                         if current.is_empty() {
                             self.state = State::Tail;
                         } else {
@@ -250,7 +249,7 @@ mod publish {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
                                 (ms / *rate).trunc() as u64
                             };
-                            next.reset(Instant::now() + Duration::from_millis(wait));
+                            *next = Instant::now() + Duration::from_millis(wait);
                         }
                         Ok((ts, batch))
                     }
@@ -439,7 +438,7 @@ mod publish {
                 }
                 Speed::Limited { current, next, .. } => {
                     current.clear();
-                    next.reset(time::Instant::now());
+                    *next = time::Instant::now();
                 }
             }
             self.reimage()
@@ -449,7 +448,7 @@ mod publish {
             let current = match &mut self.speed {
                 Speed::Unlimited(v) => v,
                 Speed::Limited { current, next, .. } => {
-                    next.reset(time::Instant::now());
+                    *next = time::Instant::now();
                     current
                 }
             };
@@ -488,7 +487,7 @@ mod publish {
                         let v = mem::replace(v, Pooled::orphan(VecDeque::new()));
                         self.speed = Speed::Limited {
                             rate: new_rate,
-                            next: time::sleep(std::time::Duration::from_secs(0)),
+                            next: time::Instant::now(),
                             current: v,
                         };
                     }
@@ -519,10 +518,10 @@ mod publish {
         t.stop()?;
         let mut control_rx = control_rx.fuse();
         let mut idle = false;
-        let mut idle_check = time::interval(std::time::Duration::from_secs(30)).fuse();
+        let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         loop {
             select_biased! {
-                _ = idle_check.next() => {
+                _ = idle_check.tick().fuse() => {
                     let no_clients = publisher.clients() == 0;
                     if no_clients && idle {
                         break Ok(())

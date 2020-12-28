@@ -109,7 +109,8 @@ impl Pack for RecordHeader {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        Ok(buf.put_slice(&RecordHeader::pack(self)))
+        let hdr = RecordHeader::pack(self).map_err(|_| PackError::InvalidFormat)?;
+        Ok(buf.put(&hdr[..]))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {

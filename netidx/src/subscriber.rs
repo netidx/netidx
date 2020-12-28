@@ -1,4 +1,4 @@
-pub use crate::protocol::publisher::v1::{Typ, Value, FromValue};
+pub use crate::protocol::publisher::v1::{FromValue, Typ, Value};
 use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, ReadChannel, WriteChannel},
@@ -13,11 +13,11 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
-use bytes::{Bytes, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use futures::{
     channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     prelude::*,
-    select, select_biased,
+    select_biased,
 };
 use fxhash::FxBuildHasher;
 use log::{info, warn};
@@ -30,15 +30,15 @@ use std::{
     hash::Hash,
     iter, mem,
     net::SocketAddr,
+    result,
     sync::{Arc, Weak},
     time::Duration,
-    result,
 };
 use tokio::{
     net::TcpStream,
     sync::{mpsc::error::SendTimeoutError, oneshot},
     task,
-    time::{self, Instant, Sleep},
+    time::{self, Instant},
 };
 
 #[derive(Debug)]
@@ -108,7 +108,7 @@ impl Pack for Event {
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
-        if buf.bytes()[0] == 0x40 {
+        if buf.chunk()[0] == 0x40 {
             buf.advance(1);
             Ok(Event::Unsubscribed)
         } else {
@@ -359,7 +359,7 @@ enum SubStatus {
 
 fn pick(n: usize) -> usize {
     let mut rng = rand::thread_rng();
-    rng.gen_range(0, n)
+    rng.gen_range(0..n)
 }
 
 #[derive(Debug)]
@@ -413,13 +413,13 @@ impl Subscriber {
     }
 
     fn start_resub_task(&self, incoming: UnboundedReceiver<()>) {
-        async fn wait_retry(retry: &mut Option<Sleep>) {
+        async fn wait_retry(retry: Option<Instant>) {
             match retry {
                 None => future::pending().await,
-                Some(d) => d.await,
+                Some(d) => time::sleep_until(d).await,
             }
         }
-        fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Sleep>) {
+        fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Instant>) {
             *retry = subscriber
                 .durable_dead
                 .values()
@@ -435,9 +435,9 @@ impl Subscriber {
                         }
                     }
                 })
-                .map(|t| time::sleep_until(t + Duration::from_secs(1)));
+                .map(|t| t + Duration::from_secs(1));
         }
-        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Sleep>) {
+        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Instant>) {
             if let Some(subscriber) = subscriber.upgrade() {
                 info!("doing resubscriptions");
                 let now = Instant::now();
@@ -520,10 +520,10 @@ impl Subscriber {
         let subscriber = self.downgrade();
         task::spawn(async move {
             let mut incoming = Batched::new(incoming, 100_000);
-            let mut retry: Option<Sleep> = None;
+            let mut retry: Option<Instant> = None;
             loop {
-                select! {
-                    _ = wait_retry(&mut retry).fuse() => {
+                select_biased! {
+                    _ = wait_retry(retry).fuse() => {
                         do_resub(&subscriber, &mut retry).await;
                     },
                     m = incoming.next() => match m {
@@ -1110,13 +1110,13 @@ async fn connection(
     let mut pending_writes: HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut batches = decode_task(read_con, rx_stop);
-    let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD).fuse();
+    let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
     let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
         HashMap::new();
     let mut by_chan: ByChan = HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {
-            now = periodic.next() => if let Some(now) = now {
+            now = periodic.tick().fuse() => {
                 if !msg_recvd {
                     break 'main Err(anyhow!("hung publisher"));
                 } else {
