@@ -472,7 +472,7 @@ fn scan_records(
 ) -> Result<usize> {
     let total_size = buf.remaining();
     loop {
-        let pos = dbg!(start_pos + (total_size - buf.remaining()));
+        let pos = start_pos + (total_size - buf.remaining());
         if buf.remaining() < <RecordHeader as Pack>::const_encoded_len().unwrap() {
             if !uncommitted_ok {
                 warn!("file missing End marker");
@@ -1244,7 +1244,6 @@ mod test {
         let mut batch = t.read_deltas(&mut cursor, batches).unwrap();
         let now = Utc::now();
         for (ts, b) in batch.drain(..) {
-            dbg!(&b);
             let elapsed = (now - ts).num_seconds();
             assert!(elapsed <= 10 && elapsed >= -10);
             assert_eq!(Vec::len(&b), paths.len());
@@ -1313,10 +1312,11 @@ mod test {
             check_contents(&t, &paths, n);
         }
         {
-            // check that we can't open the archive twice
-            let t = ArchiveReader::open(&file).unwrap();
-            check_contents(&t, &paths, n);
-            assert!(ArchiveReader::open(&file).is_err());
+            // check that we can't open the archive twice for write
+            let t = ArchiveWriter::open(&file).unwrap();
+            let reader = t.reader().unwrap();
+            check_contents(&reader, &paths, n);
+            assert!(ArchiveWriter::open(&file).is_err());
         }
     }
 }
