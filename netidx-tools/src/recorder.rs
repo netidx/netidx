@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::Bytes;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
@@ -18,7 +19,7 @@ use netidx_protocols::archive::{
     Timestamp, BATCH_POOL,
 };
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
     sync::Arc,
@@ -84,7 +85,102 @@ mod publish {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    enum ClusterCmd {
+        SeekTo(String),
+        SetStart(Bound<DateTime<Utc>>),
+        SetEnd(Bound<DateTime<Utc>>),
+        SetSpeed(Option<f64>),
+        SetState(State),
+    }
+
+    struct Cluster {
+        ctrack: ChangeTracker,
+        subscriber: Subscriber,
+        our_path: Path,
+        id: Uuid,
+        us: Val,
+        others: HashMap<Path, Dval>,
+        cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    }
+
+    impl Cluster {
+        async fn new(
+            publisher: &Publisher,
+            subscriber: Subscriber,
+            data_base: Path,
+            shards: usize,
+        ) -> Result<Cluster> {
+            let (tx, cmd) = mpsc::channel(3);
+            let id = Uuid::new_v4();
+            let base = data_base.append("cluster");
+            let our_path = base.append(&uuid_string(id));
+            let us = publisher.publish(our_path.clone(), Value::Null)?;
+            let ctrack = ChangeTracker::new(base);
+            us.writes(tx);
+            publisher.flush(None).await;
+            let others = HashMap::new();
+            let mut t = Cluster { ctrack, subscriber, our_path, id, us, cmd, others };
+            while t.others.len() < shards
+                || t.others.values().any(|d| d.last() == Event::Unsubscribed)
+            {
+                info!("waiting for {} other shards", shards);
+                t.poll_members().await?;
+                time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Ok(t)
+        }
+
+        async fn poll_members(&mut self) -> Result<bool> {
+            if !self.subscriber.resolver().check_changed(&mut self.ctrack).await? {
+                Ok(false)
+            } else {
+                let path = self.ctrack.path().clone();
+                let mut l = self.subscriber.resolver().list(path).await?;
+                let all =
+                    l.drain(..).filter(|p| p != &self.our_path).collect::<HashSet<_>>();
+                self.others.retain(|p, _| all.contains(p));
+                for path in all {
+                    if !self.others.contains_key(&path) {
+                        let dv = self.subscriber.durable_subscribe(path.clone());
+                        self.others.insert(path, dv);
+                    }
+                }
+                Ok(true)
+            }
+        }
+
+        async fn wait_cmds(&mut self) -> Result<Vec<ClusterCmd>> {
+            match self.cmd.next().await {
+                None => bail!("cluster publish write stream ended"),
+                Some(mut reqs) => {
+                    let mut cmds = Vec::new();
+                    for req in reqs.drain(..) {
+                        if let Value::Bytes(b) = &req.value {
+                            if let Ok(cmd) = serde_json::from_slice::<ClusterCmd>(&**b) {
+                                cmds.push(cmd);
+                                continue;
+                            }
+                        }
+                        warn!("ignoring invalid cmd: {:?}", &req.value);
+                    }
+                    Ok(cmds)
+                }
+            }
+        }
+
+        fn send_cmd(&self, cmd: &ClusterCmd) {
+            if self.others.len() > 0 {
+                let cmd = serde_json::to_vec(cmd).unwrap();
+                let cmd = Value::Bytes(Bytes::from(cmd));
+                for other in self.others.values() {
+                    other.write(cmd.clone());
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
     enum State {
         Stop,
         Play,
@@ -119,6 +215,7 @@ mod publish {
         state: State,
         archive: ArchiveReader,
         data_base: Path,
+        cluster: Cluster,
         _start_doc: Val,
         start_ctl: Val,
         _end_doc: Val,
@@ -133,14 +230,18 @@ mod publish {
 
     impl T {
         async fn new(
+            subscriber: Subscriber,
             publisher: Publisher,
             archive: ArchiveReader,
             session_id: Uuid,
             publish_base: Path,
             control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+            shards: usize,
         ) -> Result<T> {
             let session_base = session_base(&publish_base, session_id);
             let data_base = session_base.append("data");
+            let cluster =
+                Cluster::new(&publisher, subscriber, data_base.clone(), shards).await?;
             let _start_doc = publisher.publish(
                 session_base.append("control/start/doc"),
                 Value::String(Chars::from(START_DOC)),
@@ -191,6 +292,7 @@ mod publish {
                 state: State::Stop,
                 archive,
                 data_base,
+                cluster,
                 _start_doc,
                 start_ctl,
                 _end_doc,
@@ -322,6 +424,34 @@ mod publish {
             }
         }
 
+        fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
+            self.start_ctl.update(bound_to_val(new_start));
+            self.cursor.set_start(new_start);
+            if self.cursor.current().is_none() {
+                self.stop()?;
+            }
+            Ok(())
+        }
+
+        fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
+            self.end_ctl.update(bound_to_val(new_end));
+            self.cursor.set_end(new_end);
+            if self.cursor.current().is_none() {
+                self.stop()?;
+            }
+            Ok(())
+        }
+
+        fn set_state(&mut self, state: State) {
+            self.state = state;
+            self.state_ctl.update(Value::from(match state {
+                State::Stop => "stop",
+                State::Play => "play",
+                State::Pause => "pause",
+                State::Tail => "tail",
+            }))
+        }
+
         async fn process_control_batch(
             &mut self,
             mut batch: Pooled<Vec<WriteRequest>>,
@@ -329,26 +459,22 @@ mod publish {
             for req in batch.drain(..) {
                 if req.id == self.start_ctl.id() {
                     if let Some(new_start) = get_bound(req) {
-                        self.start_ctl.update(bound_to_val(new_start));
-                        self.cursor.set_start(new_start);
-                        if self.cursor.current().is_none() {
-                            self.stop()?;
-                        }
+                        self.set_start(new_start)?;
+                        self.cluster.send_cmd(&ClusterCmd::SetStart(new_start));
                     }
                 } else if req.id == self.end_ctl.id() {
                     if let Some(new_end) = get_bound(req) {
-                        self.end_ctl.update(bound_to_val(new_end));
-                        self.cursor.set_end(new_end);
-                        if self.cursor.current().is_none() {
-                            self.stop()?;
-                        }
+                        self.set_end(new_end)?;
+                        self.cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
                     }
                 } else if req.id == self.speed_ctl.id() {
                     if let Ok(mp) = req.value.clone().cast_to::<f64>() {
                         self.set_speed(Some(mp));
+                        self.cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
                     } else if let Ok(s) = req.value.cast_to::<Chars>() {
                         if s.trim().to_lowercase().as_str() == "unlimited" {
                             self.set_speed(None);
+                            self.cluster.send_cmd(&ClusterCmd::SetSpeed(None));
                         } else if let Some(reply) = req.send_result {
                             let e = Chars::from("invalid speed");
                             reply.send(Value::Error(e));
@@ -368,11 +494,15 @@ mod publish {
                         Ok(s) => {
                             let s = s.trim().to_lowercase();
                             if s.as_str() == "play" {
-                                self.state = State::Play;
+                                self.set_state(State::Play);
+                                self.cluster.send_cmd(&ClusterCmd::SetState(State::Play));
                             } else if s.as_str() == "pause" {
-                                self.state = State::Pause;
+                                self.set_state(State::Pause);
+                                self.cluster
+                                    .send_cmd(&ClusterCmd::SetState(State::Pause));
                             } else if s.as_str() == "stop" {
-                                self.stop()?
+                                self.stop()?;
+                                self.cluster.send_cmd(&ClusterCmd::SetState(State::Stop));
                             } else if let Some(reply) = req.send_result {
                                 let e = format!("invalid command {}", s);
                                 let e = Chars::from(e);
@@ -382,7 +512,10 @@ mod publish {
                     }
                 } else if req.id == self.pos_ctl.id() {
                     match req.value.cast_to::<Seek>() {
-                        Ok(pos) => self.seek(pos)?,
+                        Ok(pos) => {
+                            self.seek(pos)?;
+                            self.cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
+                        }
                         Err(e) => {
                             if let Some(reply) = req.send_result {
                                 let e = Chars::from(format!("{}", e));
@@ -393,6 +526,22 @@ mod publish {
                 }
             }
             Ok(self.publisher.flush(None).await)
+        }
+
+        fn process_control_cmd(&mut self, cmd: ClusterCmd) -> Result<()> {
+            match cmd {
+                ClusterCmd::SeekTo(s) => match s.parse::<Seek>() {
+                    Ok(pos) => self.seek(pos),
+                    Err(e) => {
+                        warn!("invalid seek from cluster {}, {}", s, e);
+                        Ok(())
+                    }
+                },
+                ClusterCmd::SetStart(new_start) => self.set_start(new_start),
+                ClusterCmd::SetEnd(new_end) => self.set_end(new_end),
+                ClusterCmd::SetSpeed(sp) => self.set_speed(sp),
+                ClusterCmd::SetState(st) => self.set_state(st),
+            }
         }
 
         fn reimage(&mut self) -> Result<()> {
@@ -425,8 +574,7 @@ mod publish {
         }
 
         fn stop(&mut self) -> Result<()> {
-            self.state = State::Stop;
-            self.state_ctl.update(Value::String(Chars::from("Stop")));
+            self.set_state(State::Stop);
             self.cursor.reset();
             self.pos_ctl.update(match self.cursor.start() {
                 Bound::Unbounded => Value::Null,
@@ -466,7 +614,7 @@ mod publish {
         fn set_speed(&mut self, new_rate: Option<f64>) {
             match new_rate {
                 None => {
-                    self.speed_ctl.update(Value::String(Chars::from("Unlimited")));
+                    self.speed_ctl.update(Value::String(Chars::from("unlimited")));
                 }
                 Some(new_rate) => {
                     self.speed_ctl.update(Value::F64(new_rate));
@@ -507,14 +655,23 @@ mod publish {
     async fn session(
         mut bcast: broadcast::Receiver<BCastMsg>,
         archive: ArchiveReader,
+        subscriber: Subscriber,
         publisher: Publisher,
         publish_base: Path,
         session_id: Uuid,
+        shards: usize,
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
-        let mut t =
-            T::new(publisher.clone(), archive, session_id, publish_base, control_tx)
-                .await?;
+        let mut t = T::new(
+            subscriber,
+            publisher.clone(),
+            archive,
+            session_id,
+            publish_base,
+            control_tx,
+            shards,
+        )
+        .await?;
         t.stop()?;
         let mut control_rx = control_rx.fuse();
         let mut idle = false;
@@ -552,6 +709,7 @@ mod publish {
         desired_auth: Auth,
         bind_cfg: BindCfg,
         publish_base: Path,
+        shards: usize,
     ) -> Result<()> {
         let session_publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
@@ -836,6 +994,7 @@ async fn run_async(
     poll_interval: Option<time::Duration>,
     flush_frequency: Option<usize>,
     flush_interval: Option<time::Duration>,
+    shards: usize,
     archive: String,
     spec: Vec<Glob>,
 ) {
@@ -856,9 +1015,16 @@ async fn run_async(
         let config = config.clone();
         let auth = auth.clone();
         wait.push(task::spawn(async move {
-            let res =
-                publish::run(bcast_tx, reader, config, auth, bind_cfg, publish_base)
-                    .await;
+            let res = publish::run(
+                bcast_tx,
+                reader,
+                config,
+                auth,
+                bind_cfg,
+                publish_base,
+                shards,
+            )
+            .await;
             match res {
                 Ok(()) => info!("archive publisher exited"),
                 Err(e) => warn!("archive publisher exited with error: {}", e),
@@ -907,6 +1073,7 @@ pub(crate) fn run(
     poll_interval: u64,
     flush_frequency: usize,
     flush_interval: u64,
+    shards: usize,
     archive: String,
     spec: Vec<String>,
 ) {
@@ -947,6 +1114,7 @@ pub(crate) fn run(
         poll_interval,
         flush_frequency,
         flush_interval,
+        shards,
         archive,
         spec,
     ))

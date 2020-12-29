@@ -369,6 +369,10 @@ impl ChangeTracker {
             by_resolver: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[derive(Debug, Clone)]

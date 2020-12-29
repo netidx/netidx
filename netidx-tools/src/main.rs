@@ -3,6 +3,8 @@
 extern crate netidx;
 #[macro_use]
 extern crate anyhow;
+#[macro_use]
+extern crate serde_derive;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
@@ -141,6 +143,12 @@ enum Sub {
             default_value = "30"
         )]
         flush_interval: u64,
+        #[structopt(
+            long = "shards",
+            help = "how many other recorder shards to expect",
+            default_value = "0"
+        )]
+        shards: usize,
         #[structopt(long = "archive", help = "path to the archive file")]
         archive: String,
         #[structopt(long = "spec", help = "glob pattern to archive, can be repeated")]
@@ -274,6 +282,7 @@ fn main() {
             poll_interval,
             flush_frequency,
             flush_interval,
+            shards,
             archive,
             spec,
         } => {
@@ -288,6 +297,7 @@ fn main() {
                 poll_interval,
                 flush_frequency,
                 flush_interval,
+                shards,
                 archive,
                 spec,
             )
