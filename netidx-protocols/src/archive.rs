@@ -189,7 +189,7 @@ impl ToString for Seek {
             Seek::Absolute(dt) => dt.to_rfc3339(),
             Seek::BatchRelative(i) => i.to_string(),
             Seek::TimeRelative(d) => {
-                if d < chrono::Duration::zero() {
+                if d < &chrono::Duration::zero() {
                     format!("{}s", d.num_seconds())
                 } else {
                     format!("+{}s", d.num_seconds())

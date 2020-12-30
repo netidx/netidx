@@ -38,8 +38,7 @@ pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     ctrack: ChangeTracker,
     subscriber: Subscriber,
     our_path: Path,
-    id: Uuid,
-    us: Val,
+    _us: Val,
     others: HashMap<Path, Dval>,
     cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
 }
@@ -62,7 +61,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         publisher.flush(None).await;
         let others = HashMap::new();
         let t = PhantomData;
-        let mut t = Cluster { t, ctrack, subscriber, our_path, id, us, cmd, others };
+        let mut t = Cluster { t, ctrack, subscriber, our_path, _us: us, cmd, others };
         while t.others.len() < shards
             || t.others.values().any(|d| d.last() == Event::Unsubscribed)
         {
@@ -76,7 +75,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     /// Poll the resolvers to see if any new members have joined the
     /// cluster, return true if new members have potentially joined,
     /// false if no new members have joined.
-    async fn poll_members(&mut self) -> Result<bool> {
+    pub async fn poll_members(&mut self) -> Result<bool> {
         if !self.subscriber.resolver().check_changed(&mut self.ctrack).await? {
             Ok(false)
         } else {
@@ -95,7 +94,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     }
 
     /// Wait for some commands from other members of the cluster.
-    async fn wait_cmds(&mut self) -> Result<Vec<T>> {
+    pub async fn wait_cmds(&mut self) -> Result<Vec<T>> {
         match self.cmd.next().await {
             None => bail!("cluster publish write stream ended"),
             Some(mut reqs) => {
@@ -115,7 +114,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     }
 
     /// Send a command out to other members of the cluster.
-    fn send_cmd(&self, cmd: &T) {
+    pub fn send_cmd(&self, cmd: &T) {
         if self.others.len() > 0 {
             let cmd = serde_json::to_vec(cmd).unwrap();
             let cmd = Value::Bytes(Bytes::from(cmd));
