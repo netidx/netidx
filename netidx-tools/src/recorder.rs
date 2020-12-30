@@ -25,7 +25,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
-use uuid::{adapter::SimpleRef, Uuid};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
@@ -41,11 +41,6 @@ mod publish {
     static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is Unlimited";
     static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Pause, pause at the current position. Stop, reset playback to the initial state, unpublish everything, and wait. Default Stop.";
     static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhms] to step forward or back that amount of time, e.g. -1y step back 1 year.";
-
-    fn uuid_string(id: Uuid) -> String {
-        let mut buf = [0u8; SimpleRef::LENGTH];
-        id.to_simple_ref().encode_lower(&mut buf).into()
-    }
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
         let mut buf = [0u8; SimpleRef::LENGTH];
@@ -87,97 +82,13 @@ mod publish {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     enum ClusterCmd {
+        NotIdle,
         SeekTo(String),
         SetStart(Bound<DateTime<Utc>>),
         SetEnd(Bound<DateTime<Utc>>),
         SetSpeed(Option<f64>),
         SetState(State),
-    }
-
-    struct Cluster {
-        ctrack: ChangeTracker,
-        subscriber: Subscriber,
-        our_path: Path,
-        id: Uuid,
-        us: Val,
-        others: HashMap<Path, Dval>,
-        cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
-    }
-
-    impl Cluster {
-        async fn new(
-            publisher: &Publisher,
-            subscriber: Subscriber,
-            data_base: Path,
-            shards: usize,
-        ) -> Result<Cluster> {
-            let (tx, cmd) = mpsc::channel(3);
-            let id = Uuid::new_v4();
-            let base = data_base.append("cluster");
-            let our_path = base.append(&uuid_string(id));
-            let us = publisher.publish(our_path.clone(), Value::Null)?;
-            let ctrack = ChangeTracker::new(base);
-            us.writes(tx);
-            publisher.flush(None).await;
-            let others = HashMap::new();
-            let mut t = Cluster { ctrack, subscriber, our_path, id, us, cmd, others };
-            while t.others.len() < shards
-                || t.others.values().any(|d| d.last() == Event::Unsubscribed)
-            {
-                info!("waiting for {} other shards", shards);
-                t.poll_members().await?;
-                time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Ok(t)
-        }
-
-        async fn poll_members(&mut self) -> Result<bool> {
-            if !self.subscriber.resolver().check_changed(&mut self.ctrack).await? {
-                Ok(false)
-            } else {
-                let path = self.ctrack.path().clone();
-                let mut l = self.subscriber.resolver().list(path).await?;
-                let all =
-                    l.drain(..).filter(|p| p != &self.our_path).collect::<HashSet<_>>();
-                self.others.retain(|p, _| all.contains(p));
-                for path in all {
-                    if !self.others.contains_key(&path) {
-                        let dv = self.subscriber.durable_subscribe(path.clone());
-                        self.others.insert(path, dv);
-                    }
-                }
-                Ok(true)
-            }
-        }
-
-        async fn wait_cmds(&mut self) -> Result<Vec<ClusterCmd>> {
-            match self.cmd.next().await {
-                None => bail!("cluster publish write stream ended"),
-                Some(mut reqs) => {
-                    let mut cmds = Vec::new();
-                    for req in reqs.drain(..) {
-                        if let Value::Bytes(b) = &req.value {
-                            if let Ok(cmd) = serde_json::from_slice::<ClusterCmd>(&**b) {
-                                cmds.push(cmd);
-                                continue;
-                            }
-                        }
-                        warn!("ignoring invalid cmd: {:?}", &req.value);
-                    }
-                    Ok(cmds)
-                }
-            }
-        }
-
-        fn send_cmd(&self, cmd: &ClusterCmd) {
-            if self.others.len() > 0 {
-                let cmd = serde_json::to_vec(cmd).unwrap();
-                let cmd = Value::Bytes(Bytes::from(cmd));
-                for other in self.others.values() {
-                    other.write(cmd.clone());
-                }
-            }
-        }
+        NewSession(Uuid),
     }
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -208,6 +119,7 @@ mod publish {
     }
 
     struct T {
+        idle: bool,
         publisher: Publisher,
         published: HashMap<Id, Val>,
         cursor: Cursor,
@@ -285,6 +197,7 @@ mod publish {
             pos_ctl.writes(control_tx);
             publisher.flush(None).await;
             Ok(T {
+                idle: false,
                 publisher,
                 published: HashMap::new(),
                 cursor: Cursor::new(),
@@ -304,6 +217,10 @@ mod publish {
                 _pos_doc,
                 pos_ctl,
             })
+        }
+
+        fn others(&self) -> usize {
+            self.cluster.us.subscribed_len()
         }
 
         async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -541,6 +458,10 @@ mod publish {
                 ClusterCmd::SetEnd(new_end) => self.set_end(new_end),
                 ClusterCmd::SetSpeed(sp) => self.set_speed(sp),
                 ClusterCmd::SetState(st) => self.set_state(st),
+                ClusterCmd::NotIdle => t.idle = false,
+                ClusterCmd::NewSession(_) => {
+                    warn!("invalid cmd NewSession sent to session")
+                }
             }
         }
 
@@ -642,13 +563,10 @@ mod publish {
                 }
             }
         }
-    }
 
-    async fn wait_client_if_idle(publisher: &Publisher, idle: bool) {
-        if idle {
-            publisher.wait_any_client().await
-        } else {
-            future::pending().await
+        fn not_idle(&mut self) {
+            self.idle = false;
+            self.cluster.send_cmd(&ClusterCmd::NotIdle);
         }
     }
 
@@ -674,22 +592,32 @@ mod publish {
         .await?;
         t.stop()?;
         let mut control_rx = control_rx.fuse();
-        let mut idle = false;
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         loop {
             select_biased! {
                 _ = idle_check.tick().fuse() => {
-                    let no_clients = publisher.clients() == 0;
-                    if no_clients && idle {
+                    t.cluster.poll_members().await?;
+                    let has_clients = publisher.clients() > t.others();
+                    if !has_clients && t.idle {
                         break Ok(())
+                    } else if has_clients {
+                        t.not_idle()
                     } else {
-                        idle = no_clients;
+                        t.idle = true;
                     }
                 },
-                _ = wait_client_if_idle(&publisher, idle).fuse() => {
-                    idle = false;
+                _ = t.publisher.wait_any_new_client().fuse() => {
+                    if publisher.clients() > t.others() {
+                        t.not_idle()
+                    }
                 },
                 m = bcast.recv().fuse() => t.process_bcast(m).await?,
+                cmds = t.cluster.wait_cmds() => {
+                    for cmd in cmds? {
+                        t.process_cmd(m)
+                    }
+                    publisher.flush(None).await;
+                },
                 r = control_rx.next() => match r {
                     None => break Ok(()),
                     Some(batch) => t.process_control_batch(batch).await?
@@ -711,57 +639,75 @@ mod publish {
         publish_base: Path,
         shards: usize,
     ) -> Result<()> {
+        let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
         let session_publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
                 .await?;
         let session_ctl =
             session_publisher.publish(publish_base.append("session"), Value::Null)?;
         let (control_tx, control_rx) = mpsc::channel(3);
+        let mut cluster = Cluster::new(
+            &session_publisher,
+            subscriber.clone(),
+            publish_base.clone(),
+            shards,
+        )
+        .await?;
         let mut control_rx = control_rx.fuse();
         let mut bcast_rx = bcast.subscribe();
+        let mut poll_members = time::interval(std::time::Duration::from_secs(30));
         session_ctl.writes(control_tx);
+        let start_session = |session_id: Uuid| -> () {
+            let publisher =
+                Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
+                    .await?;
+            let bcast = bcast.subscribe();
+            let archive = archive.clone();
+            let publish_base = publish_base.clone();
+            let idstr = uuid_string(session_id);
+            let subscriber = subscriber.clone();
+            session_ctl.update_subscriber(&req.addr, idstr.clone().into());
+            task::spawn(async move {
+                let res = session(
+                    bcast,
+                    archive,
+                    subscriber,
+                    publisher,
+                    publish_base,
+                    session_id,
+                    shards
+                )
+                .await;
+                match res {
+                    Ok(()) => {
+                        info!("session {} existed", idstr)
+                    }
+                    Err(e) => {
+                        warn!("session {} exited {}", idstr, e)
+                    }
+                }
+            });
+        };
         loop {
             select_biased! {
                 m = bcast_rx.recv().fuse() => match m {
                     Err(_) | Ok(BCastMsg::Batch(_, _)) => (),
                     Ok(BCastMsg::Stop) => break Ok(()),
                 },
+                _ = poll_members.tick().fuse() => {
+                    cluster.poll_members().await?
+                },
+                cmds = cluster.wait_cmds().fuse() => {
+
+                },
                 m = control_rx.next() => match m {
                     None => break Ok(()),
                     Some(mut batch) => {
                         for req in batch.drain(..) {
                             if req.id == session_ctl.id() {
-                                let publisher = Publisher::new(
-                                    resolver.clone(),
-                                    desired_auth.clone(),
-                                    bind_cfg.clone(),
-                                )
-                                    .await?;
-                                let bcast = bcast.subscribe();
-                                let archive = archive.clone();
-                                let publish_base = publish_base.clone();
                                 let session_id = Uuid::new_v4();
-                                let idstr = uuid_string(session_id);
-                                session_ctl
-                                    .update_subscriber(&req.addr, idstr.clone().into());
-                                task::spawn(async move {
-                                    let res =
-                                        session(
-                                            bcast,
-                                            archive,
-                                            publisher,
-                                            publish_base,
-                                            session_id
-                                        ).await;
-                                    match res {
-                                        Ok(()) => {
-                                            info!("session {} existed", idstr)
-                                        }
-                                        Err(e) => {
-                                            warn!("session {} exited {}", idstr, e)
-                                        }
-                                    }
-                                });
+                                start_session(session_id);
+                                cluster.send_cmd(&ClusterCmd::NewSession(session_id));
                                 session_publisher.flush(None).await;
                             }
                         }

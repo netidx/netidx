@@ -16,8 +16,10 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = "1"
 netidx = { path = "../netidx", version = "0.6", default_features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
 serde = "1"
 serde_derive = "1"
+serde_json = "1"
 combine = "4"
 base64 = "0.13"
 bytes = "1"
@@ -31,3 +33,5 @@ log = "0.4"
 parking_lot = "0.11"
 indexmap = "1"
 diligent-date-parser = "0.1"
+futures = "0.3"
+uuid = { version = "0.8", features = ["v4"] }

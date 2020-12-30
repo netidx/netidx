@@ -273,6 +273,10 @@ impl Val {
     pub fn subscribed(&self) -> Vec<SocketAddr> {
         self.0.locked.lock().subscribed.keys().map(|a| a.0).collect()
     }
+
+    pub fn subscribed_len(&self) -> usize {
+        self.0.locked.lock().subscribed.len()
+    }
 }
 
 /// A weak reference to a published value.
@@ -810,6 +814,14 @@ impl Publisher {
             }
         };
         let _ = wait.await;
+    }
+
+    /// Wait for any new client to connect. This will always wait for
+    /// a new client, even if there are clients connected.
+    pub async fn wait_any_new_client(&self) {
+        let (tx, rx) = oneshot::channel();
+        self.0.lock().wait_any_client.push(tx);
+        let _ = rx.await;
     }
 
     /// Wait for at least one client to subscribe to the specified
