@@ -14,9 +14,12 @@ use netidx::{
     resolver::{Auth, ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber},
 };
-use netidx_protocols::archive::{
-    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper, Seek,
-    Timestamp, BATCH_POOL,
+use netidx_protocols::{
+    archive::{
+        ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper, Seek,
+        Timestamp, BATCH_POOL,
+    },
+    cluster::Cluster,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -25,7 +28,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
-use uuid::Uuid;
+use uuid::{adapter::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
@@ -88,7 +91,6 @@ mod publish {
         SetEnd(Bound<DateTime<Utc>>),
         SetSpeed(Option<f64>),
         SetState(State),
-        NewSession(Uuid),
     }
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -127,7 +129,7 @@ mod publish {
         state: State,
         archive: ArchiveReader,
         data_base: Path,
-        cluster: Cluster,
+        cluster: Cluster<ClusterCmd>,
         _start_doc: Val,
         start_ctl: Val,
         _end_doc: Val,
@@ -153,7 +155,8 @@ mod publish {
             let session_base = session_base(&publish_base, session_id);
             let data_base = session_base.append("data");
             let cluster =
-                Cluster::new(&publisher, subscriber, data_base.clone(), shards).await?;
+                Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
+                    .await?;
             let _start_doc = publisher.publish(
                 session_base.append("control/start/doc"),
                 Value::String(Chars::from(START_DOC)),
@@ -217,10 +220,6 @@ mod publish {
                 _pos_doc,
                 pos_ctl,
             })
-        }
-
-        fn others(&self) -> usize {
-            self.cluster.us.subscribed_len()
         }
 
         async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -456,12 +455,9 @@ mod publish {
                 },
                 ClusterCmd::SetStart(new_start) => self.set_start(new_start),
                 ClusterCmd::SetEnd(new_end) => self.set_end(new_end),
-                ClusterCmd::SetSpeed(sp) => self.set_speed(sp),
-                ClusterCmd::SetState(st) => self.set_state(st),
-                ClusterCmd::NotIdle => t.idle = false,
-                ClusterCmd::NewSession(_) => {
-                    warn!("invalid cmd NewSession sent to session")
-                }
+                ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(sp)),
+                ClusterCmd::SetState(st) => Ok(self.set_state(st)),
+                ClusterCmd::NotIdle => Ok(self.idle = false),
             }
         }
 
@@ -597,7 +593,7 @@ mod publish {
             select_biased! {
                 _ = idle_check.tick().fuse() => {
                     t.cluster.poll_members().await?;
-                    let has_clients = publisher.clients() > t.others();
+                    let has_clients = publisher.clients() > t.cluster.others();
                     if !has_clients && t.idle {
                         break Ok(())
                     } else if has_clients {
@@ -607,14 +603,14 @@ mod publish {
                     }
                 },
                 _ = t.publisher.wait_any_new_client().fuse() => {
-                    if publisher.clients() > t.others() {
+                    if publisher.clients() > t.cluster.others() {
                         t.not_idle()
                     }
                 },
                 m = bcast.recv().fuse() => t.process_bcast(m).await?,
-                cmds = t.cluster.wait_cmds() => {
+                cmds = t.cluster.wait_cmds().fuse() => {
                     for cmd in cmds? {
-                        t.process_cmd(m)
+                        t.process_control_cmd(cmd)?
                     }
                     publisher.flush(None).await;
                 },
@@ -675,7 +671,7 @@ mod publish {
                     publisher,
                     publish_base,
                     session_id,
-                    shards
+                    shards,
                 )
                 .await;
                 match res {

@@ -38,7 +38,7 @@ pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     ctrack: ChangeTracker,
     subscriber: Subscriber,
     our_path: Path,
-    _us: Val,
+    us: Val,
     others: HashMap<Path, Dval>,
     cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
 }
@@ -61,7 +61,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         publisher.flush(None).await;
         let others = HashMap::new();
         let t = PhantomData;
-        let mut t = Cluster { t, ctrack, subscriber, our_path, _us: us, cmd, others };
+        let mut t = Cluster { t, ctrack, subscriber, our_path, us, cmd, others };
         while t.others.len() < shards
             || t.others.values().any(|d| d.last() == Event::Unsubscribed)
         {
@@ -70,6 +70,10 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
             time::sleep(std::time::Duration::from_millis(50)).await;
         }
         Ok(t)
+    }
+
+    pub fn others(&self) -> usize {
+        self.us.subscribed_len()
     }
 
     /// Poll the resolvers to see if any new members have joined the
