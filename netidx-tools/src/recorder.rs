@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bytes::Bytes;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
@@ -19,10 +18,10 @@ use netidx_protocols::{
         ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper, Seek,
         Timestamp, BATCH_POOL,
     },
-    cluster::Cluster,
+    cluster::{uuid_string, Cluster},
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     mem,
     ops::Bound,
     sync::Arc,
@@ -197,75 +196,30 @@ mod publish {
     }
 
     struct T {
-        idle: bool,
         publisher: Publisher,
         published: HashMap<Id, Val>,
         cursor: Cursor,
         speed: Speed,
         state: State,
         archive: ArchiveReader,
-        session_base: Path,
         data_base: Path,
-        cluster: Cluster<ClusterCmd>,
-        controls: Option<Controls>,
-        control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     }
 
     impl T {
         async fn new(
-            subscriber: Subscriber,
             publisher: Publisher,
             archive: ArchiveReader,
-            session_id: Uuid,
-            publish_base: Path,
-            control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-            shards: usize,
+            data_base: Path,
         ) -> Result<T> {
-            let session_base = session_base(&publish_base, session_id);
-            let data_base = session_base.append("data");
-            let cluster =
-                Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
-                    .await?;
-            let controls = if cluster.primary() {
-                Some(Controls::new(&session_base, &publisher, &control_tx).await?)
-            } else {
-                None
-            };
             Ok(T {
-                idle: false,
                 publisher,
                 published: HashMap::new(),
                 cursor: Cursor::new(),
                 speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
                 state: State::Stop,
                 archive,
-                session_base,
                 data_base,
-                cluster,
-                controls,
-                control_tx,
             })
-        }
-
-        async fn update_cluster(&mut self) -> Result<()> {
-            self.cluster.poll_members().await?;
-            match self.controls {
-                None if self.cluster.primary() => {
-                    self.controls = Some(
-                        Controls::new(
-                            &self.session_base,
-                            &self.publisher,
-                            &self.control_tx,
-                        )
-                        .await?,
-                    );
-                }
-                Some(_) if !self.cluster.primary() => {
-                    self.controls = None;
-                }
-                Some(_) | None => ()
-            }
-            Ok(())
         }
 
         async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -323,6 +277,7 @@ mod publish {
 
         async fn process_batch(
             &mut self,
+            controls: Option<&Controls>,
             batch: (DateTime<Utc>, &mut Vec<BatchItem>),
         ) -> Result<()> {
             for BatchItem(id, ev) in batch.1.drain(..) {
@@ -342,12 +297,13 @@ mod publish {
                     }
                 }
             }
-            self.pos_ctl.update(Value::DateTime(batch.0));
+            controls.map(|c| c.pos_ctl.update(Value::DateTime(batch.0)));
             Ok(self.publisher.flush(None).await)
         }
 
         async fn process_bcast(
             &mut self,
+            controls: Option<&Controls>,
             msg: Result<BCastMsg, broadcast::error::RecvError>,
         ) -> Result<()> {
             match msg {
@@ -363,7 +319,7 @@ mod publish {
                             archive.read_deltas(cursor, missed as usize)
                         })?;
                         for (ts, mut batch) in batches.drain(..) {
-                            self.process_batch((ts, &mut *batch)).await?;
+                            self.process_batch(controls, (ts, &mut *batch)).await?;
                             self.cursor.set_current(ts);
                         }
                         Ok(())
@@ -376,7 +332,7 @@ mod publish {
                         let pos = self.cursor.current().unwrap_or(chrono::MIN_DATETIME);
                         if self.cursor.contains(&dt) && pos < dt {
                             let mut batch = (*batch).clone();
-                            self.process_batch((dt, &mut batch)).await?;
+                            self.process_batch(controls, (dt, &mut batch)).await?;
                             self.cursor.set_current(dt);
                         }
                         Ok(())
@@ -386,57 +342,69 @@ mod publish {
             }
         }
 
-        fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
-            self.start_ctl.update(bound_to_val(new_start));
+        fn set_start(
+            &mut self,
+            controls: Option<&Controls>,
+            new_start: Bound<DateTime<Utc>>,
+        ) -> Result<()> {
+            controls.map(|c| c.start_ctl.update(bound_to_val(new_start)));
             self.cursor.set_start(new_start);
             if self.cursor.current().is_none() {
-                self.stop()?;
+                self.stop(controls)?;
             }
             Ok(())
         }
 
-        fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
-            self.end_ctl.update(bound_to_val(new_end));
+        fn set_end(
+            &mut self,
+            controls: Option<&Controls>,
+            new_end: Bound<DateTime<Utc>>,
+        ) -> Result<()> {
+            controls.map(|c| c.end_ctl.update(bound_to_val(new_end)));
             self.cursor.set_end(new_end);
             if self.cursor.current().is_none() {
-                self.stop()?;
+                self.stop(controls)?;
             }
             Ok(())
         }
 
-        fn set_state(&mut self, state: State) {
+        fn set_state(&mut self, controls: Option<&Controls>, state: State) {
             self.state = state;
-            self.state_ctl.update(Value::from(match state {
-                State::Stop => "stop",
-                State::Play => "play",
-                State::Pause => "pause",
-                State::Tail => "tail",
-            }))
+            controls.map(|c| {
+                c.state_ctl.update(Value::from(match state {
+                    State::Stop => "stop",
+                    State::Play => "play",
+                    State::Pause => "pause",
+                    State::Tail => "tail",
+                }))
+            });
         }
 
         async fn process_control_batch(
             &mut self,
+            controls: &Controls,
+            cluster: &Cluster<ClusterCmd>,
             mut batch: Pooled<Vec<WriteRequest>>,
         ) -> Result<()> {
             for req in batch.drain(..) {
-                if req.id == self.start_ctl.id() {
+                if req.id == controls.start_ctl.id() {
                     if let Some(new_start) = get_bound(req) {
-                        self.set_start(new_start)?;
-                        self.cluster.send_cmd(&ClusterCmd::SetStart(new_start));
+                        self.set_start(Some(controls), new_start)?;
+                        cluster.send_cmd(&ClusterCmd::SetStart(new_start));
                     }
-                } else if req.id == self.end_ctl.id() {
+                } else if req.id == controls.end_ctl.id() {
                     if let Some(new_end) = get_bound(req) {
-                        self.set_end(new_end)?;
-                        self.cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
+                        self.set_end(Some(controls), new_end)?;
+                        cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
                     }
-                } else if req.id == self.speed_ctl.id() {
+                } else if req.id == controls.speed_ctl.id() {
                     if let Ok(mp) = req.value.clone().cast_to::<f64>() {
-                        self.set_speed(Some(mp));
-                        self.cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
+                        self.set_speed(Some(controls), Some(mp));
+                        cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
                     } else if let Ok(s) = req.value.cast_to::<Chars>() {
                         if s.trim().to_lowercase().as_str() == "unlimited" {
-                            self.set_speed(None);
-                            self.cluster.send_cmd(&ClusterCmd::SetSpeed(None));
+                            self.set_speed(Some(controls), None);
+                            cluster.send_cmd(&ClusterCmd::SetSpeed(None));
                         } else if let Some(reply) = req.send_result {
                             let e = Chars::from("invalid speed");
                             reply.send(Value::Error(e));
@@ -445,7 +413,7 @@ mod publish {
                         let e = Chars::from("invalid speed");
                         reply.send(Value::Error(e));
                     }
-                } else if req.id == self.state_ctl.id() {
+                } else if req.id == controls.state_ctl.id() {
                     match req.value.cast_to::<Chars>() {
                         Err(_) => {
                             if let Some(reply) = req.send_result {
@@ -456,15 +424,14 @@ mod publish {
                         Ok(s) => {
                             let s = s.trim().to_lowercase();
                             if s.as_str() == "play" {
-                                self.set_state(State::Play);
-                                self.cluster.send_cmd(&ClusterCmd::SetState(State::Play));
+                                self.set_state(Some(controls), State::Play);
+                                cluster.send_cmd(&ClusterCmd::SetState(State::Play));
                             } else if s.as_str() == "pause" {
-                                self.set_state(State::Pause);
-                                self.cluster
-                                    .send_cmd(&ClusterCmd::SetState(State::Pause));
+                                self.set_state(Some(controls), State::Pause);
+                                cluster.send_cmd(&ClusterCmd::SetState(State::Pause));
                             } else if s.as_str() == "stop" {
-                                self.stop()?;
-                                self.cluster.send_cmd(&ClusterCmd::SetState(State::Stop));
+                                self.stop(Some(controls))?;
+                                cluster.send_cmd(&ClusterCmd::SetState(State::Stop));
                             } else if let Some(reply) = req.send_result {
                                 let e = format!("invalid command {}", s);
                                 let e = Chars::from(e);
@@ -472,11 +439,11 @@ mod publish {
                             }
                         }
                     }
-                } else if req.id == self.pos_ctl.id() {
+                } else if req.id == controls.pos_ctl.id() {
                     match req.value.cast_to::<Seek>() {
                         Ok(pos) => {
-                            self.seek(pos)?;
-                            self.cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
+                            self.seek(Some(controls), pos)?;
+                            cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
                         }
                         Err(e) => {
                             if let Some(reply) = req.send_result {
@@ -493,29 +460,31 @@ mod publish {
         fn process_control_cmd(&mut self, cmd: ClusterCmd) -> Result<()> {
             match cmd {
                 ClusterCmd::SeekTo(s) => match s.parse::<Seek>() {
-                    Ok(pos) => self.seek(pos),
+                    Ok(pos) => self.seek(None, pos),
                     Err(e) => {
                         warn!("invalid seek from cluster {}, {}", s, e);
                         Ok(())
                     }
                 },
-                ClusterCmd::SetStart(new_start) => self.set_start(new_start),
-                ClusterCmd::SetEnd(new_end) => self.set_end(new_end),
-                ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(sp)),
-                ClusterCmd::SetState(st) => Ok(self.set_state(st)),
-                ClusterCmd::NotIdle => Ok(self.idle = false),
+                ClusterCmd::SetStart(new_start) => self.set_start(None, new_start),
+                ClusterCmd::SetEnd(new_end) => self.set_end(None, new_end),
+                ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(None, sp)),
+                ClusterCmd::SetState(st) => Ok(self.set_state(None, st)),
+                ClusterCmd::NotIdle => Ok(()),
             }
         }
 
-        fn reimage(&mut self) -> Result<()> {
+        fn reimage(&mut self, controls: Option<&Controls>) -> Result<()> {
             let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
-            self.pos_ctl.update(match self.cursor.current() {
-                Some(ts) => Value::DateTime(ts),
-                None => match self.cursor.start() {
-                    Bound::Unbounded => Value::Null,
-                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
-                },
+            controls.map(|c| {
+                c.pos_ctl.update(match self.cursor.current() {
+                    Some(ts) => Value::DateTime(ts),
+                    None => match self.cursor.start() {
+                        Bound::Unbounded => Value::Null,
+                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                    },
+                })
             });
             for (id, path) in idx.drain(..) {
                 let v = match img.get(&id) {
@@ -536,12 +505,14 @@ mod publish {
             Ok(())
         }
 
-        fn stop(&mut self) -> Result<()> {
-            self.set_state(State::Stop);
+        fn stop(&mut self, controls: Option<&Controls>) -> Result<()> {
+            self.set_state(controls, State::Stop);
             self.cursor.reset();
-            self.pos_ctl.update(match self.cursor.start() {
-                Bound::Unbounded => Value::Null,
-                Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+            controls.map(|c| {
+                c.pos_ctl.update(match self.cursor.start() {
+                    Bound::Unbounded => Value::Null,
+                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                })
             });
             match &mut self.speed {
                 Speed::Unlimited(v) => {
@@ -552,10 +523,10 @@ mod publish {
                     *next = time::Instant::now();
                 }
             }
-            self.reimage()
+            self.reimage(controls)
         }
 
-        fn seek(&mut self, seek: Seek) -> Result<()> {
+        fn seek(&mut self, controls: Option<&Controls>, seek: Seek) -> Result<()> {
             let current = match &mut self.speed {
                 Speed::Unlimited(v) => v,
                 Speed::Limited { current, next, .. } => {
@@ -571,18 +542,18 @@ mod publish {
                 }
             }
             self.archive.seek(&mut self.cursor, seek);
-            self.reimage()
+            self.reimage(controls)
         }
 
-        fn set_speed(&mut self, new_rate: Option<f64>) {
-            match new_rate {
+        fn set_speed(&mut self, controls: Option<&Controls>, new_rate: Option<f64>) {
+            controls.map(|c| match new_rate {
                 None => {
-                    self.speed_ctl.update(Value::String(Chars::from("unlimited")));
+                    c.speed_ctl.update(Value::String(Chars::from("unlimited")));
                 }
                 Some(new_rate) => {
-                    self.speed_ctl.update(Value::F64(new_rate));
+                    c.speed_ctl.update(Value::F64(new_rate));
                 }
-            }
+            });
             match &mut self.speed {
                 Speed::Limited { rate, current, .. } => match new_rate {
                     Some(new_rate) => {
@@ -605,11 +576,32 @@ mod publish {
                 }
             }
         }
+    }
 
-        fn not_idle(&mut self) {
-            self.idle = false;
-            self.cluster.send_cmd(&ClusterCmd::NotIdle);
+    async fn update_cluster(
+        cluster: &mut Cluster<ClusterCmd>,
+        controls: &mut Option<Controls>,
+        session_base: &Path,
+        publisher: &Publisher,
+        control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    ) -> Result<()> {
+        cluster.poll_members().await?;
+        match controls {
+            None if cluster.primary() => {
+                *controls =
+                    Some(Controls::new(&session_base, &publisher, &control_tx).await?);
+            }
+            Some(_) if !cluster.primary() => {
+                *controls = None;
+            }
+            Some(_) | None => (),
         }
+        Ok(())
+    }
+
+    fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
+        *idle = false;
+        cluster.send_cmd(&ClusterCmd::NotIdle);
     }
 
     async fn session(
@@ -622,39 +614,47 @@ mod publish {
         shards: usize,
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
-        let mut t = T::new(
-            subscriber,
-            publisher.clone(),
-            archive,
-            session_id,
-            publish_base,
-            control_tx,
-            shards,
-        )
-        .await?;
-        t.stop()?;
+        let session_base = session_base(&publish_base, session_id);
+        let data_base = session_base.append("data");
+        let mut cluster =
+            Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
+                .await?;
+        let mut controls = if cluster.primary() {
+            Some(Controls::new(&session_base, &publisher, &control_tx).await?)
+        } else {
+            None
+        };
+        let mut t = T::new(publisher.clone(), archive, data_base).await?;
+        t.stop(controls.as_ref())?;
         let mut control_rx = control_rx.fuse();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
+        let mut idle = false;
         loop {
             select_biased! {
                 _ = idle_check.tick().fuse() => {
-                    t.update_cluster().await?;
-                    let has_clients = publisher.clients() > t.cluster.others();
-                    if !has_clients && t.idle {
+                    update_cluster(
+                        &mut cluster,
+                        &mut controls,
+                        &session_base,
+                        &publisher,
+                        &control_tx
+                    ).await?;
+                    let has_clients = publisher.clients() > cluster.others();
+                    if !has_clients && idle {
                         break Ok(())
                     } else if has_clients {
-                        t.not_idle()
+                        not_idle(&mut idle, &cluster)
                     } else {
-                        t.idle = true;
+                        idle = true;
                     }
                 },
-                _ = t.publisher.wait_any_new_client().fuse() => {
-                    if publisher.clients() > t.cluster.others() {
-                        t.not_idle()
+                _ = publisher.wait_any_new_client().fuse() => {
+                    if publisher.clients() > cluster.others() {
+                        not_idle(&mut idle, &cluster)
                     }
                 },
-                m = bcast.recv().fuse() => t.process_bcast(m).await?,
-                cmds = t.cluster.wait_cmds().fuse() => {
+                m = bcast.recv().fuse() => t.process_bcast(controls.as_ref(), m).await?,
+                cmds = cluster.wait_cmds().fuse() => {
                     for cmd in cmds? {
                         t.process_control_cmd(cmd)?
                     }
@@ -662,14 +662,59 @@ mod publish {
                 },
                 r = control_rx.next() => match r {
                     None => break Ok(()),
-                    Some(batch) => t.process_control_batch(batch).await?
+                    Some(batch) => if let Some(ref controls) = controls {
+                        t.process_control_batch(controls, &cluster, batch).await?
+                    }
                 },
                 r = t.next().fuse() => match r {
                     Err(e) => break Err(e),
-                    Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
+                    Ok((ts, mut batch)) => {
+                        t.process_batch(controls.as_ref(), (ts, &mut *batch)).await?;
+                    }
                 }
             }
         }
+    }
+
+    async fn start_session(
+        session_id: Uuid,
+        bcast: &broadcast::Sender<BCastMsg>,
+        resolver: &Config,
+        desired_auth: &Auth,
+        bind_cfg: &BindCfg,
+        subscriber: &Subscriber,
+        archive: &ArchiveReader,
+        shards: usize,
+        publish_base: &Path,
+    ) -> Result<()> {
+        let publisher =
+            Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
+                .await?;
+        let bcast = bcast.subscribe();
+        let archive = archive.clone();
+        let publish_base = publish_base.clone();
+        let subscriber = subscriber.clone();
+        task::spawn(async move {
+            let res = session(
+                bcast,
+                archive,
+                subscriber,
+                publisher,
+                publish_base,
+                session_id,
+                shards,
+            )
+            .await;
+            match res {
+                Ok(()) => {
+                    info!("session {} existed", session_id)
+                }
+                Err(e) => {
+                    warn!("session {} exited {}", session_id, e)
+                }
+            }
+        });
+        Ok(())
     }
 
     pub(super) async fn run(
@@ -688,7 +733,7 @@ mod publish {
         let session_ctl =
             session_publisher.publish(publish_base.append("session"), Value::Null)?;
         let (control_tx, control_rx) = mpsc::channel(3);
-        let mut cluster = Cluster::new(
+        let mut cluster = Cluster::<Uuid>::new(
             &session_publisher,
             subscriber.clone(),
             publish_base.clone(),
@@ -699,37 +744,6 @@ mod publish {
         let mut bcast_rx = bcast.subscribe();
         let mut poll_members = time::interval(std::time::Duration::from_secs(30));
         session_ctl.writes(control_tx);
-        let start_session = |session_id: Uuid| -> () {
-            let publisher =
-                Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
-                    .await?;
-            let bcast = bcast.subscribe();
-            let archive = archive.clone();
-            let publish_base = publish_base.clone();
-            let idstr = uuid_string(session_id);
-            let subscriber = subscriber.clone();
-            session_ctl.update_subscriber(&req.addr, idstr.clone().into());
-            task::spawn(async move {
-                let res = session(
-                    bcast,
-                    archive,
-                    subscriber,
-                    publisher,
-                    publish_base,
-                    session_id,
-                    shards,
-                )
-                .await;
-                match res {
-                    Ok(()) => {
-                        info!("session {} existed", idstr)
-                    }
-                    Err(e) => {
-                        warn!("session {} exited {}", idstr, e)
-                    }
-                }
-            });
-        };
         loop {
             select_biased! {
                 m = bcast_rx.recv().fuse() => match m {
@@ -737,10 +751,22 @@ mod publish {
                     Ok(BCastMsg::Stop) => break Ok(()),
                 },
                 _ = poll_members.tick().fuse() => {
-                    cluster.poll_members().await?
+                    cluster.poll_members().await?;
                 },
                 cmds = cluster.wait_cmds().fuse() => {
-
+                    for session_id in cmds? {
+                        start_session(
+                            session_id,
+                            &bcast,
+                            &resolver,
+                            &desired_auth,
+                            &bind_cfg,
+                            &subscriber,
+                            &archive,
+                            shards,
+                            &publish_base
+                        ).await?
+                    }
                 },
                 m = control_rx.next() => match m {
                     None => break Ok(()),
@@ -748,8 +774,22 @@ mod publish {
                         for req in batch.drain(..) {
                             if req.id == session_ctl.id() {
                                 let session_id = Uuid::new_v4();
-                                start_session(session_id);
-                                cluster.send_cmd(&ClusterCmd::NewSession(session_id));
+                                start_session(
+                                    session_id,
+                                    &bcast,
+                                    &resolver,
+                                    &desired_auth,
+                                    &bind_cfg,
+                                    &subscriber,
+                                    &archive,
+                                    shards,
+                                    &publish_base,
+                                ).await?;
+                                cluster.send_cmd(&session_id);
+                                session_ctl.update_subscriber(
+                                    &req.addr,
+                                    uuid_string(session_id).into()
+                                );
                                 session_publisher.flush(None).await;
                             }
                         }

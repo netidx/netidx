@@ -1427,6 +1427,12 @@ impl convert::From<String> for Value {
     }
 }
 
+impl convert::From<&'static str> for Value {
+    fn from(v: &'static str) -> Value {
+        Value::String(Chars::from(v))
+    }
+}
+
 impl FromValue for DateTime<Utc> {
     type Error = CantCast;
 
