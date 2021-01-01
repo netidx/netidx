@@ -120,16 +120,7 @@ mod publish {
         },
     }
 
-    struct T {
-        idle: bool,
-        publisher: Publisher,
-        published: HashMap<Id, Val>,
-        cursor: Cursor,
-        speed: Speed,
-        state: State,
-        archive: ArchiveReader,
-        data_base: Path,
-        cluster: Cluster<ClusterCmd>,
+    struct Controls {
         _start_doc: Val,
         start_ctl: Val,
         _end_doc: Val,
@@ -142,21 +133,12 @@ mod publish {
         pos_ctl: Val,
     }
 
-    impl T {
+    impl Controls {
         async fn new(
-            subscriber: Subscriber,
-            publisher: Publisher,
-            archive: ArchiveReader,
-            session_id: Uuid,
-            publish_base: Path,
-            control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-            shards: usize,
-        ) -> Result<T> {
-            let session_base = session_base(&publish_base, session_id);
-            let data_base = session_base.append("data");
-            let cluster =
-                Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
-                    .await?;
+            session_base: &Path,
+            publisher: &Publisher,
+            control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+        ) -> Result<Self> {
             let _start_doc = publisher.publish(
                 session_base.append("control/start/doc"),
                 Value::String(Chars::from(START_DOC)),
@@ -197,18 +179,9 @@ mod publish {
             state_ctl.writes(control_tx.clone());
             let pos_ctl = publisher
                 .publish(session_base.append("control/pos/current"), Value::Null)?;
-            pos_ctl.writes(control_tx);
+            pos_ctl.writes(control_tx.clone());
             publisher.flush(None).await;
-            Ok(T {
-                idle: false,
-                publisher,
-                published: HashMap::new(),
-                cursor: Cursor::new(),
-                speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
-                state: State::Stop,
-                archive,
-                data_base,
-                cluster,
+            Ok(Controls {
                 _start_doc,
                 start_ctl,
                 _end_doc,
@@ -220,6 +193,79 @@ mod publish {
                 _pos_doc,
                 pos_ctl,
             })
+        }
+    }
+
+    struct T {
+        idle: bool,
+        publisher: Publisher,
+        published: HashMap<Id, Val>,
+        cursor: Cursor,
+        speed: Speed,
+        state: State,
+        archive: ArchiveReader,
+        session_base: Path,
+        data_base: Path,
+        cluster: Cluster<ClusterCmd>,
+        controls: Option<Controls>,
+        control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    }
+
+    impl T {
+        async fn new(
+            subscriber: Subscriber,
+            publisher: Publisher,
+            archive: ArchiveReader,
+            session_id: Uuid,
+            publish_base: Path,
+            control_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+            shards: usize,
+        ) -> Result<T> {
+            let session_base = session_base(&publish_base, session_id);
+            let data_base = session_base.append("data");
+            let cluster =
+                Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
+                    .await?;
+            let controls = if cluster.primary() {
+                Some(Controls::new(&session_base, &publisher, &control_tx).await?)
+            } else {
+                None
+            };
+            Ok(T {
+                idle: false,
+                publisher,
+                published: HashMap::new(),
+                cursor: Cursor::new(),
+                speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
+                state: State::Stop,
+                archive,
+                session_base,
+                data_base,
+                cluster,
+                controls,
+                control_tx,
+            })
+        }
+
+        async fn update_cluster(&mut self) -> Result<()> {
+            self.cluster.poll_members().await?;
+            match self.controls {
+                None if self.cluster.primary() => {
+                    self.controls = Some(
+                        Controls::new(
+                            &self.session_base,
+                            &self.publisher,
+                            &self.control_tx,
+                        )
+                        .await?,
+                    );
+                }
+                Some(_) if !self.cluster.primary() => {
+                    self.controls = None;
+                }
+                Some(_) | None => ()
+            }
+            Ok(())
         }
 
         async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -592,7 +638,7 @@ mod publish {
         loop {
             select_biased! {
                 _ = idle_check.tick().fuse() => {
-                    t.cluster.poll_members().await?;
+                    t.update_cluster().await?;
                     let has_clients = publisher.clients() > t.cluster.others();
                     if !has_clients && t.idle {
                         break Ok(())

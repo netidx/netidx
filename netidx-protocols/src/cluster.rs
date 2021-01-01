@@ -12,6 +12,7 @@ use netidx::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    iter,
     marker::PhantomData,
 };
 use tokio::time;
@@ -33,6 +34,11 @@ pub fn uuid_string(id: Uuid) -> String {
 ///
 /// Messages are encoded to json, so don't expect fantastic
 /// performance.
+///
+/// A random cluster member is elected 'primary' by an common
+/// algorithm, the primary may change as members join and leave the
+/// cluster, but with a stable member set all members will agree on
+/// which one is the primary.
 pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     t: PhantomData<T>,
     ctrack: ChangeTracker,
@@ -41,6 +47,7 @@ pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     us: Val,
     others: HashMap<Path, Dval>,
     cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    primary: bool,
 }
 
 impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
@@ -61,7 +68,8 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         publisher.flush(None).await;
         let others = HashMap::new();
         let t = PhantomData;
-        let mut t = Cluster { t, ctrack, subscriber, our_path, us, cmd, others };
+        let mut t =
+            Cluster { t, ctrack, subscriber, our_path, us, cmd, others, primary: true };
         while t.others.len() < shards
             || t.others.values().any(|d| d.last() == Event::Unsubscribed)
         {
@@ -70,6 +78,12 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
             time::sleep(std::time::Duration::from_millis(50)).await;
         }
         Ok(t)
+    }
+
+    /// Returns true if this cluster member is the primary, false
+    /// otherwise. May change after `poll_members`.
+    pub fn primary(&self) -> bool {
+        self.primary
     }
 
     pub fn others(&self) -> usize {
@@ -93,6 +107,10 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
                     self.others.insert(path, dv);
                 }
             }
+            let mut paths =
+                iter::once(&self.our_path).chain(self.others.keys()).collect::<Vec<_>>();
+            paths.sort();
+            self.primary = self.our_path == *paths[0];
             Ok(true)
         }
     }
