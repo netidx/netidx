@@ -108,20 +108,17 @@ extern crate lazy_static;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate pin_utils;
-#[macro_use]
 extern crate bitflags;
 #[macro_use]
 extern crate anyhow;
-
-pub mod pool;
-pub mod pack;
-mod batch_channel;
 #[macro_use]
-pub mod utils;
+extern crate netidx_core;
+
+pub use netidx_core::{chars, pack, pool, utils};
+
+mod batch_channel;
 mod auth;
 mod channel;
-pub mod chars;
 pub mod config;
 mod os;
 pub mod path;

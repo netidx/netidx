@@ -10,5 +10,4 @@ lto = "thin"
 debug = 1
 
 [workspace]
-members = ["netidx", "netidx-protocols", "netidx-tools", "netidx-browser"]
-
+members = ["netidx-core", "netidx", "netidx-protocols", "netidx-tools", "netidx-browser"]

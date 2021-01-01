@@ -22,6 +22,7 @@ libgssapi = { version = "0.4", path = "../../libgssapi/libgssapi", default_featu
 winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi", "ntsecapi"] }
 
 [dependencies]
+netidx-core = { version = "0.6", path = "../netidx-core" }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"
@@ -36,7 +37,6 @@ rand = "0.8"
 lazy_static = "1"
 bytes = { version = "1", features = ["serde"] }
 byteorder = "1"
-pin-utils = "0.1"
 crossbeam = "0.8"
 parking_lot = "0.11"
 bitflags = "1"

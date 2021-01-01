@@ -127,7 +127,7 @@ macro_rules! atomic_id {
 
             #[cfg(test)]
             #[allow(dead_code)]
-            pub(crate) fn mk(i: u64) -> Self {
+            pub fn mk(i: u64) -> Self {
                 $name(i)
             }
         }
@@ -241,7 +241,7 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub(crate) fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
+pub fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
     let salt = salt.unwrap_or_else(|| rand::thread_rng().gen::<u64>());
     let mut hash = Sha3_512::new();
     hash.update(&salt.to_be_bytes());
@@ -277,7 +277,7 @@ pub fn bytes(t: &[u8]) -> Bytes {
 }
 
 #[derive(Clone)]
-pub(crate) struct ChanWrap<T>(pub(crate) mpsc::Sender<T>);
+pub struct ChanWrap<T>(pub mpsc::Sender<T>);
 
 impl<T> PartialEq for ChanWrap<T> {
     fn eq(&self, other: &ChanWrap<T>) -> bool {
