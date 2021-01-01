@@ -114,8 +114,8 @@ extern crate anyhow;
 #[macro_use]
 extern crate netidx_core;
 
-pub use netidx_core::{chars, pack, pool, path};
-use netidx_core::utils;
+pub use netidx_core::{chars, pack, pool, path, utils};
+pub use netidx_netproto as protocol;
 
 mod batch_channel;
 mod auth;

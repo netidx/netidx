@@ -6,6 +6,14 @@ use crate::{
     os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
     pool::{Pool, Pooled},
+    protocol::{
+        publisher,
+        resolver::{
+            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
+            FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
+            ServerHelloWrite, ToRead, ToWrite,
+        },
+    },
     secstore::SecStore,
     shard_resolver_store::Store,
     utils,
@@ -14,14 +22,6 @@ use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
 use log::{debug, info, warn};
-use netidx_netproto::{
-    publisher,
-    resolver::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromWrite,
-        ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
-    },
-};
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},

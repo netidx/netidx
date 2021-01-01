@@ -1,7 +1,8 @@
+use crate::{
+    chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral, utils,
+};
 use anyhow::Result;
-use crate::{path::Path, utils, pool::Pooled, chars::Chars};
 use fxhash::FxBuildHasher;
-use netidx_netproto::resolver::Referral;
 use serde_json::from_str;
 use std::{
     collections::{
@@ -21,9 +22,11 @@ use std::{
 
 pub(crate) mod file {
     use super::Auth;
-    use crate::{chars::Chars, path::Path, pool::Pooled, utils};
+    use crate::{
+        chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral as Pref,
+        utils,
+    };
     use anyhow::Result;
-    use netidx_netproto::resolver::Referral as Pref;
     use std::{collections::HashMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

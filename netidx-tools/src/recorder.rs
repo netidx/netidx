@@ -6,9 +6,9 @@ use log::{info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
-    glob::{Glob, GlobSet},
     path::Path,
     pool::Pooled,
+    protocol::glob::{Glob, GlobSet},
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
     resolver::{Auth, ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber},
@@ -1121,7 +1121,7 @@ pub(crate) fn run(
         (None, None) => None,
         (Some(bind), Some(publish_base)) => {
             match bind {
-                BindCfg::Match {..} => (),
+                BindCfg::Match { .. } => (),
                 BindCfg::Exact(_) => {
                     panic!("exact bindcfgs are not supported for this publisher")
                 }

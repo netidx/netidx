@@ -1,5 +1,4 @@
-use crate::{config, os::Mapper, path::Path};
-use netidx_netproto::{resolver::Referral, glob::Scope};
+use crate::{config, os::Mapper, path::Path, protocol::{glob::Scope, resolver::Referral}};
 use anyhow::{anyhow, Error, Result};
 use std::{
     collections::{BTreeMap, Bound, HashMap},

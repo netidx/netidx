@@ -1,3 +1,7 @@
+pub use crate::protocol::{
+    publisher::Id,
+    value::{FromValue, Typ, Value},
+};
 use crate::{
     auth::Permissions,
     channel::Channel,
@@ -6,6 +10,7 @@ use crate::{
     os::{self, Krb5Ctx, ServerCtx},
     path::Path,
     pool::{Pool, Pooled},
+    protocol::{self, publisher},
     resolver::{Auth, ResolverWrite},
     utils::{self, Addr, BatchItem, Batched, ChanId, ChanWrap},
 };
@@ -16,11 +21,6 @@ use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectA
 use fxhash::FxBuildHasher;
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
-use netidx_netproto::publisher;
-pub use netidx_netproto::{
-    publisher::Id,
-    value::{FromValue, Typ, Value},
-};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
@@ -970,7 +970,7 @@ async fn handle_batch(
     now: u64,
     deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
-    use netidx_netproto::publisher::{From, To::*};
+    use protocol::publisher::{From, To::*};
     let mut wait_write_res = Vec::new();
     fn qwe(con: &mut Channel<ServerCtx>, id: Id, r: bool, m: &'static str) -> Result<()> {
         if r {
@@ -1136,7 +1136,7 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
-    use netidx_netproto::publisher::Hello::{self, *};
+    use protocol::publisher::Hello::{self, *};
     debug!("hello_client");
     // negotiate protocol version
     con.send_one(&1u64).await?;

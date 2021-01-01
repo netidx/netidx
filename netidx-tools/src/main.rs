@@ -1,6 +1,6 @@
 #![recursion_limit = "2048"]
 #[macro_use]
-extern crate netidx;
+extern crate netidx_core;
 #[macro_use]
 extern crate anyhow;
 #[macro_use]

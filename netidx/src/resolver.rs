@@ -1,22 +1,24 @@
-pub use crate::resolver_single::Auth;
 use crate::{
     config::Config,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
+    protocol::resolver::{FromRead, FromWrite, Referral, ToRead, ToWrite},
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
     },
 };
-use netidx_netproto::resolver::{FromRead, FromWrite, Referral, ToRead, ToWrite};
+pub use crate::{
+    protocol::{
+        glob::{Glob, GlobSet},
+        resolver::{Resolved, Table},
+    },
+    resolver_single::Auth,
+};
 use anyhow::Result;
 use futures::future;
 use fxhash::FxBuildHasher;
-pub use netidx_netproto::{
-    glob::{Glob, GlobSet},
-    resolver::{Resolved, Table},
-};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{

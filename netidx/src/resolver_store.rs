@@ -4,6 +4,10 @@ use crate::{
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
+    protocol::{
+        glob::{GlobSet, Scope},
+        resolver::Referral,
+    },
     secstore::SecStoreInner,
     utils::{self, Addr},
 };
@@ -11,7 +15,6 @@ use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use immutable_chunkmap::set::Set;
 use log::debug;
-use netidx_netproto::{glob::{Scope, GlobSet}, resolver::Referral};
 use std::{
     clone::Clone,
     collections::{
