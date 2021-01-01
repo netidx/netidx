@@ -1,4 +1,5 @@
-use crate::{config, os::Mapper, path::Path, protocol::resolver::v1::Referral};
+use crate::{config, os::Mapper, path::Path};
+use netidx_netproto::{resolver::Referral, glob::Scope};
 use anyhow::{anyhow, Error, Result};
 use std::{
     collections::{BTreeMap, Bound, HashMap},
@@ -122,21 +123,6 @@ impl UserDb {
                     Ok(ifo)
                 }
             },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
-    Subtree,
-    Finite(usize),
-}
-
-impl Scope {
-    pub(crate) fn contains(&self, levels: usize) -> bool {
-        match self {
-            Scope::Subtree => true,
-            Scope::Finite(n) => levels <= *n,
         }
     }
 }

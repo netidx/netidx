@@ -1,4 +1,3 @@
-pub use crate::protocol::publisher::v1::{Id, Typ, Value, FromValue};
 use crate::{
     auth::Permissions,
     channel::Channel,
@@ -7,9 +6,8 @@ use crate::{
     os::{self, Krb5Ctx, ServerCtx},
     path::Path,
     pool::{Pool, Pooled},
-    protocol::publisher,
     resolver::{Auth, ResolverWrite},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap, Addr},
+    utils::{self, Addr, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
@@ -18,6 +16,11 @@ use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectA
 use fxhash::FxBuildHasher;
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
+use netidx_netproto::publisher;
+pub use netidx_netproto::{
+    publisher::Id,
+    value::{FromValue, Typ, Value},
+};
 use parking_lot::{Mutex, RwLock};
 use rand::{self, Rng};
 use std::{
@@ -883,7 +886,7 @@ fn subscribe(
                         }
                     }
                     _ => {
-                        con.queue_send(&publisher::v1::From::NoSuchValue(path.clone()))?;
+                        con.queue_send(&publisher::From::NoSuchValue(path.clone()))?;
                         break;
                     }
                 }
@@ -910,7 +913,7 @@ fn subscribe(
                         e.insert(inner.subscribed.clone());
                     }
                 }
-                let m = publisher::v1::From::Subscribed(path, id, inner.current.clone());
+                let m = publisher::From::Subscribed(path, id, inner.current.clone());
                 con.queue_send(&m)?;
                 if let Some(chans) = t.on_subscribe_chans.get(&id) {
                     for chan in chans {
@@ -955,7 +958,7 @@ async fn handle_batch(
     t: &PublisherWeak,
     updates: &Arc<SegQueue<ToClientMsg>>,
     addr: &SocketAddr,
-    msgs: impl Iterator<Item = publisher::v1::To>,
+    msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<
         ChanId,
@@ -967,7 +970,7 @@ async fn handle_batch(
     now: u64,
     deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
-    use crate::protocol::publisher::v1::{From, To::*};
+    use netidx_netproto::publisher::{From, To::*};
     let mut wait_write_res = Vec::new();
     fn qwe(con: &mut Channel<ServerCtx>, id: Id, r: bool, m: &'static str) -> Result<()> {
         if r {
@@ -1133,7 +1136,7 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
-    use crate::protocol::publisher::v1::Hello::{self, *};
+    use netidx_netproto::publisher::Hello::{self, *};
     debug!("hello_client");
     // negotiate protocol version
     con.send_one(&1u64).await?;
@@ -1184,7 +1187,7 @@ async fn client_loop(
     desired_auth: Auth,
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
-    let mut batch: Vec<publisher::v1::To> = Vec::new();
+    let mut batch: Vec<publisher::To> = Vec::new();
     let mut write_batches: HashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, fmpsc::Sender<Pooled<Vec<WriteRequest>>>),
@@ -1201,7 +1204,7 @@ async fn client_loop(
         select_biased! {
             _ = hb.tick().fuse() => {
                 if !msg_sent {
-                    con.queue_send(&publisher::v1::From::Heartbeat)?;
+                    con.queue_send(&publisher::From::Heartbeat)?;
                     con.flush().await?;
                 }
                 msg_sent = false;
@@ -1216,7 +1219,7 @@ async fn client_loop(
                             let mut pb = t.0.lock();
                             for (path, perms) in deferred_subs_batch.drain(..) {
                                 if !pb.by_path.contains_key(path.as_ref()) {
-                                    let m = publisher::v1::From::NoSuchValue(path);
+                                    let m = publisher::From::NoSuchValue(path);
                                     con.queue_send(&m)?
                                 } else {
                                     subscribe(
@@ -1251,11 +1254,11 @@ async fn client_loop(
                         msg_sent = true;
                         match m {
                             ToClientMsg::Val(id, v) => {
-                                con.queue_send(&publisher::v1::From::Update(id, v))?;
+                                con.queue_send(&publisher::From::Update(id, v))?;
                             }
                             ToClientMsg::Unpublish(id) => {
                                 // handle this as if the client had requested it
-                                batch.push(publisher::v1::To::Unsubscribe(id));
+                                batch.push(publisher::To::Unsubscribe(id));
                             }
                             ToClientMsg::Flush => break,
                         }

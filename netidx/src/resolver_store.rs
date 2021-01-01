@@ -1,11 +1,9 @@
 use crate::{
-    auth::{Permissions, Scope},
+    auth::Permissions,
     chars::Chars,
-    glob::GlobSet,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::Referral,
     secstore::SecStoreInner,
     utils::{self, Addr},
 };
@@ -13,6 +11,7 @@ use bytes::Bytes;
 use fxhash::FxBuildHasher;
 use immutable_chunkmap::set::Set;
 use log::debug;
+use netidx_netproto::{glob::{Scope, GlobSet}, resolver::Referral};
 use std::{
     clone::Clone,
     collections::{
@@ -167,7 +166,7 @@ impl Store {
                 })
             }
             if p == "/" {
-                break
+                break;
             }
         }
     }
@@ -186,7 +185,7 @@ impl Store {
                 }
             }
             if p == "/" {
-                break
+                break;
             }
         }
     }

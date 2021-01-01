@@ -114,16 +114,14 @@ extern crate anyhow;
 #[macro_use]
 extern crate netidx_core;
 
-pub use netidx_core::{chars, pack, pool, utils};
+pub use netidx_core::{chars, pack, pool, path};
+use netidx_core::utils;
 
 mod batch_channel;
 mod auth;
 mod channel;
 pub mod config;
 mod os;
-pub mod path;
-pub mod glob;
-mod protocol;
 pub mod publisher;
 pub mod resolver;
 pub mod resolver_server;

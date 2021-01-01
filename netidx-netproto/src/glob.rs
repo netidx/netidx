@@ -1,5 +1,4 @@
-use crate::{
-    auth::Scope,
+use netidx_core::{
     chars::Chars,
     pack::{Pack, PackError},
     path::Path,
@@ -15,6 +14,21 @@ use std::{
     result,
     sync::Arc,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Subtree,
+    Finite(usize),
+}
+
+impl Scope {
+    pub fn contains(&self, levels: usize) -> bool {
+        match self {
+            Scope::Subtree => true,
+            Scope::Finite(n) => levels <= *n,
+        }
+    }
+}
 
 /// Unix style globs for matching paths in the resolver. All common
 /// unix globing features are supported.
@@ -96,7 +110,7 @@ impl Glob {
         &self.base
     }
 
-    pub(crate) fn scope(&self) -> &Scope {
+    pub fn scope(&self) -> &Scope {
         &self.scope
     }
 

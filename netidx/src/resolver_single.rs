@@ -4,11 +4,6 @@ use crate::{
     os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Referral, Secret, ServerAuthWrite,
-        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
-    },
     utils,
 };
 use anyhow::{anyhow, Error, Result};
@@ -16,6 +11,11 @@ use bytes::Bytes;
 use futures::{future::select_ok, prelude::*, select_biased};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
+use netidx_netproto::resolver::{
+    ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead, FromWrite,
+    ReadyForOwnershipCheck, Referral, Secret, ServerAuthWrite, ServerHelloRead,
+    ServerHelloWrite, ToRead, ToWrite,
+};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{

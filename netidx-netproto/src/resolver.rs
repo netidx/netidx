@@ -1,7 +1,6 @@
-use crate::{
+use crate::glob::GlobSet;
+use netidx_core::{
     chars::Chars,
-    config,
-    glob::GlobSet,
     pack::{Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
@@ -11,7 +10,6 @@ use fxhash::FxBuildHasher;
 use std::{
     cmp::{Eq, PartialEq},
     collections::HashMap,
-    convert::From,
     hash::{Hash, Hasher},
     net::SocketAddr,
     result,
@@ -457,27 +455,6 @@ pub struct Referral {
     pub ttl: u64,
     pub addrs: Pooled<Vec<SocketAddr>>,
     pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
-}
-
-impl From<config::Config> for Referral {
-    fn from(c: config::Config) -> Referral {
-        Referral {
-            path: Path::from("/"),
-            ttl: u32::MAX as u64,
-            addrs: Pooled::orphan(c.addrs),
-            krb5_spns: match c.auth {
-                config::Auth::Anonymous => {
-                    Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
-                }
-                config::Auth::Krb5(mut spns) => {
-                    let mut h =
-                        Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()));
-                    h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
-                    h
-                }
-            },
-        }
-    }
 }
 
 impl Hash for Referral {

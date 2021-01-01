@@ -1,29 +1,29 @@
+pub use crate::resolver_single::Auth;
 use crate::{
     config::Config,
-    glob::GlobSet,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::{FromRead, FromWrite, Referral, ToRead, ToWrite},
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
     },
 };
-pub use crate::{
-    protocol::resolver::v1::{Resolved, Table},
-    resolver_single::Auth,
-};
+use netidx_netproto::resolver::{FromRead, FromWrite, Referral, ToRead, ToWrite};
 use anyhow::Result;
 use futures::future;
 use fxhash::FxBuildHasher;
+pub use netidx_netproto::{
+    glob::{Glob, GlobSet},
+    resolver::{Resolved, Table},
+};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{
+        hash_map::Entry,
         BTreeMap,
         Bound::{self, Included, Unbounded},
         HashMap, HashSet,
-        hash_map::Entry,
     },
     iter::IntoIterator,
     marker::PhantomData,
@@ -300,7 +300,7 @@ where
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
             desired_auth,
-            default: Arc::new(Referral::from(default)),
+            default: Arc::new(default.into()),
             by_referral: HashMap::new(),
             writer_addr,
             secrets,
@@ -535,8 +535,8 @@ impl ResolverRead {
                     *e.get_mut() = cn.change_number;
                     Ok(cn.referrals)
                 }
-            }
-            m => bail!("unexpected response to GetChangeNr, {:?}", m)
+            },
+            m => bail!("unexpected response to GetChangeNr, {:?}", m),
         })
         .await?;
         Ok(res)

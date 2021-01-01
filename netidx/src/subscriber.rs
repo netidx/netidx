@@ -1,4 +1,3 @@
-pub use crate::protocol::publisher::v1::{FromValue, Typ, Value};
 use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, ReadChannel, WriteChannel},
@@ -8,7 +7,6 @@ use crate::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    protocol::publisher::v1::{From, Id, To},
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
@@ -21,6 +19,8 @@ use futures::{
 };
 use fxhash::FxBuildHasher;
 use log::{info, warn};
+use netidx_netproto::publisher::{From, Id, To};
+pub use netidx_netproto::value::{FromValue, Typ, Value};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
@@ -890,7 +890,7 @@ async fn hello_publisher(
     auth: &Auth,
     target_spn: &Chars,
 ) -> Result<()> {
-    use crate::protocol::publisher::v1::Hello;
+    use netidx_netproto::publisher::Hello;
     // negotiate protocol version
     con.send_one(&1u64).await?;
     let _ver: u64 = con.receive().await?;

@@ -1,14 +1,10 @@
 use crate::{
-    auth::{Permissions, Scope, UserInfo},
+    auth::{Permissions, UserInfo},
     channel::Channel,
     os::ServerCtx,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::v1::{
-        FromRead, FromWrite, GetChangeNr, ListMatching, Referral, Resolved, Table,
-        ToRead, ToWrite,
-    },
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
     },
@@ -18,6 +14,13 @@ use anyhow::Result;
 use futures::{future::join_all, prelude::*, select};
 use fxhash::FxBuildHasher;
 use log::info;
+use netidx_netproto::{
+    glob::Scope,
+    resolver::{
+        FromRead, FromWrite, GetChangeNr, ListMatching, Referral, Resolved, Table,
+        ToRead, ToWrite,
+    },
+};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},

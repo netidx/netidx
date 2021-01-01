@@ -1,9 +1,7 @@
-use crate::{
-    path::Path,
-    protocol::resolver::v1::Referral,
-    utils,
-};
 use anyhow::Result;
+use crate::{path::Path, utils, pool::Pooled, chars::Chars};
+use fxhash::FxBuildHasher;
+use netidx_netproto::resolver::Referral;
 use serde_json::from_str;
 use std::{
     collections::{
@@ -12,6 +10,7 @@ use std::{
         HashMap,
     },
     convert::AsRef,
+    convert::Into,
     default::Default,
     env,
     fs::read_to_string,
@@ -22,11 +21,9 @@ use std::{
 
 pub(crate) mod file {
     use super::Auth;
-    use crate::{
-        chars::Chars, path::Path, pool::Pooled, protocol::resolver::v1::Referral as Pref,
-        utils,
-    };
+    use crate::{chars::Chars, path::Path, pool::Pooled, utils};
     use anyhow::Result;
+    use netidx_netproto::resolver::Referral as Pref;
     use std::{collections::HashMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +158,27 @@ impl From<Referral> for Config {
                     Auth::Anonymous
                 } else {
                     Auth::Krb5(r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect())
+                }
+            },
+        }
+    }
+}
+
+impl Into<Referral> for Config {
+    fn into(self) -> Referral {
+        Referral {
+            path: Path::from("/"),
+            ttl: u32::MAX as u64,
+            addrs: Pooled::orphan(self.addrs),
+            krb5_spns: match self.auth {
+                Auth::Anonymous => {
+                    Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
+                }
+                Auth::Krb5(mut spns) => {
+                    let mut h =
+                        Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()));
+                    h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
+                    h
                 }
             },
         }

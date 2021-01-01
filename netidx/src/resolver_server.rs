@@ -6,14 +6,6 @@ use crate::{
     os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
     pool::{Pool, Pooled},
-    protocol::{
-        publisher,
-        resolver::v1::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
-        },
-    },
     secstore::SecStore,
     shard_resolver_store::Store,
     utils,
@@ -22,6 +14,14 @@ use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures::{prelude::*, select_biased};
 use log::{debug, info, warn};
+use netidx_netproto::{
+    publisher,
+    resolver::{
+        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromWrite,
+        ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
+        ServerHelloWrite, ToRead, ToWrite,
+    },
+};
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
@@ -297,7 +297,7 @@ async fn hello_client_write(
                 // we have more than one.
                 let _version: u64 =
                     time::timeout(cfg.hello_timeout, con.receive()).await??;
-                use publisher::v1::Hello as PHello;
+                use publisher::Hello as PHello;
                 let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
