@@ -1119,7 +1119,15 @@ pub(crate) fn run(
     };
     let publish_args = match (bind, publish_base) {
         (None, None) => None,
-        (Some(bind), Some(publish_base)) => Some((bind, publish_base)),
+        (Some(bind), Some(publish_base)) => {
+            match bind {
+                BindCfg::Match {..} => (),
+                BindCfg::Exact(_) => {
+                    panic!("exact bindcfgs are not supported for this publisher")
+                }
+            }
+            Some((bind, publish_base))
+        }
         (Some(_), None) | (None, Some(_)) => {
             panic!("you must specify bind and publish_base to publish an archive")
         }
