@@ -194,7 +194,8 @@ async fn connection_read(
                         }
                     }
                     match c.flush_timeout(timeout).await {
-                        Err(_) => {
+                        Err(e) => {
+                            warn!("read connection send error: {}", e);
                             con = None;
                         }
                         Ok(()) => {

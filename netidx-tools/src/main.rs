@@ -168,7 +168,7 @@ enum ResolverCmd {
     #[structopt(name = "list", about = "list entries in the resolver server")]
     List {
         #[structopt(name = "path")]
-        path: Option<Path>,
+        path: Option<String>,
     },
     #[structopt(name = "table", about = "table descriptor for path")]
     Table {

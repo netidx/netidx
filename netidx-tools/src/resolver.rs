@@ -1,9 +1,12 @@
 use super::ResolverCmd;
 use netidx::{
+    chars::Chars,
     config::Config,
     path::Path,
+    protocol::glob::{Glob, GlobSet},
     resolver::{Auth, ResolverRead, ResolverWrite},
 };
+use std::{collections::HashSet, iter};
 use tokio::runtime::Runtime;
 
 pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
@@ -23,9 +26,18 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
             }
             ResolverCmd::List { path } => {
                 let resolver = ResolverRead::new(config, auth);
-                let path = path.unwrap_or_else(|| Path::from("/"));
-                for p in resolver.list(path).await.unwrap().iter() {
-                    println!("{}", p);
+                let glob =
+                    Glob::new(Chars::from(path.unwrap_or_else(|| String::from("/"))))
+                        .unwrap();
+                let globs = GlobSet::new(false, iter::once(glob)).unwrap();
+                let mut saw = HashSet::new();
+                for b in resolver.list_matching(&globs).await.unwrap().iter() {
+                    for p in b.iter() {
+                        if !saw.contains(p) {
+                            saw.insert(p);
+                            println!("{}", p);
+                        }
+                    }
                 }
             }
             ResolverCmd::Table { path } => {

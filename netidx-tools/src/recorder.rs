@@ -933,8 +933,10 @@ mod record {
                     need_list = r?;
                 },
                 r = maybe_list(need_list, &resolver, &spec).fuse() => {
+                    dbg!("listed");
                     need_list = false;
                     let mut batches = r?;
+                    dbg!(batches.len());
                     for mut batch in batches.drain(..) {
                         for path in batch.drain(..) {
                             if !subscribed.contains_key(&path) {
