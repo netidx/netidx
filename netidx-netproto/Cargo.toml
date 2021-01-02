@@ -9,8 +9,6 @@ description = "netidx wire protocol"
 documentation = "https://docs.rs/netidx-netproto"
 license = "MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 netidx-core = { version = "0.6", path = "../netidx-core" }
 bytes = { version = "1", features = ["serde"] }

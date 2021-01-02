@@ -103,16 +103,11 @@
 //! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
 //! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
 #![recursion_limit = "1024"]
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate anyhow;
-#[macro_use]
-extern crate netidx_core;
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate bitflags;
+#[macro_use] extern crate anyhow;
+#[macro_use] extern crate netidx_core;
 
 pub use netidx_core::{chars, pack, pool, path, utils};
 pub use netidx_netproto as protocol;

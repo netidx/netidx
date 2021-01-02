@@ -11,8 +11,6 @@ documentation = "https://docs.rs/netidx"
 keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
