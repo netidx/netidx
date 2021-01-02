@@ -961,7 +961,6 @@ mod record {
                 r = wait_list(&mut pending_list).fuse() => {
                     pending_list = None;
                     if let Some(mut batches) = r {
-                        dbg!(batches.len());
                         for mut batch in batches.drain(..) {
                             for path in batch.drain(..) {
                                 if !subscribed.contains_key(&path) {
