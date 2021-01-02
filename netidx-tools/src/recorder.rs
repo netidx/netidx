@@ -1,6 +1,11 @@
 use anyhow::Result;
 use chrono::prelude::*;
-use futures::{channel::mpsc, future, prelude::*, select_biased};
+use futures::{
+    channel::mpsc,
+    future::{self, Fuse},
+    prelude::*,
+    select_biased,
+};
 use fxhash::FxBuildHasher;
 use log::{info, warn};
 use netidx::{
@@ -26,7 +31,11 @@ use std::{
     ops::Bound,
     sync::Arc,
 };
-use tokio::{runtime::Runtime, sync::broadcast, task, time};
+use tokio::{
+    runtime::Runtime,
+    sync::{broadcast, oneshot},
+    task, time,
+};
 use uuid::{adapter::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
@@ -846,35 +855,54 @@ mod record {
         }
     }
 
-    async fn maybe_check(
-        need_check: bool,
-        resolver: &ResolverRead,
-        cts: &mut CTS,
-    ) -> Result<bool> {
-        if !need_check {
-            future::pending().await
-        } else {
-            cts.changed(resolver).await
-        }
-    }
-
-    async fn maybe_list(
-        need_list: bool,
-        resolver: &ResolverRead,
-        pat: &GlobSet,
-    ) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>> {
-        if !need_list {
-            future::pending().await
-        } else {
-            resolver.list_matching(pat).await
-        }
-    }
-
     async fn maybe_interval(poll: &mut Option<time::Interval>) {
         match poll {
             None => future::pending().await,
             Some(poll) => {
                 poll.tick().await;
+            }
+        }
+    }
+
+    type Lst = Option<Pooled<Vec<Pooled<Vec<Path>>>>>;
+
+    async fn list_task(
+        mut rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
+        resolver: ResolverRead,
+        spec: Vec<Glob>,
+    ) -> Result<()> {
+        let mut cts = CTS::new(&spec);
+        let spec = GlobSet::new(true, spec)?;
+        while let Some(reply) = rx.next().await {
+            if cts.changed(&resolver).await? {
+                let _ = reply.send(Some(resolver.list_matching(&spec).await?));
+            } else {
+                let _ = reply.send(None);
+            }
+        }
+        Ok(())
+    }
+
+    fn start_list_task(
+        rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
+        resolver: ResolverRead,
+        spec: Vec<Glob>,
+    ) {
+        task::spawn(async move {
+            let r = list_task(rx, resolver, spec).await;
+            match r {
+                Err(e) => warn!("list task exited with error {}", e),
+                Ok(()) => info!("list task exited"),
+            }
+        });
+    }
+
+    async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
+        match pending {
+            None => future::pending().await,
+            Some(r) => match r.await {
+                Ok(r) => r,
+                Err(_) => None,
             }
         }
     }
@@ -891,6 +919,7 @@ mod record {
         spec: Vec<Glob>,
     ) -> Result<()> {
         let (tx_batch, rx_batch) = mpsc::channel(3);
+        let (tx_list, rx_list) = mpsc::unbounded();
         let mut rx_batch = rx_batch.fuse();
         let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
@@ -898,9 +927,6 @@ mod record {
             HashMap::with_hasher(FxBuildHasher::default());
         let mut subscribed: HashMap<Path, Dval> = HashMap::new();
         let subscriber = Subscriber::new(resolver, desired_auth)?;
-        let resolver = subscriber.resolver();
-        let mut cts = CTS::new(&spec);
-        let spec = GlobSet::new(true, spec)?;
         let flush_frequency = flush_frequency.map(|f| archive.block_size() * f);
         let mut bcast_rx = bcast.subscribe();
         let mut poll = poll_interval.map(time::interval);
@@ -909,8 +935,8 @@ mod record {
         let mut timest = MonotonicTimestamper::new();
         let mut last_image = archive.len();
         let mut last_flush = archive.len();
-        let mut need_check = false;
-        let mut need_list = false;
+        let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
+        start_list_task(rx_list, subscriber.resolver(), spec);
         loop {
             select_biased! {
                 m = bcast_rx.recv().fuse() => match m {
@@ -918,7 +944,11 @@ mod record {
                     Ok(BCastMsg::Stop) => break,
                 },
                 _ = maybe_interval(&mut poll).fuse() => {
-                    need_check = true;
+                    if pending_list.is_none() {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = tx_list.unbounded_send(tx);
+                        pending_list = Some(rx.fuse());
+                    }
                 },
                 _ = maybe_interval(&mut flush).fuse() => {
                     if archive.len() > last_flush {
@@ -928,34 +958,30 @@ mod record {
                         })?;
                     }
                 }
-                r = maybe_check(need_check, &resolver, &mut cts).fuse() => {
-                    need_check = false;
-                    need_list = r?;
-                },
-                r = maybe_list(need_list, &resolver, &spec).fuse() => {
-                    dbg!("listed");
-                    need_list = false;
-                    let mut batches = r?;
-                    dbg!(batches.len());
-                    for mut batch in batches.drain(..) {
-                        for path in batch.drain(..) {
-                            if !subscribed.contains_key(&path) {
-                                let dv = subscriber.durable_subscribe(path.clone());
-                                let id = dv.id();
-                                dv.updates(true, tx_batch.clone());
-                                subscribed.insert(path.clone(), dv);
-                                to_add.push((path, id));
+                r = wait_list(&mut pending_list).fuse() => {
+                    pending_list = None;
+                    if let Some(mut batches) = r {
+                        dbg!(batches.len());
+                        for mut batch in batches.drain(..) {
+                            for path in batch.drain(..) {
+                                if !subscribed.contains_key(&path) {
+                                    let dv = subscriber.durable_subscribe(path.clone());
+                                    let id = dv.id();
+                                    dv.updates(true, tx_batch.clone());
+                                    subscribed.insert(path.clone(), dv);
+                                    to_add.push((path, id));
+                                }
                             }
                         }
-                    }
-                    task::block_in_place(|| {
-                        let i = to_add.iter().map(|(ref p, _)| p);
-                        archive.add_paths(i)
-                    })?;
-                    for (path, subid) in to_add.drain(..) {
-                        if !by_subid.contains_key(&subid) {
-                            let id = archive.id_for_path(&path).unwrap();
-                            by_subid.insert(subid, id);
+                        task::block_in_place(|| {
+                            let i = to_add.iter().map(|(ref p, _)| p);
+                            archive.add_paths(i)
+                        })?;
+                        for (path, subid) in to_add.drain(..) {
+                            if !by_subid.contains_key(&subid) {
+                                let id = archive.id_for_path(&path).unwrap();
+                                by_subid.insert(subid, id);
+                            }
                         }
                     }
                 },
