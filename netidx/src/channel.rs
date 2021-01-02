@@ -289,16 +289,8 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
         batch: &mut Vec<T>,
     ) -> Result<()> {
         batch.push(self.receive().await?);
-        for _ in 0..5 {
-            while self.buf.has_remaining() {
-                batch.push(T::decode(&mut self.buf)?);
-            }
-            match self.incoming.recv().now_or_never() {
-                Some(Some(b)) => {
-                    self.buf = b;
-                }
-                Some(None) | None => break,
-            }
+        while self.buf.has_remaining() {
+            batch.push(T::decode(&mut self.buf)?);
         }
         Ok(())
     }
