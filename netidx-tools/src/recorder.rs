@@ -694,17 +694,21 @@ mod publish {
         let archive = archive.clone();
         let publish_base = publish_base.clone();
         let subscriber = subscriber.clone();
+        let publisher_cl = publisher.clone();
         task::spawn(async move {
             let res = session(
                 bcast,
                 archive,
                 subscriber,
-                publisher,
+                publisher_cl,
                 publish_base,
                 session_id,
                 shards,
             )
             .await;
+            if let Err(e) = publisher.shutdown().await {
+                warn!("session {} publisher failed to shutdown {}", session_id, e);
+            }
             match res {
                 Ok(()) => {
                     info!("session {} existed", session_id)
@@ -858,7 +862,7 @@ mod record {
         need_list: bool,
         resolver: &ResolverRead,
         pat: &GlobSet,
-    ) -> Result<Pooled<Vec<Path>>> {
+    ) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>> {
         if !need_list {
             future::pending().await
         } else {
@@ -930,14 +934,16 @@ mod record {
                 },
                 r = maybe_list(need_list, &resolver, &spec).fuse() => {
                     need_list = false;
-                    let mut paths = r?;
-                    for path in paths.drain(..) {
-                        if !subscribed.contains_key(&path) {
-                            let dv = subscriber.durable_subscribe(path.clone());
-                            let id = dv.id();
-                            dv.updates(true, tx_batch.clone());
-                            subscribed.insert(path.clone(), dv);
-                            to_add.push((path, id));
+                    let mut batches = r?;
+                    for mut batch in batches.drain(..) {
+                        for path in batch.drain(..) {
+                            if !subscribed.contains_key(&path) {
+                                let dv = subscriber.durable_subscribe(path.clone());
+                                let id = dv.id();
+                                dv.updates(true, tx_batch.clone());
+                                subscribed.insert(path.clone(), dv);
+                                to_add.push((path, id));
+                            }
                         }
                     }
                     task::block_in_place(|| {

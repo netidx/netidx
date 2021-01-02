@@ -34,7 +34,6 @@ use tokio::{
 };
 
 const HELLO_TO: Duration = Duration::from_secs(15);
-
 static TTL: u64 = 120;
 
 lazy_static! {
@@ -173,9 +172,18 @@ async fn connection_read(
                             }
                         },
                     };
-                    let timeout =
-                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 6));
+                    let mut timeout =
+                        max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 50));
                     for (_, m) in &*tx_batch {
+                        match m {
+                            ToRead::List(_) => {
+                                timeout += Duration::from_secs(60);
+                            }
+                            ToRead::ListMatching(_) => {
+                                timeout += Duration::from_secs(300);
+                            }
+                            _ => (),
+                        }
                         match c.queue_send(m) {
                             Ok(()) => (),
                             Err(e) => {
@@ -201,7 +209,7 @@ async fn connection_read(
                                         continue 'batch;
                                     }
                                     Err(e) => {
-                                        warn!("read connection timeout, waited: {}", e);
+                                        warn!("read connection timeout: {}", e);
                                         con = None;
                                         continue 'batch;
                                     }
@@ -496,7 +504,7 @@ async fn connection_write(
                         };
                         let timeout = max(
                             HELLO_TO,
-                            Duration::from_micros(tx_batch.len() as u64 * 12)
+                            Duration::from_micros(tx_batch.len() as u64 * 100)
                         );
                         for (_, m) in &**tx_batch {
                             try_cf!("queue send {}", continue, 'main, c.queue_send(m))

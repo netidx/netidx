@@ -527,23 +527,23 @@ impl Pack for Table {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListMatching {
-    pub matched: Pooled<Vec<Path>>,
+    pub matched: Pooled<Vec<Pooled<Vec<Path>>>>,
     pub referrals: Pooled<Vec<Referral>>,
 }
 
 impl Pack for ListMatching {
     fn encoded_len(&self) -> usize {
-        <Pooled<Vec<Path>> as Pack>::encoded_len(&self.matched)
+        <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::encoded_len(&self.matched)
             + <Pooled<Vec<Referral>> as Pack>::encoded_len(&self.referrals)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Pooled<Vec<Path>> as Pack>::encode(&self.matched, buf)?;
+        <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::encode(&self.matched, buf)?;
         <Pooled<Vec<Referral>> as Pack>::encode(&self.referrals, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let matched = <Pooled<Vec<Path>> as Pack>::decode(buf)?;
+        let matched = <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::decode(buf)?;
         let referrals = <Pooled<Vec<Referral>> as Pack>::decode(buf)?;
         Ok(ListMatching { matched, referrals })
     }

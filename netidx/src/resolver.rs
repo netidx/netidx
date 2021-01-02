@@ -228,7 +228,6 @@ lazy_static! {
     static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
     static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
     static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
-    static ref LISTRECPOOL: Pool<Vec<Path>> = Pool::new(10, 1000000);
 }
 
 #[derive(Debug)]
@@ -483,9 +482,16 @@ impl ResolverRead {
         Ok(())
     }
 
-    /// list all paths in the cluster matching the specified globset
-    pub async fn list_matching(&self, globset: &GlobSet) -> Result<Pooled<Vec<Path>>> {
-        let mut results = LISTRECPOOL.take();
+    /// list all paths in the cluster matching the specified
+    /// globset. You will get a list of batches of paths. If your
+    /// globset is configured to match only published paths, then the
+    /// batches should be disjoint, otherwise there may be some
+    /// duplicate structural elements.
+    pub async fn list_matching(
+        &self,
+        globset: &GlobSet,
+    ) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>> {
+        let mut results = LISTPOOL.take();
         let m = ToRead::ListMatching(globset.clone());
         self.send_and_aggregate(m, |reply| match reply {
             FromRead::ListMatching(mut lm) => {

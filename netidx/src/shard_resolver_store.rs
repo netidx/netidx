@@ -49,6 +49,7 @@ lazy_static! {
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640, 15000);
     static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10000);
     static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10000);
+    static ref PATH_BPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(32, 1024);
     static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000, 1024);
     static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000, 1024);
 }
@@ -220,7 +221,8 @@ impl Shard {
                             )
                         }
                     }
-                    let matched = store.list_matching(&set);
+                    let mut matched = PATH_BPOOL.take();
+                    matched.push(store.list_matching(&set));
                     let lm = ListMatching { referrals, matched };
                     (id, FromRead::ListMatching(lm))
                 }
@@ -476,20 +478,18 @@ impl Store {
                             con.queue_send(&FromRead::List(paths))?;
                         }
                         (_, FromRead::ListMatching(mut lm)) => {
-                            let mut hpaths = PATH_HPOOL.take();
                             let referrals = lm.referrals;
-                            hpaths.extend(lm.matched.drain(..));
+                            let mut matched = PATH_BPOOL.take();
+                            matched.extend(lm.matched.drain(..));
                             for i in 1..replies.len() {
                                 if let (_, FromRead::ListMatching(mut lm)) =
                                     replies[i].pop_front().unwrap()
                                 {
-                                    hpaths.extend(lm.matched.drain(..));
+                                    matched.extend(lm.matched.drain(..));
                                 } else {
                                     panic!("desynced listmatching")
                                 }
                             }
-                            let mut matched = PATH_POOL.take();
-                            matched.extend(hpaths.drain());
                             con.queue_send(&FromRead::ListMatching(ListMatching {
                                 matched,
                                 referrals,
