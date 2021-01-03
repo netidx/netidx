@@ -231,7 +231,10 @@ mod publish {
             })
         }
 
-        async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+        async fn next(
+            &mut self,
+            controls: Option<&Controls>,
+        ) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
             if !self.state.play() {
                 future::pending().await
             } else {
@@ -247,7 +250,7 @@ mod publish {
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
-                                    self.state = State::Tail;
+                                    self.set_state(controls, State::Tail);
                                     future::pending().await
                                 }
                             }
@@ -263,14 +266,14 @@ mod publish {
                                 archive.read_deltas(cursor, 100)
                             })?;
                             if current.is_empty() {
-                                self.state = State::Tail;
+                                self.set_state(controls, State::Tail);
                                 return future::pending().await;
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
                         time::sleep_until(*next).await;
                         if current.is_empty() {
-                            self.state = State::Tail;
+                            self.set_state(controls, State::Tail);
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
@@ -484,7 +487,7 @@ mod publish {
         }
 
         fn reimage(&mut self, controls: Option<&Controls>) -> Result<()> {
-            let img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
+            let mut img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
             controls.map(|c| {
                 c.pos_ctl.update(match self.cursor.current() {
@@ -496,9 +499,9 @@ mod publish {
                 })
             });
             for (id, path) in idx.drain(..) {
-                let v = match img.get(&id) {
+                let v = match img.remove(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
-                    Some(Event::Update(v)) => v.clone(),
+                    Some(Event::Update(v)) => v,
                 };
                 match self.published.get(&id) {
                     Some(val) => {
@@ -675,7 +678,7 @@ mod publish {
                         t.process_control_batch(controls, &cluster, batch).await?
                     }
                 },
-                r = t.next().fuse() => match r {
+                r = t.next(controls.as_ref()).fuse() => match r {
                     Err(e) => break Err(e),
                     Ok((ts, mut batch)) => {
                         t.process_batch(controls.as_ref(), (ts, &mut *batch)).await?;
@@ -903,7 +906,7 @@ mod record {
             Some(r) => match r.await {
                 Ok(r) => r,
                 Err(_) => None,
-            }
+            },
         }
     }
 
