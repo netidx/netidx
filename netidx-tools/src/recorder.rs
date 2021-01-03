@@ -626,7 +626,7 @@ mod publish {
         let session_base = session_base(&publish_base, session_id);
         let data_base = session_base.append("data");
         let mut cluster =
-            Cluster::new(&publisher, subscriber, data_base.append("cluster"), shards)
+            Cluster::new(&publisher, subscriber, session_base.append("cluster"), shards)
                 .await?;
         let mut controls = if cluster.primary() {
             Some(Controls::new(&session_base, &publisher, &control_tx).await?)
@@ -749,7 +749,7 @@ mod publish {
         let mut cluster = Cluster::<Uuid>::new(
             &session_publisher,
             subscriber.clone(),
-            publish_base.clone(),
+            publish_base.append("cluster"),
             shards,
         )
         .await?;
