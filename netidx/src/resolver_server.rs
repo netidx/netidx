@@ -20,7 +20,7 @@ use crate::{
 };
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use futures::{prelude::*, select_biased};
+use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
 use std::{
@@ -32,7 +32,6 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::oneshot,
     task,
     time::{self, Instant},
 };
@@ -80,7 +79,7 @@ async fn client_loop_write(
     clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
-    store: Arc<Store>,
+    mut store: Store,
     con: Channel<ServerCtx>,
     secstore: Option<SecStore>,
     server_stop: oneshot::Receiver<()>,
@@ -194,7 +193,7 @@ async fn hello_client_write(
     ctracker: CTracker,
     connection_id: CId,
     listen_addr: SocketAddr,
-    store: Arc<Store>,
+    store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -345,7 +344,7 @@ async fn hello_client_write(
         clinfos,
         ctracker,
         connection_id,
-        store,
+        store.clone(),
         con,
         secstore,
         server_stop,
@@ -358,7 +357,7 @@ async fn hello_client_write(
 
 async fn client_loop_read(
     cfg: Arc<config::Config>,
-    store: Arc<Store>,
+    mut store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
@@ -392,7 +391,7 @@ async fn client_loop_read(
 
 async fn hello_client_read(
     cfg: Arc<config::Config>,
-    store: Arc<Store>,
+    store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -422,7 +421,7 @@ async fn hello_client_read(
             }
         },
     };
-    Ok(client_loop_read(cfg, store, con, server_stop, uifo).await?)
+    Ok(client_loop_read(cfg, store.clone(), con, server_stop, uifo).await?)
 }
 
 async fn hello_client(
@@ -432,7 +431,7 @@ async fn hello_client(
     connection_id: CId,
     delay_reads: Option<Instant>,
     listen_addr: SocketAddr,
-    store: Arc<Store>,
+    store: Store,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
     secstore: Option<SecStore>,
@@ -451,7 +450,8 @@ async fn hello_client(
                     bail!("no read clients allowed yet");
                 }
             }
-            Ok(hello_client_read(cfg, store, con, server_stop, secstore, hello).await?)
+            Ok(hello_client_read(cfg, store.clone(), con, server_stop, secstore, hello)
+                .await?)
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
             cfg,
@@ -459,7 +459,7 @@ async fn hello_client(
             ctracker,
             connection_id,
             listen_addr,
-            store,
+            store.clone(),
             con,
             server_stop,
             secstore,

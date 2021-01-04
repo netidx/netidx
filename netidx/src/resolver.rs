@@ -17,7 +17,7 @@ pub use crate::{
     resolver_single::Auth,
 };
 use anyhow::Result;
-use futures::future;
+use futures::{future, channel::oneshot};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -34,7 +34,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::oneshot, time::Instant};
+use tokio::time::Instant;
 
 const MAX_REFERRALS: usize = 128;
 

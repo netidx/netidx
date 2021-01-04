@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
-    channel::mpsc,
+    channel::{mpsc, oneshot},
     future::{self, Fuse},
     prelude::*,
     select_biased,
@@ -33,7 +33,7 @@ use std::{
 };
 use tokio::{
     runtime::Runtime,
-    sync::{broadcast, oneshot},
+    sync::broadcast,
     task, time,
 };
 use uuid::{adapter::SimpleRef, Uuid};

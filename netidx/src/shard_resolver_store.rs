@@ -317,6 +317,7 @@ impl Shard {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Store {
     shards: Vec<Shard>,
     build_hasher: FxBuildHasher,
@@ -329,7 +330,7 @@ impl Store {
         children: BTreeMap<Path, Referral>,
         secstore: Option<SecStore>,
         resolver: SocketAddr,
-    ) -> Arc<Self> {
+    ) -> Self {
         let shards = num_cpus::get().next_power_of_two();
         let shard_mask = shards - 1;
         let shards = (0..shards)
@@ -344,7 +345,7 @@ impl Store {
                 )
             })
             .collect();
-        Arc::new(Store { shards, shard_mask, build_hasher: FxBuildHasher::default() })
+        Store { shards, shard_mask, build_hasher: FxBuildHasher::default() }
     }
 
     fn shard(&self, path: &Path) -> usize {

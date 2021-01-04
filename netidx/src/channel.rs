@@ -8,14 +8,16 @@ use futures::{
         oneshot,
     },
     prelude::*,
+    future,
     select_biased,
 };
 use log::info;
-use std::{cmp::min, fmt::Debug, mem};
+use std::{fmt::Debug, mem, time::Duration};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
     task,
+    time,
 };
 
 const BUF: usize = 4096;
@@ -152,13 +154,13 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        if self.buf.has_remaining() {
-            for b in self.boundries.drain(..) {
-                self.to_flush.send(ToFlush::Flush(self.buf.split_to(b))).await?;
+        loop {
+            if self.try_flush()? {
+                break Ok(())
+            } else {
+                future::poll_fn(|cx| self.to_flush.poll_ready(cx)).await?
             }
-            self.to_flush.send(ToFlush::Flush(self.buf.split())).await?;
         }
-        Ok(())
     }
 
     /// Flush as much data as possible now, but don't wait if the
@@ -166,19 +168,35 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     /// otherwise false.
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
         while self.buf.has_remaining() {
-            let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
+            let boundry = self.boundries.first().copied().unwrap_or(self.buf.len());
+            let chunk = self.buf.split_to(boundry);
             match self.to_flush.try_send(ToFlush::Flush(chunk)) {
-                Ok(()) => (),
+                Ok(()) => {
+                    if self.boundries.len() > 0 {
+                        self.boundries.remove(0);
+                    }
+                },
                 Err(e) if e.is_full() => {
-                    let ToFlush::Flush(mut chunk) = e.into_inner();
-                    chunk.unsplit(self.buf.split());
-                    self.buf = chunk;
-                    return Ok(false);
+                    match e.into_inner() {
+                        ToFlush::Flush(mut chunk) => {
+                            chunk.unsplit(self.buf.split());
+                            self.buf = chunk;
+                            return Ok(false);
+                        }
+                        ToFlush::SetCtx(_) => unreachable!(),
+                    }
                 }
                 Err(_) => bail!("can't flush to closed connection"),
             }
         }
         Ok(true)
+    }
+
+    /// Initiate sending all outgoing messages and wait `timeout` for
+    /// the operation to complete. If `timeout` expires some data may
+    /// have been sent.
+    pub(crate) async fn flush_timeout(&mut self, timeout: Duration) -> Result<()> {
+        Ok(time::timeout(timeout, self.flush()).await??)
     }
 }
 
@@ -187,7 +205,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
     mut soc: ReadHalf<TcpStream>,
     mut set_ctx: oneshot::Receiver<C>,
 ) -> Receiver<BytesMut> {
-    let (tx, rx) = mpsc::channel(3);
+    let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
         let mut ctx: Option<C> = None;
@@ -337,8 +355,13 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
         Ok(self.write.flush().await?)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
         self.write.try_flush()
+    }
+
+    pub(crate) async fn flush_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.write.flush_timeout(timeout).await
     }
 
     pub(crate) async fn receive<T: Pack + Debug>(&mut self) -> Result<T, Error> {

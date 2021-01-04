@@ -8,14 +8,20 @@ use crate::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    protocol::{self, publisher::{From, Id, To}},
+    protocol::{
+        self,
+        publisher::{From, Id, To},
+    },
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
 use futures::{
-    channel::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    channel::{
+        mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
     prelude::*,
     select_biased,
 };
@@ -36,7 +42,6 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc::error::SendTimeoutError, oneshot},
     task,
     time::{self, Instant},
 };
@@ -927,7 +932,6 @@ async fn hello_publisher(
 }
 
 const PERIOD: Duration = Duration::from_secs(100);
-const FLUSH: Duration = Duration::from_secs(1);
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(1000, 100000);
@@ -1046,13 +1050,10 @@ async fn process_batch(
     Ok(())
 }
 
-async fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
+fn try_flush(con: &mut WriteChannel<ClientCtx>) -> Result<()> {
     if con.bytes_queued() > 0 {
-        match con.flush_timeout(FLUSH).await {
-            Ok(()) => Ok(()),
-            Err(SendTimeoutError::Timeout(())) => Ok(()),
-            Err(SendTimeoutError::Closed(())) => bail!("connection died"),
-        }
+        con.try_flush()?;
+        Ok(())
     } else {
         Ok(())
     }
@@ -1135,7 +1136,7 @@ async fn connection(
                         let _ = req.finished.send(Err(anyhow!("timed out")));
                     }
                 }
-                try_cf!(try_flush(&mut write_con).await)
+                try_cf!(try_flush(&mut write_con))
             },
             batch = from_sub.recv().fuse() => match batch {
                 None => break Err(anyhow!("dropped")),
@@ -1213,7 +1214,7 @@ async fn connection(
                             }
                         }
                     }
-                    try_cf!(try_flush(&mut write_con).await);
+                    try_cf!(try_flush(&mut write_con));
                 }
             },
             r = batches.next() => match r {
@@ -1224,7 +1225,7 @@ async fn connection(
                         batch,
                         &mut subscriptions
                     ).await;
-                    try_cf!(try_flush(&mut write_con).await)
+                    try_cf!(try_flush(&mut write_con))
                 },
                 Some(Ok((batch, false))) =>
                     if let Some(subscriber) = subscriber.upgrade() {
@@ -1238,7 +1239,7 @@ async fn connection(
                             &mut write_con,
                             &subscriber,
                             addr).await);
-                        try_cf!(try_flush(&mut write_con).await);
+                        try_cf!(try_flush(&mut write_con));
                         if subscriptions.is_empty() && pending.is_empty() {
                             let mut inner = subscriber.0.lock();
                             if from_sub.len() == 0 {

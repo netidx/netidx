@@ -13,7 +13,12 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use futures::{future::select_ok, prelude::*, select_biased};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::select_ok,
+    prelude::*,
+    select_biased,
+};
 use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
@@ -28,7 +33,6 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot},
     task,
     time::{self, Instant, Interval},
 };
@@ -145,7 +149,7 @@ async fn connection_read(
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
-        match receiver.recv().await {
+        match receiver.next().await {
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
@@ -238,7 +242,7 @@ pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
     pub(crate) fn new(resolver: Arc<Referral>, desired_auth: Auth) -> ResolverRead {
-        let (to_tx, to_rx) = mpsc::unbounded_channel();
+        let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
             connection_read(to_rx, resolver, desired_auth).await;
             info!("read task shutting down")
@@ -247,7 +251,7 @@ impl ResolverRead {
     }
 
     pub(crate) fn send(
-        &self,
+        &mut self,
         batch: Pooled<Vec<(usize, ToRead)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, FromRead)>>> {
         let (tx, rx) = oneshot::channel();
@@ -385,7 +389,7 @@ async fn connect_write(
 }
 
 async fn connection_write(
-    mut receiver: mpsc::Receiver<(
+    receiver: mpsc::Receiver<(
         Arc<Pooled<Vec<(usize, ToWrite)>>>,
         oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
     )>,
@@ -396,6 +400,7 @@ async fn connection_write(
     desired_auth: Auth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
+    let mut receiver = receiver.fuse();
     let mut degraded = false;
     let mut con: Option<Channel<ClientCtx>> = None;
     let mut ctx: Option<ClientCtx> = None;
@@ -463,7 +468,7 @@ async fn connection_write(
                     }
                 }
             },
-            batch = receiver.recv().fuse() => match batch {
+            batch = receiver.next() => match batch {
                 None => break,
                 Some((tx_batch, reply)) => {
                     act = true;
@@ -594,7 +599,7 @@ async fn write_mgr(
         }
         senders
     };
-    while let Some((batch, reply)) = receiver.recv().await {
+    while let Some((batch, reply)) = receiver.next().await {
         let tx_batch = Arc::new(batch);
         let mut waiters = Vec::new();
         {
@@ -630,7 +635,7 @@ impl ResolverWrite {
         write_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> ResolverWrite {
-        let (to_tx, to_rx) = mpsc::unbounded_channel();
+        let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
             let r = write_mgr(to_rx, resolver, desired_auth, secrets, write_addr).await;
             info!("write manager exited {:?}", r);
@@ -639,7 +644,7 @@ impl ResolverWrite {
     }
 
     pub(crate) fn send(
-        &self,
+        &mut self,
         batch: Pooled<Vec<(usize, ToWrite)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, FromWrite)>>> {
         let (tx, rx) = oneshot::channel();
