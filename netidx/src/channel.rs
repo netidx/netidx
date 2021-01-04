@@ -2,16 +2,19 @@ use crate::{os::Krb5Ctx, pack::Pack};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
-use futures::{prelude::*, select_biased};
+use futures::{
+    channel::{
+        mpsc::{self, Receiver, Sender},
+        oneshot,
+    },
+    prelude::*,
+    select_biased,
+};
 use log::info;
-use std::{cmp::min, fmt::Debug, mem, result, time::Duration};
+use std::{cmp::min, fmt::Debug, mem};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
-    sync::{
-        mpsc::{self, error::SendTimeoutError, Receiver, Sender},
-        oneshot,
-    },
     task,
 };
 
@@ -54,7 +57,7 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
         let mut padding = BytesMut::new();
         let mut trailer = BytesMut::new();
         let res = loop {
-            match rx.recv().await {
+            match rx.next().await {
                 None => break Ok(()),
                 Some(m) => match m {
                     ToFlush::SetCtx(c) => {
@@ -158,28 +161,24 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
         Ok(())
     }
 
-    pub(crate) async fn flush_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> result::Result<(), SendTimeoutError<()>> {
+    /// Flush as much data as possible now, but don't wait if the
+    /// channel is full. Return true if all data was flushed,
+    /// otherwise false.
+    pub(crate) fn try_flush(&mut self) -> Result<bool> {
         while self.buf.has_remaining() {
             let chunk = self.buf.split_to(min(MAX_BATCH, self.buf.len()));
-            match self.to_flush.send_timeout(ToFlush::Flush(chunk), timeout).await {
+            match self.to_flush.try_send(ToFlush::Flush(chunk)) {
                 Ok(()) => (),
-                Err(SendTimeoutError::Timeout(ToFlush::Flush(mut chunk))) => {
+                Err(e) if e.is_full() => {
+                    let ToFlush::Flush(mut chunk) = e.into_inner();
                     chunk.unsplit(self.buf.split());
                     self.buf = chunk;
-                    return Err(SendTimeoutError::Timeout(()));
+                    return Ok(false);
                 }
-                Err(SendTimeoutError::Timeout(_)) => {
-                    return Err(SendTimeoutError::Timeout(()))
-                }
-                Err(SendTimeoutError::Closed(_)) => {
-                    return Err(SendTimeoutError::Closed(()))
-                }
+                Err(_) => bail!("can't flush to closed connection"),
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -207,7 +206,7 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
                     break; // read more
                 } else if !encrypted {
                     if ctx.is_some() {
-                        break 'main Err(anyhow!("encryption is required"))
+                        break 'main Err(anyhow!("encryption is required"));
                     }
                     buf.advance(mem::size_of::<u32>());
                     try_cf!(break, 'main, tx.send(buf.split_to(len)).await);
@@ -269,7 +268,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
 
     /// Read a load of bytes from the socket into the read buffer
     pub(crate) async fn fill_buffer(&mut self) -> Result<()> {
-        if let Some(chunk) = self.incoming.recv().await {
+        if let Some(chunk) = self.incoming.next().await {
             self.buf = chunk;
             Ok(())
         } else {
@@ -338,12 +337,8 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
         Ok(self.write.flush().await?)
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn flush_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<(), SendTimeoutError<()>> {
-        Ok(self.write.flush_timeout(timeout).await?)
+    pub(crate) fn try_flush(&mut self) -> Result<bool> {
+        self.write.try_flush()
     }
 
     pub(crate) async fn receive<T: Pack + Debug>(&mut self) -> Result<T, Error> {

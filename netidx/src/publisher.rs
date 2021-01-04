@@ -17,7 +17,15 @@ use crate::{
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
 use crossbeam::queue::SegQueue;
-use futures::{channel::mpsc as fmpsc, prelude::*, select_biased, stream::SelectAll};
+use futures::{
+    channel::{
+        mpsc::{unbounded, channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
+    prelude::*,
+    select_biased,
+    stream::SelectAll,
+};
 use fxhash::FxBuildHasher;
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
@@ -39,10 +47,6 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        oneshot,
-    },
     task, time,
 };
 
@@ -200,7 +204,7 @@ impl Val {
     ///
     /// If you no longer wish to accept writes, simply drop all
     /// registered channels.
-    pub fn writes(&self, tx: fmpsc::Sender<Pooled<Vec<WriteRequest>>>) {
+    pub fn writes(&self, tx: Sender<Pooled<Vec<WriteRequest>>>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut pb = publisher.0.lock();
             let e = pb
@@ -233,7 +237,7 @@ impl Val {
     pub fn subscribers(
         &self,
         include_existing: bool,
-        tx: fmpsc::UnboundedSender<(Id, SocketAddr)>,
+        tx: UnboundedSender<(Id, SocketAddr)>,
     ) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut inner = publisher.0.lock();
@@ -295,13 +299,13 @@ impl ValWeak {
 /// A handle to the channel that will receive notifications about
 /// subscriptions to paths in a subtree with a default publisher.
 pub struct DefaultHandle {
-    chan: fmpsc::UnboundedReceiver<(Path, oneshot::Sender<()>)>,
+    chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
     path: Path,
     publisher: PublisherWeak,
 }
 
 impl Deref for DefaultHandle {
-    type Target = fmpsc::UnboundedReceiver<(Path, oneshot::Sender<()>)>;
+    type Target = UnboundedReceiver<(Path, oneshot::Sender<()>)>;
 
     fn deref(&self) -> &Self::Target {
         &self.chan
@@ -350,19 +354,16 @@ struct PublisherInner {
         FxBuildHasher,
     >,
     on_subscribe_chans:
-        HashMap<Id, Vec<fmpsc::UnboundedSender<(Id, SocketAddr)>>, FxBuildHasher>,
-    on_write: HashMap<
-        Id,
-        Vec<(ChanId, fmpsc::Sender<Pooled<Vec<WriteRequest>>>)>,
-        FxBuildHasher,
-    >,
+        HashMap<Id, Vec<UnboundedSender<(Id, SocketAddr)>>, FxBuildHasher>,
+    on_write:
+        HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
     to_publish: HashSet<Path>,
     to_publish_default: HashSet<Path>,
     to_unpublish: HashSet<Path>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
-    default: BTreeMap<Path, fmpsc::UnboundedSender<(Path, oneshot::Sender<()>)>>,
+    default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
 }
 
 impl PublisherInner {
@@ -733,7 +734,7 @@ impl Publisher {
                     pb.to_publish_default.insert(base.clone());
                 }
             }
-            let (tx, rx) = fmpsc::unbounded();
+            let (tx, rx) = unbounded();
             pb.default.insert(base.clone(), tx);
             Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
         }
@@ -778,7 +779,7 @@ impl Publisher {
                 .collect::<Vec<_>>();
             pb.resolver.clone()
         };
-        for client in clients {
+        for mut client in clients {
             let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
@@ -962,7 +963,7 @@ async fn handle_batch(
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<
         ChanId,
-        (Pooled<Vec<WriteRequest>>, fmpsc::Sender<Pooled<Vec<WriteRequest>>>),
+        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
         FxBuildHasher,
     >,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -1182,7 +1183,7 @@ async fn client_loop(
     updates: Arc<SegQueue<ToClientMsg>>,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     addr: SocketAddr,
-    mut flushes: Receiver<Option<Duration>>,
+    flushes: Receiver<Option<Duration>>,
     s: TcpStream,
     desired_auth: Auth,
 ) -> Result<()> {
@@ -1190,9 +1191,10 @@ async fn client_loop(
     let mut batch: Vec<publisher::To> = Vec::new();
     let mut write_batches: HashMap<
         ChanId,
-        (Pooled<Vec<WriteRequest>>, fmpsc::Sender<Pooled<Vec<WriteRequest>>>),
+        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
         FxBuildHasher,
     > = HashMap::with_hasher(FxBuildHasher::default());
+    let mut flushes = flushes.fuse();
     let mut hb = time::interval(HB);
     let mut msg_sent = false;
     let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
@@ -1247,7 +1249,7 @@ async fn client_loop(
                     con.flush().await?
                 }
             },
-            to_cl = flushes.recv().fuse() => match to_cl {
+            to_cl = flushes.next() => match to_cl {
                 None => break Ok(()),
                 Some(timeout) => {
                     while let Some(m) = updates.pop() {

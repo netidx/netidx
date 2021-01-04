@@ -18,7 +18,15 @@ use crate::{
     secstore::SecStore,
 };
 use anyhow::Result;
-use futures::{future::join_all, prelude::*, select};
+use futures::{
+    channel::{
+        mpsc::{unbounded, UnboundedSender},
+        oneshot::{self, Canceled},
+    },
+    future::join_all,
+    prelude::*,
+    select,
+};
 use fxhash::FxBuildHasher;
 use log::info;
 use std::{
@@ -29,13 +37,7 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use tokio::{
-    sync::{
-        mpsc::{unbounded_channel, UnboundedSender},
-        oneshot::{self, error::RecvError},
-    },
-    task,
-};
+use tokio::task;
 
 type ReadB = Vec<(u64, ToRead)>;
 type ReadR = VecDeque<(u64, FromRead)>;
@@ -80,15 +82,17 @@ impl Shard {
         secstore: Option<SecStore>,
         resolver: SocketAddr,
     ) -> Self {
-        let (read, mut read_rx) = unbounded_channel();
-        let (write, mut write_rx) = unbounded_channel();
-        let (internal, mut internal_rx) = unbounded_channel();
+        let (read, read_rx) = unbounded();
+        let (write, write_rx) = unbounded();
+        let (internal, mut internal_rx) = unbounded();
+        let mut read_rx = read_rx.fuse();
+        let mut write_rx = write_rx.fuse();
         let t = Shard { read, write, internal };
         task::spawn(async move {
             let mut store = resolver_store::Store::new(parent, children);
             loop {
                 select! {
-                    batch = read_rx.recv().fuse() => match batch {
+                    batch = read_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
                             let r = Shard::process_read_batch(
@@ -101,7 +105,7 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    batch = write_rx.recv().fuse() => match batch {
+                    batch = write_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
                             let r = Shard::process_write_batch(
@@ -112,7 +116,7 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    addr = internal_rx.recv().fuse() => match addr {
+                    addr = internal_rx.next() => match addr {
                         None => break,
                         Some((addr, reply)) => {
                             let _ = reply.send(store.published_for_addr(&addr));
@@ -362,7 +366,7 @@ impl Store {
     }
 
     pub(crate) async fn handle_batch_read(
-        &self,
+        &mut self,
         con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
         mut msgs: impl Iterator<Item = ToRead>,
@@ -423,7 +427,7 @@ impl Store {
                 }))
                 .await
                 .into_iter()
-                .collect::<result::Result<Vec<Pooled<ReadR>>, RecvError>>()?;
+                .collect::<result::Result<Vec<Pooled<ReadR>>, Canceled>>()?;
             for i in 0..n {
                 if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
                     let r = replies
@@ -550,7 +554,7 @@ impl Store {
     }
 
     pub(crate) async fn handle_batch_write_no_clear(
-        &self,
+        &mut self,
         mut con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
@@ -597,7 +601,7 @@ impl Store {
                 }))
                 .await
                 .into_iter()
-                .collect::<result::Result<Vec<Pooled<WriteR>>, RecvError>>()?;
+                .collect::<result::Result<Vec<Pooled<WriteR>>, Canceled>>()?;
             if let Some(ref mut c) = con {
                 for i in 0..n {
                     let r = replies
@@ -618,12 +622,12 @@ impl Store {
     }
 
     pub(crate) async fn handle_clear(
-        &self,
+        &mut self,
         uifo: Arc<UserInfo>,
         write_addr: SocketAddr,
     ) -> Result<()> {
         use rand::{prelude::*, thread_rng};
-        let mut published_paths = join_all(self.shards.iter().map(|shard| {
+        let mut published_paths = join_all(self.shards.iter_mut().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.send((write_addr, tx));
             rx

@@ -2,7 +2,7 @@ use crate::pool::{Pool, Pooled};
 use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 use std::{mem, ops::Drop, clone::Clone, result};
-use tokio::sync::oneshot;
+use futures::channel::oneshot;
 
 #[derive(Debug)]
 struct BatchChannelInner<T: Send + Sync + 'static> {
