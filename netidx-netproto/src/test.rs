@@ -1,5 +1,11 @@
-use crate::{chars::Chars, pack::Pack, path::Path, pool::Pooled, utils::pack};
 use bytes::{Bytes, BytesMut};
+use netidx_core::{
+    chars::Chars,
+    pack::{Pack, Z64},
+    path::Path,
+    pool::Pooled,
+    utils::pack,
+};
 use proptest::prelude::*;
 use std::fmt::Debug;
 
@@ -24,13 +30,10 @@ fn path() -> impl Strategy<Value = Path> {
 
 mod resolver {
     use super::*;
-    use crate::{
-        pack::Z64,
-        protocol::resolver::v1::{
-            ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId,
-            FromRead, FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret,
-            ServerAuthWrite, ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
-        },
+    use crate::resolver::{
+        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
+        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret, ServerAuthWrite,
+        ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
     };
     use fxhash::FxBuildHasher;
     use proptest::{collection, option};
@@ -239,8 +242,8 @@ mod resolver {
 
 mod publisher {
     use super::*;
-    use crate::protocol::publisher::v1::{From, Hello, Id, To, Value};
-    use chrono::{MIN_DATETIME, MAX_DATETIME, prelude::*};
+    use crate::{publisher::{From, Hello, Id, To}, value::Value};
+    use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
     use std::{net::SocketAddr, time::Duration};
 
     fn hello() -> impl Strategy<Value = Hello> {

@@ -423,7 +423,7 @@ impl Store {
                 join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
                     let req = ReadRequest { uifo: uifo.clone(), batch };
-                    let _ = self.shards[i].read.send((req, tx));
+                    let _ = self.shards[i].read.unbounded_send((req, tx));
                     rx
                 }))
                 .await
@@ -597,7 +597,7 @@ impl Store {
                 join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
                     let (tx, rx) = oneshot::channel();
                     let req = WriteRequest { uifo: uifo.clone(), write_addr, batch };
-                    let _ = self.shards[i].write.send((req, tx));
+                    let _ = self.shards[i].write.unbounded_send((req, tx));
                     rx
                 }))
                 .await
@@ -630,7 +630,7 @@ impl Store {
         use rand::{prelude::*, thread_rng};
         let mut published_paths = join_all(self.shards.iter_mut().map(|shard| {
             let (tx, rx) = oneshot::channel();
-            let _ = shard.internal.send((write_addr, tx));
+            let _ = shard.internal.unbounded_send((write_addr, tx));
             rx
         }))
         .await

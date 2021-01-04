@@ -43,6 +43,3 @@ bitflags = "1"
 get_if_addrs = "0.5"
 dirs = "3"
 num_cpus = "1"
-
-[dev-dependencies]
-proptest = "0.10"

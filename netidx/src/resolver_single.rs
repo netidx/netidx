@@ -255,7 +255,7 @@ impl ResolverRead {
         batch: Pooled<Vec<(usize, ToRead)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, FromRead)>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.send((batch, tx));
+        let _ = self.0.unbounded_send((batch, tx));
         rx
     }
 }
@@ -648,7 +648,7 @@ impl ResolverWrite {
         batch: Pooled<Vec<(usize, ToWrite)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, FromWrite)>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.send((batch, tx));
+        let _ = self.0.unbounded_send((batch, tx));
         rx
     }
 }

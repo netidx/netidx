@@ -4,7 +4,7 @@ mod resolver {
     use super::*;
     use crate::{
         path::Path,
-        glob::{Glob, GlobSet},
+        protocol::glob::{Glob, GlobSet},
         chars::Chars,
         resolver::{Auth, ResolverRead, ResolverWrite, ChangeTracker},
         resolver_server::Server,
@@ -146,7 +146,10 @@ mod resolver {
         );
         let pat = Glob::new(Chars::from("/app/huge*/*")).unwrap();
         let pset = GlobSet::new(true, iter::once(pat)).unwrap();
-        let mut l = r.list_matching(&pset).await.unwrap();
+        let mut l = Vec::new();
+        for mut b in r.list_matching(&pset).await.unwrap().drain(..) {
+            l.extend(b.drain(..));
+        }
         l.sort();
         assert_eq!(
             &*l,
@@ -261,12 +264,12 @@ mod publisher {
         resolver_server::Server,
         subscriber::{Event, Subscriber, Value},
     };
-    use futures::{channel::mpsc, prelude::*};
+    use futures::{channel::mpsc, prelude::*, channel::oneshot};
     use std::{
         net::{IpAddr, SocketAddr},
         time::Duration,
     };
-    use tokio::{runtime::Runtime, sync::oneshot, task, time};
+    use tokio::{runtime::Runtime, task, time};
 
     #[test]
     fn bindcfg() {
