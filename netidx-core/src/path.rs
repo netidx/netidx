@@ -208,7 +208,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// assert!(Path::is_parent("/", "/foo/bar/baz"));
     /// assert!(Path::is_parent("/foo/bar", "/foo/bar/baz"));
     /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"));
@@ -233,7 +233,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// assert_eq!("foo\\/bar", &*Path::escape("foo/bar"));
     /// assert_eq!("\\\\hello world", &*Path::escape("\\hello world"));
     /// ```
@@ -246,7 +246,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// assert_eq!("foo/bar", &*Path::unescape("foo\\/bar"));
     /// assert_eq!("\\hello world", &*Path::unescape("\\\\hello world"));
     /// ```
@@ -271,7 +271,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::root().append("bar").append("baz");
     /// assert_eq!(&*p, "/bar/baz");
     ///
@@ -297,7 +297,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::parts(&p).collect::<Vec<_>>(), vec!["foo", "bar", "baz"]);
     ///
@@ -327,7 +327,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/some/path/ending/in/foo");
     /// let mut bn = Path::dirnames(&p);
     /// assert_eq!(bn.next(), Some("/"));
@@ -351,7 +351,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::levels(&p), 3);
     /// ```
@@ -368,7 +368,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::dirname(&p), Some("/foo/bar"));
     ///
@@ -393,7 +393,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::basename(&p), Some("baz"));
     ///
@@ -453,7 +453,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("/foo/bar/baz");
     /// assert_eq!(Path::rfind_sep(&p), Some(8));
     ///
@@ -470,7 +470,7 @@ impl Path {
     ///
     /// # Examples
     /// ```
-    /// use netidx::path::Path;
+    /// use netidx_core::path::Path;
     /// let p = Path::from("foo/bar/baz");
     /// assert_eq!(Path::find_sep(&p), Some(3));
     ///
