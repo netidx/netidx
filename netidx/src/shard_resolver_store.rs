@@ -331,7 +331,7 @@ impl Store {
         secstore: Option<SecStore>,
         resolver: SocketAddr,
     ) -> Self {
-        let shards = num_cpus::get().next_power_of_two();
+        let shards = 1; //num_cpus::get().next_power_of_two();
         let shard_mask = shards - 1;
         let shards = (0..shards)
             .into_iter()
@@ -430,7 +430,11 @@ impl Store {
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<ReadR>>, Canceled>>()?;
             for i in 0..n {
-                if !replies.iter().all(|v| v.front().map(|v| i == v.0).unwrap_or(false)) {
+                if replies.len() == 1
+                    || !replies
+                        .iter()
+                        .all(|v| v.front().map(|v| i == v.0).unwrap_or(false))
+                {
                     let r = replies
                         .iter_mut()
                         .find(|r| r.front().map(|v| v.0 == i).unwrap_or(false))

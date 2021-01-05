@@ -252,7 +252,7 @@ mod resolver {
         check_resolve(&ctx, &r_huge1_sub, &paths, &waddrs).await;
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
-        w0.clear().await.unwrap();
+        w0.unpublish(paths.iter().cloned()).await.unwrap();
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
