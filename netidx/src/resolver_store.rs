@@ -142,13 +142,12 @@ impl Store {
 
     fn remove_parents(&mut self, mut p: &str) {
         loop {
-            p = Path::dirname(p).unwrap_or("/");
-            let n = Path::levels(p) + 1;
+            let n = Path::levels(p);
             let save = self.by_path.contains_key(p)
                 || self.children.contains_key(p)
                 || self
                     .by_level
-                    .get(&n)
+                    .get(&(n + 1))
                     .map(|l| {
                         let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
                             Excluded(p),
@@ -157,7 +156,6 @@ impl Store {
                         r.next().map(|(o, _)| Path::is_parent(p, o)).unwrap_or(false)
                     })
                     .unwrap_or(false);
-            let n = n - 1;
             if save {
                 let m = self.by_level.entry(n).or_insert_with(BTreeMap::new);
                 if let Some(cn) = m.get_mut(p) {
@@ -168,8 +166,9 @@ impl Store {
                     l.remove(p);
                 })
             }
-            if p == "/" {
-                break;
+            match Path::dirname(p) {
+                None => break,
+                Some(parent) => { p = parent; }
             }
         }
     }

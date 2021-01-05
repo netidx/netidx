@@ -44,12 +44,18 @@ async fn run_publisher(
     };
     publisher.flush(None).await;
     let mut last_stat = Instant::now();
+    let mut batch = 0;
     let one_second = Duration::from_secs(1);
     loop {
         v += 1;
         for (i, p) in published.iter().enumerate() {
             p.update(Value::V64(v + i as u64));
             sent += 1;
+            batch += 1;
+            if batch > 10000 {
+                batch = 0;
+                publisher.flush(None).await;
+            }
         }
         publisher.flush(None).await;
         if let Some(delay) = delay {
