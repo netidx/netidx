@@ -331,7 +331,7 @@ impl Store {
         secstore: Option<SecStore>,
         resolver: SocketAddr,
     ) -> Self {
-        let shards = 1; //num_cpus::get().next_power_of_two();
+        let shards = std::cmp::max(1, num_cpus::get().next_power_of_two());
         let shard_mask = shards - 1;
         let shards = (0..shards)
             .into_iter()
