@@ -3,13 +3,13 @@ use crate::config;
 mod resolver {
     use super::*;
     use crate::{
+        chars::Chars,
         path::Path,
         protocol::glob::{Glob, GlobSet},
-        chars::Chars,
-        resolver::{Auth, ResolverRead, ResolverWrite, ChangeTracker},
+        resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
         resolver_server::Server,
     };
-    use std::{net::SocketAddr, iter};
+    use std::{iter, net::SocketAddr};
     use tokio::runtime::Runtime;
 
     fn p(p: &'static str) -> Path {
@@ -39,16 +39,10 @@ mod resolver {
             assert_eq!(&**l, &*vec![p("/app"), p("/foo")]);
             let mut l = r.list(p("/foo")).await.unwrap();
             l.sort();
-            assert_eq!(
-                &**l,
-                &*vec![p("/foo/bar"), p("/foo/baz")]
-            );
+            assert_eq!(&**l, &*vec![p("/foo/bar"), p("/foo/baz")]);
             let mut l = r.list(p("/app")).await.unwrap();
             l.sort();
-            assert_eq!(
-                &**l,
-                &*vec![p("/app/v0"), p("/app/v1")]
-            );
+            assert_eq!(&**l, &*vec![p("/app/v0"), p("/app/v1")]);
             drop(server)
         });
     }
@@ -168,13 +162,14 @@ mod resolver {
         ctx: &Ctx,
         r: &ResolverRead,
         paths: &[Path],
-        addr: SocketAddr,
+        addrs: &[SocketAddr],
     ) {
         let mut answer = r.resolve(paths.iter().cloned()).await.unwrap();
         let mut i = 0;
-        for (p, r) in paths.iter().zip(answer.drain(..)) {
-            assert_eq!(r.addrs.len(), 1);
-            assert_eq!(r.addrs[0].0, addr);
+        for (p, mut r) in paths.iter().zip(answer.drain(..)) {
+            r.addrs.sort();
+            assert_eq!(r.addrs.len(), addrs.len());
+            assert!(r.addrs.iter().map(|(a, _)| a).eq(addrs.iter()));
             assert_eq!(r.krb5_spns.len(), 0);
             match p.as_ref() {
                 "/tmp/x" | "/tmp/y" | "/tmp/z" => assert!(
@@ -202,7 +197,8 @@ mod resolver {
 
     async fn run_publish_resolve_complex() {
         let ctx = Ctx::new().await;
-        let waddr: SocketAddr = "127.0.0.1:5543".parse().unwrap();
+        let waddrs =
+            vec!["127.0.0.1:5543".parse().unwrap(), "127.0.0.1:5544".parse().unwrap()];
         let paths = [
             "/tmp/x",
             "/tmp/y",
@@ -225,8 +221,16 @@ mod resolver {
         let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
-        let w = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddr);
-        w.publish(paths.iter().cloned()).await.unwrap();
+        let w0 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[0]);
+        let w1 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[1]);
+        w0.publish(paths.iter().cloned()).await.unwrap();
+        assert!(r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(r_root.check_changed(&mut ct_app).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
+        check_list(&r_root).await;
+        check_resolve(&ctx, &r_root, &paths, &[waddrs[0]][..]).await;
+        w1.publish(paths.iter().cloned()).await.unwrap();
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
@@ -236,18 +240,31 @@ mod resolver {
         // when this method returns, as such this test could fail
         // spuriously.
         check_list(&r_root).await;
-        check_resolve(&ctx, &r_root, &paths, waddr).await;
+        check_resolve(&ctx, &r_root, &paths, &waddrs).await;
         let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
         check_list(&r_huge0).await;
-        check_resolve(&ctx, &r_huge0, &paths, waddr).await;
+        check_resolve(&ctx, &r_huge0, &paths, &waddrs).await;
         let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
         check_list(&r_huge1).await;
-        check_resolve(&ctx, &r_huge1, &paths, waddr).await;
+        check_resolve(&ctx, &r_huge1, &paths, &waddrs).await;
         let r_huge1_sub = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
         check_list(&r_huge1_sub).await;
-        check_resolve(&ctx, &r_huge1_sub, &paths, waddr).await;
+        check_resolve(&ctx, &r_huge1_sub, &paths, &waddrs).await;
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
+        w0.clear().await.unwrap();
+        assert!(r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
+        assert!(r_root.check_changed(&mut ct_app).await.unwrap());
+        assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
+        check_list(&r_root).await;
+        check_resolve(&ctx, &r_root, &paths, &[waddrs[1]][..]).await;
+        check_list(&r_huge1_sub).await;
+        check_resolve(&ctx, &r_huge1_sub, &paths, &[waddrs[1]][..]).await;
+        check_list(&r_huge1).await;
+        check_resolve(&ctx, &r_huge1, &paths, &[waddrs[1]][..]).await;
+        check_list(&r_huge0).await;
+        check_resolve(&ctx, &r_huge0, &paths, &[waddrs[1]][..]).await;
     }
 
     #[test]
@@ -264,7 +281,7 @@ mod publisher {
         resolver_server::Server,
         subscriber::{Event, Subscriber, Value},
     };
-    use futures::{channel::mpsc, prelude::*, channel::oneshot};
+    use futures::{channel::mpsc, channel::oneshot, prelude::*};
     use std::{
         net::{IpAddr, SocketAddr},
         time::Duration,
