@@ -524,7 +524,7 @@ impl Subscriber {
         }
         let subscriber = self.downgrade();
         task::spawn(async move {
-            let mut incoming = Batched::new(incoming, 100_000);
+            let mut incoming = Batched::new(incoming.fuse(), 100_000);
             let mut retry: Option<Instant> = None;
             loop {
                 select_biased! {
@@ -572,6 +572,7 @@ impl Subscriber {
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
     ) -> Vec<(Path, Result<Val>)> {
+        #[derive(Debug)]
         enum St {
             Resolve,
             Subscribing(oneshot::Receiver<Result<Val>>),

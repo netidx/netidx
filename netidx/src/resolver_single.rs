@@ -180,11 +180,8 @@ async fn connection_read(
                         max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 50));
                     for (_, m) in &*tx_batch {
                         match m {
-                            ToRead::List(_) => {
-                                timeout += Duration::from_secs(60);
-                            }
-                            ToRead::ListMatching(_) => {
-                                timeout += Duration::from_secs(300);
+                            ToRead::List(_) | ToRead::ListMatching(_) => {
+                                timeout += HELLO_TO;
                             }
                             _ => (),
                         }

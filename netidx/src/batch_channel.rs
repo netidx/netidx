@@ -64,7 +64,10 @@ impl<T: Send + Sync + 'static> Drop for BatchReceiver<T> {
 
 impl<T: Send + Sync + 'static> BatchReceiver<T> {
     pub(crate) fn close(&self) {
-        self.0.lock().recv_closed = true
+        let mut inner = self.0.lock();
+        inner.recv_closed = true;
+        inner.queue.clear();
+        inner.notify = None;
     }
 
     pub(crate) fn len(&self) -> usize {

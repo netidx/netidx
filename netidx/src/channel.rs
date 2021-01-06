@@ -9,6 +9,7 @@ use futures::{
     },
     prelude::*,
     future,
+    stream,
     select_biased,
 };
 use log::info;
@@ -263,7 +264,7 @@ pub(crate) struct ReadChannel<C> {
     buf: BytesMut,
     _stop: oneshot::Sender<()>,
     set_ctx: Option<oneshot::Sender<C>>,
-    incoming: Receiver<BytesMut>,
+    incoming: stream::Fuse<Receiver<BytesMut>>,
 }
 
 impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
@@ -274,7 +275,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
             buf: BytesMut::new(),
             _stop: stop_tx,
             set_ctx: Some(set_ctx),
-            incoming: read_task(stop_rx, socket, read_ctx),
+            incoming: read_task(stop_rx, socket, read_ctx).fuse(),
         }
     }
 
