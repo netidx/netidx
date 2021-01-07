@@ -1,10 +1,6 @@
 #![recursion_limit = "2048"]
-#[macro_use]
-extern crate netidx_core;
-#[macro_use]
-extern crate anyhow;
-#[macro_use]
-extern crate serde_derive;
+#[macro_use] extern crate anyhow;
+#[macro_use] extern crate serde_derive;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;

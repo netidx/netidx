@@ -13,6 +13,18 @@ use tokio::{
     runtime::Runtime,
 };
 
+macro_rules! tryc {
+    ($msg:expr, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("{}: {}", $msg, e);
+                continue;
+            }
+        }
+    };
+}
+
 pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Auth) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
@@ -30,26 +42,23 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 Ok(_) => (),
             }
             let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
-            let path = try_cf!(
+            let path = tryc!(
                 "missing path",
-                continue,
                 m.next().ok_or_else(|| anyhow!("missing path"))
             );
-            let typ_or_null = try_cf!(
+            let typ_or_null = tryc!(
                 "missing type",
-                continue,
                 m.next().ok_or_else(|| anyhow!("missing type"))
             );
             let val = if typ_or_null == "null" {
                 Value::Null
             } else {
-                let typ = try_cf!("invalid type", continue, typ_or_null.parse::<Typ>());
-                let v = try_cf!(
+                let typ = tryc!("invalid type", typ_or_null.parse::<Typ>());
+                let v = tryc!(
                     "missing value",
-                    continue,
                     m.next().ok_or_else(|| anyhow!("malformed data"))
                 );
-                try_cf!("parse val", continue, typ.parse(v))
+                tryc!("parse val", typ.parse(v))
             };
             match published.get(path) {
                 Some(p) => {
@@ -57,9 +66,8 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 }
                 None => {
                     let path = Path::from(String::from(path));
-                    let publ = try_cf!(
+                    let publ = tryc!(
                         "failed to publish",
-                        continue,
                         publisher.publish(path.clone(), val)
                     );
                     published.insert(path, publ);
