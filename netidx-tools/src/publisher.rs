@@ -22,52 +22,52 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
             Publisher::new(config, auth, bcfg).await.expect("creating publisher");
         let mut buf = String::new();
         let mut stdin = BufReader::new(stdin());
-        while let Ok(len) = stdin.read_line(&mut buf).await {
-            if len == 0 {
-                break;
+        let res = loop {
+            buf.clear();
+            match stdin.read_line(&mut buf).await {
+                Err(e) => break Err(anyhow::Error::from(e)),
+                Ok(len) if len == 0 => break Err::<(), anyhow::Error>(anyhow!("EOF")),
+                Ok(_) => (),
             }
-            {
-                let mut m = utils::splitn_escaped(buf.as_str(), 3, '\\', '|');
-                let path = try_cf!(
-                    "missing path",
+            let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
+            let path = try_cf!(
+                "missing path",
+                continue,
+                m.next().ok_or_else(|| anyhow!("missing path"))
+            );
+            let typ_or_null = try_cf!(
+                "missing type",
+                continue,
+                m.next().ok_or_else(|| anyhow!("missing type"))
+            );
+            let val = if typ_or_null == "null" {
+                Value::Null
+            } else {
+                let typ = try_cf!("invalid type", continue, typ_or_null.parse::<Typ>());
+                let v = try_cf!(
+                    "missing value",
                     continue,
-                    m.next().ok_or_else(|| anyhow!("missing path"))
+                    m.next().ok_or_else(|| anyhow!("malformed data"))
                 );
-                let typ_or_null = try_cf!(
-                    "missing type",
-                    continue,
-                    m.next().ok_or_else(|| anyhow!("missing type"))
-                );
-                let val = if typ_or_null == "null" {
-                    Value::Null
-                } else {
-                    let typ =
-                        try_cf!("invalid type", continue, typ_or_null.parse::<Typ>());
-                    let v = try_cf!(
-                        "missing value",
+                try_cf!("parse val", continue, typ.parse(v))
+            };
+            match published.get(path) {
+                Some(p) => {
+                    p.update(val);
+                }
+                None => {
+                    let path = Path::from(String::from(path));
+                    let publ = try_cf!(
+                        "failed to publish",
                         continue,
-                        m.next().ok_or_else(|| anyhow!("malformed data"))
+                        publisher.publish(path.clone(), val)
                     );
-                    try_cf!("parse val", continue, typ.parse(v))
-                };
-                match published.get(path) {
-                    Some(p) => {
-                        p.update(val);
-                    }
-                    None => {
-                        let path = Path::from(String::from(path));
-                        let publ = try_cf!(
-                            "failed to publish",
-                            continue,
-                            publisher.publish(path.clone(), val)
-                        );
-                        published.insert(path, publ);
-                    }
+                    published.insert(path, publ);
                 }
             }
-            buf.clear();
             publisher.flush(timeout).await
-        }
+        };
+        eprintln!("read loop exited {:?}", res);
         // run until we are killed even if stdin closes or ends
         future::pending::<()>().await;
         drop(publisher);
