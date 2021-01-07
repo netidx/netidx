@@ -7,7 +7,7 @@ use futures::{
     select_biased,
 };
 use fxhash::FxBuildHasher;
-use log::{info, warn, error};
+use log::{error, info, warn};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -45,9 +45,9 @@ mod publish {
 
     static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
     static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
-    static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is Unlimited";
-    static STATE_DOC: &'static str = "The current state of playback, {Stop, Pause, Play}. Pause, pause at the current position. Stop, reset playback to the initial state, unpublish everything, and wait. Default Stop.";
-    static POS_DOC: &'static str = "The current playback position. Null if playback is stopped, otherwise the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhms] to step forward or back that amount of time, e.g. -1y step back 1 year.";
+    static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is 1";
+    static STATE_DOC: &'static str = "The current state of playback, {pause, play, tail}. Tail, seek to the end of the archive and play any new messages that arrive. Default pause.";
+    static POS_DOC: &'static str = "The current playback position. Null if the archive is empty, or the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhmsu] to step forward or back that amount of time, e.g. -1y step back 1 year. -1u to step back 1 microsecond. set to 'beginning' to seek to the beginning and 'end' to seek to the end. By default the initial position is set to 'beginning' when opening the archive.";
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
         let mut buf = [0u8; SimpleRef::LENGTH];
@@ -61,6 +61,8 @@ mod publish {
                 Ok(Bound::Unbounded)
             }
             v => match v.cast_to::<Seek>()? {
+                Seek::Beginning => Ok(Bound::Unbounded),
+                Seek::End => Ok(Bound::Unbounded),
                 Seek::Absolute(ts) => Ok(Bound::Included(ts)),
                 Seek::TimeRelative(offset) => Ok(Bound::Included(Utc::now() + offset)),
                 Seek::BatchRelative(_) => bail!("invalid bound"),
@@ -99,7 +101,6 @@ mod publish {
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
     enum State {
-        Stop,
         Play,
         Pause,
         Tail,
@@ -109,7 +110,7 @@ mod publish {
         fn play(&self) -> bool {
             match self {
                 State::Play => true,
-                State::Pause | State::Stop | State::Tail => false,
+                State::Pause | State::Tail => false,
             }
         }
     }
@@ -178,7 +179,7 @@ mod publish {
             speed_ctl.writes(control_tx.clone());
             let state_ctl = publisher.publish(
                 session_base.append("control/state/current"),
-                Value::String(Chars::from("Stop")),
+                Value::String(Chars::from("pause")),
             )?;
             state_ctl.writes(control_tx.clone());
             let pos_ctl = publisher
@@ -221,7 +222,7 @@ mod publish {
                 published: HashMap::new(),
                 cursor: Cursor::new(),
                 speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
-                state: State::Stop,
+                state: State::Pause,
                 archive,
                 data_base,
             })
@@ -322,7 +323,7 @@ mod publish {
                     bail!("broadcast channel closed")
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => match self.state {
-                    State::Stop | State::Play | State::Pause => Ok(()),
+                    State::Play | State::Pause => Ok(()),
                     State::Tail => {
                         let archive = &self.archive;
                         let cursor = &mut self.cursor;
@@ -337,7 +338,7 @@ mod publish {
                     }
                 },
                 Ok(BCastMsg::Batch(ts, batch)) => match self.state {
-                    State::Stop | State::Play | State::Pause => Ok(()),
+                    State::Play | State::Pause => Ok(()),
                     State::Tail => {
                         let dt = ts.datetime();
                         let pos = self.cursor.current().unwrap_or(chrono::MIN_DATETIME);
@@ -361,7 +362,7 @@ mod publish {
             controls.map(|c| c.start_ctl.update(bound_to_val(new_start)));
             self.cursor.set_start(new_start);
             if self.cursor.current().is_none() {
-                self.stop(controls)?;
+                self.seek(controls, Seek::Beginning)?;
             }
             Ok(())
         }
@@ -374,7 +375,7 @@ mod publish {
             controls.map(|c| c.end_ctl.update(bound_to_val(new_end)));
             self.cursor.set_end(new_end);
             if self.cursor.current().is_none() {
-                self.stop(controls)?;
+                self.seek(controls, Seek::Beginning)?;
             }
             Ok(())
         }
@@ -383,7 +384,6 @@ mod publish {
             self.state = state;
             controls.map(|c| {
                 c.state_ctl.update(Value::from(match state {
-                    State::Stop => "stop",
                     State::Play => "play",
                     State::Pause => "pause",
                     State::Tail => "tail",
@@ -440,9 +440,10 @@ mod publish {
                             } else if s.as_str() == "pause" {
                                 self.set_state(Some(controls), State::Pause);
                                 cluster.send_cmd(&ClusterCmd::SetState(State::Pause));
-                            } else if s.as_str() == "stop" {
-                                self.stop(Some(controls))?;
-                                cluster.send_cmd(&ClusterCmd::SetState(State::Stop));
+                            } else if s.as_str() == "tail" {
+                                self.seek(Some(controls), Seek::End)?;
+                                self.set_state(Some(controls), State::Tail);
+                                cluster.send_cmd(&ClusterCmd::SetState(State::Tail));
                             } else if let Some(reply) = req.send_result {
                                 let e = format!("invalid command {}", s);
                                 let e = Chars::from(e);
@@ -454,6 +455,12 @@ mod publish {
                     match req.value.cast_to::<Seek>() {
                         Ok(pos) => {
                             self.seek(Some(controls), pos)?;
+                            match self.state {
+                                State::Pause | State::Play => (),
+                                State::Tail => {
+                                    self.set_state(Some(controls), State::Play);
+                                }
+                            }
                             cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
                         }
                         Err(e) => {
@@ -515,27 +522,6 @@ mod publish {
                 }
             }
             Ok(())
-        }
-
-        fn stop(&mut self, controls: Option<&Controls>) -> Result<()> {
-            self.set_state(controls, State::Stop);
-            self.cursor.reset();
-            controls.map(|c| {
-                c.pos_ctl.update(match self.cursor.start() {
-                    Bound::Unbounded => Value::Null,
-                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
-                })
-            });
-            match &mut self.speed {
-                Speed::Unlimited(v) => {
-                    v.clear();
-                }
-                Speed::Limited { current, next, .. } => {
-                    current.clear();
-                    *next = time::Instant::now();
-                }
-            }
-            self.reimage(controls)
         }
 
         fn seek(&mut self, controls: Option<&Controls>, seek: Seek) -> Result<()> {
@@ -634,7 +620,8 @@ mod publish {
             None
         };
         let mut t = T::new(publisher.clone(), archive, data_base).await?;
-        t.stop(controls.as_ref())?;
+        t.seek(controls.as_ref(), Seek::Beginning)?;
+        t.publisher.flush(None).await;
         let mut control_rx = control_rx.fuse();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         let mut idle = false;

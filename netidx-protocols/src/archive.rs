@@ -25,7 +25,7 @@ use std::{
     fs::{File, OpenOptions},
     iter::IntoIterator,
     mem,
-    ops::{Bound, RangeBounds, Drop},
+    ops::{Bound, Drop, RangeBounds},
     path::Path as FilePath,
     str::FromStr,
     sync::{
@@ -178,6 +178,8 @@ impl Pack for BatchItem {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Seek {
+    Beginning,
+    End,
     Absolute(DateTime<Utc>),
     BatchRelative(i8),
     TimeRelative(chrono::Duration),
@@ -186,6 +188,8 @@ pub enum Seek {
 impl ToString for Seek {
     fn to_string(&self) -> String {
         match self {
+            Seek::Beginning => "beginning".into(),
+            Seek::End => "end".into(),
             Seek::Absolute(dt) => dt.to_rfc3339(),
             Seek::BatchRelative(i) => i.to_string(),
             Seek::TimeRelative(d) => {
@@ -205,12 +209,16 @@ impl FromStr for Seek {
     fn from_str(s: &str) -> Result<Self> {
         use diligent_date_parser::parse_date;
         let s = s.trim();
-        if let Ok(steps) = s.parse::<i8>() {
+        if s == "beginning" {
+            Ok(Seek::Beginning)
+        } else if s == "end" {
+            Ok(Seek::End)
+        } else if let Ok(steps) = s.parse::<i8>() {
             Ok(Seek::BatchRelative(steps))
         } else if let Some(dt) = parse_date(s) {
             Ok(Seek::Absolute(dt.with_timezone(&Utc)))
         } else if s.starts_with(['+', '-'].as_ref())
-            && s.ends_with(['y', 'M', 'd', 'h', 'm', 's'].as_ref())
+            && s.ends_with(['y', 'M', 'd', 'h', 'm', 's', 'u'].as_ref())
             && s.is_ascii()
             && s.len() > 2
         {
@@ -229,8 +237,10 @@ impl FromStr for Seek {
                         quantity * 3600.
                     } else if mag == 'm' {
                         quantity * 60.
-                    } else {
+                    } else if mag == 's' {
                         quantity
+                    } else {
+                        quantity * 1e-6
                     };
                     let offset = chrono::Duration::nanoseconds(if dir == '+' {
                         (quantity * 1e9).trunc() as i64
@@ -1057,6 +1067,22 @@ impl ArchiveReader {
     /// bounds, then it will move to the closest in bounds position.
     pub fn seek(&self, cursor: &mut Cursor, seek: Seek) {
         match seek {
+            Seek::Beginning => match self.index.read().deltamap.keys().next() {
+                None => {
+                    cursor.current = None;
+                }
+                Some(ts) => {
+                    cursor.set_current(*ts);
+                }
+            },
+            Seek::End => match self.index.read().deltamap.keys().next_back() {
+                None => {
+                    cursor.current = None;
+                }
+                Some(ts) => {
+                    cursor.set_current(*ts);
+                }
+            },
             Seek::Absolute(ts) => {
                 cursor.set_current(ts);
             }
@@ -1172,7 +1198,7 @@ impl ArchiveReader {
         self.check_remap_rescan()?;
         let pos = match cursor.current {
             None => cursor.start,
-            Some(pos) => Bound::Included(pos)
+            Some(pos) => Bound::Included(pos),
         };
         match pos {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
@@ -1255,11 +1281,7 @@ mod test {
     use netidx::subscriber::Value;
     use std::fs;
 
-    fn check_contents(
-        t: &ArchiveReader,
-        paths: &[Path],
-        batches: usize,
-    ) {
+    fn check_contents(t: &ArchiveReader, paths: &[Path], batches: usize) {
         t.check_remap_rescan().unwrap();
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
