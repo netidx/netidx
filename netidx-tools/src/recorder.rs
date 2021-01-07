@@ -31,11 +31,7 @@ use std::{
     ops::Bound,
     sync::Arc,
 };
-use tokio::{
-    runtime::Runtime,
-    sync::broadcast,
-    task, time,
-};
+use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adapter::SimpleRef, Uuid};
 
 #[derive(Debug, Clone)]
@@ -276,7 +272,7 @@ mod publish {
                         time::sleep_until(*next).await;
                         if current.is_empty() {
                             self.set_state(controls, State::Tail);
-                            self.publisher.flush(None).await;                            
+                            self.publisher.flush(None).await;
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
@@ -490,7 +486,8 @@ mod publish {
         }
 
         fn reimage(&mut self, controls: Option<&Controls>) -> Result<()> {
-            let mut img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
+            let mut img =
+                task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = self.archive.get_index();
             controls.map(|c| {
                 c.pos_ctl.update(match self.cursor.current() {
@@ -549,12 +546,9 @@ mod publish {
                     current
                 }
             };
-            match current.pop_front() {
-                None => (),
-                Some((ts, _)) => {
-                    self.cursor.set_current(ts);
-                    current.clear()
-                }
+            if let Some((ts, _)) = current.pop_front() {
+                self.cursor.set_current(ts);
+                current.clear()
             }
             self.archive.seek(&mut self.cursor, seek);
             self.reimage(controls)

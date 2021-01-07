@@ -1160,28 +1160,34 @@ impl ArchiveReader {
         }
     }
 
-    /// Builds an image corresponding to the state at the beginning of
-    /// the cursor. If the cursor beginning is Unbounded, then the
-    /// image will be empty. If there are no images in the archive,
-    /// then all the deltas between the beginning and the cursor start
-    /// will be read, otherwise only the deltas between the closest
-    /// image that is older, and the cursor start need to be read.
+    /// Builds an image corresponding to the state at the cursor, or
+    /// if the cursor has no current position then at the beginning of
+    /// the cursor. If the cursor has no position and then beginning
+    /// is Unbounded, then the image will be empty. If there are no
+    /// images in the archive, then all the deltas between the
+    /// beginning and the cursor position will be read, otherwise only
+    /// the deltas between the closest image that is older, and the
+    /// cursor start need to be read.
     pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<HashMap<Id, Event>>> {
         self.check_remap_rescan()?;
-        match cursor.start {
+        let pos = match cursor.current {
+            None => cursor.start,
+            Some(pos) => Bound::Included(pos)
+        };
+        match pos {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
             _ => {
                 let (mut to_read, end) = {
                     // we need to invert the excluded/included to get
                     // the correct initial state.
-                    let cs = match cursor.start {
+                    let pos = match pos {
                         Bound::Excluded(t) => Bound::Included(t),
                         Bound::Included(t) => Bound::Excluded(t),
                         Bound::Unbounded => unreachable!(),
                     };
                     let index = self.index.read();
                     let mut to_read = TO_READ_POOL.take();
-                    let mut iter = index.imagemap.range((Bound::Unbounded, cs));
+                    let mut iter = index.imagemap.range((Bound::Unbounded, pos));
                     let s = match iter.next_back() {
                         None => Bound::Unbounded,
                         Some((ts, pos)) => {
@@ -1189,7 +1195,7 @@ impl ArchiveReader {
                             Bound::Included(*ts)
                         }
                     };
-                    to_read.extend(index.deltamap.range((s, cs)).map(|v| v.1));
+                    to_read.extend(index.deltamap.range((s, pos)).map(|v| v.1));
                     (to_read, index.end)
                 };
                 let mut image = IMG_POOL.take();
