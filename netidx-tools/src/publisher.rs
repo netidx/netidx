@@ -12,13 +12,14 @@ use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader},
     runtime::Runtime,
 };
+use log::{error, warn};
 
 macro_rules! tryc {
     ($msg:expr, $e:expr) => {
         match $e {
             Ok(x) => x,
             Err(e) => {
-                eprintln!("{}: {}", $msg, e);
+                error!("{}: {}", $msg, e);
                 continue;
             }
         }
@@ -75,7 +76,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
             }
             publisher.flush(timeout).await
         };
-        eprintln!("read loop exited {:?}", res);
+        warn!("read loop exited {:?}, running until killed", res);
         // run until we are killed even if stdin closes or ends
         future::pending::<()>().await;
         drop(publisher);
