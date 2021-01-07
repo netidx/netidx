@@ -7,7 +7,7 @@ use futures::{
     select_biased,
 };
 use fxhash::FxBuildHasher;
-use log::{info, warn};
+use log::{info, warn, error};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -723,7 +723,7 @@ mod publish {
                     info!("session {} existed", session_id)
                 }
                 Err(e) => {
-                    warn!("session {} exited {}", session_id, e)
+                    error!("session {} exited {}", session_id, e)
                 }
             }
         });
@@ -891,7 +891,7 @@ mod record {
         task::spawn(async move {
             let r = list_task(rx, resolver, spec).await;
             match r {
-                Err(e) => warn!("list task exited with error {}", e),
+                Err(e) => error!("list task exited with error {}", e),
                 Ok(()) => info!("list task exited"),
             }
         });
@@ -1088,7 +1088,7 @@ async fn run_async(
             .await;
             match res {
                 Ok(()) => info!("archive publisher exited"),
-                Err(e) => warn!("archive publisher exited with error: {}", e),
+                Err(e) => error!("archive publisher exited with error: {}", e),
             }
         }));
     }
@@ -1109,7 +1109,7 @@ async fn run_async(
             .await;
             match res {
                 Ok(()) => info!("archive writer exited"),
-                Err(e) => warn!("archive writer exited with error: {}", e),
+                Err(e) => error!("archive writer exited with error: {}", e),
             }
         }));
     }
