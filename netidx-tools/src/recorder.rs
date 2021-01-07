@@ -251,6 +251,7 @@ mod publish {
                                 Some(batch) => Ok(batch),
                                 None => {
                                     self.set_state(controls, State::Tail);
+                                    self.publisher.flush(None).await;
                                     future::pending().await
                                 }
                             }
@@ -267,6 +268,7 @@ mod publish {
                             })?;
                             if current.is_empty() {
                                 self.set_state(controls, State::Tail);
+                                self.publisher.flush(None).await;
                                 return future::pending().await;
                             }
                         }
@@ -274,6 +276,7 @@ mod publish {
                         time::sleep_until(*next).await;
                         if current.is_empty() {
                             self.set_state(controls, State::Tail);
+                            self.publisher.flush(None).await;                            
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
