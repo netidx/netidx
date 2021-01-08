@@ -495,7 +495,7 @@ mod publish {
         fn reimage(&mut self, controls: Option<&Controls>) -> Result<()> {
             let mut img =
                 task::block_in_place(|| self.archive.build_image(&self.cursor))?;
-            let mut idx = self.archive.get_index();
+            let mut idx = task::block_in_place(|| self.archive.get_index());
             controls.map(|c| {
                 c.pos_ctl.update(match self.cursor.current() {
                     Some(ts) => Value::DateTime(ts),
@@ -537,6 +537,7 @@ mod publish {
                 current.clear()
             }
             self.archive.seek(&mut self.cursor, seek);
+            dbg!(&self.cursor);
             self.reimage(controls)
         }
 
@@ -619,6 +620,7 @@ mod publish {
         } else {
             None
         };
+        archive.check_remap_rescan()?;
         let mut t = T::new(publisher.clone(), archive, data_base).await?;
         t.seek(controls.as_ref(), Seek::Beginning)?;
         t.publisher.flush(None).await;
