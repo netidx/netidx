@@ -203,7 +203,7 @@ mod publish {
 
     struct T {
         publisher: Publisher,
-        published: HashMap<Id, Val>,
+        published: HashMap<Id, Val, FxBuildHasher>,
         cursor: Cursor,
         speed: Speed,
         state: State,
@@ -219,7 +219,7 @@ mod publish {
         ) -> Result<T> {
             Ok(T {
                 publisher,
-                published: HashMap::new(),
+                published: HashMap::with_hasher(FxBuildHasher::default()),
                 cursor: Cursor::new(),
                 speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
                 state: State::Pause,
@@ -537,7 +537,6 @@ mod publish {
                 current.clear()
             }
             self.archive.seek(&mut self.cursor, seek);
-            dbg!(&self.cursor);
             self.reimage(controls)
         }
 
