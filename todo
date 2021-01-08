@@ -1,0 +1,12 @@
+0.6
+
+- subscriber cmd line observed to not resubscribe to /archive/session
+  when recorder was restarted
+
+- recorder observed to lose access to most data when the speed was set
+
+- timestamps in the ken-ohki generated file are ... strange, jump
+  multiple seconds, and then increment by microseconds, something
+  might be wrong with monotonic timestamper.
+
+- browser freezing, strange gtk error messages on stderr

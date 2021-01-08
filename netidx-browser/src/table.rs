@@ -21,7 +21,6 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     iter::FromIterator,
-    ops::Drop,
     rc::{Rc, Weak},
     result,
 };
@@ -49,12 +48,7 @@ struct TableInner {
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
-}
-
-impl Drop for TableInner {
-    fn drop(&mut self) {
-        self.view.set_model(None::<&ListStore>)
-    }
+    destroyed: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -194,7 +188,9 @@ impl Table {
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::new()),
+            destroyed: Cell::new(false),
         }));
+        t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
         t.view().append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -268,10 +264,13 @@ impl Table {
         });
         if let Some((col, dir)) = &t.0.spec.default_sort_column {
             let col = Path::from(col.clone());
-            let idx = t.0.descriptor.cols
-                .iter()
-                .enumerate()
-                .find_map(|(i, (c, _))| if c == &col { Some(i + 1) } else { None });
+            let idx = t.0.descriptor.cols.iter().enumerate().find_map(|(i, (c, _))| {
+                if c == &col {
+                    Some(i + 1)
+                } else {
+                    None
+                }
+            });
             let dir = match dir {
                 view::SortDir::Ascending => gtk::SortType::Ascending,
                 view::SortDir::Descending => gtk::SortType::Descending,
@@ -366,6 +365,7 @@ impl Table {
     }
 
     pub(super) fn update_subscriptions(&self) {
+        if self.0.destroyed.get() { return }
         let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
         let (mut start, mut end) = match self.view().get_visible_range() {
             Some((s, e)) => (s, e),
@@ -470,6 +470,7 @@ impl Table {
                 self.store().set_sort_column_id(col, dir);
             }
         }
+        self.view().thaw_child_notify();
         self.0.sort_temp_disabled.set(false);
     }
 
@@ -485,31 +486,32 @@ impl Table {
         &self.0.store
     }
 
-    pub(super) fn start_update_task(
-        &self,
-        mut tx: Option<oneshot::Sender<()>>,
-        sctx: Option<(SortColumn, SortType)>,
-    ) {
+    pub(super) fn start_update_task(&self, mut tx: Option<oneshot::Sender<()>>) {
+        let sctx = self.disable_sort();
         let t = self;
         idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
-            for _ in 0..1000 {
-                match t.0.update.borrow_mut().pop() {
-                    None => break,
-                    Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(&id) {
-                        let s = &format!("{}", v).to_value();
-                        t.store().set_value(&sub.row, sub.col, s);
+            if t.0.destroyed.get() {
+                Continue(false)
+            } else {
+                for _ in 0..1000 {
+                    match t.0.update.borrow_mut().pop() {
+                        None => break,
+                        Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(&id) {
+                            let s = &format!("{}", v).to_value();
+                            t.store().set_value(&sub.row, sub.col, s);
+                        }
                     }
                 }
-            }
-            if t.0.update.borrow().len() > 0 {
-                Continue(true)
-            } else {
-                if let Some(tx) = tx.take() {
-                    let _: result::Result<_, _> = tx.send(());
+                if t.0.update.borrow().len() > 0 {
+                    Continue(true)
+                } else {
+                    if let Some(tx) = tx.take() {
+                        let _: result::Result<_, _> = tx.send(());
+                    }
+                    t.enable_sort(sctx);
+                    t.update_subscriptions();
+                    Continue(false)
                 }
-                t.enable_sort(sctx);
-                t.update_subscriptions();
-                Continue(false)
             }
         }));
     }
@@ -527,7 +529,7 @@ impl Table {
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();
                     waits.push(rx);
-                    self.start_update_task(Some(tx), self.disable_sort());
+                    self.start_update_task(Some(tx));
                 }
             }
         }

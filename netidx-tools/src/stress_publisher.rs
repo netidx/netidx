@@ -55,6 +55,9 @@ async fn run_publisher(
             if batch > 10000 {
                 batch = 0;
                 publisher.flush(None).await;
+                if let Some(delay) = delay {
+                    time::sleep(delay).await;
+                }
             }
         }
         publisher.flush(None).await;

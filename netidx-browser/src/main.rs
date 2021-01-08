@@ -347,7 +347,7 @@ impl Widget {
                     let tbl =
                         table::Table::new(ctx.clone(), base_path, spec, selected_path);
                     // force the initial update/subscribe
-                    tbl.start_update_task(None, None);
+                    tbl.start_update_task(None);
                     Widget::Table(tbl)
                 }
                 view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
