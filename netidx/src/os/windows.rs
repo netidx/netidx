@@ -1,8 +1,8 @@
 use super::{Krb5Ctx, Krb5ServerCtx};
 use anyhow::{bail, Result};
 use bytes::{Buf, BytesMut};
-use parking_lot::Mutex;
 use log::debug;
+use parking_lot::Mutex;
 use std::{
     default::Default,
     ffi::OsString,
@@ -170,40 +170,43 @@ fn wrap_iov(
     data: &mut BytesMut,
     padding: &mut BytesMut,
 ) -> Result<()> {
-    header.resize(sizes.cbSecurityTrailer as usize, 0);
-    padding.resize(sizes.cbBlockSize as usize, 0);
-    let mut buffers = [
-        SecBuffer {
-            BufferType: sspi::SECBUFFER_TOKEN,
-            cbBuffer: sizes.cbSecurityTrailer,
-            pvBuffer: &mut **header as *mut _ as *mut c_void,
-        },
-        SecBuffer {
-            BufferType: sspi::SECBUFFER_DATA,
-            cbBuffer: data.len() as u32,
-            pvBuffer: &mut **data as *mut _ as *mut c_void,
-        },
-        SecBuffer {
-            BufferType: sspi::SECBUFFER_PADDING,
-            cbBuffer: sizes.cbBlockSize,
-            pvBuffer: &mut **padding as *mut _ as *mut c_void,
-        },
-    ];
-    let mut buf_desc = SecBufferDesc {
-        ulVersion: sspi::SECBUFFER_VERSION,
-        cBuffers: 3,
-        pBuffers: buffers.as_mut_ptr(),
-    };
-    let flags = if !encrypt { KERB_WRAP_NO_ENCRYPT } else { 0 };
-    let res =
-        unsafe { sspi::EncryptMessage(ctx as *mut _, flags, &mut buf_desc as *mut _, 0) };
-    if !SUCCEEDED(res) {
-        bail!("EncryptMessage failed {}", format_error(res))
-    }
-    header.resize(buffers[0].cbBuffer as usize, 0);
-    assert_eq!(buffers[1].cbBuffer as usize, data.len());
-    padding.resize(buffers[2].cbBuffer as usize, 0);
-    Ok(())
+    task::block_in_place(|| {
+        header.resize(sizes.cbSecurityTrailer as usize, 0);
+        padding.resize(sizes.cbBlockSize as usize, 0);
+        let mut buffers = [
+            SecBuffer {
+                BufferType: sspi::SECBUFFER_TOKEN,
+                cbBuffer: sizes.cbSecurityTrailer,
+                pvBuffer: &mut **header as *mut _ as *mut c_void,
+            },
+            SecBuffer {
+                BufferType: sspi::SECBUFFER_DATA,
+                cbBuffer: data.len() as u32,
+                pvBuffer: &mut **data as *mut _ as *mut c_void,
+            },
+            SecBuffer {
+                BufferType: sspi::SECBUFFER_PADDING,
+                cbBuffer: sizes.cbBlockSize,
+                pvBuffer: &mut **padding as *mut _ as *mut c_void,
+            },
+        ];
+        let mut buf_desc = SecBufferDesc {
+            ulVersion: sspi::SECBUFFER_VERSION,
+            cBuffers: 3,
+            pBuffers: buffers.as_mut_ptr(),
+        };
+        let flags = if !encrypt { KERB_WRAP_NO_ENCRYPT } else { 0 };
+        let res = unsafe {
+            sspi::EncryptMessage(ctx as *mut _, flags, &mut buf_desc as *mut _, 0)
+        };
+        if !SUCCEEDED(res) {
+            bail!("EncryptMessage failed {}", format_error(res))
+        }
+        header.resize(buffers[0].cbBuffer as usize, 0);
+        assert_eq!(buffers[1].cbBuffer as usize, data.len());
+        padding.resize(buffers[2].cbBuffer as usize, 0);
+        Ok(())
+    })
 }
 
 fn wrap(
@@ -226,41 +229,43 @@ fn wrap(
 }
 
 fn unwrap_iov(ctx: &mut SecHandle, len: usize, msg: &mut BytesMut) -> Result<BytesMut> {
-    let mut bufs = [
-        SecBuffer {
-            BufferType: sspi::SECBUFFER_STREAM,
-            cbBuffer: len as u32,
-            pvBuffer: &mut msg[0..len] as *mut _ as *mut c_void,
-        },
-        SecBuffer {
-            BufferType: sspi::SECBUFFER_DATA,
-            cbBuffer: 0,
-            pvBuffer: ptr::null_mut(),
-        },
-    ];
-    let mut bufs_desc = SecBufferDesc {
-        ulVersion: sspi::SECBUFFER_VERSION,
-        cBuffers: 2,
-        pBuffers: bufs.as_mut_ptr(),
-    };
-    let mut qop: u32 = 0;
-    let res = unsafe {
-        sspi::DecryptMessage(
-            ctx as *mut _,
-            &mut bufs_desc as *mut _,
-            0,
-            &mut qop as *mut _,
-        )
-    };
-    if !SUCCEEDED(res) {
-        bail!("decrypt message failed {}", format_error(res))
-    }
-    let hdr_len = bufs[1].pvBuffer as usize - bufs[0].pvBuffer as usize;
-    let data_len = bufs[1].cbBuffer as usize;
-    msg.advance(hdr_len);
-    let data = msg.split_to(data_len);
-    msg.advance(len - hdr_len - data_len); // padding
-    Ok(data)
+    task::block_in_place(|| {
+        let mut bufs = [
+            SecBuffer {
+                BufferType: sspi::SECBUFFER_STREAM,
+                cbBuffer: len as u32,
+                pvBuffer: &mut msg[0..len] as *mut _ as *mut c_void,
+            },
+            SecBuffer {
+                BufferType: sspi::SECBUFFER_DATA,
+                cbBuffer: 0,
+                pvBuffer: ptr::null_mut(),
+            },
+        ];
+        let mut bufs_desc = SecBufferDesc {
+            ulVersion: sspi::SECBUFFER_VERSION,
+            cBuffers: 2,
+            pBuffers: bufs.as_mut_ptr(),
+        };
+        let mut qop: u32 = 0;
+        let res = unsafe {
+            sspi::DecryptMessage(
+                ctx as *mut _,
+                &mut bufs_desc as *mut _,
+                0,
+                &mut qop as *mut _,
+            )
+        };
+        if !SUCCEEDED(res) {
+            bail!("decrypt message failed {}", format_error(res))
+        }
+        let hdr_len = bufs[1].pvBuffer as usize - bufs[0].pvBuffer as usize;
+        let data_len = bufs[1].cbBuffer as usize;
+        msg.advance(hdr_len);
+        let data = msg.split_to(data_len);
+        msg.advance(len - hdr_len - data_len); // padding
+        Ok(data)
+    })
 }
 
 fn convert_lifetime(lifetime: LARGE_INTEGER) -> Result<Duration> {
