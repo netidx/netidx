@@ -915,7 +915,7 @@ mod record {
         flush_interval: Option<time::Duration>,
         spec: Vec<Glob>,
     ) -> Result<()> {
-        let (tx_batch, rx_batch) = mpsc::channel(3);
+        let (tx_batch, rx_batch) = mpsc::channel(1_000_000);
         let (tx_list, rx_list) = mpsc::unbounded();
         let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 1_000_000);
         let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
@@ -990,7 +990,6 @@ mod record {
                     Some(utils::BatchItem::EndBatch) => {
                         let mut overflow = Vec::new();
                         let mut tbatch = BATCH_POOL.take();
-                        let ts = timest.timestamp();
                         task::block_in_place(|| -> Result<()> {
                             for mut batch in pending_batches.drain(..) {
                                 for (subid, ev) in batch.drain(..) {
@@ -1001,6 +1000,7 @@ mod record {
                                 }
                             }
                             loop { // handle batches >4 GiB
+                                let ts = timest.timestamp();
                                 match archive.add_batch(false, ts, &tbatch) {
                                     Err(e) if e.is::<RecordTooLarge>() => {
                                         let at = tbatch.len() >> 1;
@@ -1008,6 +1008,8 @@ mod record {
                                     }
                                     Err(e) => bail!(e),
                                     Ok(()) => {
+                                        let m = BCastMsg::Batch(ts, Arc::new(tbatch));
+                                        let _ = bcast.send(m);
                                         match overflow.pop() {
                                             None => break,
                                             Some(b) => { tbatch = Pooled::orphan(b); }
@@ -1038,7 +1040,6 @@ mod record {
                             }
                             Ok(())
                         })?;
-                        let _ = bcast.send(BCastMsg::Batch(ts, Arc::new(tbatch)));
                     }
                 }
             }
