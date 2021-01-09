@@ -247,7 +247,7 @@ mod publish {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
                             *batches = task::block_in_place(|| {
-                                archive.read_deltas(cursor, 100)
+                                archive.read_deltas(cursor, 4)
                             })?;
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
@@ -266,7 +266,7 @@ mod publish {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
                             let mut cur = task::block_in_place(|| {
-                                archive.read_deltas(cursor, 100)
+                                archive.read_deltas(cursor, 4)
                             })?;
                             for v in current.drain(..) {
                                 cur.push_front(v);
@@ -915,9 +915,9 @@ mod record {
         flush_interval: Option<time::Duration>,
         spec: Vec<Glob>,
     ) -> Result<()> {
-        let (tx_batch, rx_batch) = mpsc::channel(10_000);
+        let (tx_batch, rx_batch) = mpsc::channel(10);
         let (tx_list, rx_list) = mpsc::unbounded();
-        let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10_000);
+        let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10);
         let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
         let mut image: HashMap<SubId, Event, FxBuildHasher> =
