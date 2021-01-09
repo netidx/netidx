@@ -369,8 +369,6 @@ impl MonotonicTimestamper {
             },
         };
         self.prev = now;
-        dbg!(ts);
-        dbg!(ts.datetime());
         ts
     }
 }
