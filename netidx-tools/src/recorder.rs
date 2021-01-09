@@ -262,12 +262,16 @@ mod publish {
                     Speed::Limited { rate, next, current } => {
                         use std::time::Duration;
                         use tokio::time::Instant;
-                        if current.is_empty() {
+                        if current.len() < 2 {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
-                            *current = task::block_in_place(|| {
+                            let mut cur = task::block_in_place(|| {
                                 archive.read_deltas(cursor, 100)
                             })?;
+                            for v in current.drain(..) {
+                                cur.push_front(v);
+                            }
+                            *current = cur;
                             if current.is_empty() {
                                 self.set_state(controls, State::Tail);
                                 self.publisher.flush(None).await;
