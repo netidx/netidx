@@ -37,14 +37,16 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct FileHeader {
     version: u32,
+    committed: u64,
 }
 
 static FILE_MAGIC: &'static [u8] = b"netidx archive";
+static COMMITTED_OFFSET: usize = FILE_MAGIC.len() + mem::size_of::<u32>();
 const FILE_VERSION: u32 = 0;
 
 impl Pack for FileHeader {
     fn const_encoded_len() -> Option<usize> {
-        Some(FILE_MAGIC.len() + mem::size_of::<u32>())
+        Some(COMMITTED_OFFSET + mem::size_of::<u64>())
     }
 
     fn encoded_len(&self) -> usize {
@@ -53,7 +55,9 @@ impl Pack for FileHeader {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         buf.put_slice(FILE_MAGIC);
-        Ok(buf.put_u32(FILE_VERSION))
+        buf.put_u32(FILE_VERSION);
+        buf.put_u64(self.committed);
+        Ok(())
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
@@ -62,7 +66,9 @@ impl Pack for FileHeader {
                 return Err(PackError::InvalidFormat);
             }
         }
-        Ok(FileHeader { version: buf.get_u32() })
+        let version = buf.get_u32();
+        let committed = buf.get_u64();
+        Ok(FileHeader { version, committed })
     }
 }
 
@@ -78,21 +84,18 @@ enum RecordTyp {
     ImageBatch = 3,
 }
 
-const MAX_RECORD_LEN: u32 = 0x7FFFFFFF;
+const MAX_RECORD_LEN: u32 = u32::MAX;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 
 // Every record in the archive starts with this header
 #[derive(PackedStruct, Debug, Clone)]
 #[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
 pub struct RecordHeader {
-    // two stage commit flag
-    #[packed_field(bits = "0", size_bits = "1")]
-    committed: bool,
     // the record type
-    #[packed_field(bits = "1:2", size_bits = "2", ty = "enum")]
+    #[packed_field(bits = "0:1", size_bits = "2", ty = "enum")]
     record_type: RecordTyp,
     // the record length, up to MAX_RECORD_LEN, not including this header
-    #[packed_field(bits = "3:33", size_bits = "31", endian = "msb")]
+    #[packed_field(bits = "2:33", size_bits = "32", endian = "msb")]
     record_length: u32,
     // microsecond offset from last timestamp record, up to MAX_TIMESTAMP
     #[packed_field(bits = "34:63", size_bits = "30", endian = "msb")]
@@ -492,31 +495,22 @@ fn scan_records(
     mut deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
     max_id: &mut u64,
-    uncommitted_ok: bool,
+    end: usize,
     start_pos: usize,
     buf: &mut impl Buf,
 ) -> Result<usize> {
     let total_size = buf.remaining();
     loop {
         let pos = start_pos + (total_size - buf.remaining());
+        if pos >= end {
+            break Ok(pos);
+        }
         if buf.remaining() < <RecordHeader as Pack>::const_encoded_len().unwrap() {
-            if !uncommitted_ok {
-                warn!("file missing End marker");
-            }
             break Ok(pos);
         }
         let rh = RecordHeader::decode(buf)
             .map_err(Error::from)
             .context("invalid record header")?;
-        if !rh.committed {
-            // End of archive marked by uncommitted record with length 0
-            if rh.record_length == 0 {
-                break Ok(pos);
-            } else if !uncommitted_ok {
-                warn!("uncommitted records before end marker {}", pos);
-                break Ok(pos);
-            }
-        }
         if buf.remaining() < rh.record_length as usize {
             warn!("truncated record at {}", pos);
             break Ok(pos);
@@ -570,7 +564,6 @@ fn scan_file(
     deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
     max_id: &mut u64,
-    uncommitted_ok: bool,
     buf: &mut impl Buf,
 ) -> Result<usize> {
     let total_bytes = buf.remaining();
@@ -592,7 +585,7 @@ fn scan_file(
         deltamap,
         time_basis,
         max_id,
-        uncommitted_ok,
+        header.committed as usize,
         total_bytes - buf.remaining(),
         buf,
     )
@@ -683,6 +676,7 @@ pub struct ArchiveWriter {
 impl Drop for ArchiveWriter {
     fn drop(&mut self) {
         let _ = self.flush();
+        let _ = self.mmap.flush(); // for the committed header
     }
 }
 
@@ -716,7 +710,6 @@ impl ArchiveWriter {
                 None,
                 &mut time_basis,
                 &mut t.next_id,
-                false,
                 &mut &*t.mmap,
             )?;
             t.next_id += 1;
@@ -736,15 +729,8 @@ impl ArchiveWriter {
             file.set_len(max(block_size, fh_len + rh_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
-            let fh = FileHeader { version: FILE_VERSION };
+            let fh = FileHeader { version: FILE_VERSION, committed: fh_len as u64 };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
-            let rh = RecordHeader {
-                committed: false,
-                record_type: RecordTyp::DeltaBatch,
-                record_length: 0,
-                timestamp: 0,
-            };
-            <RecordHeader as Pack>::encode(&rh, &mut buf)?;
             mmap.flush()?;
             Ok(ArchiveWriter {
                 path_by_id: IndexMap::new(),
@@ -786,28 +772,10 @@ impl ArchiveWriter {
     pub fn flush(&mut self) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
         if self.committed < end {
-            let hl = <RecordHeader as Pack>::const_encoded_len().unwrap();
-            if self.mmap.len() - end < hl {
-                self.reserve(hl)?;
-            }
-            let end_marker = RecordHeader {
-                committed: false,
-                record_type: RecordTyp::DeltaBatch,
-                record_length: 0,
-                timestamp: 0,
-            };
-            <RecordHeader as Pack>::encode(&end_marker, &mut &mut self.mmap[end..])?;
             self.mmap.flush()?;
-            while self.committed < end {
-                let mut hr =
-                    <RecordHeader as Pack>::decode(&mut &self.mmap[self.committed..])?;
-                hr.committed = true;
-                <RecordHeader as Pack>::encode(
-                    &hr,
-                    &mut &mut self.mmap[self.committed..],
-                )?;
-                self.committed += hl + hr.record_length as usize;
-            }
+            let mut buf = &mut self.mmap[COMMITTED_OFFSET..];
+            buf.put_u64(end as u64);
+            self.committed = end;
         }
         Ok(())
     }
@@ -835,7 +803,6 @@ impl ArchiveWriter {
             let end = self.end.load(Ordering::Relaxed);
             let mut buf = &mut self.mmap[end..];
             let rh = RecordHeader {
-                committed: false,
                 record_type: RecordTyp::PathMappings,
                 record_length: record_length as u32,
                 timestamp: 0,
@@ -871,12 +838,14 @@ impl ArchiveWriter {
                 }
             }
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
+            if record_length > MAX_RECORD_LEN as usize {
+                bail!(RecordTooLarge)
+            }
             match timestamp {
                 Timestamp::Offset(_, _) => (),
                 Timestamp::NewBasis(basis) => {
                     let record_length = <DateTime<Utc> as Pack>::encoded_len(&basis);
                     let rh = RecordHeader {
-                        committed: false,
                         record_type: RecordTyp::Timestamp,
                         record_length: record_length as u32,
                         timestamp: 0,
@@ -891,7 +860,6 @@ impl ArchiveWriter {
             let len = self.check_reserve(record_length)?;
             let mut buf = &mut self.mmap[self.end.load(Ordering::Relaxed)..];
             let rh = RecordHeader {
-                committed: false,
                 record_type: if image {
                     RecordTyp::ImageBatch
                 } else {
@@ -993,7 +961,6 @@ impl ArchiveReader {
             Some(&mut index.deltamap),
             &mut index.time_basis,
             &mut max_id,
-            false,
             &mut &*mmap,
         )?;
         index.end = end;
@@ -1052,7 +1019,7 @@ impl ArchiveReader {
                 Some(&mut r.deltamap),
                 &mut r.time_basis,
                 &mut max_id,
-                true,
+                end,
                 r.end,
                 &mut &mmap[r.end..end],
             )?;

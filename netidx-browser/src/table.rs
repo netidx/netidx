@@ -457,7 +457,6 @@ impl Table {
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
         self.0.sort_temp_disabled.set(true);
         let col = self.store().get_sort_column_id();
-        self.view().freeze_child_notify();
         self.store().set_unsorted();
         self.0.sort_temp_disabled.set(false);
         col
@@ -470,7 +469,6 @@ impl Table {
                 self.store().set_sort_column_id(col, dir);
             }
         }
-        self.view().thaw_child_notify();
         self.0.sort_temp_disabled.set(false);
     }
 

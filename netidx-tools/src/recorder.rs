@@ -17,11 +17,12 @@ use netidx::{
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
     resolver::{Auth, ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber},
+    utils,
 };
 use netidx_protocols::{
     archive::{
-        ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper, Seek,
-        Timestamp, BATCH_POOL,
+        ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper,
+        RecordTooLarge, Seek, Timestamp, BATCH_POOL,
     },
     cluster::{uuid_string, Cluster},
 };
@@ -221,7 +222,11 @@ mod publish {
                 publisher,
                 published: HashMap::with_hasher(FxBuildHasher::default()),
                 cursor: Cursor::new(),
-                speed: Speed::Unlimited(Pooled::orphan(VecDeque::new())),
+                speed: Speed::Limited {
+                    rate: 1.,
+                    next: time::Instant::now(),
+                    current: Pooled::orphan(VecDeque::new()),
+                },
                 state: State::Pause,
                 archive,
                 data_base,
@@ -908,7 +913,7 @@ mod record {
     ) -> Result<()> {
         let (tx_batch, rx_batch) = mpsc::channel(3);
         let (tx_list, rx_list) = mpsc::unbounded();
-        let mut rx_batch = rx_batch.fuse();
+        let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 1_000_000);
         let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
         let mut image: HashMap<SubId, Event, FxBuildHasher> =
@@ -924,6 +929,7 @@ mod record {
         let mut last_image = archive.len();
         let mut last_flush = archive.len();
         let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
+        let mut pending_batches: Vec<Pooled<Vec<(SubId, Event)>>> = Vec::new();
         start_list_task(rx_list, subscriber.resolver(), spec);
         loop {
             select_biased! {
@@ -974,17 +980,37 @@ mod record {
                 },
                 batch = rx_batch.next() => match batch {
                     None => break,
-                    Some(mut batch) => {
+                    Some(utils::BatchItem::InBatch(batch)) => {
+                        pending_batches.push(batch);
+                    },
+                    Some(utils::BatchItem::EndBatch) => {
+                        let mut overflow = Vec::new();
                         let mut tbatch = BATCH_POOL.take();
                         let ts = timest.timestamp();
                         task::block_in_place(|| -> Result<()> {
-                            for (subid, ev) in batch.drain(..) {
-                                if image_frequency.is_some() {
-                                    image.insert(subid, ev.clone());
+                            for mut batch in pending_batches.drain(..) {
+                                for (subid, ev) in batch.drain(..) {
+                                    if image_frequency.is_some() {
+                                        image.insert(subid, ev.clone());
+                                    }
+                                    tbatch.push(BatchItem(by_subid[&subid], ev));
                                 }
-                                tbatch.push(BatchItem(by_subid[&subid], ev));
                             }
-                            archive.add_batch(false, ts, &tbatch)?;
+                            loop { // handle batches >4 GiB
+                                match archive.add_batch(false, ts, &tbatch) {
+                                    Err(e) if e.is::<RecordTooLarge>() => {
+                                        let at = tbatch.len() >> 1;
+                                        overflow.push(tbatch.split_off(at));
+                                    }
+                                    Err(e) => bail!(e),
+                                    Ok(()) => {
+                                        match overflow.pop() {
+                                            None => break,
+                                            Some(b) => { tbatch = Pooled::orphan(b); }
+                                        }
+                                    }
+                                }
+                            }
                             match image_frequency {
                                 None => (),
                                 Some(freq) if archive.len() - last_image < freq => (),
