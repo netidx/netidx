@@ -915,9 +915,9 @@ mod record {
         flush_interval: Option<time::Duration>,
         spec: Vec<Glob>,
     ) -> Result<()> {
-        let (tx_batch, rx_batch) = mpsc::channel(1_000_000);
+        let (tx_batch, rx_batch) = mpsc::channel(10_000);
         let (tx_list, rx_list) = mpsc::unbounded();
-        let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 1_000_000);
+        let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10_000);
         let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
         let mut image: HashMap<SubId, Event, FxBuildHasher> =

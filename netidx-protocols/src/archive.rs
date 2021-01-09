@@ -313,13 +313,14 @@ impl Timestamp {
 
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicTimestamper {
+    prev: DateTime<Utc>,
     basis: Option<DateTime<Utc>>,
     offset: u32,
 }
 
 impl MonotonicTimestamper {
     pub fn new() -> Self {
-        MonotonicTimestamper { basis: None, offset: 0 }
+        MonotonicTimestamper { prev: Utc::now(), basis: None, offset: 0 }
     }
 
     fn update_basis(&mut self, new_basis: DateTime<Utc>) -> DateTime<Utc> {
@@ -348,9 +349,9 @@ impl MonotonicTimestamper {
     pub fn timestamp(&mut self) -> Timestamp {
         use chrono::Duration;
         let now = Utc::now();
-        match self.basis {
+        let ts = match self.basis {
             None => Timestamp::NewBasis(self.update_basis(now)),
-            Some(basis) => match (now - basis).num_microseconds() {
+            Some(basis) => match (now - self.prev).num_microseconds() {
                 Some(off) if off <= 0 => {
                     if self.offset < MAX_TIMESTAMP {
                         self.offset += 1;
@@ -366,7 +367,11 @@ impl MonotonicTimestamper {
                 }
                 None | Some(_) => Timestamp::NewBasis(self.update_basis(now)),
             },
-        }
+        };
+        self.prev = now;
+        dbg!(ts);
+        dbg!(ts.datetime());
+        ts
     }
 }
 
