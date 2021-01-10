@@ -362,6 +362,8 @@ enum SubStatus {
     Pending(Vec<oneshot::Sender<Result<Val>>>),
 }
 
+const REMEBER_FAILED: Duration = Duration::from_secs(5);
+
 fn pick(n: usize) -> usize {
     let mut rng = rand::thread_rng();
     rng.gen_range(0..n)
@@ -371,11 +373,38 @@ fn pick(n: usize) -> usize {
 struct SubscriberInner {
     resolver: ResolverRead,
     connections: HashMap<SocketAddr, BatchSender<ToCon>, FxBuildHasher>,
+    recently_failed: HashMap<SocketAddr, Instant, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DvalWeak>,
     durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: Auth,
+}
+
+impl SubscriberInner {
+    fn choose_addr(
+        &mut self,
+        addrs: &mut Pooled<Vec<(SocketAddr, Bytes)>>,
+    ) -> (SocketAddr, Bytes) {
+        assert!(addrs.len() > 0);
+        let mut i = 0;
+        while i < addrs.len() && addrs.len() > 1 {
+            if self.recently_failed.contains_key(&addrs[0].0) {
+                addrs.swap_remove(0);
+            } else {
+                i += 1;
+            }
+        }
+        if addrs.len() == 1 {
+            addrs[0].clone()
+        } else {
+            addrs[pick(addrs.len())].clone()
+        }
+    }
+
+    fn gc_recently_failed(&mut self) {
+        self.recently_failed.retain(|_, v| v.elapsed() < REMEBER_FAILED)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -400,6 +429,7 @@ impl Subscriber {
             resolver,
             desired_auth,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
+            recently_failed: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
             durable_dead: HashMap::new(),
             durable_alive: HashMap::new(),
@@ -586,6 +616,7 @@ impl Subscriber {
         let r = {
             // Init
             let mut t = self.0.lock();
+            t.gc_recently_failed();
             for p in paths.clone() {
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
@@ -643,17 +674,11 @@ impl Subscriber {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
-                    for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
+                    for (p, mut resolved) in to_resolve.into_iter().zip(res.drain(..)) {
                         if resolved.addrs.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
-                            let addr = {
-                                if resolved.addrs.len() == 1 {
-                                    resolved.addrs[0].clone()
-                                } else {
-                                    resolved.addrs[pick(resolved.addrs.len())].clone()
-                                }
-                            };
+                            let addr = t.choose_addr(&mut resolved.addrs);
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {
@@ -674,8 +699,20 @@ impl Subscriber {
                                     .await;
                                     if let Some(subscriber) = subscriber.upgrade() {
                                         subscriber.0.lock().connections.remove(&addr);
+                                        match res {
+                                            Ok(()) => {
+                                                info!("connection to {} closed", addr)
+                                            }
+                                            Err(e) => {
+                                                subscriber
+                                                    .0
+                                                    .lock()
+                                                    .recently_failed
+                                                    .insert(addr, Instant::now());
+                                                warn!("connection to {} failed {}", addr, e)
+                                            }
+                                        }
                                     }
-                                    info!("connection to {} shutdown {:?}", addr, res);
                                 });
                                 tx
                             });
