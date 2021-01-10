@@ -247,7 +247,7 @@ mod publish {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
                             *batches =
-                                task::block_in_place(|| archive.read_deltas(cursor, 4))?;
+                                task::block_in_place(|| archive.read_deltas(cursor, 3))?;
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
@@ -265,7 +265,7 @@ mod publish {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
                             let mut cur =
-                                task::block_in_place(|| archive.read_deltas(cursor, 4))?;
+                                task::block_in_place(|| archive.read_deltas(cursor, 3))?;
                             for v in current.drain(..) {
                                 cur.push_front(v);
                             }

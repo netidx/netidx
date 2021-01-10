@@ -19,9 +19,10 @@
     over List, Table and especially ListMatching calls.
   - Reorganize the project so rust-analyzer will work on all the sub
     projects.
-  - Move to Tokio 1.0 and Bytes 1.0
   - Allow the option in subscriber to stop storing the last value
-    received for about 12% improved performance.
+    received for about 12% improved performance on Intel (on ppc64le
+    it's worth something like +50%).
+  - Move to Tokio 1.0 and Bytes 1.0
 
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate
