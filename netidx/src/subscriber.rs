@@ -378,7 +378,7 @@ struct SubscriberInner {
     desired_auth: Auth,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SubscriberWeak(Weak<Mutex<SubscriberInner>>);
 
 impl SubscriberWeak {
@@ -665,13 +665,16 @@ impl Subscriber {
                                 let addr = addr.0;
                                 task::spawn(async move {
                                     let res = connection(
-                                        subscriber,
+                                        subscriber.clone(),
                                         addr,
                                         target_spn,
                                         rx,
                                         desired_auth,
                                     )
                                     .await;
+                                    if let Some(subscriber) = subscriber.upgrade() {
+                                        subscriber.0.lock().connections.remove(&addr);
+                                    }
                                     info!("connection to {} shutdown {:?}", addr, res);
                                 });
                                 tx
@@ -1269,7 +1272,6 @@ async fn connection(
             addr,
         )
         .await;
-        subscriber.0.lock().connections.remove(&addr);
         for (_, req) in pending {
             let _ = req.finished.send(Err(anyhow!("connection died")));
         }
