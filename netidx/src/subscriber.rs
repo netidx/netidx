@@ -362,7 +362,7 @@ enum SubStatus {
     Pending(Vec<oneshot::Sender<Result<Val>>>),
 }
 
-const REMEBER_FAILED: Duration = Duration::from_secs(5);
+const REMEBER_FAILED: Duration = Duration::from_secs(60);
 
 fn pick(n: usize) -> usize {
     let mut rng = rand::thread_rng();
@@ -382,23 +382,16 @@ struct SubscriberInner {
 }
 
 impl SubscriberInner {
-    fn choose_addr(
-        &mut self,
-        addrs: &mut Pooled<Vec<(SocketAddr, Bytes)>>,
-    ) -> (SocketAddr, Bytes) {
-        assert!(addrs.len() > 0);
-        let mut i = 0;
-        while i < addrs.len() && addrs.len() > 1 {
-            if self.recently_failed.contains_key(&addrs[0].0) {
-                addrs.swap_remove(0);
-            } else {
-                i += 1;
-            }
-        }
-        if addrs.len() == 1 {
-            addrs[0].clone()
-        } else {
-            addrs[pick(addrs.len())].clone()
+    fn choose_addr(&mut self, addrs: &[(SocketAddr, Bytes)]) -> (SocketAddr, Bytes) {
+        use rand::seq::IteratorRandom;
+        let mut rng = rand::thread_rng();
+        match addrs
+            .iter()
+            .filter(|(a, _)| !self.recently_failed.contains_key(a))
+            .choose(&mut rng)
+        {
+            None => addrs.iter().choose(&mut rng).unwrap().clone(),
+            Some((addr, tok)) => (*addr, tok.clone()),
         }
     }
 
@@ -674,11 +667,11 @@ impl Subscriber {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
-                    for (p, mut resolved) in to_resolve.into_iter().zip(res.drain(..)) {
+                    for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
                         if resolved.addrs.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
-                            let addr = t.choose_addr(&mut resolved.addrs);
+                            let addr = t.choose_addr(&*resolved.addrs);
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {
@@ -709,7 +702,10 @@ impl Subscriber {
                                                     .lock()
                                                     .recently_failed
                                                     .insert(addr, Instant::now());
-                                                warn!("connection to {} failed {}", addr, e)
+                                                warn!(
+                                                    "connection to {} failed {}",
+                                                    addr, e
+                                                )
                                             }
                                         }
                                     }
