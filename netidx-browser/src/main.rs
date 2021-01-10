@@ -30,7 +30,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     resolver::{Auth, ResolverRead},
-    subscriber::{Dval, Event, SubId, Subscriber, Value},
+    subscriber::{Dval, Event, SubId, Subscriber, Value, UpdatesFlags},
 };
 use netidx_protocols::view as protocol_view;
 use once_cell::sync::OnceCell;
@@ -155,7 +155,7 @@ impl Source {
             }
             view::Source::Load(path) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
-                dv.updates(true, ctx.updates.clone());
+                dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.updates.clone());
                 Source::Load(spec, dv)
             }
             view::Source::Variable(name) => {
@@ -799,7 +799,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                                 let s = subscriber
                                     .durable_subscribe(base_path.append(".view"));
                                 let (tx, rx) = mpsc::channel(2);
-                                s.updates(true, tx);
+                                s.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
                                 view_path = Some(base_path.clone());
                                 rx_view = Some(rx);
                                 _dv_view = Some(s);

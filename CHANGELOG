@@ -20,6 +20,8 @@
   - Reorganize the project so rust-analyzer will work on all the sub
     projects.
   - Move to Tokio 1.0 and Bytes 1.0
+  - Allow the option in subscriber to stop storing the last value
+    received for about 12% improved performance.
 
 * 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate

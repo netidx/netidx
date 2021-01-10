@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 use netidx::{
     path::Path,
     resolver,
-    subscriber::{Dval, SubId, Value},
+    subscriber::{Dval, SubId, Value, UpdatesFlags},
 };
 use netidx_protocols::view;
 use std::{
@@ -418,7 +418,7 @@ impl Table {
                     p.append(&self.0.descriptor.cols[(id - 1) as usize].0)
                 };
                 let s = self.0.ctx.subscriber.durable_subscribe(p);
-                s.updates(true, self.0.ctx.updates.clone());
+                s.updates(UpdatesFlags::BEGIN_WITH_LAST, self.0.ctx.updates.clone());
                 self.0.by_id.borrow_mut().insert(
                     s.id(),
                     Subscription { _sub: s, row: row.clone(), col: id as u32 },

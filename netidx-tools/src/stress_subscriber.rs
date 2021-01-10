@@ -4,7 +4,7 @@ use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
-    subscriber::{Event, Subscriber},
+    subscriber::{Event, Subscriber, UpdatesFlags},
 };
 use std::time::Duration;
 use tokio::{
@@ -29,7 +29,10 @@ pub(crate) fn run(config: Config, auth: Auth) {
         };
         let (tx, mut vals) = mpsc::channel(3);
         for s in subs.iter() {
-            s.updates(true, tx.clone())
+            s.updates(
+                UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::STOP_COLLECTING_LAST,
+                tx.clone(),
+            )
         }
         let start = Instant::now();
         let mut last_stat = start;

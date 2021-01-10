@@ -70,6 +70,22 @@ impl error::Error for NoSuchValue {}
 
 atomic_id!(SubId);
 
+bitflags! {
+    pub struct UpdatesFlags: u32 {
+        /// if set, then an immediate update will be sent consisting
+        /// of the last value received from the publisher.
+        const BEGIN_WITH_LAST      = 0x01;
+
+        /// If set then the subscriber will stop storing the last
+        /// value. The `last` method will return whatever last was
+        /// before this method was called, and the passed in channel
+        /// will be the only way of getting data from the
+        /// subscription. This improves performance at the expense of
+        /// flexibility.
+        const STOP_COLLECTING_LAST = 0x02;
+    }
+}
+
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
@@ -86,7 +102,12 @@ struct SubscribeValRequest {
 enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
-    Stream { id: Id, sub_id: SubId, tx: Sender<Pooled<Vec<(SubId, Event)>>>, last: bool },
+    Stream {
+        id: Id,
+        sub_id: SubId,
+        tx: Sender<Pooled<Vec<(SubId, Event)>>>,
+        flags: UpdatesFlags,
+    },
     Write(Id, Value, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
 }
@@ -161,9 +182,7 @@ impl Val {
         self.0.last.lock().clone()
     }
 
-    /// Register `tx` to receive updates to this `Val`. If
-    /// `begin_with_last` is true, then an immediate update will be
-    /// sent consisting of the last value received from the publisher.
+    /// Register `tx` to receive updates to this `Val`.
     ///
     /// You may register multiple different channels to receive
     /// updates from a `Val`, and you may register one channel to
@@ -174,17 +193,8 @@ impl Val {
     /// register a duplicate channel and begin_with_last is true you
     /// will get an update with the current state, even though the
     /// channel registration will be ignored.
-    pub fn updates(
-        &self,
-        begin_with_last: bool,
-        tx: Sender<Pooled<Vec<(SubId, Event)>>>,
-    ) {
-        let m = ToCon::Stream {
-            tx,
-            sub_id: self.0.sub_id,
-            last: begin_with_last,
-            id: self.0.id,
-        };
+    pub fn updates(&self, flags: UpdatesFlags, tx: Sender<Pooled<Vec<(SubId, Event)>>>) {
+        let m = ToCon::Stream { tx, sub_id: self.0.sub_id, id: self.0.id, flags };
         self.0.connection.send(m);
     }
 
@@ -226,7 +236,7 @@ impl Val {
 struct DvalInner {
     sub_id: SubId,
     sub: Option<Val>,
-    streams: Vec<Sender<Pooled<Vec<(SubId, Event)>>>>,
+    streams: Vec<(UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     tries: usize,
     next_try: Instant,
 }
@@ -268,6 +278,13 @@ impl DvalWeak {
 /// other than that the performance is the same. It is therefore
 /// recommended that you use `Dval` as the default kind of value
 /// subscription.
+/// If `stop_collecting_last` is true then the subscriber will
+/// stop storing the last value in addition to giving it to this
+/// channel. The `last` method will return null from now on, and
+/// the passed in channel will be the only way of getting data
+/// from the subscription. This improves performance at the
+/// expense of flexibility.
+
 ///
 /// If all user held references to `Dval` are dropped it will be
 /// unsubscribed.
@@ -279,8 +296,8 @@ impl Dval {
         DvalWeak(Arc::downgrade(&self.0))
     }
 
-    /// Get the last value published by the publisher, or None if the
-    /// subscription is currently dead.
+    /// Get the last value published by the publisher, or Unsubscribed
+    /// if the subscription is currently dead.
     pub fn last(&self) -> Event {
         match &self.0.lock().sub {
             None => Event::Unsubscribed,
@@ -288,30 +305,23 @@ impl Dval {
         }
     }
 
-    /// Register `tx` to receive updates to this `Dval`. If
-    /// `begin_with_last` is true, then an immediate update will be
-    /// sent consisting of the last value received from the publisher.
+    /// Register `tx` to receive updates to this `Dval`.
     ///
     /// You may register multiple different channels to receive
     /// updates from a `Dval`, and you may register one channel to
     /// receive updates from multiple `Dval`s.
     pub fn updates(
         &self,
-        begin_with_last: bool,
+        flags: UpdatesFlags,
         tx: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) {
         let mut t = self.0.lock();
-        t.streams.retain(|c| !c.is_closed());
-        if !t.streams.iter().any(|s| tx.same_receiver(s)) {
-            t.streams.push(tx.clone());
+        t.streams.retain(|(_, c)| !c.is_closed());
+        if !t.streams.iter().any(|(_, s)| tx.same_receiver(s)) {
+            t.streams.push((flags, tx.clone()));
         }
         if let Some(ref sub) = t.sub {
-            let m = ToCon::Stream {
-                tx,
-                sub_id: t.sub_id,
-                last: begin_with_last,
-                id: sub.0.id,
-            };
+            let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
             sub.0.connection.send(m);
         }
     }
@@ -526,13 +536,13 @@ impl Subscriber {
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
                                 ds.tries = 0;
-                                ds.streams.retain(|c| !c.is_closed());
-                                for tx in ds.streams.iter().cloned() {
+                                ds.streams.retain(|(_, c)| !c.is_closed());
+                                for (flags, tx) in ds.streams.iter().cloned() {
                                     sub.0.connection.send(ToCon::Stream {
                                         tx,
                                         sub_id: ds.sub_id,
-                                        last: true,
                                         id: sub.0.id,
+                                        flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
                                     });
                                 }
                                 ds.sub = Some(sub);
@@ -878,6 +888,7 @@ struct Sub {
     path: Path,
     streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     last: Arc<Mutex<Event>>,
+    collect_last: bool,
 }
 
 type ByChan = HashMap<
@@ -993,7 +1004,9 @@ async fn process_updates_batch(
                         .1
                         .push((*sub_id, Event::Update(m.clone())))
                 }
-                *sub.last.lock() = Event::Update(m);
+                if sub.collect_last {
+                    *sub.last.lock() = Event::Update(m);
+                }
             }
         }
     }
@@ -1023,7 +1036,9 @@ async fn process_batch(
                             .1
                             .push((*sub_id, Event::Update(m.clone())));
                     }
-                    *sub.last.lock() = Event::Update(m);
+                    if sub.collect_last {
+                        *sub.last.lock() = Event::Update(m);
+                    }
                 }
                 None => con.queue_send(&To::Unsubscribe(i))?,
             },
@@ -1073,7 +1088,12 @@ async fn process_batch(
                         Ok(()) => {
                             subscriptions.insert(
                                 id,
-                                Sub { path: req.path, last, streams: Vec::new() },
+                                Sub {
+                                    path: req.path,
+                                    last,
+                                    streams: Vec::new(),
+                                    collect_last: true,
+                                },
                             );
                         }
                     }
@@ -1203,8 +1223,11 @@ async fn connection(
                                     write_con.queue_send(&To::Unsubscribe(id))
                                 )
                             }
-                            ToCon::Stream { id, sub_id, mut tx, last } => {
+                            ToCon::Stream { id, sub_id, mut tx, flags } => {
                                 if let Some(sub) = subscriptions.get_mut(&id) {
+                                    if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
+                                        sub.collect_last = false;
+                                    }
                                     sub.streams.retain(|(_, _, c)| {
                                         if c.is_closed() {
                                             by_receiver.remove(&ChanWrap(c.clone()));
@@ -1213,7 +1236,7 @@ async fn connection(
                                             true
                                         }
                                     });
-                                    if last {
+                                    if flags.contains(UpdatesFlags::BEGIN_WITH_LAST) {
                                         let m = sub.last.lock().clone();
                                         let mut b = BATCHES.take();
                                         b.push((sub_id, m));

@@ -11,7 +11,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     resolver::Auth,
-    subscriber::{Dval, Event, SubId, Typ, Subscriber, Value},
+    subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
 };
 use std::{
@@ -198,7 +198,11 @@ impl Ctx {
                     subscriptions.entry(p.clone()).or_insert_with(|| {
                         let s = subscriber.durable_subscribe(p.clone());
                         paths.insert(s.id(), p.clone());
-                        s.updates(true, sender_updates);
+                        s.updates(
+                            UpdatesFlags::BEGIN_WITH_LAST
+                                | UpdatesFlags::STOP_COLLECTING_LAST,
+                            sender_updates,
+                        );
                         s
                     });
                 }

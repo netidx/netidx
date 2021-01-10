@@ -16,7 +16,7 @@ use netidx::{
     protocol::glob::{Glob, GlobSet},
     publisher::{BindCfg, Publisher, Val, Value, WriteRequest},
     resolver::{Auth, ChangeTracker, ResolverRead},
-    subscriber::{Dval, Event, SubId, Subscriber},
+    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
 };
 use netidx_protocols::{
@@ -246,9 +246,8 @@ mod publish {
                         None => {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
-                            *batches = task::block_in_place(|| {
-                                archive.read_deltas(cursor, 4)
-                            })?;
+                            *batches =
+                                task::block_in_place(|| archive.read_deltas(cursor, 4))?;
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
@@ -265,9 +264,8 @@ mod publish {
                         if current.len() < 2 {
                             let archive = &self.archive;
                             let cursor = &mut self.cursor;
-                            let mut cur = task::block_in_place(|| {
-                                archive.read_deltas(cursor, 4)
-                            })?;
+                            let mut cur =
+                                task::block_in_place(|| archive.read_deltas(cursor, 4))?;
                             for v in current.drain(..) {
                                 cur.push_front(v);
                             }
@@ -964,7 +962,11 @@ mod record {
                                 if !subscribed.contains_key(&path) {
                                     let dv = subscriber.durable_subscribe(path.clone());
                                     let id = dv.id();
-                                    dv.updates(true, tx_batch.clone());
+                                    dv.updates(
+                                        UpdatesFlags::BEGIN_WITH_LAST
+                                            | UpdatesFlags::STOP_COLLECTING_LAST,
+                                        tx_batch.clone()
+                                    );
                                     subscribed.insert(path.clone(), dv);
                                     to_add.push((path, id));
                                 }
