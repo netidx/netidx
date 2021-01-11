@@ -320,7 +320,7 @@ impl Table {
             *self.0.focus_row.borrow_mut() = None;
             self.0.selected_path.set_label("");
         }
-        if key.get_keyval() == keys::constants::W
+        if key.get_keyval() == keys::constants::w
             && key.get_state().contains(gdk::ModifierType::CONTROL_MASK)
         {
             self.write_dialog()
@@ -337,85 +337,94 @@ impl Table {
             let path = Path::from(Arc::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
             let dv = self.0.ctx.subscriber.durable_subscribe(path);
-            match dv.last() {
-                Event::Unsubscribed => {
-                    err_modal(&window, "Selected cell isn't subscribed yet");
-                }
-                Event::Update(v) => {
-                    let d = gtk::Dialog::with_buttons(
-                        Some("Write Cell"),
-                        Some(&window),
-                        gtk::DialogFlags::MODAL,
-                        &[
-                            ("Cancel", gtk::ResponseType::Cancel),
-                            ("Write", gtk::ResponseType::Accept),
-                        ],
-                    );
-                    let root = d.get_content_area();
-                    let cb = gtk::ComboBoxText::new();
-                    for typ in Typ::all() {
-                        let name = typ.name();
-                        cb.append(Some(name), name);
-                    }
-                    let typ = Rc::new(RefCell::new(Typ::get(&v)));
-                    let val = Rc::new(RefCell::new(Some(v.clone())));
-                    cb.set_active_id(typ.borrow().map(|t| t.name()));
-                    cb.connect_changed(clone!(@strong typ => move |cb| {
-                        *typ.borrow_mut() = cb.get_active_id().and_then(|s| {
-                            Typ::from_str(&*s).ok()
-                        });
-                    }));
-                    let err = gtk::Label::new(None);
-                    let err_attrs = pango::AttrList::new();
-                    err_attrs.insert(
-                        pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap(),
-                    );
-                    err.set_attributes(Some(&err_attrs));
-                    let data = gtk::Entry::new();
-                    data.set_text(&format!("{}", v));
-                    data.connect_changed(clone!(
-                        @strong typ,
-                        @strong val,
-                        @strong err => move |t| {
-                        match &*typ.borrow() {
-                            None => { *val.borrow_mut() = Some(Value::Null); }
-                            Some(typ) => match typ.parse(&*t.get_text()) {
-                                Err(e) => {
-                                    *val.borrow_mut() = None;
-                                    err.set_text(&format!("{}", e));
-                                    t.set_icon_from_icon_name(
-                                        gtk::EntryIconPosition::Secondary,
-                                        Some("dialog-error")
-                                    );
-                                }
-                                Ok(v) => {
-                                    err.set_text("");
-                                    t.set_icon_from_icon_name(
-                                        gtk::EntryIconPosition::Secondary,
-                                        None
-                                    );
-                                    *val.borrow_mut() = Some(v)
-                                }
-                            }
-                        }
-                    }));
-                    root.add(&cb);
-                    root.add(&data);
-                    root.add(&err);
-                    match d.run() {
-                        gtk::ResponseType::Accept => match &*val.borrow() {
-                            None => {
-                                err_modal(&window, "Can't parse value, not written");
-                            }
-                            Some(v) => {
-                                dv.write(v.clone());
-                            }
-                        },
-                        gtk::ResponseType::Cancel | _ => (),
-                    }
-                    d.close();
-                }
+            let val = Rc::new(RefCell::new(match dv.last() {
+                Event::Unsubscribed => Some(Value::Null),
+                Event::Update(v) => Some(v),
+            }));
+            let d = gtk::Dialog::with_buttons(
+                Some("Write Cell"),
+                Some(&window),
+                gtk::DialogFlags::MODAL,
+                &[
+                    ("Cancel", gtk::ResponseType::Cancel),
+                    ("Write", gtk::ResponseType::Accept),
+                ],
+            );
+            let root = d.get_content_area();
+            let cb_lbl = gtk::Label::new(Some("Type:"));
+            let cb = gtk::ComboBoxText::new();
+            let cb_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            cb_box.add(&cb_lbl);
+            cb_box.add(&cb);
+            let data_lbl = gtk::Label::new(Some("value:"));
+            let data = gtk::Entry::new();
+            let data_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            data_box.add(&data_lbl);
+            data_box.add(&data);
+            let err = gtk::Label::new(None);
+            let err_attrs = pango::AttrList::new();
+            err_attrs.insert(pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap());
+            err.set_attributes(Some(&err_attrs));
+            for typ in Typ::all() {
+                let name = typ.name();
+                cb.append(Some(name), name);
             }
+            let typ =
+                Rc::new(RefCell::new(val.borrow().as_ref().and_then(|v| Typ::get(v))));
+            let parse_val = Rc::new(clone!(
+                @strong typ,
+                @strong val,
+                @strong data,
+                @strong err => move || {
+                match &*typ.borrow() {
+                    None => { *val.borrow_mut() = Some(Value::Null); }
+                    Some(typ) => match typ.parse(&*data.get_text()) {
+                        Err(e) => {
+                            *val.borrow_mut() = None;
+                            err.set_text(&format!("{}", e));
+                            data.set_icon_from_icon_name(
+                                gtk::EntryIconPosition::Secondary,
+                                Some("dialog-error")
+                            );
+                        }
+                        Ok(v) => {
+                            err.set_text("");
+                            data.set_icon_from_icon_name(
+                                gtk::EntryIconPosition::Secondary,
+                                None
+                            );
+                            *val.borrow_mut() = Some(v)
+                        }
+                    }
+                }
+            }));
+            cb.set_active_id(typ.borrow().map(|t| t.name()));
+            cb.connect_changed(clone!(@strong typ, @strong parse_val => move |cb| {
+                *typ.borrow_mut() = cb.get_active_id().and_then(|s| {
+                    Typ::from_str(&*s).ok()
+                });
+                parse_val();
+            }));
+            if let Some(v) = &*val.borrow() {
+                data.set_text(&format!("{}", v));
+            }
+            data.connect_changed(clone!(@strong parse_val => move |_| parse_val()));
+            root.add(&cb_box);
+            root.add(&data_box);
+            root.add(&err);
+            root.show_all();
+            match d.run() {
+                gtk::ResponseType::Accept => match &*val.borrow() {
+                    None => {
+                        err_modal(&window, "Can't parse value, not written");
+                    }
+                    Some(v) => {
+                        dv.write(v.clone());
+                    }
+                },
+                gtk::ResponseType::Cancel | _ => (),
+            }
+            d.close();
         }
     }
 
