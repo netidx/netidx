@@ -277,7 +277,11 @@ mod publish {
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        time::sleep_until(*next).await;
+                        let mut now = Instant::now();
+                        if *next >= now {
+                            time::sleep_until(*next).await;
+                            now = Instant::now();
+                        }
                         if current.is_empty() {
                             self.set_state(controls, State::Tail);
                             self.publisher.flush(None).await;
@@ -286,7 +290,7 @@ mod publish {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
                                 (ms / *rate).trunc() as u64
                             };
-                            *next = Instant::now() + Duration::from_millis(wait);
+                            *next = now + Duration::from_millis(wait);
                         }
                         Ok((ts, batch))
                     }
