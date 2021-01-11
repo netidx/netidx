@@ -176,7 +176,7 @@ mod publish {
             )?;
             end_ctl.writes(control_tx.clone());
             let speed_ctl = publisher
-                .publish(session_base.append("control/speed/current"), Value::V32(1))?;
+                .publish(session_base.append("control/speed/current"), Value::F64(1.))?;
             speed_ctl.writes(control_tx.clone());
             let state_ctl = publisher.publish(
                 session_base.append("control/state/current"),
