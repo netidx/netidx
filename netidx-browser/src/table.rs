@@ -1,4 +1,7 @@
-use super::{FromGui, Target, ViewLoc, WidgetCtx};
+use super::{
+    util::{err_modal, toplevel},
+    FromGui, Target, ViewLoc, WidgetCtx,
+};
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
@@ -13,7 +16,7 @@ use indexmap::IndexMap;
 use netidx::{
     path::Path,
     resolver,
-    subscriber::{Dval, SubId, Value, UpdatesFlags},
+    subscriber::{Dval, Event, SubId, Typ, UpdatesFlags, Value},
 };
 use netidx_protocols::view;
 use std::{
@@ -23,6 +26,8 @@ use std::{
     iter::FromIterator,
     rc::{Rc, Weak},
     result,
+    str::FromStr,
+    sync::Arc,
 };
 
 struct Subscription {
@@ -315,7 +320,103 @@ impl Table {
             *self.0.focus_row.borrow_mut() = None;
             self.0.selected_path.set_label("");
         }
+        if key.get_keyval() == keys::constants::W
+            && key.get_state().contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            self.write_dialog()
+        }
         Inhibit(false)
+    }
+
+    fn write_dialog(&self) {
+        let window = toplevel(self.view());
+        let selected = self.0.selected_path.get_text();
+        if &*selected == "" {
+            err_modal(&window, "Select a cell before write");
+        } else {
+            let path = Path::from(Arc::from(&*selected));
+            // we should already be subscribed, so we're just looking up the dval by path.
+            let dv = self.0.ctx.subscriber.durable_subscribe(path);
+            match dv.last() {
+                Event::Unsubscribed => {
+                    err_modal(&window, "Selected cell isn't subscribed yet");
+                }
+                Event::Update(v) => {
+                    let d = gtk::Dialog::with_buttons(
+                        Some("Write Cell"),
+                        Some(&window),
+                        gtk::DialogFlags::MODAL,
+                        &[
+                            ("Cancel", gtk::ResponseType::Cancel),
+                            ("Write", gtk::ResponseType::Accept),
+                        ],
+                    );
+                    let root = d.get_content_area();
+                    let cb = gtk::ComboBoxText::new();
+                    for typ in Typ::all() {
+                        let name = typ.name();
+                        cb.append(Some(name), name);
+                    }
+                    let typ = Rc::new(RefCell::new(Typ::get(&v)));
+                    let val = Rc::new(RefCell::new(Some(v.clone())));
+                    cb.set_active_id(typ.borrow().map(|t| t.name()));
+                    cb.connect_changed(clone!(@strong typ => move |cb| {
+                        *typ.borrow_mut() = cb.get_active_id().and_then(|s| {
+                            Typ::from_str(&*s).ok()
+                        });
+                    }));
+                    let err = gtk::Label::new(None);
+                    let err_attrs = pango::AttrList::new();
+                    err_attrs.insert(
+                        pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap(),
+                    );
+                    err.set_attributes(Some(&err_attrs));
+                    let data = gtk::Entry::new();
+                    data.set_text(&format!("{}", v));
+                    data.connect_changed(clone!(
+                        @strong typ,
+                        @strong val,
+                        @strong err => move |t| {
+                        match &*typ.borrow() {
+                            None => { *val.borrow_mut() = Some(Value::Null); }
+                            Some(typ) => match typ.parse(&*t.get_text()) {
+                                Err(e) => {
+                                    *val.borrow_mut() = None;
+                                    err.set_text(&format!("{}", e));
+                                    t.set_icon_from_icon_name(
+                                        gtk::EntryIconPosition::Secondary,
+                                        Some("dialog-error")
+                                    );
+                                }
+                                Ok(v) => {
+                                    err.set_text("");
+                                    t.set_icon_from_icon_name(
+                                        gtk::EntryIconPosition::Secondary,
+                                        None
+                                    );
+                                    *val.borrow_mut() = Some(v)
+                                }
+                            }
+                        }
+                    }));
+                    root.add(&cb);
+                    root.add(&data);
+                    root.add(&err);
+                    match d.run() {
+                        gtk::ResponseType::Accept => match &*val.borrow() {
+                            None => {
+                                err_modal(&window, "Can't parse value, not written");
+                            }
+                            Some(v) => {
+                                dv.write(v.clone());
+                            }
+                        },
+                        gtk::ResponseType::Cancel | _ => (),
+                    }
+                    d.close();
+                }
+            }
+        }
     }
 
     fn cursor_changed(&self) {
@@ -365,7 +466,9 @@ impl Table {
     }
 
     pub(super) fn update_subscriptions(&self) {
-        if self.0.destroyed.get() { return }
+        if self.0.destroyed.get() {
+            return;
+        }
         let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
         let (mut start, mut end) = match self.view().get_visible_range() {
             Some((s, e)) => (s, e),

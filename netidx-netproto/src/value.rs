@@ -1,9 +1,9 @@
+use bytes::{Buf, BufMut, Bytes};
+use chrono::{naive::NaiveDateTime, prelude::*};
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError},
 };
-use bytes::{Buf, BufMut, Bytes};
-use chrono::{naive::NaiveDateTime, prelude::*};
 use std::{
     convert, error, fmt, mem,
     num::FpCategory,
@@ -34,6 +34,25 @@ pub enum Typ {
     Bytes,
     Result,
 }
+
+static TYPES: [Typ; 16] = [
+    Typ::U32,
+    Typ::V32,
+    Typ::I32,
+    Typ::Z32,
+    Typ::U64,
+    Typ::V64,
+    Typ::I64,
+    Typ::Z64,
+    Typ::F32,
+    Typ::F64,
+    Typ::DateTime,
+    Typ::Duration,
+    Typ::Bool,
+    Typ::String,
+    Typ::Bytes,
+    Typ::Result,
+];
 
 impl Typ {
     pub fn name(&self) -> &'static str {
@@ -138,6 +157,10 @@ impl Typ {
                 }
             },
         })
+    }
+
+    pub fn all() -> &'static [Self] {
+        &TYPES
     }
 }
 

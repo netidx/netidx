@@ -311,6 +311,16 @@ impl Timestamp {
     }
 }
 
+/// The goal of this structure are as follows in order of importance
+/// 1. Monotonic. subsuquent calls to timestamp() will always be greater than previous calls.
+/// 2. Steady. Clock skew should be minimized where possible.
+/// 3. Accurate. Time stamps should be close to the actual time
+/// 4. Precise. Small differences in time should be representable.
+/// 5. Compact. Time stamps should use as little space as possible.
+///
+/// Unfortunatly because system provided time functions are often
+/// awful some careful and elaborate logic is required in order to
+/// meet the above goals.
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicTimestamper {
     prev: DateTime<Utc>,
