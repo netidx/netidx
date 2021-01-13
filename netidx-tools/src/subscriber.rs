@@ -80,9 +80,10 @@ impl<'a> Out<'a> {
     fn write(&self, to_stdout: &mut BytesMut) {
         match &self.value {
             Event::Unsubscribed => {
-                to_stdout.extend_from_slice(b"Unsubscribed\n");
+                to_stdout.extend_from_slice(b"Unsubscribed");
                 to_stdout.extend_from_slice(b"|");
                 to_stdout.extend_from_slice(self.path.as_bytes());
+                to_stdout.extend_from_slice(b"\n");
             }
             Event::Update(v) => {
                 to_stdout.extend_from_slice(self.path.as_bytes());
