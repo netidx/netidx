@@ -70,12 +70,10 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         let t = PhantomData;
         let mut t =
             Cluster { t, ctrack, subscriber, our_path, us, cmd, others, primary: true };
-        while t.others.len() < shards
-            || t.others.values().any(|d| d.last() == Event::Unsubscribed)
-        {
+        while t.subscribed_others() < shards {
             info!("waiting for {} other shards", shards);
             t.poll_members().await?;
-            time::sleep(std::time::Duration::from_millis(50)).await;
+            time::sleep(std::time::Duration::from_millis(100)).await;
         }
         Ok(t)
     }
@@ -84,6 +82,11 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     /// otherwise. May change after `poll_members`.
     pub fn primary(&self) -> bool {
         self.primary
+    }
+
+    fn subscribed_others(&self) -> usize {
+        self.others.len()
+            - self.others.values().filter(|d| d.last() == Event::Unsubscribed).count()
     }
 
     pub fn others(&self) -> usize {

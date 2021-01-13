@@ -125,14 +125,14 @@ enum Sub {
         image_frequency: usize,
         #[structopt(
             long = "poll-interval",
-            help = "How often to poll the resolver, 0 for never (1)",
-            default_value = "1"
+            help = "How often to poll the resolver, 0 for never (5)",
+            default_value = "5"
         )]
         poll_interval: u64,
         #[structopt(
             long = "flush-frequency",
-            help = "How often to flush changes in pages, 0 only on exit (8 pages)",
-            default_value = "8"
+            help = "How often to flush changes in pages, 0 only on exit (65534 pages)",
+            default_value = "65534"
         )]
         flush_frequency: usize,
         #[structopt(
