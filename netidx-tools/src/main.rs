@@ -1,6 +1,8 @@
 #![recursion_limit = "2048"]
-#[macro_use] extern crate anyhow;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate anyhow;
+#[macro_use]
+extern crate serde_derive;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
@@ -163,7 +165,13 @@ enum ResolverCmd {
     Resolve { path: Path },
     #[structopt(name = "list", about = "list entries in the resolver server")]
     List {
-        #[structopt(name = "path")]
+        #[structopt(
+            long = "no-structure",
+            short = "n",
+            help = "don't list structural items, only published paths"
+        )]
+        no_structure: bool,
+        #[structopt(name = "pattern")]
         path: Option<String>,
     },
     #[structopt(name = "table", about = "table descriptor for path")]

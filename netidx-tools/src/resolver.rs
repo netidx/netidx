@@ -24,23 +24,26 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     println!("{}", addr);
                 }
             }
-            ResolverCmd::List { path } => {
+            ResolverCmd::List { no_structure, path } => {
                 let resolver = ResolverRead::new(config, auth);
-                let path = path.map(|p| Path::from(Arc::from(p))).unwrap_or(Path::root());
-                if !Glob::is_glob(&*path) {
-                    for path in resolver.list(path).await.unwrap().drain(..) {
-                        println!("{}", path)
+                let pat = {
+                    let path = path.map(|p| Path::from(Arc::from(p))).unwrap_or(Path::root());
+                    if !Glob::is_glob(&*path) {
+                        path.append("*")
+                    } else {
+                        path
                     }
-                } else {
-                    let glob = Glob::new(Chars::from(String::from(&*path))).unwrap();
-                    let globs = GlobSet::new(false, iter::once(glob)).unwrap();
-                    let mut saw = HashSet::new();
-                    for b in resolver.list_matching(&globs).await.unwrap().iter() {
-                        for p in b.iter() {
-                            if !saw.contains(p) {
-                                saw.insert(p);
-                                println!("{}", p);
-                            }
+                };
+                let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
+                let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
+                let mut saw = HashSet::new();
+                for b in resolver.list_matching(&globs).await.unwrap().iter() {
+                    for p in b.iter() {
+                        if no_structure {
+                            println!("{}", p);
+                        } else if !saw.contains(p) {
+                            saw.insert(p);
+                            println!("{}", p);
                         }
                     }
                 }
