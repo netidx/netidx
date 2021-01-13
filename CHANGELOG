@@ -24,6 +24,7 @@
     it's worth something like +50%).
   - command line 'resolver list' now takes globs, and can poll for
     changes
+  - Implement a write dialog in the browser table view.
   - Move to Tokio 1.0 and Bytes 1.0
 
 * 0.5.1:
