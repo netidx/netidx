@@ -4,10 +4,10 @@ use netidx::{
     config::Config,
     path::Path,
     protocol::glob::{Glob, GlobSet},
-    resolver::{Auth, ResolverRead, ResolverWrite},
+    resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
 };
-use std::{collections::HashSet, iter, sync::Arc};
-use tokio::runtime::Runtime;
+use std::{collections::HashSet, iter, sync::Arc, time::Duration};
+use tokio::{runtime::Runtime, time};
 
 pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
     let rt = Runtime::new().expect("failed to init runtime");
@@ -24,10 +24,11 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     println!("{}", addr);
                 }
             }
-            ResolverCmd::List { no_structure, path } => {
+            ResolverCmd::List { watch, no_structure, path } => {
                 let resolver = ResolverRead::new(config, auth);
                 let pat = {
-                    let path = path.map(|p| Path::from(Arc::from(p))).unwrap_or(Path::root());
+                    let path =
+                        path.map(|p| Path::from(Arc::from(p))).unwrap_or(Path::root());
                     if !Glob::is_glob(&*path) {
                         path.append("*")
                     } else {
@@ -35,16 +36,22 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     }
                 };
                 let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
+                let mut ct = ChangeTracker::new(Path::from(Arc::from(glob.base())));
                 let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
-                let mut saw = HashSet::new();
-                for b in resolver.list_matching(&globs).await.unwrap().iter() {
-                    for p in b.iter() {
-                        if no_structure {
-                            println!("{}", p);
-                        } else if !saw.contains(p) {
-                            saw.insert(p);
-                            println!("{}", p);
+                let mut paths = HashSet::new();
+                while watch {
+                    if resolver.check_changed(&mut ct).await.unwrap() {
+                        for b in resolver.list_matching(&globs).await.unwrap().iter() {
+                            for p in b.iter() {
+                                if !paths.contains(p) {
+                                    paths.insert(p.clone());
+                                    println!("{}", p);
+                                }
+                            }
                         }
+                    }
+                    if watch {
+                        time::sleep(Duration::from_secs(5)).await
                     }
                 }
             }

@@ -171,6 +171,12 @@ enum ResolverCmd {
             help = "don't list structural items, only published paths"
         )]
         no_structure: bool,
+        #[structopt(
+            long = "watch",
+            short = "w",
+            help = "poll the resolver for new paths matching the specified pattern"
+        )]
+        watch: bool,
         #[structopt(name = "pattern")]
         path: Option<String>,
     },
