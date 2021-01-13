@@ -78,13 +78,15 @@ struct Out<'a> {
 
 impl<'a> Out<'a> {
     fn write(&self, to_stdout: &mut BytesMut) {
-        to_stdout.extend_from_slice(self.path.as_bytes());
-        to_stdout.extend_from_slice(b"|");
         match &self.value {
             Event::Unsubscribed => {
                 to_stdout.extend_from_slice(b"Unsubscribed\n");
+                to_stdout.extend_from_slice(b"|");
+                to_stdout.extend_from_slice(self.path.as_bytes());
             }
             Event::Update(v) => {
+                to_stdout.extend_from_slice(self.path.as_bytes());
+                to_stdout.extend_from_slice(b"|");
                 to_stdout.extend_from_slice(match Typ::get(&v) {
                     None => b"none",
                     Some(typ) => typ.name().as_bytes(),

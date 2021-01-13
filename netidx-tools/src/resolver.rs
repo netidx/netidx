@@ -39,7 +39,7 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                 let mut ct = ChangeTracker::new(Path::from(Arc::from(glob.base())));
                 let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
                 let mut paths = HashSet::new();
-                while watch {
+                loop {
                     if resolver.check_changed(&mut ct).await.unwrap() {
                         for b in resolver.list_matching(&globs).await.unwrap().iter() {
                             for p in b.iter() {
@@ -52,6 +52,8 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     }
                     if watch {
                         time::sleep(Duration::from_secs(5)).await
+                    } else {
+                        break;
                     }
                 }
             }
