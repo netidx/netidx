@@ -22,6 +22,8 @@
   - Allow the option in subscriber to stop storing the last value
     received for about 12% improved performance on Intel (on ppc64le
     it's worth something like +50%).
+  - command line 'resolver list' now takes globs, and can poll for
+    changes
   - Move to Tokio 1.0 and Bytes 1.0
 
 * 0.5.1:
