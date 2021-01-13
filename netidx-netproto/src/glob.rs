@@ -1,3 +1,6 @@
+use anyhow::Result;
+use bytes::{Buf, BufMut};
+use globset;
 use netidx_core::{
     chars::Chars,
     pack::{Pack, PackError},
@@ -5,9 +8,6 @@ use netidx_core::{
     pool::{Pool, Pooled},
     utils,
 };
-use anyhow::Result;
-use bytes::{Buf, BufMut};
-use globset;
 use std::{
     cmp::{Eq, PartialEq},
     ops::Deref,
@@ -57,6 +57,27 @@ pub struct Glob {
 }
 
 impl Glob {
+    /// returns true if the specified string contains any non escaped
+    /// glob meta chars.
+    pub fn is_glob(mut s: &str) -> bool {
+        loop {
+            if s.is_empty() {
+                break false;
+            } else {
+                match s.find(&['?', '*', '{', '['][..]) {
+                    None => break false,
+                    Some(i) => {
+                        if utils::is_escaped(s, '\\', i) {
+                            s = &s[i + 1..];
+                        } else {
+                            break true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(raw: Chars) -> Result<Glob> {
         if !Path::is_absolute(&raw) {
             bail!("glob paths must be absolute")
@@ -68,24 +89,7 @@ impl Glob {
                 match iter.next() {
                     None => break cur,
                     Some(p) => {
-                        let mut s = p;
-                        let is_glob = loop {
-                            if s.is_empty() {
-                                break false;
-                            } else {
-                                match s.find(&['?', '*', '{', '['][..]) {
-                                    None => break false,
-                                    Some(i) => {
-                                        if utils::is_escaped(s, '\\', i) {
-                                            s = &s[i + 1..];
-                                        } else {
-                                            break true;
-                                        }
-                                    }
-                                }
-                            }
-                        };
-                        if is_glob {
+                        if Glob::is_glob(p) {
                             break cur;
                         } else {
                             cur = p;
