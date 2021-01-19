@@ -9,12 +9,12 @@ use combine::{
         range::{take_while, take_while1},
         repeat::escaped,
     },
-    sep_by1,
+    sep_by, sep_by1,
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
 use netidx::{chars::Chars, path::Path, publisher::Value};
-use std::{result::Result, str::FromStr, boxed};
+use std::{boxed, result::Result, str::FromStr};
 
 fn unescape(s: String, esc: char) -> String {
     if !s.contains(esc) {
@@ -268,7 +268,7 @@ where
             between(
                 spaces().with(token('(')),
                 spaces().with(token(')')),
-                spaces().with(sep_by1(source(), spaces().with(token(',')))),
+                spaces().with(sep_by(source(), spaces().with(token(',')))),
             ),
         )
             .map(|(function, from)| Source::Map { function, from }),
@@ -498,10 +498,11 @@ mod tests {
                     ],
                     function: String::from("max"),
                 },
+                Source::Map { from: vec![], function: String::from("rand") },
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(constant(f32, 1), load_path("/foo/bar"), max(constant(f32, 0), load_path("/foo/baz")))"#;
+        let chs = r#"sum(constant(f32, 1), load_path("/foo/bar"), max(constant(f32, 0), load_path("/foo/baz")), rand())"#;
         assert_eq!(src, parse_source(chs).unwrap());
     }
 }

@@ -385,5 +385,9 @@ mod tests {
             ],
             function: String::from("sum"),
         });
+        check(Source::Map {
+            from: vec![],
+            function: String::from("any")
+        });
     }
 }
