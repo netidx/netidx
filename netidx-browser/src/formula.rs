@@ -549,7 +549,9 @@ pub(super) static FORMULAS: [&'static str; 19] = [
 impl Formula {
     pub(super) fn new(ctx: &WidgetCtx, name: &str, from: &[Source]) -> Formula {
         match name {
-            "any" => Formula::Any(RefCell::new(None)),
+            "any" => {
+                Formula::Any(RefCell::new(from.iter().find_map(|s| s.current())))
+            },
             "all" => Formula::All(CachedVals::new(from)),
             "sum" => Formula::Sum(CachedVals::new(from)),
             "product" => Formula::Product(CachedVals::new(from)),

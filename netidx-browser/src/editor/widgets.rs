@@ -290,18 +290,17 @@ fn source(
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
                 e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
-                inspect.set_active(false);
                 *source.borrow_mut() = s.clone();
                 on_change(s);
             }
         }
     }));
     inspect.connect_toggled(clone!(
-    @strong ctx,
-    @strong on_change,
-    @strong inspector,
-    @strong source,
-    @weak entry => move |b| {
+        @strong ctx,
+        @strong on_change,
+        @strong inspector,
+        @strong source,
+        @weak entry => move |b| {
         if !b.get_active() {
             if let Some((w, _)) = inspector.borrow_mut().take() {
                 w.close()
