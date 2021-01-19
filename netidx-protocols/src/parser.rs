@@ -78,7 +78,11 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize((digit(), optional(token('.')), take_while(|c: char| c.is_digit(10))))
+    recognize((
+        take_while(|c: char| c.is_digit(10)),
+        optional(token('.')),
+        take_while(|c: char| c.is_digit(10)),
+    ))
 }
 
 struct Base64Encoded(Vec<u8>);
@@ -438,6 +442,10 @@ mod tests {
             parse_source("constant(f32, 3.1415)").unwrap()
         );
         assert_eq!(
+            Source::Constant(Value::F32(675.6)),
+            parse_source("constant(f32, 675.6)").unwrap()
+        );
+        assert_eq!(
             Source::Constant(Value::F32(3.)),
             parse_source("constant(f32, 3)").unwrap()
         );
@@ -493,7 +501,7 @@ mod tests {
                 Source::Load(Path::from("/foo/bar")),
                 Source::Map {
                     from: vec![
-                        Source::Constant(Value::F32(0.)),
+                        Source::Constant(Value::F32(675.6)),
                         Source::Load(Path::from("/foo/baz")),
                     ],
                     function: String::from("max"),
@@ -502,7 +510,7 @@ mod tests {
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(constant(f32, 1), load_path("/foo/bar"), max(constant(f32, 0), load_path("/foo/baz")), rand())"#;
+        let chs = r#"sum(constant(f32, 1), load_path("/foo/bar"), max(constant(f32, 675.6), load_path("/foo/baz")), rand())"#;
         assert_eq!(src, parse_source(chs).unwrap());
     }
 }
