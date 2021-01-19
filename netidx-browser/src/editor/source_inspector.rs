@@ -21,8 +21,9 @@ fn set_dbg_src(
     spec: view::Source,
 ) -> view::Source {
     let source = Source::new(ctx, &HashMap::new(), spec.clone());
-    if let Some(v) = source.current() {
-        store.set_value(&iter, 1, &format!("{}", v).to_value());
+    match source.current() {
+        None => store.set_value(&iter, 1, &None::<&str>.to_value()),
+        Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value())
     }
     store.set_value(&iter, 3, &SourceWrap(source).to_value());
     spec
