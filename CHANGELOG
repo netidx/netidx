@@ -1,3 +1,11 @@
+* 0.6.1:
+  - Fix several really dumb bugs in the formula parser
+  - Fix the browser's formula inspector closing whenever you change
+    something
+  - Fix the browser's formula inspector sometimes shows stale values
+  - Fix the evaluation of the any() formula so it also works with
+    constant sources
+
 * 0.6.0:
   - New tool, netidx recorder, records subscriptions to compact
     archive files and publishes archive files.
