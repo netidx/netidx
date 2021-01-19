@@ -446,6 +446,10 @@ mod tests {
             parse_source("constant(f32, 675.6)").unwrap()
         );
         assert_eq!(
+            Source::Constant(Value::F32(42.3435)),
+            parse_source("constant(f32, 42.3435)").unwrap()
+        );
+        assert_eq!(
             Source::Constant(Value::F32(3.)),
             parse_source("constant(f32, 3)").unwrap()
         );
