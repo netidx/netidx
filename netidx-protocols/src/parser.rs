@@ -78,10 +78,19 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize((
-        take_while1(|c: char| c.is_digit(10)),
-        token('.'),
-        take_while(|c: char| c.is_digit(10)),
+    choice((
+        attempt(recognize((
+            take_while1(|c: char| c.is_digit(10)),
+            token('.'),
+            take_while(|c: char| c.is_digit(10)),
+        ))),
+        attempt(recognize((
+            take_while1(|c: char| c.is_digit(10)),
+            optional(token('.')),
+            take_while(|c: char| c.is_digit(10)),
+            token('e'),
+            int(),
+        ))),
     ))
 }
 
@@ -213,7 +222,7 @@ where
         ),
         attempt(
             constant("duration")
-                .with(from_str(int()).and(choice((
+                .with(from_str(flt()).and(choice((
                     string("ns"),
                     string("us"),
                     string("ms"),
@@ -221,10 +230,10 @@ where
                 ))))
                 .map(|(n, suffix)| {
                     let d = match suffix {
-                        "ns" => Duration::from_nanos(n),
-                        "us" => Duration::from_micros(n),
-                        "ms" => Duration::from_millis(n),
-                        "s" => Duration::from_secs(n),
+                        "ns" => Duration::from_secs_f64(n / 1e9),
+                        "us" => Duration::from_secs_f64(n / 1e6),
+                        "ms" => Duration::from_secs_f64(n / 1e3),
+                        "s" => Duration::from_secs_f64(n),
                         _ => unreachable!(),
                     };
                     Source::Constant(Value::Duration(d))
@@ -402,12 +411,30 @@ mod tests {
             Source::Constant(Value::F32(42.3435)),
             parse_source("f32:42.3435").unwrap()
         );
+        assert_eq!(
+            Source::Constant(Value::F32(1.123e9)),
+            parse_source("f32:1.123e9").unwrap()
+        );
+        assert_eq!(Source::Constant(Value::F32(1e9)), parse_source("f32:1e9").unwrap());
+        assert_eq!(
+            Source::Constant(Value::F32(21.2443e-6)),
+            parse_source("f32:21.2443e-6").unwrap()
+        );
         assert_eq!(Source::Constant(Value::F32(3.)), parse_source("f32:3.").unwrap());
         assert_eq!(
             Source::Constant(Value::F64(3.1415)),
             parse_source("f64:3.1415").unwrap()
         );
         assert_eq!(Source::Constant(Value::F64(3.1415)), parse_source("3.1415").unwrap());
+        assert_eq!(
+            Source::Constant(Value::F64(1.123e9)),
+            parse_source("1.123e9").unwrap()
+        );
+        assert_eq!(Source::Constant(Value::F64(1e9)), parse_source("1e9").unwrap());
+        assert_eq!(
+            Source::Constant(Value::F64(21.2443e-6)),
+            parse_source("21.2443e-6").unwrap()
+        );
         assert_eq!(Source::Constant(Value::F64(3.)), parse_source("f64:3.").unwrap());
         assert_eq!(Source::Constant(Value::F64(3.)), parse_source("3.").unwrap());
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
