@@ -6,8 +6,8 @@ use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Source {
     Constant(Value),
-    Load(Path),
-    Variable(String),
+    Load(boxed::Box<Source>),
+    Variable(boxed::Box<Source>),
     Map {
         /// the sources we are mapping from
         from: Vec<Source>,
@@ -29,16 +29,16 @@ impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Source::Constant(v) => match v {
-                Value::U32(v) => write!(f, "constant(u32, {})", v),
-                Value::V32(v) => write!(f, "constant(v32, {})", v),
-                Value::I32(v) => write!(f, "constant(i32, {})", v),
-                Value::Z32(v) => write!(f, "constant(z32, {})", v),
-                Value::U64(v) => write!(f, "constant(u64, {})", v),
-                Value::V64(v) => write!(f, "constant(v64, {})", v),
-                Value::I64(v) => write!(f, "constant(i64, {})", v),
-                Value::Z64(v) => write!(f, "constant(z64, {})", v),
-                Value::F32(v) => write!(f, "constant(f32, {})", v),
-                Value::F64(v) => write!(f, "constant(f64, {})", v),
+                Value::U32(v) => write!(f, "u32:{}", v),
+                Value::V32(v) => write!(f, "v32:{}", v),
+                Value::I32(v) => write!(f, "i32:{}", v),
+                Value::Z32(v) => write!(f, "z32:{}", v),
+                Value::U64(v) => write!(f, "u64:{}", v),
+                Value::V64(v) => write!(f, "v64:{}", v),
+                Value::I64(v) => write!(f, "{}", v),
+                Value::Z64(v) => write!(f, "z64:{}", v),
+                Value::F32(v) => write!(f, "f32:{}", v),
+                Value::F64(v) => write!(f, "{}", v),
                 Value::DateTime(v) => write!(f, r#"constant(datetime, "{}")"#, v),
                 Value::Duration(v) => {
                     write!(f, r#"constant(duration, "{}s")"#, v.as_secs_f64())
@@ -357,9 +357,13 @@ mod tests {
         check(Source::Constant(Value::Z64(-100)));
         check(Source::Constant(Value::Z64(100)));
         check(Source::Constant(Value::F32(3.1415)));
+        check(Source::Constant(Value::F32(332.1415)));
+        check(Source::Constant(Value::F32(-33.14)));
         check(Source::Constant(Value::F32(3.)));
         check(Source::Constant(Value::F32(3.)));
         check(Source::Constant(Value::F64(3.1415)));
+        check(Source::Constant(Value::F64(332.1415)));
+        check(Source::Constant(Value::F64(-33.14)));
         check(Source::Constant(Value::F64(3.)));
         check(Source::Constant(Value::F64(3.)));
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
