@@ -43,14 +43,14 @@ impl fmt::Display for Source {
                     } else {
                         write!(f, "f32:{}", v)
                     }
-                },
+                }
                 Value::F64(v) => {
                     if v.fract() == 0. {
                         write!(f, "{}.", v)
                     } else {
                         write!(f, "{}", v)
                     }
-                },
+                }
                 Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
                 Value::Duration(v) => {
                     write!(f, r#"duration:"{}s""#, v.as_secs_f64())
@@ -332,84 +332,105 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use netidx::chars::Chars;
+    use std::time::Duration;
+    use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use proptest::{collection, prelude::*};
 
-    #[test]
-    fn sink_round_trip() {
-        let s = Sink::Store(Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#));
-        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
-        let s = Sink::All(vec![
-            Sink::Store(Path::from("/foo/bar")),
-            Sink::Variable(String::from("foo")),
-        ]);
-        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
-        let s = Sink::Navigate;
-        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
-        let s = Sink::Confirm(boxed::Box::new(Sink::Navigate));
-        assert_eq!(s, s.to_string().parse::<Sink>().unwrap());
+    fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
+        (MIN_DATETIME.timestamp()..MAX_DATETIME.timestamp(), 0..1_000_000_000u32)
+            .prop_map(|(s, ns)| Utc.timestamp(s, ns))
     }
 
-    fn check(s: Source) {
-        assert_eq!(dbg!(&s), &dbg!(s.to_string()).parse::<Source>().unwrap())
+    fn duration() -> impl Strategy<Value = Duration> {
+        (any::<u64>(), 0..1_000_000_000u32).prop_map(|(s, ns)| Duration::new(s, ns))
     }
 
-    #[test]
-    fn source_round_trip() {
-        check(Source::Constant(Value::U32(23)));
-        check(Source::Constant(Value::V32(42)));
-        check(Source::Constant(Value::I32(-10)));
-        check(Source::Constant(Value::I32(12321)));
-        check(Source::Constant(Value::Z32(-99)));
-        check(Source::Constant(Value::U64(100)));
-        check(Source::Constant(Value::V64(100)));
-        check(Source::Constant(Value::I64(-100)));
-        check(Source::Constant(Value::I64(100)));
-        check(Source::Constant(Value::Z64(-100)));
-        check(Source::Constant(Value::Z64(100)));
-        check(Source::Constant(Value::F32(3.1415)));
-        check(Source::Constant(Value::F32(332.1415)));
-        check(Source::Constant(Value::F32(-33.14)));
-        check(Source::Constant(Value::F32(3.)));
-        check(Source::Constant(Value::F32(3.)));
-        check(Source::Constant(Value::F64(1e9)));
-        check(Source::Constant(Value::F64(3.1415e9)));
-        check(Source::Constant(Value::F64(32.1415e-9)));
-        check(Source::Constant(Value::F64(3.1415)));
-        check(Source::Constant(Value::F64(332.1415)));
-        check(Source::Constant(Value::F64(-33.14)));
-        check(Source::Constant(Value::F64(3.)));
-        check(Source::Constant(Value::F64(3.)));
-        let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
-        check(Source::Constant(Value::String(c)));
-        check(Source::Constant(Value::True));
-        check(Source::Constant(Value::False));
-        check(Source::Constant(Value::Null));
-        check(Source::Constant(Value::Ok));
-        check(Source::Constant(Value::Error(Chars::from("error"))));
-        check(Source::Load(boxed::Box::new(Source::Constant(Value::String(
-            Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#),
-        )))));
-        check(Source::Variable(boxed::Box::new(Source::Constant(Value::String(
-            Chars::from("sum"),
-        )))));
-        check(Source::Map {
-            from: vec![
-                Source::Constant(Value::F32(1.)),
-                Source::Load(boxed::Box::new(Source::Constant(Value::String(
-                    Chars::from("/foo/bar"),
-                )))),
+    fn bytes() -> impl Strategy<Value = Bytes> {
+        any::<Vec<u8>>().prop_map(Bytes::from)
+    }
+
+    fn chars() -> impl Strategy<Value = Chars> {
+        any::<String>().prop_map(Chars::from)
+    }
+
+    fn value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            any::<u32>().prop_map(Value::U32),
+            any::<u32>().prop_map(Value::V32),
+            any::<i32>().prop_map(Value::I32),
+            any::<i32>().prop_map(Value::Z32),
+            any::<u64>().prop_map(Value::U64),
+            any::<u64>().prop_map(Value::V64),
+            any::<i64>().prop_map(Value::I64),
+            any::<i64>().prop_map(Value::Z64),
+            any::<f32>().prop_map(Value::F32),
+            any::<f64>().prop_map(Value::F64),
+            datetime().prop_map(Value::DateTime),
+            duration().prop_map(Value::Duration),
+            chars().prop_map(Value::String),
+            bytes().prop_map(Value::Bytes),
+            Just(Value::True),
+            Just(Value::False),
+            Just(Value::Null),
+            Just(Value::Ok),
+            chars().prop_map(Value::Error),
+        ]
+    }
+
+    fn path() -> impl Strategy<Value = Path> {
+        chars().prop_map(Path::from)
+    }
+
+    prop_compose! {
+        fn fname()(s in "[a-z][a-z0-9_]*") -> String {
+            s
+        }
+    }
+    
+    fn sink() -> impl Strategy<Value = Sink> {
+        let leaf = prop_oneof![
+            path().prop_map(Sink::Store),
+            fname().prop_map(Sink::Variable),
+            Just(Sink::Navigate),
+        ];
+        leaf.prop_recursive(
+            10,
+            1024,
+            10,
+            |inner| prop_oneof! [
+                collection::vec(inner.clone(), (1, 10)).prop_map(Sink::All),
+                inner.prop_map(|s| Sink::Confirm(boxed::Box::new(s)))
+            ]
+        )
+    }
+
+    fn source() -> BoxedStrategy<Source> {
+        prop_oneof![
+            value().prop_map(Source::Constant),
+            source().prop_map(|s| Source::Load(boxed::Box::new(s))),
+            source().prop_map(|s| Source::Variable(boxed::Box::new(s))),
+            (collection::vec(source(), (0, 10)), any::<String>()).prop_map(|(s, f)| {
                 Source::Map {
-                    from: vec![
-                        Source::Constant(Value::F32(0.)),
-                        Source::Load(boxed::Box::new(Source::Constant(Value::String(
-                            Chars::from("/foo/baz"),
-                        )))),
-                    ],
-                    function: String::from("max"),
-                },
-            ],
-            function: String::from("sum"),
-        });
-        check(Source::Map { from: vec![], function: String::from("any") });
+                    function: f,
+                    from: s
+                }
+            })
+        ].boxed()
+    }
+
+    proptest! {
+        #[test]
+        fn sink_round_trip(s in sink()) {
+            assert_eq!(dbg!(&s), &dbg!(s.to_string()).parse::<Sink>().unwrap());
+        }
+
+/*
+        #[test]
+        fn source_round_trip(s in source()) {
+            assert_eq!(s, s.to_string().parse::<Source>().unwrap())
+        }
+*/
     }
 }

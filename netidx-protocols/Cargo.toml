@@ -35,3 +35,6 @@ indexmap = "1"
 diligent-date-parser = "0.1"
 futures = "0.3"
 uuid = { version = "0.8", features = ["v4"] }
+
+[dev-dependencies]
+proptest = "0.10"

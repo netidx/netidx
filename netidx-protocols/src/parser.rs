@@ -2,7 +2,7 @@ use crate::view::{Sink, Source};
 use base64;
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice, from_str, many1, optional,
+    attempt, between, choice, from_str, many1, one_of, optional,
     parser::{
         char::{digit, spaces, string},
         combinator::recognize,
@@ -35,23 +35,28 @@ fn unescape(s: String, esc: char) -> String {
     }
 }
 
-fn escaped_string<I>(cq: char) -> impl Parser<I, Output = String>
+fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize(escaped(take_while1(move |c| c != cq && c != '\\'), '\\', token(cq)))
-        .map(|s| unescape(s, '\\'))
+    static ESC: [char; 2] = ['"', '\\'];
+    recognize(escaped(
+        take_while1(move |c| c != '"' && c != '\\'),
+        '\\',
+        one_of(ESC[..].iter().copied()),
+    ))
+    .map(|s| unescape(s, '\\'))
 }
 
-fn quoted<I>(oq: char, cq: char) -> impl Parser<I, Output = String>
+fn quoted<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces().with(between(token(oq), token(cq), escaped_string(cq)))
+    spaces().with(between(token('"'), token('"'), escaped_string()))
 }
 
 fn uint<I>() -> impl Parser<I, Output = String>
@@ -126,7 +131,9 @@ where
 {
     recognize((
         take_while1(|c: char| c.is_alphabetic() && c.is_lowercase()),
-        take_while(|c: char| (c.is_alphanumeric() && c.is_lowercase()) || c == '_'),
+        take_while(|c: char| {
+            (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
+        }),
     ))
 }
 
@@ -148,9 +155,7 @@ where
     spaces().with(choice((
         attempt(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
         attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
-        attempt(
-            quoted('"', '"').map(|v| Source::Constant(Value::String(Chars::from(v)))),
-        ),
+        attempt(quoted().map(|v| Source::Constant(Value::String(Chars::from(v))))),
         attempt(string("true").map(|_| Source::Constant(Value::True))),
         attempt(string("false").map(|_| Source::Constant(Value::False))),
         attempt(string("null").map(|_| Source::Constant(Value::Null))),
@@ -209,17 +214,15 @@ where
                 .with(from_str(base64str()))
                 .map(|Base64Encoded(v)| Source::Constant(Value::Bytes(Bytes::from(v)))),
         ),
-        attempt(
-            string("ok").map(|_| Source::Constant(Value::Ok)),
-        ),
+        attempt(string("ok").map(|_| Source::Constant(Value::Ok))),
         attempt(
             constant("error")
-                .with(quoted('"', '"'))
+                .with(quoted())
                 .map(|s| Source::Constant(Value::Error(Chars::from(s)))),
         ),
         attempt(
             constant("datetime")
-                .with(from_str(quoted('"', '"')))
+                .with(from_str(quoted()))
                 .map(|d| Source::Constant(Value::DateTime(d))),
         ),
         attempt(
@@ -298,7 +301,7 @@ where
                 .with(between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
-                    quoted('"', '"'),
+                    quoted(),
                 ))
                 .map(|s| Sink::Store(Path::from(s))),
         ),
