@@ -53,7 +53,12 @@ impl fmt::Display for Source {
                 }
                 Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
                 Value::Duration(v) => {
-                    write!(f, r#"duration:"{}s""#, v.as_secs_f64())
+                    let v = v.as_secs_f64();
+                    if v.fract() == 0. {
+                        write!(f, r#"duration:{}.s"#, v)
+                    } else {
+                        write!(f, r#"duration:{}s"#, v)
+                    }
                 }
                 Value::String(s) => {
                     write!(f, r#""{}""#, utils::escape(&*s, '\\', '"'))
@@ -333,10 +338,10 @@ pub struct View {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use netidx::chars::Chars;
-    use std::time::Duration;
     use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use netidx::chars::Chars;
     use proptest::{collection, prelude::*};
+    use std::time::Duration;
 
     fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
         (MIN_DATETIME.timestamp()..MAX_DATETIME.timestamp(), 0..1_000_000_000u32)
@@ -388,36 +393,53 @@ mod tests {
             s
         }
     }
-    
+
     fn sink() -> impl Strategy<Value = Sink> {
         let leaf = prop_oneof![
             path().prop_map(Sink::Store),
             fname().prop_map(Sink::Variable),
             Just(Sink::Navigate),
         ];
-        leaf.prop_recursive(
-            10,
-            1024,
-            10,
-            |inner| prop_oneof! [
+        leaf.prop_recursive(100, 1000000, 10, |inner| {
+            prop_oneof![
                 collection::vec(inner.clone(), (1, 10)).prop_map(Sink::All),
                 inner.prop_map(|s| Sink::Confirm(boxed::Box::new(s)))
             ]
-        )
+        })
     }
 
-    fn source() -> BoxedStrategy<Source> {
-        prop_oneof![
-            value().prop_map(Source::Constant),
-            source().prop_map(|s| Source::Load(boxed::Box::new(s))),
-            source().prop_map(|s| Source::Variable(boxed::Box::new(s))),
-            (collection::vec(source(), (0, 10)), any::<String>()).prop_map(|(s, f)| {
-                Source::Map {
-                    function: f,
-                    from: s
+    fn source() -> impl Strategy<Value = Source> {
+        let leaf = value().prop_map(Source::Constant);
+        leaf.prop_recursive(100, 1000000, 10, |inner| {
+            prop_oneof![
+                inner.clone().prop_map(|s| Source::Load(boxed::Box::new(s))),
+                inner.clone().prop_map(|s| Source::Variable(boxed::Box::new(s))),
+                (collection::vec(inner, (0, 10)), fname())
+                    .prop_map(|(s, f)| { Source::Map { function: f, from: s } })
+            ]
+        })
+    }
+
+    fn check(s0: &Source, s1: &Source) -> bool {
+        match (s0, s1) {
+            (Source::Constant(v0), Source::Constant(v1)) => match (v0, v1) {
+                (Value::Duration(d0), Value::Duration(d1)) => {
+                    (d0.as_secs_f64() - d1.as_secs_f64()).abs() < 1e-8
                 }
-            })
-        ].boxed()
+                (Value::F32(v0), Value::F32(v1)) => (v0 - v1).abs() < 1e-7,
+                (Value::F64(v0), Value::F64(v1)) => (v0 - v1).abs() < 1e-8,
+                (v0, v1) => v0 == v1,
+            },
+            (Source::Load(s0), Source::Load(s1)) => check(&*s0, &*s1),
+            (Source::Variable(s0), Source::Variable(s1)) => check(&*s0, &*s1),
+            (
+                Source::Map { from: srs0, function: f0 },
+                Source::Map { from: srs1, function: f1 },
+            ) if f0 == f1 && srs0.len() == srs1.len() => {
+                srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
+            }
+            (_, _) => false
+        }
     }
 
     proptest! {
@@ -426,11 +448,9 @@ mod tests {
             assert_eq!(dbg!(&s), &dbg!(s.to_string()).parse::<Sink>().unwrap());
         }
 
-/*
         #[test]
         fn source_round_trip(s in source()) {
-            assert_eq!(s, s.to_string().parse::<Source>().unwrap())
+            assert!(check(dbg!(&s), &dbg!(s.to_string()).parse::<Source>().unwrap()))
         }
-*/
     }
 }
