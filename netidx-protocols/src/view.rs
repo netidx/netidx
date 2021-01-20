@@ -37,28 +37,38 @@ impl fmt::Display for Source {
                 Value::V64(v) => write!(f, "v64:{}", v),
                 Value::I64(v) => write!(f, "{}", v),
                 Value::Z64(v) => write!(f, "z64:{}", v),
-                Value::F32(v) => write!(f, "f32:{}", v),
-                Value::F64(v) => write!(f, "{}", v),
-                Value::DateTime(v) => write!(f, r#"constant(datetime, "{}")"#, v),
+                Value::F32(v) => {
+                    if v.fract() == 0. {
+                        write!(f, "f32:{}.", v)
+                    } else {
+                        write!(f, "f32:{}", v)
+                    }
+                },
+                Value::F64(v) => {
+                    if v.fract() == 0. {
+                        write!(f, "{}.", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
+                },
+                Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
                 Value::Duration(v) => {
-                    write!(f, r#"constant(duration, "{}s")"#, v.as_secs_f64())
+                    write!(f, r#"duration:"{}s""#, v.as_secs_f64())
                 }
                 Value::String(s) => {
-                    write!(f, r#"constant(string, "{}")"#, utils::escape(&*s, '\\', '"'))
+                    write!(f, r#""{}""#, utils::escape(&*s, '\\', '"'))
                 }
-                Value::Bytes(b) => write!(f, "constant(binary, {})", base64::encode(&*b)),
-                Value::True => write!(f, "constant(bool, true)"),
-                Value::False => write!(f, "constant(bool, false)"),
-                Value::Null => write!(f, "constant(null)"),
-                Value::Ok => write!(f, "constant(result, ok)"),
+                Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
+                Value::True => write!(f, "true"),
+                Value::False => write!(f, "false"),
+                Value::Null => write!(f, "null"),
+                Value::Ok => write!(f, "ok"),
                 Value::Error(v) => {
-                    write!(f, r#"constant(result, "{}")"#, utils::escape(&*v, '\\', '"'))
+                    write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', '"'))
                 }
             },
-            Source::Load(p) => {
-                write!(f, r#"load_path("{}")"#, utils::escape(&*p, '\\', '"'))
-            }
-            Source::Variable(v) => write!(f, "load_var({})", v),
+            Source::Load(s) => write!(f, r#"load_path({})"#, s),
+            Source::Variable(s) => write!(f, "load_var({})", s),
             Source::Map { from, function } => {
                 write!(f, "{}(", function)?;
                 for i in 0..from.len() {
@@ -143,14 +153,14 @@ pub struct Action {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SortDir {
     Ascending,
-    Descending
+    Descending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ColumnSpec {
     Exactly(Vec<String>),
     Hide(Vec<String>),
-    Auto
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,7 +350,7 @@ mod tests {
     }
 
     fn check(s: Source) {
-        assert_eq!(s, s.to_string().parse::<Source>().unwrap())
+        assert_eq!(dbg!(&s), &dbg!(s.to_string()).parse::<Source>().unwrap())
     }
 
     #[test]
@@ -361,6 +371,9 @@ mod tests {
         check(Source::Constant(Value::F32(-33.14)));
         check(Source::Constant(Value::F32(3.)));
         check(Source::Constant(Value::F32(3.)));
+        check(Source::Constant(Value::F64(1e9)));
+        check(Source::Constant(Value::F64(3.1415e9)));
+        check(Source::Constant(Value::F64(32.1415e-9)));
         check(Source::Constant(Value::F64(3.1415)));
         check(Source::Constant(Value::F64(332.1415)));
         check(Source::Constant(Value::F64(-33.14)));
@@ -373,25 +386,30 @@ mod tests {
         check(Source::Constant(Value::Null));
         check(Source::Constant(Value::Ok));
         check(Source::Constant(Value::Error(Chars::from("error"))));
-        check(Source::Load(Path::from(r#"/foo bar baz/"zam"/)_ xyz+ "#)));
-        check(Source::Variable(String::from("sum")));
+        check(Source::Load(boxed::Box::new(Source::Constant(Value::String(
+            Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#),
+        )))));
+        check(Source::Variable(boxed::Box::new(Source::Constant(Value::String(
+            Chars::from("sum"),
+        )))));
         check(Source::Map {
             from: vec![
                 Source::Constant(Value::F32(1.)),
-                Source::Load(Path::from("/foo/bar")),
+                Source::Load(boxed::Box::new(Source::Constant(Value::String(
+                    Chars::from("/foo/bar"),
+                )))),
                 Source::Map {
                     from: vec![
                         Source::Constant(Value::F32(0.)),
-                        Source::Load(Path::from("/foo/baz")),
+                        Source::Load(boxed::Box::new(Source::Constant(Value::String(
+                            Chars::from("/foo/baz"),
+                        )))),
                     ],
                     function: String::from("max"),
                 },
             ],
             function: String::from("sum"),
         });
-        check(Source::Map {
-            from: vec![],
-            function: String::from("any")
-        });
+        check(Source::Map { from: vec![], function: String::from("any") });
     }
 }

@@ -80,16 +80,18 @@ where
 {
     choice((
         attempt(recognize((
-            take_while1(|c: char| c.is_digit(10)),
-            token('.'),
-            take_while(|c: char| c.is_digit(10)),
-        ))),
-        attempt(recognize((
+            optional(token('-')),
             take_while1(|c: char| c.is_digit(10)),
             optional(token('.')),
             take_while(|c: char| c.is_digit(10)),
             token('e'),
             int(),
+        ))),
+        attempt(recognize((
+            optional(token('-')),
+            take_while1(|c: char| c.is_digit(10)),
+            token('.'),
+            take_while(|c: char| c.is_digit(10)),
         ))),
     ))
 }
@@ -144,8 +146,8 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
         attempt(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
+        attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
         attempt(
             quoted('"', '"').map(|v| Source::Constant(Value::String(Chars::from(v)))),
         ),
@@ -208,10 +210,10 @@ where
                 .map(|Base64Encoded(v)| Source::Constant(Value::Bytes(Bytes::from(v)))),
         ),
         attempt(
-            constant("result").with(string("ok")).map(|_| Source::Constant(Value::Ok)),
+            string("ok").map(|_| Source::Constant(Value::Ok)),
         ),
         attempt(
-            constant("result")
+            constant("error")
                 .with(quoted('"', '"'))
                 .map(|s| Source::Constant(Value::Error(Chars::from(s)))),
         ),
@@ -446,7 +448,7 @@ mod tests {
         assert_eq!(Source::Constant(Value::Ok), parse_source("ok").unwrap());
         assert_eq!(
             Source::Constant(Value::Error(Chars::from("error"))),
-            parse_source(r#"result:"error""#).unwrap()
+            parse_source(r#"error:"error""#).unwrap()
         );
         let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
         let s = r#"load_path("/foo bar baz/\"zam\"/)_ xyz+ ")"#;

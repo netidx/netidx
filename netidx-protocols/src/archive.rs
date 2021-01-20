@@ -1342,5 +1342,8 @@ mod test {
             check_contents(&reader, &paths, n);
             assert!(ArchiveWriter::open(&file).is_err());
         }
+        if FilePath::is_file(&file) {
+            fs::remove_file(file).unwrap();
+        }
     }
 }
