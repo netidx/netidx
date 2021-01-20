@@ -389,7 +389,9 @@ mod tests {
     }
 
     prop_compose! {
-        fn fname()(s in "[a-z][a-z0-9_]*") -> String {
+        fn fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
+            s != "ok" && s != "true" && s != "false" && s != "null"
+        })) -> String {
             s
         }
     }

@@ -2,7 +2,8 @@ use crate::view::{Sink, Source};
 use base64;
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice, from_str, many1, one_of, optional,
+    attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
+    optional,
     parser::{
         char::{digit, spaces, string},
         combinator::recognize,
@@ -156,9 +157,21 @@ where
         attempt(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
         attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
         attempt(quoted().map(|v| Source::Constant(Value::String(Chars::from(v))))),
-        attempt(string("true").map(|_| Source::Constant(Value::True))),
-        attempt(string("false").map(|_| Source::Constant(Value::False))),
-        attempt(string("null").map(|_| Source::Constant(Value::Null))),
+        attempt(
+            string("true")
+                .skip(not_followed_by(none_of(" ),".chars())))
+                .map(|_| Source::Constant(Value::True)),
+        ),
+        attempt(
+            string("false")
+                .skip(not_followed_by(none_of(" ),".chars())))
+                .map(|_| Source::Constant(Value::False)),
+        ),
+        attempt(
+            string("null")
+                .skip(not_followed_by(none_of(" ),".chars())))
+                .map(|_| Source::Constant(Value::Null)),
+        ),
         attempt(
             constant("u32")
                 .with(from_str(uint()))
@@ -214,7 +227,11 @@ where
                 .with(from_str(base64str()))
                 .map(|Base64Encoded(v)| Source::Constant(Value::Bytes(Bytes::from(v)))),
         ),
-        attempt(string("ok").map(|_| Source::Constant(Value::Ok))),
+        attempt(
+            string("ok")
+                .skip(not_followed_by(none_of(" ),".chars())))
+                .map(|_| Source::Constant(Value::Ok)),
+        ),
         attempt(
             constant("error")
                 .with(quoted())
