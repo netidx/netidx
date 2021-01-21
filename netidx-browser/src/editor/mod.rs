@@ -308,13 +308,17 @@ impl Widget {
                 widget(view::WidgetKind::Button(view::Button {
                     enabled: view::Source::Constant(Value::True),
                     label: view::Source::Constant(Value::String(l)),
-                    source: view::Source::Load(Path::from("/somewhere")),
+                    source: view::Source::Load(Box::new(view::Source::Constant(
+                        Value::String(Chars::from("/somewhere")),
+                    ))),
                     sink: view::Sink::Store(Path::from("/somewhere/else")),
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
                 enabled: view::Source::Constant(Value::True),
-                source: view::Source::Load(Path::from("/somewhere")),
+                source: view::Source::Load(Box::new(view::Source::Constant(
+                    Value::String(Chars::from("/somewhere")),
+                ))),
                 sink: view::Sink::Store(Path::from("/somewhere/else")),
             })),
             Some("Selector") => {
@@ -323,14 +327,18 @@ impl Widget {
                 widget(view::WidgetKind::Selector(view::Selector {
                     enabled: view::Source::Constant(Value::True),
                     choices: view::Source::Constant(Value::String(choices)),
-                    source: view::Source::Load(Path::from("/somewhere")),
+                    source: view::Source::Load(Box::new(view::Source::Constant(
+                        Value::String(Chars::from("/somewhere")),
+                    ))),
                     sink: view::Sink::Store(Path::from("/somewhere/else")),
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
                 enabled: view::Source::Constant(Value::True),
                 visible: view::Source::Constant(Value::True),
-                source: view::Source::Load(Path::from("/somewhere")),
+                source: view::Source::Load(Box::new(view::Source::Constant(
+                    Value::String(Chars::from("/somewhere")),
+                ))),
                 sink: view::Sink::Store(Path::from("/somewhere/else")),
             })),
             Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {

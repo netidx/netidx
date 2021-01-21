@@ -1,4 +1,4 @@
-use super::super::{formula, Source, WidgetCtx, Target};
+use super::super::{formula, Source, Target, WidgetCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
@@ -16,14 +16,15 @@ use std::{
 
 fn set_dbg_src(
     ctx: &WidgetCtx,
+    variables: &Rc<RefCell<HashMap<String, Value>>>,
     store: &gtk::TreeStore,
     iter: &gtk::TreeIter,
     spec: view::Source,
 ) -> view::Source {
-    let source = Source::new(ctx, &HashMap::new(), spec.clone());
+    let source = Source::new(ctx, variables.clone(), spec.clone());
     match source.current() {
         None => store.set_value(&iter, 1, &None::<&str>.to_value()),
-        Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value())
+        Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value()),
     }
     store.set_value(&iter, 3, &SourceWrap(source).to_value());
     spec
@@ -55,6 +56,7 @@ struct Constant {
 impl Constant {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -101,7 +103,7 @@ impl Constant {
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
         store.set_value(iter, 0, &"constant".to_value());
         let t = Constant { root, spec };
-        set_dbg_src(ctx, store, iter, t.spec());
+        set_dbg_src(ctx, variables, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Constant(t).to_value());
     }
 
@@ -117,52 +119,28 @@ impl Constant {
 #[derive(Clone, Debug)]
 struct Variable {
     root: gtk::Box,
-    spec: Rc<RefCell<String>>,
 }
 
 impl Variable {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: String,
+        from: Box<view::Source>,
     ) {
-        let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let entbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        let lblvar = gtk::Label::new(Some("Name:"));
-        let entvar = gtk::Entry::new();
-        let errlbl = gtk::Label::new(None);
-        errlbl.set_use_markup(true);
-        root.pack_start(&entbox, false, false, 0);
-        root.pack_start(&errlbl, false, false, 0);
-        entbox.pack_start(&lblvar, false, false, 0);
-        entbox.pack_start(&entvar, true, true, 0);
-        entvar.set_text(&*spec.borrow());
-        entvar.connect_activate(clone!(
-            @strong on_change, @strong spec, @weak errlbl => move |e| {
-            match format!("load_var({})", &*e.get_text()).parse::<view::Source>() {
-                Err(e) => {
-                    let msg = format!(r#"<span foreground="red">{}</span>"#, e);
-                    errlbl.set_markup(&msg);
-                },
-                Ok(view::Source::Variable(name)) => {
-                    errlbl.set_markup("");
-                    *spec.borrow_mut() = name;
-                    on_change()
-                },
-                Ok(_) => unreachable!()
-            }
-        }));
         store.set_value(iter, 0, &"load_var".to_value());
-        let t = Variable { root, spec };
-        set_dbg_src(ctx, store, iter, t.spec());
+        let t = Variable { root };
+        let s = view::Source::Variable(from);
+        set_dbg_src(ctx, variables, store, iter, s);
         store.set_value(iter, 2, &Properties::Variable(t).to_value());
     }
 
     fn spec(&self) -> view::Source {
-        view::Source::Variable(self.spec.borrow().clone())
+        let will_be_overwritten = Box::new(view::Source::Constant(Value::U32(42)));
+        view::Source::Variable(will_be_overwritten)
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -173,36 +151,28 @@ impl Variable {
 #[derive(Clone, Debug)]
 struct Load {
     root: gtk::Box,
-    spec: Rc<RefCell<Path>>,
 }
 
 impl Load {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: Path,
+        from: Box<view::Source>,
     ) {
-        let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        let lblvar = gtk::Label::new(Some("Path:"));
-        let entvar = gtk::Entry::new();
-        root.pack_start(&lblvar, false, false, 0);
-        root.pack_start(&entvar, true, true, 0);
-        entvar.set_text(&**spec.borrow());
-        entvar.connect_activate(clone!(@strong on_change, @strong spec => move |e| {
-            *spec.borrow_mut() = Path::from(String::from(&*e.get_text()));
-            on_change()
-        }));
         store.set_value(iter, 0, &"load_path".to_value());
-        let t = Load { root, spec };
-        set_dbg_src(ctx, store, iter, t.spec());
+        let t = Load { root };
+        let s = view::Source::Load(from);
+        set_dbg_src(ctx, variables, store, iter, s);
         store.set_value(iter, 2, &Properties::Load(t).to_value());
     }
 
     fn spec(&self) -> view::Source {
-        view::Source::Load(self.spec.borrow().clone())
+        let will_be_overwritten = Box::new(view::Source::Constant(Value::U32(42)));
+        view::Source::Load(will_be_overwritten)
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -219,6 +189,7 @@ struct Map {
 impl Map {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -243,7 +214,7 @@ impl Map {
         }));
         store.set_value(iter, 0, &spec.borrow().to_value());
         let s = view::Source::Map { function: spec.borrow().clone(), from };
-        set_dbg_src(ctx, store, iter, s);
+        set_dbg_src(ctx, variables, store, iter, s);
         store.set_value(iter, 2, &Properties::Map(Map { root, spec }).to_value());
     }
 
@@ -268,17 +239,24 @@ enum Properties {
 impl Properties {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         spec: view::Source,
     ) {
         match spec {
-            view::Source::Constant(v) => Constant::insert(ctx, on_change, store, iter, v),
-            view::Source::Load(p) => Load::insert(ctx, on_change, store, iter, p),
-            view::Source::Variable(v) => Variable::insert(ctx, on_change, store, iter, v),
+            view::Source::Constant(v) => {
+                Constant::insert(ctx, variables, on_change, store, iter, v)
+            }
+            view::Source::Load(p) => {
+                Load::insert(ctx, variables, on_change, store, iter, p)
+            }
+            view::Source::Variable(v) => {
+                Variable::insert(ctx, variables, on_change, store, iter, v)
+            }
             view::Source::Map { function, from } => {
-                Map::insert(ctx, on_change, store, iter, function, from)
+                Map::insert(ctx, variables, on_change, store, iter, function, from)
             }
         }
     }
@@ -312,8 +290,12 @@ fn default_source(id: Option<&str>) -> view::Source {
     match id {
         None => view::Source::Constant(Value::U64(42)),
         Some("constant") => view::Source::Constant(Value::U64(42)),
-        Some("load_var") => view::Source::Variable("foo_bar_baz".into()),
-        Some("load_path") => view::Source::Load(Path::from("/some/path")),
+        Some("load_var") => view::Source::Variable(Box::new(view::Source::Constant(
+            Value::String(Chars::from("foo_bar_baz")),
+        ))),
+        Some("load_path") => view::Source::Load(Box::new(view::Source::Constant(
+            Value::String(Chars::from("/some/path")),
+        ))),
         Some("function") => {
             let from = vec![view::Source::Constant(Value::U64(42))];
             view::Source::Map { function: "any".into(), from }
@@ -324,20 +306,22 @@ fn default_source(id: Option<&str>) -> view::Source {
 
 fn build_tree(
     ctx: &WidgetCtx,
+    variables: &Rc<RefCell<HashMap<String, Value>>>,
     on_change: &OnChange,
     store: &gtk::TreeStore,
     parent: Option<&gtk::TreeIter>,
     s: &view::Source,
 ) {
     let iter = store.insert_before(parent, None);
-    Properties::insert(ctx, on_change.clone(), store, &iter, s.clone());
+    Properties::insert(ctx, variables, on_change.clone(), store, &iter, s.clone());
     match s {
-        view::Source::Constant(_) | view::Source::Load(_) | view::Source::Variable(_) => {
-            ()
+        view::Source::Constant(_) => (),
+        view::Source::Load(s) | view::Source::Variable(s) => {
+            build_tree(ctx, variables, on_change, store, Some(&iter), &s)
         }
         view::Source::Map { from, function: _ } => {
             for s in from {
-                build_tree(ctx, on_change, store, Some(&iter), s)
+                build_tree(ctx, variables, on_change, store, Some(&iter), s)
             }
         }
     }
@@ -345,6 +329,7 @@ fn build_tree(
 
 fn build_source(
     ctx: &WidgetCtx,
+    variables: &Rc<RefCell<HashMap<String, Value>>>,
     store: &gtk::TreeStore,
     root: &gtk::TreeIter,
 ) -> view::Source {
@@ -352,35 +337,41 @@ fn build_source(
     match v.get::<&Properties>() {
         Err(e) => {
             let v = Value::String(Chars::from(format!("tree error: {}", e)));
-            set_dbg_src(ctx, store, root, view::Source::Constant(v))
+            set_dbg_src(ctx, variables, store, root, view::Source::Constant(v))
         }
         Ok(None) => {
             let v = Value::String(Chars::from("tree error: missing widget"));
-            set_dbg_src(ctx, store, root, view::Source::Constant(v))
+            set_dbg_src(ctx, variables, store, root, view::Source::Constant(v))
         }
         Ok(Some(p)) => match p.spec() {
-            v @ view::Source::Constant(_)
-            | v @ view::Source::Load(_)
-            | v @ view::Source::Variable(_) => set_dbg_src(ctx, store, root, v),
+            v @ view::Source::Constant(_) => set_dbg_src(ctx, variables, store, root, v),
+            v @ view::Source::Variable(mut s) | v @ view::Source::Load(mut s) => {
+                if let Some(iter) = store.iter_children(Some(root)) {
+                    s = Box::new(build_source(ctx, variables, store, &iter));
+                }
+                set_dbg_src(ctx, variables, store, root, v)
+            },            
             view::Source::Map { mut from, function } => {
                 from.clear();
                 store.set_value(root, 0, &function.to_value());
                 match store.iter_children(Some(root)) {
                     None => set_dbg_src(
                         ctx,
+                        variables,
                         store,
                         root,
                         view::Source::Map { from, function },
                     ),
                     Some(iter) => {
                         loop {
-                            from.push(build_source(ctx, store, &iter));
+                            from.push(build_source(ctx, variables, store, &iter));
                             if !store.iter_next(&iter) {
                                 break;
                             }
                         }
                         set_dbg_src(
                             ctx,
+                            variables,
                             store,
                             root,
                             view::Source::Map { from, function },

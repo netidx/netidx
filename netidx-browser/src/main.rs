@@ -224,66 +224,60 @@ impl Source {
     fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
             Source::Constant(_, _) => None,
-            Source::Variable { spec, from, name, variables } => {
-                if let Some(v) = from.update(tgt, value) {
-                    match v.cast_to::<String>() {
-                        Ok(s) => {
-                            let res = variables.borrow().get(&s).cloned();
-                            *name.borrow_mut() = Some(s);
-                            res
-                        }
-                        Err(_) => {
-                            *name.borrow_mut() = None;
+            Source::Variable { from, name, variables, .. } => match from
+                .update(tgt, value)
+            {
+                None => match tgt {
+                    Target::Netidx(_) => None,
+                    Target::Variable(n) => {
+                        if name.borrow().map(|s| s.as_str()) != Some(n) {
                             None
+                        } else {
+                            variables.borrow_mut().insert(String::from(n), value.clone());
+                            Some(value.clone())
                         }
                     }
-                } else {
-                    match tgt {
-                        Target::Netidx(id) => None,
-                        Target::Variable(n) => {
-                            if name.borrow().map(|s| s.as_str()) != Some(n) {
-                                None
-                            } else {
-                                variables
-                                    .borrow_mut()
-                                    .insert(String::from(n), value.clone());
-                                Some(value.clone())
-                            }
-                        }
+                },
+                Some(v) => match v.cast_to::<String>() {
+                    Ok(s) => {
+                        let res = variables.borrow().get(&s).cloned();
+                        *name.borrow_mut() = Some(s);
+                        res
                     }
-                }
-            }
+                    Err(_) => {
+                        *name.borrow_mut() = None;
+                        None
+                    }
+                },
+            },
             Source::Map { spec: _, from, function } => function.update(from, tgt, value),
-            Source::Load { from, cur, ctx, .. } => {
-                if let Some(v) = from.update(tgt, value) {
-                    match v.cast_to::<String>() {
-                        Err(_) => {
-                            *cur.borrow_mut() = None;
+            Source::Load { from, cur, ctx, .. } => match from.update(tgt, value) {
+                None => match tgt {
+                    Target::Variable(_) => None,
+                    Target::Netidx(id) => {
+                        if cur.borrow().map(|dv| dv.id()) == Some(id) {
+                            Some(value.clone())
+                        } else {
                             None
                         }
-                        Ok(s) => {
-                            let dv = ctx.subscriber.durable_subscribe(Path::from(s));
-                            let res = dv.last();
-                            *cur.borrow_mut() = Some(dv);
-                            match res {
-                                Event::Unsubscribed => None,
-                                Event::Update(v) => Some(v),
-                            }
+                    }
+                },
+                Some(v) => match v.cast_to::<String>() {
+                    Err(_) => {
+                        *cur.borrow_mut() = None;
+                        None
+                    }
+                    Ok(s) => {
+                        let dv = ctx.subscriber.durable_subscribe(Path::from(s));
+                        let res = dv.last();
+                        *cur.borrow_mut() = Some(dv);
+                        match res {
+                            Event::Unsubscribed => None,
+                            Event::Update(v) => Some(v),
                         }
                     }
-                } else {
-                    match tgt {
-                        Target::Variable(_) => None,
-                        Target::Netidx(id) => {
-                            if cur.borrow().map(|dv| dv.id()) == Some(id) {
-                                Some(value.clone())
-                            } else {
-                                None
-                            }
-                        },
-                    }
-                }
-            }
+                },
+            },
         }
     }
 }
@@ -1464,14 +1458,14 @@ fn main() {
             })
             .unwrap();
         let (subscriber, resolver) = rx_init.recv().unwrap();
-        let ctx = WidgetCtx {
+        let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
             subscriber,
             resolver,
             updates: tx_updates,
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
             raw_view,
-        };
+        }));
         run_gui(ctx, app, rx_to_gui);
     });
     application.run(&[]);
