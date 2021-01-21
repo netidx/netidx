@@ -364,12 +364,20 @@ fn eval_cmp(from: &CachedVals) -> Option<Value> {
 
 fn eval_if(from: &CachedVals) -> Option<Value> {
     match &**from.0.borrow() {
+        [cond, b1] => match cond {
+            None => None,
+            Some(Value::True) => b1.clone(),
+            Some(Value::False) => None,
+            _ => Some(Value::Error(Chars::from(
+                "if(predicate, caseIf, [caseElse]): expected boolean condition",
+            )))
+        }
         [cond, b1, b2] => match cond {
             None => None,
             Some(Value::True) => b1.clone(),
             Some(Value::False) => b2.clone(),
             _ => Some(Value::Error(Chars::from(
-                "if(predicate, caseIf, caseElse): expected boolean condition",
+                "if(predicate, caseIf, [caseElse]): expected boolean condition",
             ))),
         },
         _ => Some(Value::Error(Chars::from(
