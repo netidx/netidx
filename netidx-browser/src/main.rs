@@ -30,7 +30,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     resolver::{Auth, ResolverRead},
-    subscriber::{Dval, Event, SubId, Subscriber, Value, UpdatesFlags},
+    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_protocols::view as protocol_view;
 use once_cell::sync::OnceCell;
@@ -39,6 +39,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     fmt, fs, mem,
+    ops::Deref,
     path::PathBuf,
     rc::Rc,
     result,
@@ -106,14 +107,25 @@ enum FromGui {
     Terminate,
 }
 
-#[derive(Debug, Clone)]
-struct WidgetCtx {
+#[derive(Debug)]
+struct WidgetCtxInner {
     subscriber: Subscriber,
     resolver: ResolverRead,
     updates: mpsc::Sender<RawBatch>,
     to_gui: glib::Sender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
     raw_view: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+struct WidgetCtx(Rc<WidgetCtxInner>);
+
+impl Deref for WidgetCtx {
+    type Target = WidgetCtxInner;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,17 +137,31 @@ enum Target<'a> {
 #[derive(Debug, Clone)]
 enum Source {
     Constant(view::Source, Value),
-    Load(view::Source, Dval),
-    Variable(view::Source, String, Rc<RefCell<Value>>),
-    Map { spec: view::Source, from: Vec<Source>, function: Box<Formula> },
+    Load {
+        spec: view::Source,
+        from: Box<Source>,
+        cur: Rc<RefCell<Option<Dval>>>,
+        ctx: WidgetCtx,
+    },
+    Variable {
+        spec: view::Source,
+        from: Box<Source>,
+        name: Rc<RefCell<Option<String>>>,
+        variables: Rc<RefCell<HashMap<String, Value>>>,
+    },
+    Map {
+        spec: view::Source,
+        from: Vec<Source>,
+        function: Box<Formula>,
+    },
 }
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
             Source::Constant(s, _) => s,
-            Source::Load(s, _) => s,
-            Source::Variable(s, _, _) => s,
+            Source::Load { spec, .. } => spec,
+            Source::Variable { spec, .. } => spec,
             Source::Map { spec, .. } => spec,
         };
         write!(f, "{}", s.to_string())
@@ -145,7 +171,7 @@ impl fmt::Display for Source {
 impl Source {
     fn new(
         ctx: &WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Source,
     ) -> Self {
         match &spec {
@@ -153,22 +179,29 @@ impl Source {
                 let v = v.clone();
                 Source::Constant(spec, v)
             }
-            view::Source::Load(path) => {
-                let dv = ctx.subscriber.durable_subscribe(path.clone());
-                dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.updates.clone());
-                Source::Load(spec, dv)
+            view::Source::Load(s) => {
+                let from = Box::new(Source::new(ctx, variables, view::Source::clone(&s)));
+                let dv =
+                    from.current().and_then(|v| v.cast_to::<String>().ok()).map(|s| {
+                        let dv = ctx.subscriber.durable_subscribe(Path::from(s));
+                        dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.updates.clone());
+                        dv
+                    });
+                let cur = Rc::new(RefCell::new(dv));
+                Source::Load { spec, from, cur, ctx: ctx.clone() }
             }
-            view::Source::Variable(name) => {
-                let v = variables.get(name).cloned().unwrap_or(Value::Null);
-                let name = name.clone();
-                Source::Variable(spec, name, Rc::new(RefCell::new(v)))
+            view::Source::Variable(s) => {
+                let source = Source::new(ctx, variables, view::Source::clone(&s));
+                let name = source.current().and_then(|v| v.cast_to::<String>().ok());
+                let name = Rc::new(RefCell::new(name));
+                Source::Variable { spec, from: Box::new(source), name, variables }
             }
             view::Source::Map { from, function } => {
                 let from: Vec<Source> = from
                     .iter()
                     .map(|spec| Source::new(ctx, variables, spec.clone()))
                     .collect();
-                let function = Box::new(Formula::new(ctx, function, &*from));
+                let function = Box::new(Formula::new(&*ctx, function, &*from));
                 Source::Map { spec, from, function }
             }
         }
@@ -177,11 +210,13 @@ impl Source {
     fn current(&self) -> Option<Value> {
         match self {
             Source::Constant(_, v) => Some(v.clone()),
-            Source::Load(_, dv) => match dv.last() {
-                Event::Unsubscribed => None,
-                Event::Update(v) => Some(v),
+            Source::Load { cur, .. } => match cur.borrow().map(|dv| dv.last()) {
+                None | Some(Event::Unsubscribed) => None,
+                Some(Event::Update(v)) => Some(v),
             },
-            Source::Variable(_, _, v) => Some(v.borrow().clone()),
+            Source::Variable { name, variables, .. } => {
+                name.borrow().and_then(|n| variables.borrow().get(&n).cloned())
+            }
             Source::Map { spec: _, from: _, function } => function.current(),
         }
     }
@@ -189,20 +224,66 @@ impl Source {
     fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
             Source::Constant(_, _) => None,
-            Source::Variable(_, name, cur) => match tgt {
-                Target::Netidx(_) => None,
-                Target::Variable(n) if n == name => {
-                    *cur.borrow_mut() = value.clone();
-                    Some(value.clone())
+            Source::Variable { spec, from, name, variables } => {
+                if let Some(v) = from.update(tgt, value) {
+                    match v.cast_to::<String>() {
+                        Ok(s) => {
+                            let res = variables.borrow().get(&s).cloned();
+                            *name.borrow_mut() = Some(s);
+                            res
+                        }
+                        Err(_) => {
+                            *name.borrow_mut() = None;
+                            None
+                        }
+                    }
+                } else {
+                    match tgt {
+                        Target::Netidx(id) => None,
+                        Target::Variable(n) => {
+                            if name.borrow().map(|s| s.as_str()) != Some(n) {
+                                None
+                            } else {
+                                variables
+                                    .borrow_mut()
+                                    .insert(String::from(n), value.clone());
+                                Some(value.clone())
+                            }
+                        }
+                    }
                 }
-                Target::Variable(_) => None,
-            },
+            }
             Source::Map { spec: _, from, function } => function.update(from, tgt, value),
-            Source::Load(_, dv) => match tgt {
-                Target::Variable(_) => None,
-                Target::Netidx(id) if dv.id() == id => Some(value.clone()),
-                Target::Netidx(_) => None,
-            },
+            Source::Load { from, cur, ctx, .. } => {
+                if let Some(v) = from.update(tgt, value) {
+                    match v.cast_to::<String>() {
+                        Err(_) => {
+                            *cur.borrow_mut() = None;
+                            None
+                        }
+                        Ok(s) => {
+                            let dv = ctx.subscriber.durable_subscribe(Path::from(s));
+                            let res = dv.last();
+                            *cur.borrow_mut() = Some(dv);
+                            match res {
+                                Event::Unsubscribed => None,
+                                Event::Update(v) => Some(v),
+                            }
+                        }
+                    }
+                } else {
+                    match tgt {
+                        Target::Variable(_) => None,
+                        Target::Netidx(id) => {
+                            if cur.borrow().map(|dv| dv.id()) == Some(id) {
+                                Some(value.clone())
+                            } else {
+                                None
+                            }
+                        },
+                    }
+                }
+            }
         }
     }
 }
