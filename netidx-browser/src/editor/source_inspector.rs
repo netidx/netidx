@@ -350,7 +350,7 @@ fn build_source(
                     s = Box::new(build_source(ctx, variables, store, &iter));
                 }
                 set_dbg_src(ctx, variables, store, root, v)
-            },            
+            }
             view::Source::Map { mut from, function } => {
                 from.clear();
                 store.set_value(root, 0, &function.to_value());
@@ -395,6 +395,7 @@ impl SourceInspector {
         on_change: impl Fn(view::Source) + 'static,
         init: view::Source,
     ) -> SourceInspector {
+        let variables = Rc::new(RefCell::new(HashMap::new()));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let store = gtk::TreeStore::new(&[
             String::static_type(),
@@ -470,6 +471,7 @@ impl SourceInspector {
             let inhibit = inhibit.clone();
             let scheduled = Rc::new(Cell::new(false));
             let on_change = Rc::new(on_change);
+            let variables = variables.clone();
             move || {
                 if !scheduled.get() {
                     scheduled.set(true);
@@ -480,7 +482,7 @@ impl SourceInspector {
                         @strong scheduled,
                         @strong on_change => move || {
                             if let Some(root) = store.get_iter_first() {
-                                let src = build_source(&ctx, &store, &root);
+                                let src = build_source(&ctx, &variables, &store, &root);
                                 on_change(src)
                             }
                             scheduled.set(false);
@@ -490,8 +492,9 @@ impl SourceInspector {
                 }
             }
         });
-        build_tree(&ctx, &on_change, &store, None, &init);
+        build_tree(&ctx, &variables, &on_change, &store, None, &init);
         kind.connect_changed(clone!(
+        @strong variables,
         @strong ctx,
         @strong on_change,
         @strong store,
@@ -506,7 +509,14 @@ impl SourceInspector {
                     }
                     let id = c.get_active_id();
                     let src = default_source(id.as_ref().map(|s| &**s));
-                    Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
+                    Properties::insert(
+                        &ctx,
+                        &variables,
+                        on_change.clone(),
+                        &store,
+                        &iter,
+                        src
+                    );
                     let pv = store.get_value(&iter, 2);
                     if let Ok(Some(p)) = pv.get::<&Properties>() {
                         properties.pack_start(p.root(), true, true, 5);
@@ -559,30 +569,42 @@ impl SourceInspector {
         menu.append(&new_child);
         menu.append(&delete);
         let dup = Rc::new(clone!(
-        @strong ctx, @strong on_change, @weak store, @strong selected => move || {
+            @strong variables,
+            @strong ctx,
+            @strong on_change,
+            @weak store,
+            @strong selected => move || {
             if let Some(iter) = &*selected.borrow() {
-                let src = build_source(&ctx, &store, iter);
+                let src = build_source(&ctx, &variables, &store, iter);
                 let parent = store.iter_parent(iter);
-                build_tree(&ctx, &on_change, &store, parent.as_ref(), &src);
+                build_tree(&ctx, &variables, &on_change, &store, parent.as_ref(), &src);
                 on_change()
             }
         }));
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let add = Rc::new(clone!(
-        @strong ctx, @strong on_change, @weak store, @strong selected => move || {
+            @strong variables,
+            @strong ctx,
+            @strong on_change,
+            @weak store,
+            @strong selected => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let src = default_source(Some("constant"));
-            Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
+            Properties::insert(&ctx, &variables, on_change.clone(), &store, &iter, src);
             on_change();
         }));
         new_sib.connect_activate(clone!(@strong add => move |_| add()));
         addbtn.connect_clicked(clone!(@strong add => move |_| add()));
         let addch = Rc::new(clone!(
-        @strong ctx, @strong on_change, @weak store, @strong selected => move || {
+            @strong variables,
+            @strong ctx,
+            @strong on_change,
+            @weak store,
+            @strong selected => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let src = default_source(Some("constant"));
-            Properties::insert(&ctx, on_change.clone(), &store, &iter, src);
+            Properties::insert(&ctx, &variables, on_change.clone(), &store, &iter, src);
             on_change();
         }));
         new_child.connect_activate(clone!(@strong addch => move |_| addch()));
