@@ -485,9 +485,11 @@ static KINDS: [&'static str; 13] = [
 ];
 
 impl Editor {
-    pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
-        let variables: Rc<RefCell<HashMap<String, Value>>> =
-            Rc::new(RefCell::new(HashMap::new()));
+    pub(super) fn new(
+        ctx: WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        spec: view::View,
+    ) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {

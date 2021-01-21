@@ -663,6 +663,7 @@ struct View {
 impl View {
     fn new(
         ctx: WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         path: &ViewLoc,
         saved: &Rc<Cell<bool>>,
         spec: view::View,
@@ -677,13 +678,8 @@ impl View {
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
-        let variables = Rc::new(RefCell::new(spec.variables));
-        let widget = Widget::new(
-            ctx.clone(),
-            &variables,
-            spec.root.clone(),
-            selected_path.clone(),
-        );
+        let widget =
+            Widget::new(ctx.clone(), variables, spec.root.clone(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_property_margin(2);
         root.add(&make_crumbs(&ctx, path, saved));
@@ -1169,6 +1165,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
+    let variables: Rc<RefCell<HashMap<String, Value>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     window.connect_delete_event(clone!(
         @strong ctx,
         @strong saved => @default-return Inhibit(false), move |w, _| {
@@ -1182,6 +1180,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     }));
     design_mode.connect_toggled(clone!(
     @weak mainbox,
+    @strong variables,
     @strong editor,
     @strong highlight,
     @strong current,
@@ -1192,7 +1191,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             mainbox.remove(editor.root());
         }
         let s = current_spec.borrow().clone();
-        let e = Editor::new(WidgetCtx::clone(&*ctx), s);
+        let e = Editor::new(WidgetCtx::clone(&*ctx), &variables, s);
         mainbox.add1(e.root());
         mainbox.show_all();
         *editor.borrow_mut() = Some(e);
@@ -1311,8 +1310,15 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     }
                 }
             }
+            variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
-            let cur = View::new((*ctx).clone(), &*current_loc.borrow(), &saved, raeified);
+            let cur = View::new(
+                (*ctx).clone(),
+                &variables,
+                &*current_loc.borrow(),
+                &saved,
+                raeified,
+            );
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
