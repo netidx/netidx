@@ -7,9 +7,10 @@ use super::{
 use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
-use netidx::{path::Path, subscriber::Value};
+use netidx::{chars::Chars, subscriber::Value};
 use netidx_protocols::view;
 use std::{
+    boxed::Box,
     cell::{Cell, RefCell},
     rc::Rc,
 };
@@ -1040,8 +1041,12 @@ impl LinePlot {
             build_series(view::Series {
                 title: String::from("Series"),
                 line_color: view::RGB { r: 0., g: 0., b: 0. },
-                x: view::Source::Load(Path::from("/somewhere/in/netidx/x")),
-                y: view::Source::Load(Path::from("/somewhere/in/netidx/y")),
+                x: view::Source::Load(Box::new(view::Source::Constant(
+                    Value::String(Chars::from("/somewhere/in/netidx/x")))
+                )),
+                y: view::Source::Load(Box::new(view::Source::Constant(
+                    Value::String(Chars::from("/somewhere/in/netidx/y")))
+                )),
             })
         }));
         for s in spec.borrow().series.iter() {

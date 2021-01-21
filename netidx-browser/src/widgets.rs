@@ -27,14 +27,14 @@ pub(super) struct Button {
 impl Button {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Button,
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let label = Source::new(&ctx, variables, spec.label.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
+        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
+        let label = Source::new(&ctx, variables.clone(), spec.label.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
@@ -88,11 +88,11 @@ pub(super) struct Label {
 impl Label {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Source,
         selected_path: gtk::Label,
     ) -> Label {
-        let source = Source::new(&ctx, variables, spec.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.clone());
         let txt = match source.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
@@ -133,10 +133,10 @@ pub(super) struct Action {
 impl Action {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Action,
     ) -> Self {
-        let source = Source::new(&ctx, variables, spec.source.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         if let Some(cur) = source.current() {
             sink.set(&ctx, cur);
@@ -163,7 +163,7 @@ pub(super) struct Selector {
 impl Selector {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Selector,
         selected_path: gtk::Label,
     ) -> Self {
@@ -190,9 +190,9 @@ impl Selector {
                 Inhibit(false)
             }),
         );
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let choices = Source::new(&ctx, variables, spec.choices.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
+        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
+        let choices = Source::new(&ctx, variables.clone(), spec.choices.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
@@ -292,13 +292,13 @@ pub(super) struct Toggle {
 impl Toggle {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Toggle,
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
+        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
@@ -372,13 +372,13 @@ pub(super) struct Entry {
 impl Entry {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Entry,
         selected_path: gtk::Label,
     ) -> Self {
-        let enabled = Source::new(&ctx, variables, spec.enabled.clone());
-        let visible = Source::new(&ctx, variables, spec.visible.clone());
-        let source = Source::new(&ctx, variables, spec.source.clone());
+        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
+        let visible = Source::new(&ctx, variables.clone(), spec.visible.clone());
+        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
         let sink = Sink::new(&ctx, spec.sink.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
@@ -466,25 +466,26 @@ pub(super) struct LinePlot {
 impl LinePlot {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::LinePlot,
         _selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min = Rc::new(Source::new(&ctx, variables, spec.x_min.clone()));
-        let x_max = Rc::new(Source::new(&ctx, variables, spec.x_max.clone()));
-        let y_min = Rc::new(Source::new(&ctx, variables, spec.y_min.clone()));
-        let y_max = Rc::new(Source::new(&ctx, variables, spec.y_max.clone()));
-        let keep_points = Rc::new(Source::new(&ctx, variables, spec.keep_points.clone()));
+        let x_min = Rc::new(Source::new(&ctx, variables.clone(), spec.x_min.clone()));
+        let x_max = Rc::new(Source::new(&ctx, variables.clone(), spec.x_max.clone()));
+        let y_min = Rc::new(Source::new(&ctx, variables.clone(), spec.y_min.clone()));
+        let y_max = Rc::new(Source::new(&ctx, variables.clone(), spec.y_max.clone()));
+        let keep_points =
+            Rc::new(Source::new(&ctx, variables.clone(), spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
                     line_color: series.line_color,
-                    x: Source::new(&ctx, variables, series.x.clone()),
-                    y: Source::new(&ctx, variables, series.y.clone()),
+                    x: Source::new(&ctx, variables.clone(), series.x.clone()),
+                    y: Source::new(&ctx, variables.clone(), series.y.clone()),
                     x_data: VecDeque::new(),
                     y_data: VecDeque::new(),
                 })

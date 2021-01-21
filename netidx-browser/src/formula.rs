@@ -452,14 +452,20 @@ pub(super) struct Eval {
     ctx: WidgetCtx,
     cached: CachedVals,
     current: RefCell<Result<Source, Value>>,
+    variables: Rc<RefCell<HashMap<String, Value>>>,
 }
 
 impl Eval {
-    fn new(ctx: &WidgetCtx, from: &[Source]) -> Self {
+    fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        from: &[Source],
+    ) -> Self {
         let t = Eval {
             ctx: ctx.clone(),
             cached: CachedVals::new(from),
             current: RefCell::new(Err(Value::Null)),
+            variables: variables.clone(),
         };
         t.compile();
         t
@@ -477,7 +483,7 @@ impl Eval {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<view::Source>() {
-                    Ok(spec) => Ok(Source::new(&self.ctx, &HashMap::new(), spec)),
+                    Ok(spec) => Ok(Source::new(&self.ctx, self.variables.clone(), spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -547,11 +553,14 @@ pub(super) static FORMULAS: [&'static str; 19] = [
 ];
 
 impl Formula {
-    pub(super) fn new(ctx: &WidgetCtx, name: &str, from: &[Source]) -> Formula {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        name: &str,
+        from: &[Source],
+    ) -> Formula {
         match name {
-            "any" => {
-                Formula::Any(RefCell::new(from.iter().find_map(|s| s.current())))
-            },
+            "any" => Formula::Any(RefCell::new(from.iter().find_map(|s| s.current()))),
             "all" => Formula::All(CachedVals::new(from)),
             "sum" => Formula::Sum(CachedVals::new(from)),
             "product" => Formula::Product(CachedVals::new(from)),
@@ -567,7 +576,7 @@ impl Formula {
             "filter" => Formula::Filter(CachedVals::new(from)),
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
-            "eval" => Formula::Eval(Eval::new(ctx, from)),
+            "eval" => Formula::Eval(Eval::new(ctx, variables, from)),
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             _ => Formula::Unknown(String::from(name)),

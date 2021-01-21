@@ -1,10 +1,15 @@
-use super::{set_common_props, Widget, WidgetCtx, Target};
+use super::{set_common_props, Target, Widget, WidgetCtx};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::subscriber::Value;
-use std::{cmp::max, collections::HashMap};
+use std::{
+    rc::Rc,
+    cell::RefCell,
+    cmp::max,
+    collections::HashMap,
+};
 
 pub(super) struct Box {
     root: gtk::Box,
@@ -14,7 +19,7 @@ pub(super) struct Box {
 impl Box {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Box,
         selected_path: gtk::Label,
     ) -> Self {
@@ -104,7 +109,7 @@ pub(super) struct Grid {
 impl Grid {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Grid,
         selected_path: gtk::Label,
     ) -> Self {

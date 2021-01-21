@@ -191,7 +191,7 @@ impl Source {
                 Source::Load { spec, from, cur, ctx: ctx.clone() }
             }
             view::Source::Variable(s) => {
-                let source = Source::new(ctx, variables, view::Source::clone(&s));
+                let source = Source::new(ctx, variables.clone(), view::Source::clone(&s));
                 let name = source.current().and_then(|v| v.cast_to::<String>().ok());
                 let name = Rc::new(RefCell::new(name));
                 Source::Variable { spec, from: Box::new(source), name, variables }
@@ -199,9 +199,9 @@ impl Source {
             view::Source::Map { from, function } => {
                 let from: Vec<Source> = from
                     .iter()
-                    .map(|spec| Source::new(ctx, variables, spec.clone()))
+                    .map(|spec| Source::new(ctx, variables.clone(), spec.clone()))
                     .collect();
-                let function = Box::new(Formula::new(&*ctx, function, &*from));
+                let function = Box::new(Formula::new(&*ctx, &variables, function, &*from));
                 Source::Map { spec, from, function }
             }
         }
@@ -210,12 +210,12 @@ impl Source {
     fn current(&self) -> Option<Value> {
         match self {
             Source::Constant(_, v) => Some(v.clone()),
-            Source::Load { cur, .. } => match cur.borrow().map(|dv| dv.last()) {
+            Source::Load { cur, .. } => match cur.borrow().as_ref().map(|dv| dv.last()) {
                 None | Some(Event::Unsubscribed) => None,
                 Some(Event::Update(v)) => Some(v),
             },
             Source::Variable { name, variables, .. } => {
-                name.borrow().and_then(|n| variables.borrow().get(&n).cloned())
+                name.borrow().as_ref().and_then(|n| variables.borrow().get(&*n).cloned())
             }
             Source::Map { spec: _, from: _, function } => function.current(),
         }
@@ -230,7 +230,7 @@ impl Source {
                 None => match tgt {
                     Target::Netidx(_) => None,
                     Target::Variable(n) => {
-                        if name.borrow().map(|s| s.as_str()) != Some(n) {
+                        if name.borrow().as_ref().map(|s| s.as_str()) != Some(n) {
                             None
                         } else {
                             variables.borrow_mut().insert(String::from(n), value.clone());
@@ -255,7 +255,7 @@ impl Source {
                 None => match tgt {
                     Target::Variable(_) => None,
                     Target::Netidx(id) => {
-                        if cur.borrow().map(|dv| dv.id()) == Some(id) {
+                        if cur.borrow().as_ref().map(|dv| dv.id()) == Some(id) {
                             Some(value.clone())
                         } else {
                             None
@@ -409,7 +409,7 @@ enum Widget {
 impl Widget {
     fn new(
         ctx: WidgetCtx,
-        variables: &HashMap<String, Value>,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         spec: view::Widget,
         selected_path: gtk::Label,
     ) -> Widget {
@@ -673,9 +673,10 @@ impl View {
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
+        let variables = Rc::new(RefCell::new(spec.variables));
         let widget = Widget::new(
             ctx.clone(),
-            &spec.variables,
+            &variables,
             spec.root.clone(),
             selected_path.clone(),
         );

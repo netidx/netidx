@@ -4,7 +4,6 @@ use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::{
     chars::Chars,
-    path::Path,
     subscriber::{Typ, Value},
 };
 use netidx_protocols::view;
@@ -125,7 +124,6 @@ impl Variable {
     fn insert(
         ctx: &WidgetCtx,
         variables: &Rc<RefCell<HashMap<String, Value>>>,
-        on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         from: Box<view::Source>,
@@ -157,7 +155,6 @@ impl Load {
     fn insert(
         ctx: &WidgetCtx,
         variables: &Rc<RefCell<HashMap<String, Value>>>,
-        on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         from: Box<view::Source>,
@@ -249,12 +246,8 @@ impl Properties {
             view::Source::Constant(v) => {
                 Constant::insert(ctx, variables, on_change, store, iter, v)
             }
-            view::Source::Load(p) => {
-                Load::insert(ctx, variables, on_change, store, iter, p)
-            }
-            view::Source::Variable(v) => {
-                Variable::insert(ctx, variables, on_change, store, iter, v)
-            }
+            view::Source::Load(p) => Load::insert(ctx, variables, store, iter, p),
+            view::Source::Variable(v) => Variable::insert(ctx, variables, store, iter, v),
             view::Source::Map { function, from } => {
                 Map::insert(ctx, variables, on_change, store, iter, function, from)
             }
@@ -345,11 +338,17 @@ fn build_source(
         }
         Ok(Some(p)) => match p.spec() {
             v @ view::Source::Constant(_) => set_dbg_src(ctx, variables, store, root, v),
-            v @ view::Source::Variable(mut s) | v @ view::Source::Load(mut s) => {
+            view::Source::Variable(mut s) => {
                 if let Some(iter) = store.iter_children(Some(root)) {
                     s = Box::new(build_source(ctx, variables, store, &iter));
                 }
-                set_dbg_src(ctx, variables, store, root, v)
+                set_dbg_src(ctx, variables, store, root, view::Source::Variable(s))
+            }
+            view::Source::Load(mut s) => {
+                if let Some(iter) = store.iter_children(Some(root)) {
+                    s = Box::new(build_source(ctx, variables, store, &iter));
+                }
+                set_dbg_src(ctx, variables, store, root, view::Source::Load(s))
             }
             view::Source::Map { mut from, function } => {
                 from.clear();
@@ -476,6 +475,7 @@ impl SourceInspector {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
+                        @strong variables,
                         @strong ctx,
                         @strong store,
                         @strong inhibit,
