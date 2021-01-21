@@ -391,10 +391,10 @@ pub(super) struct SourceInspector {
 impl SourceInspector {
     pub(super) fn new(
         ctx: WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: impl Fn(view::Source) + 'static,
         init: view::Source,
     ) -> SourceInspector {
-        let variables = Rc::new(RefCell::new(HashMap::new()));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let store = gtk::TreeStore::new(&[
             String::static_type(),

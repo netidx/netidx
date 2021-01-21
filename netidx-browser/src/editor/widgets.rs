@@ -12,6 +12,7 @@ use netidx_protocols::view;
 use std::{
     boxed::Box,
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
 };
 
@@ -257,6 +258,7 @@ type DbgSrc = Rc<RefCell<Option<(gtk::Window, SourceInspector)>>>;
 
 fn source(
     ctx: &WidgetCtx,
+    variables: &Rc<RefCell<HashMap<String, Value>>>,
     txt: &str,
     init: &view::Source,
     on_change: impl Fn(view::Source) + 'static,
@@ -297,6 +299,7 @@ fn source(
         }
     }));
     inspect.connect_toggled(clone!(
+        @strong variables,
         @strong ctx,
         @strong on_change,
         @strong inspector,
@@ -316,7 +319,12 @@ fn source(
                     entry.emit_activate();
                 }
             };
-            let si = SourceInspector::new(ctx.clone(), on_change, source.borrow().clone());
+            let si = SourceInspector::new(
+                ctx.clone(),
+                &variables,
+                on_change,
+                source.borrow().clone()
+            );
             w.add(si.root());
             si.root().set_property_margin(5);
             w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
@@ -339,11 +347,17 @@ pub(super) struct Action {
 }
 
 impl Action {
-    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Action) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        on_change: OnChange,
+        spec: view::Action,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (srclbl, srcent, source) = source(
             ctx,
+            variables,
             "Source:",
             &spec.borrow().source,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -386,13 +400,19 @@ pub(super) struct Label {
 }
 
 impl Label {
-    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Source) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        on_change: OnChange,
+        spec: view::Source,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
         root.pack_start(&pathbox, false, false, 0);
         let (l, e, source) = source(
             ctx,
+            variables,
             "Source:",
             &*spec.borrow(),
             clone!(@strong spec => move |s| {
@@ -430,11 +450,17 @@ pub(super) struct Button {
 }
 
 impl Button {
-    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Button) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        on_change: OnChange,
+        spec: view::Button,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
             ctx,
+            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -445,6 +471,7 @@ impl Button {
         root.add((l, e));
         let (l, e, label_source) = source(
             ctx,
+            variables,
             "Label:",
             &spec.borrow().label,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -455,6 +482,7 @@ impl Button {
         root.add((l, e));
         let (l, e, source) = source(
             ctx,
+            variables,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -504,11 +532,17 @@ pub(super) struct Toggle {
 }
 
 impl Toggle {
-    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Toggle) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        on_change: OnChange,
+        spec: view::Toggle,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
             ctx,
+            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -519,6 +553,7 @@ impl Toggle {
         root.add((l, e));
         let (l, e, source) = source(
             ctx,
+            variables,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -568,6 +603,7 @@ pub(super) struct Selector {
 impl Selector {
     pub(super) fn new(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         spec: view::Selector,
     ) -> Self {
@@ -575,6 +611,7 @@ impl Selector {
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
             ctx,
+            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -585,6 +622,7 @@ impl Selector {
         root.add((l, e));
         let (l, e, choices_source) = source(
             ctx,
+            variables,
             "Choices:",
             &spec.borrow().choices,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -595,6 +633,7 @@ impl Selector {
         root.add((l, e));
         let (l, e, source) = source(
             ctx,
+            variables,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -645,11 +684,17 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    pub(super) fn new(ctx: &WidgetCtx, on_change: OnChange, spec: view::Entry) -> Self {
+    pub(super) fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        on_change: OnChange,
+        spec: view::Entry,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_source) = source(
             ctx,
+            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -660,6 +705,7 @@ impl Entry {
         root.add((l, e));
         let (l, e, visible_source) = source(
             ctx,
+            variables,
             "Visible:",
             &spec.borrow().visible,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -670,6 +716,7 @@ impl Entry {
         root.add((l, e));
         let (l, e, source) = source(
             ctx,
+            variables,
             "Source:",
             &spec.borrow().source,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -732,6 +779,7 @@ pub(super) struct LinePlot {
 impl LinePlot {
     pub(super) fn new(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         spec: view::LinePlot,
     ) -> Self {
@@ -740,8 +788,9 @@ impl LinePlot {
         LinePlot::build_chart_style_editor(&root, &on_change, &spec);
         LinePlot::build_axis_style_editor(&root, &on_change, &spec);
         let (x_min, x_max, y_min, y_max, keep_points) =
-            LinePlot::build_axis_range_editor(ctx, &root, &on_change, &spec);
-        let series = LinePlot::build_series_editor(ctx, &root, &on_change, &spec);
+            LinePlot::build_axis_range_editor(ctx, variables, &root, &on_change, &spec);
+        let series =
+            LinePlot::build_series_editor(ctx, variables, &root, &on_change, &spec);
         LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
@@ -805,6 +854,7 @@ impl LinePlot {
 
     fn build_axis_range_editor(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
@@ -816,6 +866,7 @@ impl LinePlot {
         range_exp.add(range.root());
         let (l, e, x_min) = source(
             ctx,
+            variables,
             "x min:",
             &spec.borrow().x_min,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -826,6 +877,7 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, x_max) = source(
             ctx,
+            variables,
             "x max:",
             &spec.borrow().x_max,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -836,6 +888,7 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, y_min) = source(
             ctx,
+            variables,
             "y min:",
             &spec.borrow().y_min,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -846,6 +899,7 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, y_max) = source(
             ctx,
+            variables,
             "y max:",
             &spec.borrow().y_max,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -856,6 +910,7 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, keep_points) = source(
             ctx,
+            variables,
             "Keep Points:",
             &spec.borrow().keep_points,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -944,6 +999,7 @@ impl LinePlot {
 
     fn build_series_editor(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
@@ -967,6 +1023,7 @@ impl LinePlot {
         seriesbox.pack_start(&addbtn, false, false, 0);
         let build_series = Rc::new(clone!(
             @weak seriesbox,
+            @strong variables,
             @strong ctx,
             @strong on_change,
             @strong series => move |spec: view::Series| {
@@ -997,6 +1054,7 @@ impl LinePlot {
                 grid.add((lbl_line_color, line_color));
                 let (l, e, x) = source(
                     &ctx,
+                    &variables,
                     "X:",
                     &spec.borrow().x,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -1007,6 +1065,7 @@ impl LinePlot {
                 grid.add((l, e));
                 let (l, e, y) = source(
                     &ctx,
+                    &variables,
                     "Y:",
                     &spec.borrow().y,
                     clone!(@strong spec, @strong on_change => move |s| {

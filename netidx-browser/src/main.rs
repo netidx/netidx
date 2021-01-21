@@ -201,7 +201,8 @@ impl Source {
                     .iter()
                     .map(|spec| Source::new(ctx, variables.clone(), spec.clone()))
                     .collect();
-                let function = Box::new(Formula::new(&*ctx, &variables, function, &*from));
+                let function =
+                    Box::new(Formula::new(&*ctx, &variables, function, &*from));
                 Source::Map { spec, from, function }
             }
         }
@@ -269,10 +270,13 @@ impl Source {
                     }
                     Ok(s) => {
                         let dv = ctx.subscriber.durable_subscribe(Path::from(s));
+                        dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.updates.clone());
                         let res = dv.last();
                         *cur.borrow_mut() = Some(dv);
                         match res {
-                            Event::Unsubscribed => None,
+                            Event::Unsubscribed => {
+                                Some(Value::String(Chars::from("#LOST")))
+                            }
                             Event::Update(v) => Some(v),
                         }
                     }

@@ -9,6 +9,7 @@ use netidx_protocols::view;
 use std::{
     boxed,
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
     result,
 };
@@ -175,6 +176,7 @@ struct Widget {
 impl Widget {
     fn insert(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -183,7 +185,12 @@ impl Widget {
         let (name, kind, props) = match spec {
             view::Widget { props: _, kind: view::WidgetKind::Action(s) } => (
                 "Action",
-                WidgetKind::Action(widgets::Action::new(ctx, on_change.clone(), s)),
+                WidgetKind::Action(widgets::Action::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 None,
             ),
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
@@ -193,32 +200,62 @@ impl Widget {
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
-                WidgetKind::Label(widgets::Label::new(ctx, on_change.clone(), s)),
+                WidgetKind::Label(widgets::Label::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
-                WidgetKind::Button(widgets::Button::new(ctx, on_change.clone(), s)),
+                WidgetKind::Button(widgets::Button::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
-                WidgetKind::Toggle(widgets::Toggle::new(ctx, on_change.clone(), s)),
+                WidgetKind::Toggle(widgets::Toggle::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
-                WidgetKind::Selector(widgets::Selector::new(ctx, on_change.clone(), s)),
+                WidgetKind::Selector(widgets::Selector::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
-                WidgetKind::Entry(widgets::Entry::new(ctx, on_change.clone(), s)),
+                WidgetKind::Entry(widgets::Entry::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
-                WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
+                WidgetKind::LinePlot(widgets::LinePlot::new(
+                    ctx,
+                    variables,
+                    on_change.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
@@ -449,6 +486,8 @@ static KINDS: [&'static str; 13] = [
 
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, spec: view::View) -> Editor {
+        let variables: Rc<RefCell<HashMap<String, Value>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -552,7 +591,14 @@ impl Editor {
                 }
             }
         });
-        Editor::build_tree(&ctx, &on_change, &store, None, &spec.borrow().root);
+        Editor::build_tree(
+            &ctx,
+            &variables,
+            &on_change,
+            &store,
+            None,
+            &spec.borrow().root,
+        );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root_lower.pack_start(&reveal_properties, true, true, 5);
@@ -564,6 +610,7 @@ impl Editor {
             kind.append(Some(k), k);
         }
         kind.connect_changed(clone!(
+            @strong variables,
             @strong on_change,
             @strong store,
             @strong selected,
@@ -580,7 +627,14 @@ impl Editor {
                     }
                     let id = c.get_active_id();
                     let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
-                    Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
+                    Widget::insert(
+                        &ctx,
+                        &variables,
+                        on_change.clone(),
+                        &store,
+                        &iter,
+                        spec
+                    );
                     let wv = store.get_value(&iter, 1);
                     if let Ok(Some(w)) = wv.get::<&Widget>() {
                         properties.pack_start(w.root(), true, true, 5);
@@ -658,30 +712,49 @@ impl Editor {
         menu.append(&delete);
         menu.append(&undo);
         let dup = Rc::new(clone!(
-        @strong on_change, @weak store, @strong selected, @strong ctx => move || {
+            @strong variables,
+            @strong on_change,
+            @weak store,
+            @strong selected,
+            @strong ctx => move || {
             if let Some(iter) = &*selected.borrow() {
                 let spec = Editor::build_spec(&store, iter);
                 let parent = store.iter_parent(iter);
-                Editor::build_tree(&ctx, &on_change, &store, parent.as_ref(), &spec);
+                Editor::build_tree(
+                    &ctx,
+                    &variables,
+                    &on_change,
+                    &store,
+                    parent.as_ref(),
+                    &spec
+                );
                 on_change()
             }
         }));
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let newsib = Rc::new(clone!(
-            @strong on_change, @weak store, @strong selected, @strong ctx => move || {
+            @strong variables,
+            @strong on_change,
+            @weak store,
+            @strong selected,
+            @strong ctx => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
+            Widget::insert(&ctx, &variables, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         let newch = Rc::new(clone!(
-            @strong on_change, @weak store, @strong selected, @strong ctx => move || {
+            @strong variables,
+            @strong on_change,
+            @weak store,
+            @strong selected,
+            @strong ctx => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
+            Widget::insert(&ctx, &variables, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         new_child.connect_activate(clone!(@strong newch => move |_| newch()));
@@ -699,6 +772,7 @@ impl Editor {
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
         let und = Rc::new(clone!(
             @weak store,
+            @strong variables,
             @strong undo_stack,
             @strong spec,
             @strong selected,
@@ -714,7 +788,14 @@ impl Editor {
                     }
                     store.clear();
                     *spec.borrow_mut() = s.clone();
-                    Editor::build_tree(&ctx, &on_change, &store, None, &s.root);
+                    Editor::build_tree(
+                        &ctx,
+                        &variables,
+                        &on_change,
+                        &store,
+                        None,
+                        &s.root
+                    );
                     on_change();
                 }
         }));
@@ -742,33 +823,44 @@ impl Editor {
 
     fn build_tree(
         ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: &OnChange,
         store: &gtk::TreeStore,
         parent: Option<&gtk::TreeIter>,
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
+        Widget::insert(ctx, variables, on_change.clone(), store, &iter, w.clone());
         match &w.kind {
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
                 }
             }
-            view::WidgetKind::BoxChild(b) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*b.widget)
-            }
+            view::WidgetKind::BoxChild(b) => Editor::build_tree(
+                ctx,
+                variables,
+                on_change,
+                store,
+                Some(&iter),
+                &*b.widget,
+            ),
             view::WidgetKind::Grid(g) => {
                 for w in &g.rows {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
                 }
             }
-            view::WidgetKind::GridChild(g) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*g.widget)
-            }
+            view::WidgetKind::GridChild(g) => Editor::build_tree(
+                ctx,
+                variables,
+                on_change,
+                store,
+                Some(&iter),
+                &*g.widget,
+            ),
             view::WidgetKind::GridRow(g) => {
                 for w in &g.columns {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
                 }
             }
             view::WidgetKind::Action(_)
