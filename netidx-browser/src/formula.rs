@@ -347,6 +347,7 @@ fn eval_cmp(from: &CachedVals) -> Option<Value> {
                     (Value::False, Value::False) => Some(eval_op(&*op, false, false)),
                     (Value::Ok, Value::Ok) => Some(eval_op(&*op, true, true)),
                     (Value::Error(v0), Value::Error(v1)) => Some(eval_op(&*op, v0, v1)),
+                    (Value::Null, Value::Null) => Some(Value::True),
                     (v0, v1) => Some(Value::Error(Chars::from(format!(
                         "can't compare incompatible types {:?} and {:?}",
                         v0, v1
