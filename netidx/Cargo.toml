@@ -8,6 +8,7 @@ description = "Cross platform secure messaging framework, \"like DNS for values\
 homepage = "https://estokes.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
+readme = "README.md"
 keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
