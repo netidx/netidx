@@ -370,8 +370,8 @@ fn eval_if(from: &CachedVals) -> Option<Value> {
             Some(Value::False) => None,
             _ => Some(Value::Error(Chars::from(
                 "if(predicate, caseIf, [caseElse]): expected boolean condition",
-            )))
-        }
+            ))),
+        },
         [cond, b1, b2] => match cond {
             None => None,
             Some(Value::True) => b1.clone(),
@@ -454,6 +454,29 @@ fn eval_isa(from: &CachedVals) -> Option<Value> {
         (Typ::Result, Some(Value::Error(_))) => Some(Value::True),
         (_, Some(_)) => Some(Value::False),
     })
+}
+
+fn eval_string_join(from: &CachedVals) -> Option<Value> {
+    use bytes::BytesMut;
+    let vals = from.0.borrow();
+    let mut parts = vals
+        .iter()
+        .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
+    match parts.next() {
+        None => None,
+        Some(sep) => {
+            let mut res = BytesMut::new();
+            for p in parts {
+                if res.is_empty() {
+                    res.extend_from_slice(p.bytes());
+                } else {
+                    res.extend_from_slice(sep.bytes());
+                    res.extend_from_slice(p.bytes());
+                }
+            }
+            Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -553,12 +576,31 @@ pub(super) enum Formula {
     Eval(Eval),
     Count(Count),
     Sample(Sample),
+    StringJoin(CachedVals),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 19] = [
-    "any", "all", "sum", "product", "divide", "mean", "min", "max", "and", "or", "not",
-    "cmp", "if", "filter", "cast", "isa", "eval", "count", "sample",
+pub(super) static FORMULAS: [&'static str; 20] = [
+    "any",
+    "all",
+    "sum",
+    "product",
+    "divide",
+    "mean",
+    "min",
+    "max",
+    "and",
+    "or",
+    "not",
+    "cmp",
+    "if",
+    "filter",
+    "cast",
+    "isa",
+    "eval",
+    "count",
+    "sample",
+    "string_join",
 ];
 
 impl Formula {
@@ -588,6 +630,7 @@ impl Formula {
             "eval" => Formula::Eval(Eval::new(ctx, variables, from)),
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
+            "string_join" => Formula::StringJoin(CachedVals::new(from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -613,6 +656,7 @@ impl Formula {
             Formula::Eval(e) => e.eval(),
             Formula::Count(c) => c.eval(),
             Formula::Sample(c) => c.eval(),
+            Formula::StringJoin(c) => eval_string_join(c),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -655,6 +699,9 @@ impl Formula {
             Formula::Eval(e) => e.update(from, tgt, value),
             Formula::Count(c) => c.update(from, tgt, value),
             Formula::Sample(c) => c.update(from, tgt, value),
+            Formula::StringJoin(c) => {
+                update_cached(eval_string_join, c, from, tgt, value)
+            }
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

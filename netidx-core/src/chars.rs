@@ -25,8 +25,16 @@ impl Chars {
         Ok(Chars(bytes))
     }
 
+    pub unsafe fn from_bytes_unchecked(bytes: Bytes) -> Chars {
+        Chars(bytes)
+    }
+    
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &*self.0
     }
 }
 
