@@ -16,7 +16,7 @@ pub(super) fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
         msg,
     );
     let resp = d.run();
-    d.close();
+    unsafe { d.destroy() };
     resp == gtk::ResponseType::Yes
 }
 
@@ -29,5 +29,5 @@ pub(super) fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
         msg,
     );
     d.run();
-    d.close();
+    unsafe { d.destroy() };
 }

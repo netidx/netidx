@@ -1053,7 +1053,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
         gtk::ResponseType::Accept => loc.borrow_mut().take(),
         gtk::ResponseType::Cancel | _ => None,
     };
-    d.close();
+    unsafe { d.destroy(); }
     res
 }
 
@@ -1218,7 +1218,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let go_act = gio::SimpleAction::new("go", None);
     window.add_action(&go_act);
     go_act.connect_activate(
-        clone!(@strong ctx, @strong saved, @weak window => move |_, _| {
+        clone!(@strong ctx, @strong saved, @weak design_mode, @weak window => move |_, _| {
             if saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
                 if let Some(loc) = choose_location(&window, false) {
                     let m = FromGui::Navigate(loc);
