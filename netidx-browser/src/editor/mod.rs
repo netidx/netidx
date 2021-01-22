@@ -77,42 +77,52 @@ impl WidgetProps {
             spec.borrow().unwrap_or(DEFAULT_PROPS).valign,
         )));
         halign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            let mut spec = spec.borrow_mut();
-            let spec = spec.get_or_insert(DEFAULT_PROPS);
-            spec.halign =
-                c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+            {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.halign =
+                    c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+            }
             on_change()
         }));
         valign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            let mut spec = spec.borrow_mut();
-            let spec = spec.get_or_insert(DEFAULT_PROPS);
-            spec.valign =
-                c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+            {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.valign =
+                    c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+            }
             on_change()
         }));
         let hexp = gtk::CheckButton::with_label("Expand Horizontally");
         grid.attach(&hexp, 0, 2, 1);
         hexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
-            let mut spec = spec.borrow_mut();
-            let spec = spec.get_or_insert(DEFAULT_PROPS);
-            spec.hexpand = b.get_active();
+            {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.hexpand = b.get_active();
+            }
             on_change()
         }));
         let vexp = gtk::CheckButton::with_label("Expand Vertically");
         grid.attach(&vexp, 0, 2, 1);
         vexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
-            let mut spec = spec.borrow_mut();
-            let spec = spec.get_or_insert(DEFAULT_PROPS);
-            spec.vexpand = b.get_active();
+            {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.vexpand = b.get_active();
+            }
             on_change()
         }));
         grid.add(parse_entry(
             "Top Margin:",
             &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_top,
             clone!(@strong spec, @strong on_change => move |s| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.margin_top = s;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    spec.margin_top = s;
+                }
                 on_change()
             }),
         ));
@@ -120,9 +130,11 @@ impl WidgetProps {
             "Bottom Margin:",
             &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_bottom,
             clone!(@strong spec, @strong on_change => move |s| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.margin_bottom = s;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    spec.margin_bottom = s;
+                }
                 on_change()
             }),
         ));
@@ -130,9 +142,11 @@ impl WidgetProps {
             "Start Margin:",
             &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_start,
             clone!(@strong spec, @strong on_change => move |s| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.margin_start = s;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    spec.margin_start = s;
+                }
                 on_change()
             }),
         ));
@@ -140,9 +154,11 @@ impl WidgetProps {
             "End Margin:",
             &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_end,
             clone!(@strong spec, @strong on_change => move |s| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.margin_end = s;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    spec.margin_end = s;
+                }
                 on_change()
             }),
         ));
