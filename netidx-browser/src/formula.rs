@@ -184,8 +184,17 @@ pub(super) struct Sample {
 }
 
 impl Sample {
-    fn new(_from: &[Source]) -> Self {
-        Sample { current: Rc::new(RefCell::new(None)) }
+    fn new(from: &[Source]) -> Self {
+        let v = match from {
+            [trigger, source] => match trigger.current() {
+                None => None,
+                Some(_) => source.current(),
+            },
+            _ => Some(Value::Error(Chars::from(
+                "sample(trigger, source): expected 2 arguments",
+            ))),
+        };
+        Sample { current: Rc::new(RefCell::new(v)) }
     }
 
     fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
@@ -200,9 +209,7 @@ impl Sample {
                     v
                 }
             }
-            _ => Some(Value::Error(Chars::from(
-                "sample(trigger, source): expected 2 arguments",
-            ))),
+            _ => None,
         }
     }
 
