@@ -20,13 +20,23 @@ type OnChange = Rc<dyn Fn()>;
 #[derive(Debug, Clone)]
 struct WidgetProps {
     root: gtk::Expander,
-    spec: Rc<RefCell<view::WidgetProps>>,
+    spec: Rc<RefCell<Option<view::WidgetProps>>>,
 }
 
 impl WidgetProps {
-    fn new(on_change: OnChange, spec: view::WidgetProps) -> Self {
+    fn new(on_change: OnChange, spec: Option<view::WidgetProps>) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Expander::new(Some("Layout Properties"));
+        let on_change = Rc::new({
+            let spec = spec.clone();
+            move || {
+                let default = spec.borrow().as_ref() == Some(&DEFAULT_PROPS);
+                if default {
+                    *spec.borrow_mut() = None;
+                }
+                on_change()
+            }
+        });
         util::expander_touch_enable(&root);
         let mut grid = TwoColGrid::new();
         root.add(grid.root());
@@ -60,59 +70,79 @@ impl WidgetProps {
             halign.append(Some(a), a);
             valign.append(Some(a), a);
         }
-        halign.set_active_id(Some(align_to_str(spec.borrow().halign)));
-        valign.set_active_id(Some(align_to_str(spec.borrow().valign)));
+        halign.set_active_id(Some(align_to_str(
+            spec.borrow().unwrap_or(DEFAULT_PROPS).halign,
+        )));
+        valign.set_active_id(Some(align_to_str(
+            spec.borrow().unwrap_or(DEFAULT_PROPS).valign,
+        )));
         halign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            spec.borrow_mut().halign =
+            let mut spec = spec.borrow_mut();
+            let spec = spec.get_or_insert(DEFAULT_PROPS);
+            spec.halign =
                 c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
         valign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            spec.borrow_mut().valign =
+            let mut spec = spec.borrow_mut();
+            let spec = spec.get_or_insert(DEFAULT_PROPS);
+            spec.valign =
                 c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             on_change()
         }));
         let hexp = gtk::CheckButton::with_label("Expand Horizontally");
         grid.attach(&hexp, 0, 2, 1);
         hexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
-            spec.borrow_mut().hexpand = b.get_active();
+            let mut spec = spec.borrow_mut();
+            let spec = spec.get_or_insert(DEFAULT_PROPS);
+            spec.hexpand = b.get_active();
             on_change()
         }));
         let vexp = gtk::CheckButton::with_label("Expand Vertically");
         grid.attach(&vexp, 0, 2, 1);
         vexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
-            spec.borrow_mut().vexpand = b.get_active();
+            let mut spec = spec.borrow_mut();
+            let spec = spec.get_or_insert(DEFAULT_PROPS);
+            spec.vexpand = b.get_active();
             on_change()
         }));
         grid.add(parse_entry(
             "Top Margin:",
-            &spec.borrow().margin_top,
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_top,
             clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().margin_top = s;
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.margin_top = s;
                 on_change()
             }),
         ));
         grid.add(parse_entry(
             "Bottom Margin:",
-            &spec.borrow().margin_bottom,
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_bottom,
             clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().margin_bottom = s;
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.margin_bottom = s;
                 on_change()
             }),
         ));
         grid.add(parse_entry(
             "Start Margin:",
-            &spec.borrow().margin_start,
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_start,
             clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().margin_start = s;
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.margin_start = s;
                 on_change()
             }),
         ));
         grid.add(parse_entry(
             "End Margin:",
-            &spec.borrow().margin_end,
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_end,
             clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().margin_end = s;
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                spec.margin_end = s;
                 on_change()
             }),
         ));
@@ -123,8 +153,8 @@ impl WidgetProps {
         self.root.upcast_ref()
     }
 
-    fn spec(&self) -> view::WidgetProps {
-        self.spec.borrow().clone()
+    fn spec(&self) -> Option<view::WidgetProps> {
+        *self.spec.borrow()
     }
 }
 
@@ -196,7 +226,7 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
                 "Table",
                 WidgetKind::Table(widgets::Table::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
@@ -206,7 +236,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
@@ -216,7 +246,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
@@ -226,7 +256,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
@@ -236,7 +266,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
@@ -246,7 +276,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
@@ -256,12 +286,12 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(widgets::BoxContainer::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::BoxChild(s) } => (
                 "BoxChild",
@@ -271,7 +301,7 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Grid(s) } => (
                 "Grid",
                 WidgetKind::Grid(widgets::Grid::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
+                Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::GridChild(s) } => (
                 "GridChild",
@@ -296,7 +326,7 @@ impl Widget {
     }
 
     fn spec(&self) -> view::Widget {
-        let props = self.props.as_ref().map(|p| p.spec());
+        let props = self.props.as_ref().and_then(|p| p.spec());
         let kind = match &self.kind {
             WidgetKind::Action(w) => w.spec(),
             WidgetKind::Table(w) => w.spec(),

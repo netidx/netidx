@@ -309,7 +309,7 @@ pub enum WidgetKind {
     LinePlot(LinePlot),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetProps {
     pub halign: Align,
     pub valign: Align,
