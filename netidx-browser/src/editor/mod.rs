@@ -235,6 +235,8 @@ impl Widget {
                     ctx,
                     variables,
                     on_change.clone(),
+                    store,
+                    iter,
                     s,
                 )),
                 None,
@@ -498,6 +500,24 @@ impl Widget {
         self.root.upcast_ref()
     }
 
+    fn moved(&self, iter: &gtk::TreeIter) {
+        match &self.kind {
+            WidgetKind::Action(w) => w.moved(iter),
+            WidgetKind::Table(_)
+            | WidgetKind::Label(_)
+            | WidgetKind::Button(_)
+            | WidgetKind::Toggle(_)
+            | WidgetKind::Selector(_)
+            | WidgetKind::Entry(_)
+            | WidgetKind::LinePlot(_)
+            | WidgetKind::Box(_)
+            | WidgetKind::BoxChild(_)
+            | WidgetKind::Grid(_)
+            | WidgetKind::GridChild(_)
+            | WidgetKind::GridRow => (),
+        }
+    }
+
     fn update(&self, tgt: Target, value: &Value) {
         match &self.kind {
             WidgetKind::Action(w) => w.update(tgt, value),
@@ -603,11 +623,23 @@ impl Editor {
             let column = gtk::TreeViewColumn::new();
             let cell = gtk::CellRendererText::new();
             column.pack_start(&cell, true);
-            column.set_title("widget tree");
+            column.set_title("widget name");
             column.add_attribute(&cell, "text", 0);
             column
         });
-        let store = gtk::TreeStore::new(&[String::static_type(), Widget::static_type()]);
+        view.append_column(&{
+            let column = gtk::TreeViewColumn::new();
+            let cell = gtk::CellRendererText::new();
+            column.pack_start(&cell, true);
+            column.set_title("desc");
+            column.add_attribute(&cell, "text", 2);
+            column
+        });
+        let store = gtk::TreeStore::new(&[
+            String::static_type(),
+            Widget::static_type(),
+            String::static_type(),
+        ]);
         view.set_model(Some(&store));
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
@@ -871,7 +903,16 @@ impl Editor {
         store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
             on_change();
         }));
-        store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
+        store.connect_row_inserted(clone!(
+        @strong store, @strong on_change => move |_, _, iter| {
+            idle_add_local(clone!(@strong store, @strong iter => move || {
+                let v = store.get_value(&iter, 1);
+                match v.get::<&Widget>() {
+                    Err(_) | Ok(None) => (),
+                    Ok(Some(w)) => w.moved(&iter),
+                }
+                glib::Continue(false)
+            }));
             on_change();
         }));
         Editor { root, store }

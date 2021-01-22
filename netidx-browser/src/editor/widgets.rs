@@ -344,6 +344,7 @@ pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Action>>,
     source: DbgSrc,
+    iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
 impl Action {
@@ -351,17 +352,32 @@ impl Action {
         ctx: &WidgetCtx,
         variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
+        store: &gtk::TreeStore,
+        iter: &gtk::TreeIter,
         spec: view::Action,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
+        let iter = Rc::new(RefCell::new(iter.clone()));
+        let update_desc = Rc::new({
+            let store = store.clone();
+            let iter = iter.clone();
+            let spec = spec.clone();
+            move || {
+                let spec = spec.borrow();
+                let desc = format!("{} <- {}", &spec.sink, &spec.source);
+                store.set_value(&*iter.borrow(), 2, &desc.to_value());
+            }
+        });
+        update_desc();
         let (srclbl, srcent, source) = source(
             ctx,
             variables,
             "Source:",
             &spec.borrow().source,
-            clone!(@strong spec, @strong on_change => move |s| {
+            clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().source = s;
+                update_desc();
                 on_change()
             }),
         );
@@ -369,14 +385,19 @@ impl Action {
         root.add(parse_entry(
             "Sink:",
             &spec.borrow().sink,
-            clone!(@strong spec, @strong on_change => move |s| {
+            clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().sink = s;
+                update_desc();
                 on_change()
             }),
         ));
-        Action { root, spec, source }
+        Action { root, spec, source, iter }
     }
 
+    pub(super) fn moved(&self, iter: &gtk::TreeIter) {
+        *self.iter.borrow_mut() = iter.clone();
+    }
+    
     pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Action(self.spec.borrow().clone())
     }
