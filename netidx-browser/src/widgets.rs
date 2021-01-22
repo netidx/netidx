@@ -35,7 +35,7 @@ impl Button {
         let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
         let label = Source::new(&ctx, variables.clone(), spec.label.clone());
         let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
+        let sink = Sink::new(&ctx, variables, spec.sink.clone());
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -137,7 +137,7 @@ impl Action {
         spec: view::Action,
     ) -> Self {
         let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
+        let sink = Sink::new(&ctx, variables, spec.sink.clone());
         if let Some(cur) = source.current() {
             sink.set(&ctx, cur);
         }
@@ -193,7 +193,7 @@ impl Selector {
         let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
         let choices = Source::new(&ctx, variables.clone(), spec.choices.clone());
         let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
+        let sink = Sink::new(&ctx, variables, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
@@ -299,7 +299,7 @@ impl Toggle {
         let switch = gtk::Switch::new();
         let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
         let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
+        let sink = Sink::new(&ctx, variables, spec.sink.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
@@ -379,7 +379,7 @@ impl Entry {
         let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
         let visible = Source::new(&ctx, variables.clone(), spec.visible.clone());
         let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, spec.sink.clone());
+        let sink = Sink::new(&ctx, variables, spec.sink.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));

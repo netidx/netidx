@@ -1,4 +1,4 @@
-use crate::view::{Sink, Source};
+use crate::view::{StoreTarget, Sink, Source};
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -318,9 +318,18 @@ where
                 .with(between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
+                    fname(),
+                ))
+                .map(|s| Sink::Store(StoreTarget::Variable(s))),
+        ),
+        attempt(
+            string("store_path")
+                .with(between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
                     quoted(),
                 ))
-                .map(|s| Sink::Store(Path::from(s))),
+                .map(|s| Sink::Store(StoreTarget::Path(Path::from(s)))),
         ),
         attempt(
             string("store_var")
@@ -382,16 +391,18 @@ mod tests {
 
     #[test]
     fn sink_parse() {
+        let v = "foo_bar_baz";
+        let s = "store_path(foo_bar_baz)";
+        assert_eq!(Sink::Store(StoreTarget::Variable(v.into())), parse_sink(s).unwrap());
         let p = Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#);
         let s = r#"store_path("/foo bar baz/\"(zam)\"/_ xyz+ ")"#;
-        assert_eq!(Sink::Store(p), parse_sink(s).unwrap());
+        assert_eq!(Sink::Store(StoreTarget::Path(p)), parse_sink(s).unwrap());
         assert_eq!(
             Sink::Variable(String::from("foo")),
             parse_sink("store_var(foo)").unwrap()
         );
-
         let snk = Sink::All(vec![
-            Sink::Store(Path::from("/foo/bar")),
+            Sink::Store(StoreTarget::Path(Path::from("/foo/bar"))),
             Sink::Variable(String::from("foo")),
         ]);
         let chs = r#"all(store_path("/foo/bar"), store_var(foo))"#;

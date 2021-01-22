@@ -394,7 +394,9 @@ impl Widget {
                     source: view::Source::Load(Box::new(view::Source::Constant(
                         Value::String(Chars::from("/somewhere")),
                     ))),
-                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    sink: view::Sink::Store(view::StoreTarget::Path(Path::from(
+                        "/somewhere/else",
+                    ))),
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
@@ -402,7 +404,9 @@ impl Widget {
                 source: view::Source::Load(Box::new(view::Source::Constant(
                     Value::String(Chars::from("/somewhere")),
                 ))),
-                sink: view::Sink::Store(Path::from("/somewhere/else")),
+                sink: view::Sink::Store(view::StoreTarget::Path(Path::from(
+                    "/somewhere/else",
+                ))),
             })),
             Some("Selector") => {
                 let choices =
@@ -413,7 +417,9 @@ impl Widget {
                     source: view::Source::Load(Box::new(view::Source::Constant(
                         Value::String(Chars::from("/somewhere")),
                     ))),
-                    sink: view::Sink::Store(Path::from("/somewhere/else")),
+                    sink: view::Sink::Store(view::StoreTarget::Path(Path::from(
+                        "/somewhere/else",
+                    ))),
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
@@ -422,7 +428,9 @@ impl Widget {
                 source: view::Source::Load(Box::new(view::Source::Constant(
                     Value::String(Chars::from("/somewhere")),
                 ))),
-                sink: view::Sink::Store(Path::from("/somewhere/else")),
+                sink: view::Sink::Store(view::StoreTarget::Path(Path::from(
+                    "/somewhere/else",
+                ))),
             })),
             Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
                 title: String::from("Line Plot"),

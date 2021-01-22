@@ -97,8 +97,14 @@ impl FromStr for Source {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
+pub enum StoreTarget {
+    Path(Path),
+    Variable(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Sink {
-    Store(Path),
+    Store(StoreTarget),
     Variable(String),
     Navigate,
     All(Vec<Sink>),
@@ -108,8 +114,13 @@ pub enum Sink {
 impl fmt::Display for Sink {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Sink::Store(p) => {
-                write!(f, r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
+            Sink::Store(tgt) => match tgt {
+                StoreTarget::Path(p) => {
+                    write!(f, r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
+                }
+                StoreTarget::Variable(v) => {
+                    write!(f, r#"store_path({})"#, &*v)
+                }
             }
             Sink::Variable(v) => write!(f, "store_var({})", v),
             Sink::Navigate => write!(f, "navigate()"),
@@ -396,9 +407,16 @@ mod tests {
         }
     }
 
+    fn store_target() -> impl Strategy<Value = StoreTarget> {
+        prop_oneof! [
+            path().prop_map(StoreTarget::Path),
+            fname().prop_map(StoreTarget::Variable)
+        ]
+    }
+    
     fn sink() -> impl Strategy<Value = Sink> {
         let leaf = prop_oneof![
-            path().prop_map(Sink::Store),
+            store_target().prop_map(Sink::Store),
             fname().prop_map(Sink::Variable),
             Just(Sink::Navigate),
         ];

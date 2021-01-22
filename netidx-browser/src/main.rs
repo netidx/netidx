@@ -41,7 +41,7 @@ use std::{
     fmt, fs, mem,
     ops::Deref,
     path::PathBuf,
-    rc::Rc,
+    rc::{Rc, Weak},
     result,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -91,7 +91,6 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(String, Value),
-    Confirm(String, Sink, Value),
     TryNavigate(Value),
     ShowError(String),
     SaveError(String),
@@ -115,16 +114,35 @@ struct WidgetCtxInner {
     to_gui: glib::Sender<ToGui>,
     from_gui: mpsc::UnboundedSender<FromGui>,
     raw_view: Arc<AtomicBool>,
+    window: gtk::ApplicationWindow,
 }
 
 #[derive(Debug, Clone)]
 struct WidgetCtx(Rc<WidgetCtxInner>);
+
+impl glib::clone::Downgrade for WidgetCtx {
+    type Weak = WidgetCtxWeak;
+
+    fn downgrade(&self) -> Self::Weak {
+        WidgetCtxWeak(Rc::downgrade(&self.0))
+    }
+}
 
 impl Deref for WidgetCtx {
     type Target = WidgetCtxInner;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
+    }
+}
+
+struct WidgetCtxWeak(Weak<WidgetCtxInner>);
+
+impl glib::clone::Upgrade for WidgetCtxWeak {
+    type Strong = WidgetCtx;
+
+    fn upgrade(&self) -> Option<Self::Strong> {
+        Weak::upgrade(&self.0).map(WidgetCtx)
     }
 }
 
@@ -288,7 +306,14 @@ impl Source {
 
 #[derive(Debug, Clone)]
 enum Sink {
-    Store(view::Sink, Dval),
+    DirectStore(view::Sink, Dval),
+    IndirectStore {
+        spec: view::Sink,
+        variables: Rc<RefCell<HashMap<String, Value>>>,
+        ctx: WidgetCtx,
+        val: RefCell<Option<Value>>,
+        dv: RefCell<Option<Dval>>,
+    },
     Variable(view::Sink, String),
     Navigate(view::Sink),
     All(view::Sink, Vec<Sink>),
@@ -298,7 +323,8 @@ enum Sink {
 impl fmt::Display for Sink {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
-            Sink::Store(s, _) => s,
+            Sink::DirectStore(s, _) => s,
+            Sink::IndirectStore { spec, .. } => spec,
             Sink::Variable(s, _) => s,
             Sink::Navigate(s) => s,
             Sink::All(s, _) => s,
@@ -309,23 +335,43 @@ impl fmt::Display for Sink {
 }
 
 impl Sink {
-    fn new(ctx: &WidgetCtx, spec: view::Sink) -> Self {
+    fn new(
+        ctx: &WidgetCtx,
+        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        spec: view::Sink,
+    ) -> Self {
         match &spec {
             view::Sink::Variable(name) => {
                 let name = name.clone();
                 Sink::Variable(spec, name)
             }
-            view::Sink::Store(path) => {
+            view::Sink::Store(view::StoreTarget::Variable(name)) => {
+                let val = RefCell::new(variables.borrow().get(name).cloned());
+                let dv = RefCell::new(
+                    variables
+                        .borrow()
+                        .get(name)
+                        .and_then(|v| v.clone().cast_to::<String>().ok())
+                        .map(Path::from)
+                        .as_ref()
+                        .map(|p| ctx.subscriber.durable_subscribe(p.clone())),
+                );
+                let variables = variables.clone();
+                let ctx = ctx.clone();
+                Sink::IndirectStore { spec, variables, ctx, val, dv }
+            }
+            view::Sink::Store(view::StoreTarget::Path(path)) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
-                Sink::Store(spec, dv)
+                Sink::DirectStore(spec, dv)
             }
             view::Sink::Navigate => Sink::Navigate(spec),
             view::Sink::All(sinks) => {
-                let sinks = sinks.iter().map(|s| Sink::new(ctx, s.clone())).collect();
+                let sinks =
+                    sinks.iter().map(|s| Sink::new(ctx, variables, s.clone())).collect();
                 Sink::All(spec, sinks)
             }
             view::Sink::Confirm(sink) => {
-                let sink = Box::new(Sink::new(ctx, view::Sink::clone(&*sink)));
+                let sink = Box::new(Sink::new(ctx, variables, view::Sink::clone(&*sink)));
                 Sink::Confirm(spec, sink)
             }
         }
@@ -333,8 +379,27 @@ impl Sink {
 
     fn set(&self, ctx: &WidgetCtx, v: Value) {
         match self {
-            Sink::Store(_, dv) => {
+            Sink::DirectStore(_, dv) => {
                 dv.write(v);
+            }
+            Sink::IndirectStore { spec, variables, ctx, val, dv } => {
+                match spec {
+                    view::Sink::Store(view::StoreTarget::Variable(name)) => {
+                        let cur = variables.borrow(); 
+                        let cur = cur.get(name);
+                        if val.borrow().as_ref() != cur {
+                            *val.borrow_mut() = cur.cloned();
+                            *dv.borrow_mut() = cur
+                                .cloned()
+                                .and_then(|v| v.cast_to::<String>().ok())
+                                .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                if let Some(dv) = &*dv.borrow() {
+                    dv.write(v);
+                }
             }
             Sink::Variable(_, name) => {
                 let _: result::Result<_, _> =
@@ -351,7 +416,8 @@ impl Sink {
             Sink::Confirm(_, sink) => {
                 let sink = Sink::clone(&*sink);
                 let spec = match &sink {
-                    Sink::Store(spec, _) => spec,
+                    Sink::DirectStore(spec, _) => spec,
+                    Sink::IndirectStore { spec, .. } => spec,
                     Sink::Variable(spec, _) => spec,
                     Sink::Navigate(spec) => spec,
                     Sink::All(spec, _) => spec,
@@ -362,8 +428,9 @@ impl Sink {
                     v,
                     spec.to_string()
                 );
-                let _: result::Result<_, _> =
-                    ctx.to_gui.send(ToGui::Confirm(msg, sink, v));
+                if ask_modal(&ctx.window, &msg) {
+                    sink.set(&*ctx, v)
+                }
             }
         }
     }
@@ -604,7 +671,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: &Rc<Cell<bool>>) -> gtk::B
                 let target = glib::markup_escape_text(target);
                 lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
                 lbl.connect_activate_link(clone!(
-                @strong ctx,
+                @weak ctx,
                 @strong ask_saved,
                 @weak root => @default-return Inhibit(false), move |_, uri| {
                     if !ask_saved() {
@@ -622,8 +689,9 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: &Rc<Cell<bool>>) -> gtk::B
             root.add(&rl);
             rl.set_margin_start(10);
             rl.set_markup(r#"<a href=""> / </a>"#);
-            rl.connect_activate_link(
-                clone!(@strong ctx, @strong ask_saved => move |_, _| {
+            rl.connect_activate_link(clone!(
+                @weak ctx,
+                @strong ask_saved => @default-return Inhibit(false), move |_, _| {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
@@ -631,16 +699,17 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: &Rc<Cell<bool>>) -> gtk::B
                     let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                     Inhibit(false)
-                }),
-            );
+            }));
             let sep = gtk::Label::new(Some(" > "));
             root.add(&sep);
             let fl = gtk::Label::new(None);
             root.add(&fl);
             fl.set_margin_start(10);
             fl.set_markup(&format!(r#"<a href="">file:{:?}</a>"#, name));
-            fl.connect_activate_link(
-                clone!(@strong ctx, @strong ask_saved, @strong name => move |_, _| {
+            fl.connect_activate_link(clone!(
+                @weak ctx,
+                @strong ask_saved,
+                @strong name => @default-return Inhibit(false), move |_, _| {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
@@ -648,8 +717,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc, saved: &Rc<Cell<bool>>) -> gtk::B
                     let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                     Inhibit(false)
-                }),
-            );
+            }));
         }
     }
     root
@@ -1053,7 +1121,9 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
         gtk::ResponseType::Accept => loc.borrow_mut().take(),
         gtk::ResponseType::Cancel | _ => None,
     };
-    unsafe { d.destroy(); }
+    unsafe {
+        d.destroy();
+    }
     res
 }
 
@@ -1062,7 +1132,6 @@ fn save_view(
     saved: &Rc<Cell<bool>>,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
     current_spec: &Rc<RefCell<protocol_view::View>>,
-    window: &gtk::ApplicationWindow,
     save_button: &gtk::ToolButton,
     save_as: bool,
 ) {
@@ -1108,7 +1177,7 @@ fn save_view(
     let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
-        _ => match choose_location(&window, true) {
+        _ => match choose_location(&ctx.window, true) {
             None => (),
             Some(loc) => do_save(loc),
         },
@@ -1117,9 +1186,8 @@ fn save_view(
 
 fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let app = app.clone();
-    let window = ApplicationWindow::new(&app);
     let group = gtk::WindowGroup::new();
-    group.add_window(&window);
+    group.add_window(&ctx.window);
     let headerbar = gtk::HeaderBar::new();
     let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
@@ -1147,12 +1215,12 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     headerbar.pack_start(&design_mode);
     headerbar.pack_start(&save_button);
     headerbar.pack_end(&prefs_button);
-    window.set_titlebar(Some(&headerbar));
-    window.set_title("Netidx browser");
-    window.set_default_size(800, 600);
-    window.add(&mainbox);
-    window.show_all();
-    if let Some(screen) = window.get_screen() {
+    ctx.window.set_titlebar(Some(&headerbar));
+    ctx.window.set_title("Netidx browser");
+    ctx.window.set_default_size(800, 600);
+    ctx.window.add(&mainbox);
+    ctx.window.show_all();
+    if let Some(screen) = ctx.window.get_screen() {
         setup_css(&screen);
     }
     let ctx = Rc::new(ctx);
@@ -1167,8 +1235,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     let variables: Rc<RefCell<HashMap<String, Value>>> =
         Rc::new(RefCell::new(HashMap::new()));
-    window.connect_delete_event(clone!(
-        @strong ctx,
+    ctx.window.connect_delete_event(clone!(
+        @weak ctx,
         @strong saved => @default-return Inhibit(false), move |w, _| {
             if saved.get() || ask_modal(w, "Unsaved view will be lost.") {
                 let _: result::Result<_, _> =
@@ -1185,7 +1253,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     @strong highlight,
     @strong current,
     @strong current_spec,
-    @strong ctx => move |b| {
+    @weak ctx => move |b| {
     if b.get_active() {
         if let Some(editor) = editor.borrow_mut().take() {
             mainbox.remove(editor.root());
@@ -1210,17 +1278,16 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         @strong saved,
         @strong save_loc,
         @strong current_spec,
-        @strong ctx,
-        @weak window => move |b| {
-            save_view(&ctx, &saved, &save_loc, &current_spec, &window, b, false)
+        @weak ctx => move |b| {
+            save_view(&ctx, &saved, &save_loc, &current_spec, b, false)
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
-    window.add_action(&go_act);
+    ctx.window.add_action(&go_act);
     go_act.connect_activate(
-        clone!(@strong ctx, @strong saved, @weak design_mode, @weak window => move |_, _| {
-            if saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
-                if let Some(loc) = choose_location(&window, false) {
+        clone!(@weak ctx, @strong saved, @weak design_mode => move |_, _| {
+            if saved.get() || ask_modal(&ctx.window, "Unsaved view will be lost.") {
+                if let Some(loc) = choose_location(&ctx.window, false) {
                     let m = FromGui::Navigate(loc);
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
@@ -1228,28 +1295,27 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }),
     );
     let save_as_act = gio::SimpleAction::new("save_as", None);
-    window.add_action(&save_as_act);
+    ctx.window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
         @strong saved,
         @strong save_loc,
         @strong current_spec,
-        @strong ctx,
-        @strong save_button,
-        @weak window => move |_, _| {
-            save_view(&ctx, &saved, &save_loc, &current_spec, &window, &save_button, true)
+        @weak ctx,
+        @strong save_button => move |_, _| {
+            save_view(&ctx, &saved, &save_loc, &current_spec, &save_button, true)
         }
     ));
     let raw_view_act =
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
-    window.add_action(&raw_view_act);
+    ctx.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @strong saved,
-        @strong ctx,
-        @strong current_loc,
-        @weak window => move |a, _| {
+        @weak ctx,
+        @strong current_loc  => move |a, _| {
         if let Some(v) = a.get_state() {
             let new_v = !v.get::<bool>().expect("invalid state");
-            if !new_v || saved.get() || ask_modal(&window, "Unsaved view will be lost.") {
+            let m = "Unsaved view will be lost.";
+            if !new_v || saved.get() || ask_modal(&ctx.window, m) {
                 ctx.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
                 let m = FromGui::Navigate(current_loc.borrow().clone());
@@ -1258,7 +1324,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
         }
     }));
     let new_window_act = gio::SimpleAction::new("new_window", None);
-    window.add_action(&new_window_act);
+    ctx.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(mut batch) => {
@@ -1322,7 +1388,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
+            ctx.window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();
             let hl = highlight.borrow();
@@ -1349,12 +1415,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::Confirm(msg, sink, v) => {
-            if ask_modal(&window, &msg) {
-                sink.set(&*ctx, v)
-            }
-            Continue(true)
-        }
         ToGui::TryNavigate(v) => {
             match v {
                 Value::String(path) => {
@@ -1363,31 +1423,29 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
                 }
                 v => err_modal(
-                    &window,
+                    &ctx.window,
                     &format!("can't navigate to {}, expected string", v),
                 ),
             }
             Continue(true)
         }
         ToGui::ShowError(s) => {
-            err_modal(&window, &s);
+            err_modal(&ctx.window, &s);
             Continue(true)
         }
         ToGui::SaveError(s) => {
-            err_modal(&window, &s);
+            err_modal(&ctx.window, &s);
             idle_add_local(clone!(
-                @strong ctx,
+                @weak ctx,
                 @strong saved,
                 @strong save_loc,
                 @strong current_spec,
-                @strong window,
-                @strong save_button => move || {
+                @strong save_button => @default-return Continue(false), move || {
                     save_view(
                         &ctx,
                         &saved,
                         &save_loc,
                         &current_spec,
-                        &window,
                         &save_button,
                         true,
                     );
@@ -1469,6 +1527,7 @@ fn main() {
             })
             .unwrap();
         let (subscriber, resolver) = rx_init.recv().unwrap();
+        let window = ApplicationWindow::new(app);
         let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
             subscriber,
             resolver,
@@ -1476,6 +1535,7 @@ fn main() {
             to_gui: tx_to_gui,
             from_gui: tx_from_gui,
             raw_view,
+            window: window.clone(),
         }));
         run_gui(ctx, app, rx_to_gui);
     });
