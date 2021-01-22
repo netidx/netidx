@@ -486,7 +486,7 @@ impl Widget {
                 ),
             };
         if let Some(r) = w.root() {
-            set_common_props(spec.props, r);
+            set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
         }
         w
     }
@@ -733,7 +733,7 @@ fn default_view(path: Path) -> protocol_view::View {
                 default_sort_column: None,
                 columns: protocol_view::ColumnSpec::Auto,
             }),
-            props: DEFAULT_PROPS,
+            props: None,
         },
     }
 }
@@ -855,7 +855,7 @@ async fn netidx_main(mut ctx: StartNetidx) {
                             let raeified_default = view::View {
                                 variables: HashMap::new(),
                                 root: view::Widget {
-                                    props: DEFAULT_PROPS,
+                                    props: None,
                                     kind: view::WidgetKind::Table(view::Table {
                                         path: base_path.clone(),
                                         default_sort_column: None,

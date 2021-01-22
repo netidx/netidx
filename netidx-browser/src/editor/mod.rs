@@ -196,7 +196,7 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
                 "Table",
                 WidgetKind::Table(widgets::Table::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
@@ -206,7 +206,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
@@ -216,7 +216,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
@@ -226,7 +226,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
@@ -236,7 +236,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
@@ -246,7 +246,7 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
@@ -256,12 +256,12 @@ impl Widget {
                     on_change.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(widgets::BoxContainer::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props: _, kind: view::WidgetKind::BoxChild(s) } => (
                 "BoxChild",
@@ -271,7 +271,7 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Grid(s) } => (
                 "Grid",
                 WidgetKind::Grid(widgets::Grid::new(on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(on_change, props.unwrap_or(DEFAULT_PROPS))),
             ),
             view::Widget { props: _, kind: view::WidgetKind::GridChild(s) } => (
                 "GridChild",
@@ -296,7 +296,7 @@ impl Widget {
     }
 
     fn spec(&self) -> view::Widget {
-        let props = self.props.as_ref().map(|p| p.spec()).unwrap_or(DEFAULT_PROPS);
+        let props = self.props.as_ref().map(|p| p.spec());
         let kind = match &self.kind {
             WidgetKind::Action(w) => w.spec(),
             WidgetKind::Table(w) => w.spec(),
@@ -319,7 +319,7 @@ impl Widget {
 
     fn default_spec(name: Option<&str>) -> view::Widget {
         fn widget(kind: view::WidgetKind) -> view::Widget {
-            view::Widget { kind, props: DEFAULT_PROPS }
+            view::Widget { kind, props: None }
         }
         match name {
             None => widget(view::WidgetKind::Table(view::Table {
@@ -406,7 +406,7 @@ impl Widget {
                 let s = Value::String(Chars::from("empty box child"));
                 let w = view::Widget {
                     kind: view::WidgetKind::Label(view::Source::Constant(s)),
-                    props: DEFAULT_PROPS,
+                    props: None,
                 };
                 widget(view::WidgetKind::BoxChild(view::BoxChild {
                     pack: view::Pack::Start,
@@ -425,7 +425,7 @@ impl Widget {
                 let s = Value::String(Chars::from("empty grid child"));
                 let w = view::Widget {
                     kind: view::WidgetKind::Label(view::Source::Constant(s)),
-                    props: DEFAULT_PROPS,
+                    props: None,
                 };
                 widget(view::WidgetKind::GridChild(view::GridChild {
                     width: 1,
@@ -883,14 +883,14 @@ impl Editor {
                 let s = Value::String(Chars::from(format!("tree error: {}", e)));
                 view::Widget {
                     kind: view::WidgetKind::Label(view::Source::Constant(s)),
-                    props: DEFAULT_PROPS,
+                    props: None,
                 }
             }
             Ok(None) => {
                 let s = Value::String(Chars::from("tree error: missing widget"));
                 view::Widget {
                     kind: view::WidgetKind::Label(view::Source::Constant(s)),
-                    props: DEFAULT_PROPS,
+                    props: None,
                 }
             }
             Ok(Some(w)) => {

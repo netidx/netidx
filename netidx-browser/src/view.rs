@@ -82,7 +82,7 @@ pub(super) enum WidgetKind {
 
 #[derive(Debug, Clone)]
 pub(super) struct Widget {
-    pub(super) props: view::WidgetProps,
+    pub(super) props: Option<view::WidgetProps>,
     pub(super) kind: WidgetKind,
 }
 

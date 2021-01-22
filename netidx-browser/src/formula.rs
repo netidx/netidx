@@ -381,7 +381,7 @@ fn eval_if(from: &CachedVals) -> Option<Value> {
             ))),
         },
         _ => Some(Value::Error(Chars::from(
-            "if(predicate, caseIf, caseElse): expected 3 arguments",
+            "if(predicate, caseIf, [caseElse]): expected at least 2 arguments",
         ))),
     }
 }

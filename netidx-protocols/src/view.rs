@@ -323,7 +323,7 @@ pub struct WidgetProps {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widget {
-    pub props: WidgetProps,
+    pub props: Option<WidgetProps>,
     pub kind: WidgetKind,
 }
 

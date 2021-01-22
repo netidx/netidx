@@ -1,15 +1,10 @@
-use super::{set_common_props, Target, Widget, WidgetCtx};
+use super::{set_common_props, Target, Widget, WidgetCtx, DEFAULT_PROPS};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::subscriber::Value;
-use std::{
-    rc::Rc,
-    cell::RefCell,
-    cmp::max,
-    collections::HashMap,
-};
+use std::{cell::RefCell, cmp::max, collections::HashMap, rc::Rc};
 
 pub(super) struct Box {
     root: gtk::Box,
@@ -47,12 +42,13 @@ impl Box {
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
+                        let props = s.props.unwrap_or(DEFAULT_PROPS);
                         let (expand, fill) = match spec.direction {
                             view::Direction::Horizontal => {
-                                (s.props.hexpand, is_fill(s.props.halign))
+                                (props.hexpand, is_fill(props.halign))
                             }
                             view::Direction::Vertical => {
-                                (s.props.vexpand, is_fill(s.props.valign))
+                                (props.vexpand, is_fill(props.valign))
                             }
                         };
                         match pack {
@@ -63,7 +59,7 @@ impl Box {
                                 root.pack_end(r, expand, fill, *padding as u32)
                             }
                         }
-                        set_common_props(s.props.clone(), r);
+                        set_common_props(props, r);
                     }
                     children.push(w);
                 }
@@ -76,7 +72,7 @@ impl Box {
                     );
                     if let Some(r) = w.root() {
                         root.add(r);
-                        set_common_props(s.props.clone(), r);
+                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
                     }
                     children.push(w);
                 }
@@ -141,7 +137,7 @@ impl Grid {
                 Widget::new(ctx.clone(), variables, spec.clone(), selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, 1, 1);
-                set_common_props(spec.props, r);
+                set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
             }
             *i += 1;
             w
@@ -159,14 +155,24 @@ impl Grid {
                 let mut max_height = 1;
                 let row = match spec.kind {
                     view::WidgetKind::GridChild(c) => {
-                        vec![attach_child(spec.props, c, &mut max_height, &mut i, j)]
+                        vec![attach_child(
+                            spec.props.unwrap_or(DEFAULT_PROPS),
+                            c,
+                            &mut max_height,
+                            &mut i,
+                            j,
+                        )]
                     }
                     view::WidgetKind::GridRow(view::GridRow { columns }) => columns
                         .into_iter()
                         .map(|spec| match spec.kind {
-                            view::WidgetKind::GridChild(c) => {
-                                attach_child(spec.props, c, &mut max_height, &mut i, j)
-                            }
+                            view::WidgetKind::GridChild(c) => attach_child(
+                                spec.props.unwrap_or(DEFAULT_PROPS),
+                                c,
+                                &mut max_height,
+                                &mut i,
+                                j,
+                            ),
                             _ => attach_normal(spec, &mut i, j),
                         })
                         .collect(),
