@@ -577,25 +577,28 @@ impl LinePlot {
             }
             mesh.draw().map_err(|e| anyhow!("{}", e))
         }
+        fn valid_typ(v: &Value) -> bool {
+            v.is_number() || Typ::get(v) == Some(Typ::DateTime)
+        }
         if width.get() > 0 && height.get() > 0 {
             let (x_min, x_max, y_min, y_max) =
                 (x_min.current(), x_max.current(), y_min.current(), y_max.current());
             let mut computed_x_min = series
                 .borrow()
                 .last()
-                .and_then(|s| s.x_data.back())
+                .and_then(|s| s.x_data.iter().find(|v| valid_typ(v)))
                 .unwrap_or(&Value::F64(0.))
                 .clone();
             let mut computed_x_max = computed_x_min.clone();
             let mut computed_y_min = series
                 .borrow()
                 .last()
-                .and_then(|s| s.y_data.back())
+                .and_then(|s| s.y_data.iter().find(|v| valid_typ(v)))
                 .unwrap_or(&Value::F64(0.))
                 .clone();
             let mut computed_y_max = computed_y_min.clone();
             for s in series.borrow().iter() {
-                for x in s.x_data.iter() {
+                for x in s.x_data.iter().filter(|v| valid_typ(v)) {
                     if x < &computed_x_min {
                         computed_x_min = x.clone();
                     }
@@ -603,7 +606,7 @@ impl LinePlot {
                         computed_x_max = x.clone();
                     }
                 }
-                for y in s.y_data.iter() {
+                for y in s.y_data.iter().filter(|v| valid_typ(v)) {
                     if y < &computed_y_min {
                         computed_y_min = y.clone();
                     }

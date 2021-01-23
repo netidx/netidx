@@ -365,7 +365,7 @@ impl Action {
             let spec = spec.clone();
             move || {
                 let spec = spec.borrow();
-                let desc = format!("{} <- {}", &spec.sink, &spec.source);
+                let desc = format!("{}", &spec.sink);
                 store.set_value(&*iter.borrow(), 2, &desc.to_value());
             }
         });
