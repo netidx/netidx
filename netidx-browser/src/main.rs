@@ -393,7 +393,6 @@ impl Sink {
                         .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
                     if let Some(dv) = &*dv.borrow() {
                         for v in queued.borrow_mut().drain(..) {
-                            println!("writing queued: {}", v);
                             dv.write(v);
                         }
                     }
@@ -419,12 +418,8 @@ impl Sink {
                     _ => unreachable!(),
                 }
                 match &*dv.borrow() {
-                    None => {
-                        println!("queueing: {}", v);
-                        queued.borrow_mut().push(v)
-                    }
+                    None => queued.borrow_mut().push(v),
                     Some(dv) => {
-                        println!("writing: {}", v);
                         dv.write(v);
                     }
                 }
@@ -1404,6 +1399,9 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                     }
                 }
             }
+            if let Some(cur) = current.borrow_mut().take() {
+                mainbox.remove(cur.root());
+            }
             variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
             let cur = View::new(
@@ -1413,9 +1411,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
                 &saved,
                 raeified,
             );
-            if let Some(cur) = current.borrow_mut().take() {
-                mainbox.remove(cur.root());
-            }
             ctx.window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();

@@ -569,6 +569,7 @@ impl Subscriber {
                                     });
                                 }
                                 for (v, resp) in ds.queued_writes.drain(..) {
+                                    println!("subscriber writing queued {}", v);
                                     sub.0
                                         .connection
                                         .send(ToCon::Write(sub.0.id, v, resp));
