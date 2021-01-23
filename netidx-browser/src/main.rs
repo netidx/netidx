@@ -312,7 +312,6 @@ enum Sink {
         queued: RefCell<Vec<Value>>,
         variables: Rc<RefCell<HashMap<String, Value>>>,
         ctx: WidgetCtx,
-        val: RefCell<Option<Value>>,
         dv: RefCell<Option<Dval>>,
     },
     Variable(view::Sink, String),
@@ -347,7 +346,6 @@ impl Sink {
                 Sink::Variable(spec, name)
             }
             view::Sink::Store(view::StoreTarget::Variable(name)) => {
-                let val = RefCell::new(variables.borrow().get(name).cloned());
                 let dv = RefCell::new(
                     variables
                         .borrow()
@@ -360,7 +358,7 @@ impl Sink {
                 let variables = variables.clone();
                 let ctx = ctx.clone();
                 let queued = RefCell::new(Vec::new());
-                Sink::IndirectStore { spec, queued, variables, ctx, val, dv }
+                Sink::IndirectStore { spec, queued, variables, ctx, dv }
             }
             view::Sink::Store(view::StoreTarget::Path(path)) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
@@ -386,23 +384,18 @@ impl Sink {
             | Sink::Navigate(_)
             | Sink::All(_, _)
             | Sink::Confirm(_, _) => (),
-            Sink::IndirectStore { spec, queued, variables, ctx, val, dv } => match spec {
+            Sink::IndirectStore { spec, queued, variables, ctx, dv } => match spec {
                 view::Sink::Store(view::StoreTarget::Variable(n)) if n == name => {
-                    let cur = variables.borrow();
-                    let cur = dbg!(cur.get(dbg!(name)));
-                    if val.borrow().as_ref() != cur {
-                        *val.borrow_mut() = cur.cloned();
-                        *dv.borrow_mut() = cur
-                            .cloned()
-                            .and_then(|v| v.cast_to::<String>().ok())
-                            .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
-                    }
-                    match &*dv.borrow() {
-                        None => (),
-                        Some(dv) => {
-                            for v in queued.borrow_mut().drain(..) {
-                                dv.write(v);
-                            }
+                    *dv.borrow_mut() = variables
+                        .borrow()
+                        .get(name)
+                        .cloned()
+                        .and_then(|v| v.cast_to::<String>().ok())
+                        .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
+                    if let Some(dv) = &*dv.borrow() {
+                        for v in queued.borrow_mut().drain(..) {
+                            println!("writing queued: {}", v);
+                            dv.write(v);
                         }
                     }
                 }
@@ -424,8 +417,12 @@ impl Sink {
                     _ => unreachable!(),
                 }
                 match &*dv.borrow() {
-                    None => queued.borrow_mut().push(v),
+                    None => {
+                        println!("queueing: {}", v);
+                        queued.borrow_mut().push(v)
+                    }
                     Some(dv) => {
+                        println!("writing: {}", v);
                         dv.write(v);
                     }
                 }

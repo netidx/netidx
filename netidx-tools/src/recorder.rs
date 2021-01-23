@@ -100,7 +100,7 @@ mod publish {
         SetState(State),
     }
 
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     enum State {
         Play,
         Pause,
@@ -392,14 +392,20 @@ mod publish {
         }
 
         fn set_state(&mut self, controls: Option<&Controls>, state: State) {
-            self.state = state;
-            controls.map(|c| {
-                c.state_ctl.update(Value::from(match state {
-                    State::Play => "play",
-                    State::Pause => "pause",
-                    State::Tail => "tail",
-                }))
-            });
+            match (self.state, state) {
+                (State::Tail, State::Play) => (),
+                (s0, s1) if s0 == s1 => (),
+                (_, state) => {
+                    self.state = state;
+                    controls.map(|c| {
+                        c.state_ctl.update(Value::from(match state {
+                            State::Play => "play",
+                            State::Pause => "pause",
+                            State::Tail => "tail",
+                        }))
+                    });
+                }
+            }
         }
 
         async fn process_control_batch(
@@ -410,16 +416,19 @@ mod publish {
         ) -> Result<()> {
             for req in batch.drain(..) {
                 if req.id == controls.start_ctl.id() {
+                    println!("set start: {}", req.value);
                     if let Some(new_start) = get_bound(req) {
                         self.set_start(Some(controls), new_start)?;
                         cluster.send_cmd(&ClusterCmd::SetStart(new_start));
                     }
                 } else if req.id == controls.end_ctl.id() {
+                    println!("set end: {}", req.value);
                     if let Some(new_end) = get_bound(req) {
                         self.set_end(Some(controls), new_end)?;
                         cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
                     }
                 } else if req.id == controls.speed_ctl.id() {
+                    println!("set speed: {}", req.value);
                     if let Ok(mp) = req.value.clone().cast_to::<f64>() {
                         self.set_speed(Some(controls), Some(mp));
                         cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
@@ -436,6 +445,7 @@ mod publish {
                         reply.send(Value::Error(e));
                     }
                 } else if req.id == controls.state_ctl.id() {
+                    println!("set state: {}", req.value);
                     match req.value.cast_to::<Chars>() {
                         Err(_) => {
                             if let Some(reply) = req.send_result {
@@ -463,6 +473,7 @@ mod publish {
                         }
                     }
                 } else if req.id == controls.pos_ctl.id() {
+                    println!("set pos: {}", req.value);
                     match req.value.cast_to::<Seek>() {
                         Ok(pos) => {
                             self.seek(Some(controls), pos)?;
@@ -786,6 +797,7 @@ mod publish {
                         for req in batch.drain(..) {
                             if req.id == session_ctl.id() {
                                 let session_id = Uuid::new_v4();
+                                println!("start session {}", session_id);
                                 start_session(
                                     session_id,
                                     &bcast,
