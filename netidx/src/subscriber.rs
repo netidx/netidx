@@ -330,7 +330,9 @@ impl Dval {
     /// Write a value back to the publisher, see `Val::write`. If we
     /// aren't currently subscribed the write will be queued and sent
     /// when we are. The return value will be `true` if the write was
-    /// sent immediatly, and false if it was queued.
+    /// sent immediatly, and false if it was queued. It is still
+    /// possible that a write will be dropped e.g. if the connection
+    /// dies while we are writing it.
     pub fn write(&self, v: Value) -> bool {
         let mut t = self.0.lock();
         match t.sub {
@@ -355,7 +357,8 @@ impl Dval {
     /// are required.
     ///
     /// If we are not currently subscribed then the write will be
-    /// queued until we are.
+    /// queued until we are. It is still possible that a write will be
+    /// dropped e.g. if the connection dies while we are writing it.
     pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
         let mut t = self.0.lock();
