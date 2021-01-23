@@ -377,20 +377,19 @@ impl Sink {
         }
     }
 
-    fn update(&self, name: &str) {
+    fn update(&self, name: &str, value: &Value) {
         match self {
             Sink::DirectStore(_, _)
             | Sink::Variable(_, _)
             | Sink::Navigate(_)
             | Sink::All(_, _)
             | Sink::Confirm(_, _) => (),
-            Sink::IndirectStore { spec, queued, variables, ctx, dv } => match spec {
+            Sink::IndirectStore { spec, queued, ctx, dv, .. } => match spec {
                 view::Sink::Store(view::StoreTarget::Variable(n)) if n == name => {
-                    *dv.borrow_mut() = variables
-                        .borrow()
-                        .get(name)
-                        .cloned()
-                        .and_then(|v| v.cast_to::<String>().ok())
+                    *dv.borrow_mut() = value
+                        .clone()
+                        .cast_to::<String>()
+                        .ok()
                         .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
                     if let Some(dv) = &*dv.borrow() {
                         for v in queued.borrow_mut().drain(..) {
@@ -409,10 +408,13 @@ impl Sink {
             Sink::DirectStore(_, dv) => {
                 dv.write(v);
             }
-            Sink::IndirectStore { spec, queued, dv, .. } => {
+            Sink::IndirectStore { spec, queued, variables, dv, .. } => {
                 match spec {
                     view::Sink::Store(view::StoreTarget::Variable(name)) => {
-                        self.update(name);
+                        let variables = variables.borrow();
+                        if let Some(v) = variables.get(name) {
+                            self.update(name, v);
+                        }
                     }
                     _ => unreachable!(),
                 }

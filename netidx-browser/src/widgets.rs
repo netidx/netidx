@@ -71,15 +71,15 @@ impl Button {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name)
-        }
         let _: Option<Value> = self.source.update(tgt, value);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.label.update(tgt, value) {
             self.button.set_label(&format!("{}", new));
+        }
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name, value)
         }
     }
 }
@@ -150,7 +150,7 @@ impl Action {
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Target::Variable(name) = tgt {
-            self.sink.update(name)
+            self.sink.update(name, value)
         }
         if let Some(new) = self.source.update(tgt, value) {
             self.sink.set(&self.ctx, new);
@@ -275,7 +275,7 @@ impl Selector {
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Target::Variable(name) = tgt {
-            self.sink.update(name)
+            self.sink.update(name, value)
         }
         self.we_set.set(true);
         if let Some(new) = self.enabled.update(tgt, value) {
@@ -363,7 +363,7 @@ impl Toggle {
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Target::Variable(name) = tgt {
-            self.sink.update(name);
+            self.sink.update(name, value);
         }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.switch.set_sensitive(val_to_bool(&new));
@@ -447,7 +447,7 @@ impl Entry {
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         if let Target::Variable(name) = tgt {
-            self.sink.update(name);
+            self.sink.update(name, value);
         }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.entry.set_sensitive(val_to_bool(&new));
