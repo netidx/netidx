@@ -34,19 +34,51 @@ impl CachedVals {
     }
 }
 
-fn eval_all(from: &CachedVals) -> Option<Value> {
-    match &**from.0.borrow() {
-        [] => None,
-        [hd, tl @ ..] => match hd {
-            None => None,
-            v @ Some(_) => {
-                if tl.into_iter().all(|v1| v1 == v) {
-                    v.clone()
-                } else {
-                    None
+#[derive(Debug, Clone)]
+pub struct All {
+    cached: CachedVals,
+    current: Rc<RefCell<Option<Value>>>,
+}
+
+impl All {
+    fn new(from: &[Source]) -> Self {
+        let cached = CachedVals::new(from);
+        let current = Rc::new(RefCell::new(All::eval_sources(&cached)));
+        All { cached, current }
+    }
+
+    fn eval_sources(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [] => None,
+            [hd, tl @ ..] => match hd {
+                None => None,
+                v @ Some(_) => {
+                    if tl.into_iter().all(|v1| v1 == v) {
+                        v.clone()
+                    } else {
+                        None
+                    }
                 }
+            },
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        self.current.borrow().clone()
+    }
+    
+    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+        if !self.cached.update(from, tgt, value) {
+            None
+        } else {
+            let cur = All::eval_sources(&self.cached);
+            if cur == *self.current.borrow() {
+                None
+            } else {
+                *self.current.borrow_mut() = cur.clone();
+                cur
             }
-        },
+        }
     }
 }
 
@@ -565,7 +597,7 @@ fn update_cached(
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
     Any(RefCell<Option<Value>>),
-    All(CachedVals),
+    All(All),
     Sum(CachedVals),
     Product(CachedVals),
     Divide(CachedVals),
@@ -619,7 +651,7 @@ impl Formula {
     ) -> Formula {
         match name {
             "any" => Formula::Any(RefCell::new(from.iter().find_map(|s| s.current()))),
-            "all" => Formula::All(CachedVals::new(from)),
+            "all" => Formula::All(All::new(from)),
             "sum" => Formula::Sum(CachedVals::new(from)),
             "product" => Formula::Product(CachedVals::new(from)),
             "divide" => Formula::Divide(CachedVals::new(from)),
@@ -645,7 +677,7 @@ impl Formula {
     pub(super) fn current(&self) -> Option<Value> {
         match self {
             Formula::Any(c) => c.borrow().clone(),
-            Formula::All(c) => eval_all(c),
+            Formula::All(c) => c.eval(),
             Formula::Sum(c) => eval_sum(c),
             Formula::Product(c) => eval_product(c),
             Formula::Divide(c) => eval_divide(c),
@@ -688,7 +720,7 @@ impl Formula {
                 *c.borrow_mut() = res.clone();
                 res
             }
-            Formula::All(c) => update_cached(eval_all, c, from, tgt, value),
+            Formula::All(c) => c.update(from, tgt, value),
             Formula::Sum(c) => update_cached(eval_sum, c, from, tgt, value),
             Formula::Product(c) => update_cached(eval_product, c, from, tgt, value),
             Formula::Divide(c) => update_cached(eval_divide, c, from, tgt, value),
