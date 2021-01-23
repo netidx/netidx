@@ -1,4 +1,9 @@
-* 0.6.1:
+* 0.6.1 netidx:
+  - small semantic change in subscriber, writes to a dval now queue
+    when the subscription is not connected and are sent on
+    reconnect. Previously they would be dropped.
+
+* 0.6.1 browser:
   - Fix several really dumb bugs in the formula parser
   - Fix the browser's formula inspector closing whenever you change
     something

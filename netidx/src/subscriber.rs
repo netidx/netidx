@@ -236,6 +236,7 @@ impl Val {
 struct DvalInner {
     sub_id: SubId,
     sub: Option<Val>,
+    queued_writes: Vec<(Value, Option<oneshot::Sender<Value>>)>,
     streams: Vec<(UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     tries: usize,
     next_try: Instant,
@@ -327,15 +328,19 @@ impl Dval {
     }
 
     /// Write a value back to the publisher, see `Val::write`. If we
-    /// aren't currently connected the write will be dropped and this
-    /// method will return `false`
+    /// aren't currently subscribed the write will be queued and sent
+    /// when we are. The return value will be `true` if the write was
+    /// sent immediatly, and false if it was queued.
     pub fn write(&self, v: Value) -> bool {
-        let t = self.0.lock();
+        let mut t = self.0.lock();
         match t.sub {
-            None => false,
             Some(ref val) => {
                 val.write(v);
                 true
+            }
+            None => {
+                t.queued_writes.push((v, None));
+                false
             }
         }
     }
@@ -349,15 +354,30 @@ impl Dval {
     /// overhead, avoid it in situations where high message volumes
     /// are required.
     ///
-    /// If we are not currently subscribed then the channel will close
-    /// immediatly with no result.
+    /// If we are not currently subscribed then the write will be
+    /// queued until we are.
     pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
-        self.0
-            .lock()
-            .sub
-            .as_ref()
-            .map(|val| val.write_with_recipt(v))
-            .unwrap_or_else(|| oneshot::channel().1)
+        let (tx, rx) = oneshot::channel();
+        let mut t = self.0.lock();
+        match t.sub {
+            Some(ref sub) => {
+                sub.0.connection.send(ToCon::Write(sub.0.id, v, Some(tx)));
+            }
+            None => {
+                t.queued_writes.push((v, Some(tx)));
+            }
+        }
+        rx
+    }
+
+    /// Clear the write queue
+    pub fn clear_queued_writes(&self) {
+        self.0.lock().queued_writes.clear()
+    }
+
+    /// Return the number of queued writes
+    pub fn queued_writes(&self) -> usize {
+        self.0.lock().queued_writes.len()
     }
 
     /// return the unique id of this `Dval`
@@ -544,6 +564,11 @@ impl Subscriber {
                                         id: sub.0.id,
                                         flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
                                     });
+                                }
+                                for (v, resp) in ds.queued_writes.drain(..) {
+                                    sub.0
+                                        .connection
+                                        .send(ToCon::Write(sub.0.id, v, resp));
                                 }
                                 ds.sub = Some(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
@@ -852,6 +877,7 @@ impl Subscriber {
         let s = Dval(Arc::new(Mutex::new(DvalInner {
             sub_id: SubId::new(),
             sub: None,
+            queued_writes: Vec::new(),
             streams: Vec::new(),
             tries: 0,
             next_try: Instant::now(),
