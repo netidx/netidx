@@ -309,6 +309,7 @@ enum Sink {
     DirectStore(view::Sink, Dval),
     IndirectStore {
         spec: view::Sink,
+        queued: RefCell<Vec<Value>>,
         variables: Rc<RefCell<HashMap<String, Value>>>,
         ctx: WidgetCtx,
         val: RefCell<Option<Value>>,
@@ -358,7 +359,8 @@ impl Sink {
                 );
                 let variables = variables.clone();
                 let ctx = ctx.clone();
-                Sink::IndirectStore { spec, variables, ctx, val, dv }
+                let queued = RefCell::new(Vec::new());
+                Sink::IndirectStore { spec, queued, variables, ctx, val, dv }
             }
             view::Sink::Store(view::StoreTarget::Path(path)) => {
                 let dv = ctx.subscriber.durable_subscribe(path.clone());
@@ -377,28 +379,55 @@ impl Sink {
         }
     }
 
+    fn update(&self, name: &str) {
+        match self {
+            Sink::DirectStore(_, _)
+            | Sink::Variable(_, _)
+            | Sink::Navigate(_)
+            | Sink::All(_, _)
+            | Sink::Confirm(_, _) => (),
+            Sink::IndirectStore { spec, queued, variables, ctx, val, dv } => match spec {
+                view::Sink::Store(view::StoreTarget::Variable(n)) if n == name => {
+                    let cur = variables.borrow();
+                    let cur = dbg!(cur.get(dbg!(name)));
+                    if val.borrow().as_ref() != cur {
+                        *val.borrow_mut() = cur.cloned();
+                        *dv.borrow_mut() = cur
+                            .cloned()
+                            .and_then(|v| v.cast_to::<String>().ok())
+                            .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
+                    }
+                    match &*dv.borrow() {
+                        None => (),
+                        Some(dv) => {
+                            for v in queued.borrow_mut().drain(..) {
+                                dv.write(v);
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            },
+        }
+    }
+
     fn set(&self, ctx: &WidgetCtx, v: Value) {
         match self {
             Sink::DirectStore(_, dv) => {
                 dv.write(v);
             }
-            Sink::IndirectStore { spec, variables, ctx, val, dv } => {
+            Sink::IndirectStore { spec, queued, dv, .. } => {
                 match spec {
                     view::Sink::Store(view::StoreTarget::Variable(name)) => {
-                        let cur = variables.borrow(); 
-                        let cur = cur.get(name);
-                        if val.borrow().as_ref() != cur {
-                            *val.borrow_mut() = cur.cloned();
-                            *dv.borrow_mut() = cur
-                                .cloned()
-                                .and_then(|v| v.cast_to::<String>().ok())
-                                .map(|p| ctx.subscriber.durable_subscribe(Path::from(p)));
-                        }
+                        self.update(name);
                     }
                     _ => unreachable!(),
                 }
-                if let Some(dv) = &*dv.borrow() {
-                    dv.write(v);
+                match &*dv.borrow() {
+                    None => queued.borrow_mut().push(v),
+                    Some(dv) => {
+                        dv.write(v);
+                    }
                 }
             }
             Sink::Variable(_, name) => {

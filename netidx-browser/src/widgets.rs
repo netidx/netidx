@@ -21,6 +21,7 @@ pub(super) struct Button {
     enabled: Source,
     label: Source,
     source: Source,
+    sink: Sink,
     button: gtk::Button,
 }
 
@@ -62,7 +63,7 @@ impl Button {
                 Inhibit(false)
             }),
         );
-        Button { enabled, label, source, button }
+        Button { enabled, label, source, sink, button }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -70,6 +71,9 @@ impl Button {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name)
+        }
         let _: Option<Value> = self.source.update(tgt, value);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.button.set_sensitive(val_to_bool(&new));
@@ -145,6 +149,9 @@ impl Action {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name)
+        }
         if let Some(new) = self.source.update(tgt, value) {
             self.sink.set(&self.ctx, new);
         }
@@ -157,6 +164,7 @@ pub(super) struct Selector {
     enabled: Source,
     choices: Source,
     source: Source,
+    sink: Sink,
     we_set: Rc<Cell<bool>>,
 }
 
@@ -222,7 +230,7 @@ impl Selector {
                 );
             }
         }));
-        Selector { root, combo, enabled, choices, source, we_set }
+        Selector { root, combo, enabled, choices, source, sink, we_set }
     }
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Option<Value>) {
@@ -266,6 +274,9 @@ impl Selector {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name)
+        }
         self.we_set.set(true);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.combo.set_sensitive(val_to_bool(&new));
@@ -285,6 +296,7 @@ impl Selector {
 pub(super) struct Toggle {
     enabled: Source,
     source: Source,
+    sink: Sink,
     we_set: Rc<Cell<bool>>,
     switch: gtk::Switch,
 }
@@ -342,7 +354,7 @@ impl Toggle {
                 Inhibit(false)
             }),
         );
-        Toggle { enabled, source, switch, we_set }
+        Toggle { enabled, source, sink, switch, we_set }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -350,6 +362,9 @@ impl Toggle {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name);
+        }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
@@ -367,6 +382,7 @@ pub(super) struct Entry {
     enabled: Source,
     visible: Source,
     source: Source,
+    sink: Sink,
 }
 
 impl Entry {
@@ -422,7 +438,7 @@ impl Entry {
             Inhibit(false)
         }));
         // CR estokes: give the user an indication that it's out of sync
-        Entry { entry, enabled, visible, source }
+        Entry { entry, enabled, visible, source, sink }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -430,6 +446,9 @@ impl Entry {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
+        if let Target::Variable(name) = tgt {
+            self.sink.update(name);
+        }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
