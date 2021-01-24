@@ -410,25 +410,26 @@ mod publish {
 
         async fn process_control_batch(
             &mut self,
+            session_id: Uuid,
             controls: &Controls,
             cluster: &Cluster<ClusterCmd>,
             mut batch: Pooled<Vec<WriteRequest>>,
         ) -> Result<()> {
             for req in batch.drain(..) {
                 if req.id == controls.start_ctl.id() {
-                    println!("set start: {}", req.value);
+                    info!("set start {}: {}", session_id, req.value);
                     if let Some(new_start) = get_bound(req) {
                         self.set_start(Some(controls), new_start)?;
                         cluster.send_cmd(&ClusterCmd::SetStart(new_start));
                     }
                 } else if req.id == controls.end_ctl.id() {
-                    println!("set end: {}", req.value);
+                    info!("set end {}: {}", session_id, req.value);
                     if let Some(new_end) = get_bound(req) {
                         self.set_end(Some(controls), new_end)?;
                         cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
                     }
                 } else if req.id == controls.speed_ctl.id() {
-                    println!("set speed: {}", req.value);
+                    info!("set speed {}: {}", session_id, req.value);
                     if let Ok(mp) = req.value.clone().cast_to::<f64>() {
                         self.set_speed(Some(controls), Some(mp));
                         cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
@@ -445,7 +446,7 @@ mod publish {
                         reply.send(Value::Error(e));
                     }
                 } else if req.id == controls.state_ctl.id() {
-                    println!("set state: {}", req.value);
+                    info!("set state {}: {}", session_id, req.value);
                     match req.value.cast_to::<Chars>() {
                         Err(_) => {
                             if let Some(reply) = req.send_result {
@@ -473,7 +474,7 @@ mod publish {
                         }
                     }
                 } else if req.id == controls.pos_ctl.id() {
-                    println!("set pos: {}", req.value);
+                    info!("set pos {}: {}", session_id, req.value);
                     match req.value.cast_to::<Seek>() {
                         Ok(pos) => {
                             self.seek(Some(controls), pos)?;
@@ -682,7 +683,11 @@ mod publish {
                 r = control_rx.next() => match r {
                     None => break Ok(()),
                     Some(batch) => if let Some(ref controls) = controls {
-                        t.process_control_batch(controls, &cluster, batch).await?
+                        t.process_control_batch(
+                            session_id,
+                            controls,
+                            &cluster, batch
+                        ).await?
                     }
                 },
                 r = t.next(controls.as_ref()).fuse() => match r {
@@ -797,7 +802,7 @@ mod publish {
                         for req in batch.drain(..) {
                             if req.id == session_ctl.id() {
                                 let session_id = Uuid::new_v4();
-                                println!("start session {}", session_id);
+                                info!("start session {}", session_id);
                                 start_session(
                                     session_id,
                                     &bcast,
