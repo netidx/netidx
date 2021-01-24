@@ -147,6 +147,18 @@ enum Sub {
             default_value = "0"
         )]
         shards: usize,
+        #[structopt(
+            long = "max_sessions",
+            help = "how many total client sesions to allow",
+            default_value = "768"
+        )]
+        max_sessions: usize,
+        #[structopt(
+            long = "max_sessions_per_client",
+            help = "how many sesions to allow each client",
+            default_value = "64"
+        )]
+        max_sessions_per_client: usize,
         #[structopt(long = "archive", help = "path to the archive file")]
         archive: String,
         #[structopt(long = "spec", help = "glob pattern to archive, can be repeated")]
@@ -293,6 +305,8 @@ fn main() {
             flush_frequency,
             flush_interval,
             shards,
+            max_sessions,
+            max_sessions_per_client,
             archive,
             spec,
         } => {
@@ -308,6 +322,8 @@ fn main() {
                 flush_frequency,
                 flush_interval,
                 shards,
+                max_sessions,
+                max_sessions_per_client,
                 archive,
                 spec,
             )

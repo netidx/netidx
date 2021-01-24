@@ -26,9 +26,11 @@ use netidx_protocols::{
     },
     cluster::{uuid_string, Cluster},
 };
+use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     mem,
+    net::SocketAddr,
     ops::Bound,
     sync::Arc,
 };
@@ -700,8 +702,59 @@ mod publish {
         }
     }
 
+    struct SessionsInner {
+        max_total: usize,
+        max_by_client: usize,
+        total: usize,
+        by_client: HashMap<SocketAddr, usize, FxBuildHasher>,
+    }
+
+    #[derive(Clone)]
+    struct Sessions(Arc<Mutex<SessionsInner>>);
+
+    impl Sessions {
+        fn new(max_total: usize, max_by_client: usize) -> Self {
+            Sessions(Arc::new(Mutex::new(SessionsInner {
+                max_total,
+                max_by_client,
+                total: 0,
+                by_client: HashMap::with_hasher(FxBuildHasher::default()),
+            })))
+        }
+
+        fn add_session(&self, client: SocketAddr) -> Option<Session> {
+            let mut inner = self.0.lock();
+            let inner = &mut *inner;
+            let by_client = inner.by_client.entry(client).or_insert(0);
+            if inner.total < inner.max_total && *by_client < inner.max_by_client {
+                inner.total += 1;
+                *by_client += 1;
+                Some(Session(self.clone(), client))
+            } else {
+                None
+            }
+        }
+
+        fn delete_session(&self, session: &Session) {
+            let mut inner = self.0.lock();
+            if let Some(c) = inner.by_client.get_mut(&session.1) {
+                *c -= 1;
+                inner.total -= 1;
+            }
+        }
+    }
+
+    struct Session(Sessions, SocketAddr);
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            self.0.delete_session(self)
+        }
+    }
+
     async fn start_session(
         session_id: Uuid,
+        session_token: Option<Session>,
         bcast: &broadcast::Sender<BCastMsg>,
         resolver: &Config,
         desired_auth: &Auth,
@@ -741,6 +794,7 @@ mod publish {
                     error!("session {} exited {}", session_id, e)
                 }
             }
+            drop(session_token)
         });
         Ok(())
     }
@@ -753,7 +807,10 @@ mod publish {
         bind_cfg: BindCfg,
         publish_base: Path,
         shards: usize,
+        max_sessions: usize,
+        max_sessions_per_client: usize,
     ) -> Result<()> {
+        let sessions: Sessions = Sessions::new(max_sessions, max_sessions_per_client);
         let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
         let session_publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
@@ -785,6 +842,7 @@ mod publish {
                     for session_id in cmds? {
                         start_session(
                             session_id,
+                            None,
                             &bcast,
                             &resolver,
                             &desired_auth,
@@ -801,25 +859,33 @@ mod publish {
                     Some(mut batch) => {
                         for req in batch.drain(..) {
                             if req.id == session_ctl.id() {
-                                let session_id = Uuid::new_v4();
-                                info!("start session {}", session_id);
-                                start_session(
-                                    session_id,
-                                    &bcast,
-                                    &resolver,
-                                    &desired_auth,
-                                    &bind_cfg,
-                                    &subscriber,
-                                    &archive,
-                                    shards,
-                                    &publish_base,
-                                ).await?;
-                                cluster.send_cmd(&session_id);
-                                session_ctl.update_subscriber(
-                                    &req.addr,
-                                    uuid_string(session_id).into()
-                                );
-                                session_publisher.flush(None).await;
+                                match sessions.add_session(req.addr) {
+                                    None => {
+                                        warn!("too many sessions, client {}", req.addr)
+                                    },
+                                    Some(session_token) => {
+                                        let session_id = Uuid::new_v4();
+                                        info!("start session {}", session_id);
+                                        start_session(
+                                            session_id,
+                                            Some(session_token),
+                                            &bcast,
+                                            &resolver,
+                                            &desired_auth,
+                                            &bind_cfg,
+                                            &subscriber,
+                                            &archive,
+                                            shards,
+                                            &publish_base,
+                                        ).await?;
+                                        cluster.send_cmd(&session_id);
+                                        session_ctl.update_subscriber(
+                                            &req.addr,
+                                            uuid_string(session_id).into()
+                                        );
+                                        session_publisher.flush(None).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1098,6 +1164,8 @@ async fn run_async(
     flush_frequency: Option<usize>,
     flush_interval: Option<time::Duration>,
     shards: usize,
+    max_sessions: usize,
+    max_sessions_per_client: usize,
     archive: String,
     spec: Vec<Glob>,
 ) {
@@ -1126,6 +1194,8 @@ async fn run_async(
                 bind_cfg,
                 publish_base,
                 shards,
+                max_sessions,
+                max_sessions_per_client,
             )
             .await;
             match res {
@@ -1177,6 +1247,8 @@ pub(crate) fn run(
     flush_frequency: usize,
     flush_interval: u64,
     shards: usize,
+    max_sessions: usize,
+    max_sessions_per_client: usize,
     archive: String,
     spec: Vec<String>,
 ) {
@@ -1226,6 +1298,8 @@ pub(crate) fn run(
         flush_frequency,
         flush_interval,
         shards,
+        max_sessions,
+        max_sessions_per_client,
         archive,
         spec,
     ))
