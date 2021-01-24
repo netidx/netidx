@@ -148,13 +148,13 @@ enum Sub {
         )]
         shards: usize,
         #[structopt(
-            long = "max_sessions",
+            long = "max-sessions",
             help = "how many total client sesions to allow",
-            default_value = "768"
+            default_value = "256"
         )]
         max_sessions: usize,
         #[structopt(
-            long = "max_sessions_per_client",
+            long = "max-sessions-per-client",
             help = "how many sesions to allow each client",
             default_value = "64"
         )]
