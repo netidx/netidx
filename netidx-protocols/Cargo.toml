@@ -7,7 +7,7 @@ homepage = "https://estokes.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 description = "Various protocols build on top of netidx"
 documentation = "https://docs.rs/netidx-protocols"
-readme = "README.md"
+readme = "../README.md"
 license = "MIT"
 
 [features]
