@@ -279,7 +279,7 @@ mod publisher {
         publisher::{BindCfg, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
-        subscriber::{Event, Subscriber, Value},
+        subscriber::{Event, Subscriber, Value, UpdatesFlags},
     };
     use futures::{channel::mpsc, channel::oneshot, prelude::*};
     use std::{
@@ -372,7 +372,7 @@ mod publisher {
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);
-            vs.updates(true, tx);
+            vs.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
             loop {
                 match rx.next().await {
                     None => panic!("publisher died"),

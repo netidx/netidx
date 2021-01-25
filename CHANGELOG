@@ -1,7 +1,13 @@
-* 0.6.1 netidx:
+* 0.6.1 netidx netidx-tools:
   - small semantic change in subscriber, writes to a dval now queue
     when the subscription is not connected and are sent on
     reconnect. Previously they would be dropped.
+  - Fix recorder hang when setting state to play when it's tail
+  - Put limits on the number of sessions allowed per client and total,
+    and pick reasonable defaults.
+
+* 0.6.2 browser, netidx-protocols:
+  - major update to the filter language syntax and semantics
 
 * 0.6.1 browser:
   - Fix several really dumb bugs in the formula parser

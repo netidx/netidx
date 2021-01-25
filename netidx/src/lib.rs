@@ -48,7 +48,7 @@
 //! # Subscriber
 //! ```no_run
 //! use netidx::{
-//!     subscriber::Subscriber,
+//!     subscriber::{Subscriber, UpdatesFlags},
 //!     config::Config,
 //!     resolver::Auth,
 //!     path::Path,
@@ -64,7 +64,7 @@
 //! println!("washu-chan cpu temp is: {:?}", temp.last());
 //!
 //! let (tx, mut rx) = mpsc::channel(10);
-//! temp.updates(false, tx);
+//! temp.updates(UpdatesFlags::empty(), tx);
 //! while let Some(mut batch) = rx.next().await {
 //!     for (_, v) in batch.drain(..) {
 //!         println!("washu-chan cpu temp is: {:?}", v);
