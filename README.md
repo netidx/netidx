@@ -1,3 +1,5 @@
+For more details see the [netidx book](https://estokes.github.io/netidx-book/)
+
 Netidx is like DNS for values. With netidx you can name individual
 values in your program, and other programs can find and subscribe to
 those values securely over the network.
@@ -11,7 +13,7 @@ involved.
 
  # Publisher
  ```rust
- use netidx::{
+use netidx::{
     publisher::{Publisher, Value, BindCfg},
     config::Config,
     resolver::Auth,
@@ -34,7 +36,7 @@ let temp = publisher.publish(
 publisher.flush(None).await;
 
 loop {
-    time::delay_for(Duration::from_millis(500)).await;
+    time::sleep(Duration::from_millis(500)).await;
     temp.update(Value::F32(get_cpu_temp()));
     publisher.flush(None).await;
 }
@@ -42,8 +44,8 @@ loop {
 
  # Subscriber
  ```rust
- use netidx::{
-    subscriber::Subscriber,
+use netidx::{
+    subscriber::{Subscriber, UpdatesFlags},
     config::Config,
     resolver::Auth,
     path::Path,
@@ -57,7 +59,7 @@ let temp = subscriber.subscribe_one(path, None).await?;
 println!("washu-chan cpu temp is: {:?}", temp.last());
 
 let (tx, mut rx) = mpsc::channel(10);
-temp.updates(false, tx);
+temp.updates(UpdatesFlags::empty(), tx);
 while let Some(mut batch) = rx.next().await {
     for (_, v) in batch.drain(..) {
         println!("washu-chan cpu temp is: {:?}", v);
