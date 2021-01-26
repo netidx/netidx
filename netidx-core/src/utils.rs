@@ -175,6 +175,54 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
     }
 }
 
+/// escape the specified string using the specified escape character
+/// and a slice of special characters that need escaping.
+pub fn escape<'a, 'b, T>(s: &'a T, esc: char, spec: &'b [char]) -> Cow<'a, str>
+where 
+    T: AsRef<str> + ?Sized,
+    'a: 'b,
+{
+    let s = s.as_ref();
+    if s.find(|c: char| spec.contains(&c) || c == esc).is_none() {
+        Cow::Borrowed(s.as_ref())
+    } else {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if spec.contains(&c) {
+                out.push(esc);
+                out.push(c);
+            } else if c == esc {
+                out.push(esc);
+                out.push(c);
+            } else {
+                out.push(c);
+            }
+        }
+        Cow::Owned(out)
+    }
+}
+
+/// unescape the specified string using the specified escape character
+pub fn unescape<T>(s: &T, esc: char) -> Cow<str> where T: AsRef<str> + ?Sized {
+    let s = s.as_ref();
+    if !s.contains(esc) {
+        Cow::Borrowed(s.as_ref())
+    } else {
+        let mut res = String::with_capacity(s.len());
+        let mut escaped = false;
+        res.extend(s.chars().filter_map(|c| {
+            if c == esc && !escaped {
+                escaped = true;
+                None
+            } else {
+                escaped = false;
+                Some(c)
+            }
+        }));
+        Cow::Owned(res)
+    }
+}
+
 pub fn is_escaped(s: &str, esc: char, i: usize) -> bool {
     let b = s.as_bytes();
     !s.is_char_boundary(i) || {
@@ -187,27 +235,6 @@ pub fn is_escaped(s: &str, esc: char, i: usize) -> bool {
             }
         }
         res
-    }
-}
-
-pub fn escape<T: AsRef<str> + ?Sized>(s: &T, esc: char, sep: char) -> Cow<str> {
-    let s = s.as_ref();
-    if s.find(|c: char| c == sep || c == esc).is_none() {
-        Cow::Borrowed(s.as_ref())
-    } else {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            if c == sep {
-                out.push(esc);
-                out.push(c);
-            } else if c == esc {
-                out.push(esc);
-                out.push(c);
-            } else {
-                out.push(c);
-            }
-        }
-        Cow::Owned(out)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::view::{StoreTarget, Sink, Source};
+use crate::view::{Sink, Source, StoreTarget};
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -14,27 +14,10 @@ use combine::{
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, path::Path, publisher::Value};
-use std::{boxed, result::Result, str::FromStr, time::Duration};
+use netidx::{chars::Chars, path::Path, publisher::Value, utils};
+use std::{borrow::Cow, boxed, result::Result, str::FromStr, time::Duration};
 
-fn unescape(s: String, esc: char) -> String {
-    if !s.contains(esc) {
-        s
-    } else {
-        let mut res = String::with_capacity(s.len());
-        let mut escaped = false;
-        res.extend(s.chars().filter_map(|c| {
-            if c == esc && !escaped {
-                escaped = true;
-                None
-            } else {
-                escaped = false;
-                Some(c)
-            }
-        }));
-        res
-    }
-}
+pub(crate) static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
@@ -42,13 +25,15 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    static ESC: [char; 2] = ['"', '\\'];
     recognize(escaped(
-        take_while1(move |c| c != '"' && c != '\\'),
+        take_while1(move |c| !PATH_ESC.contains(&c)),
         '\\',
-        one_of(ESC[..].iter().copied()),
+        one_of(PATH_ESC.iter().copied()),
     ))
-    .map(|s| unescape(s, '\\'))
+    .map(|s| match utils::unescape(&s, '\\') {
+        Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
+        Cow::Owned(s) => s,
+    })
 }
 
 fn quoted<I>() -> impl Parser<I, Output = String>
@@ -138,6 +123,67 @@ where
     ))
 }
 
+fn interpolated_<I>() -> impl Parser<I, Output = Source>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    enum Intp {
+        Lit(String),
+        Expr(Source),
+    }
+    impl Intp {
+        fn to_source(self) -> Source {
+            match self {
+                Intp::Lit(s) => Source::Constant(Value::from(s)),
+                Intp::Expr(s) => s,
+            }
+        }
+    }
+    spaces()
+        .with(between(
+            token('"'),
+            token('"'),
+            many1(choice((
+                attempt(between(token('['), token(']'), source().map(Intp::Expr))),
+                escaped_string().map(Intp::Lit),
+            ))),
+        ))
+        .map(|toks: Vec<Intp>| {
+            toks.into_iter()
+                .fold(None, |src, tok| -> Option<Source> {
+                    match (src, tok) {
+                        (None, t @ Intp::Lit(_)) => Some(t.to_source()),
+                        (None, Intp::Expr(s)) => Some(Source::Map {
+                            from: vec![s],
+                            function: "string_concat".into(),
+                        }),
+                        (Some(src @ Source::Constant(_)), s) => Some(Source::Map {
+                            from: vec![src, s.to_source()],
+                            function: "string_concat".into(),
+                        }),
+                        (Some(Source::Map { mut from, function }), s) => {
+                            from.push(s.to_source());
+                            Some(Source::Map { from, function })
+                        }
+                        (Some(Source::Load(_)), _) | (Some(Source::Variable(_)), _) => {
+                            unreachable!()
+                        }
+                    }
+                })
+                .unwrap_or(Source::Constant(Value::from("")))
+        })
+}
+
+parser!{
+    fn interpolated[I]()(I) -> Source
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        interpolated_()
+    }
+}
+
 fn constant<I>(typ: &'static str) -> impl Parser<I, Output = char>
 where
     I: RangeStream<Token = char>,
@@ -156,7 +202,7 @@ where
     spaces().with(choice((
         attempt(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
         attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
-        attempt(quoted().map(|v| Source::Constant(Value::String(Chars::from(v))))),
+        attempt(interpolated()),
         attempt(
             string("true")
                 .skip(not_followed_by(none_of(" ),".chars())))
@@ -473,6 +519,8 @@ mod tests {
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
         let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
         assert_eq!(Source::Constant(Value::String(c)), parse_source(s).unwrap());
+        let c = Chars::new();
+        assert_eq!(Source::Constant(Value::String(c)), parse_source(r#""""#).unwrap());
         assert_eq!(Source::Constant(Value::True), parse_source("true").unwrap());
         assert_eq!(Source::Constant(Value::False), parse_source("false").unwrap());
         assert_eq!(Source::Constant(Value::Null), parse_source("null").unwrap());

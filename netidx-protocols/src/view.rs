@@ -61,7 +61,7 @@ impl fmt::Display for Source {
                     }
                 }
                 Value::String(s) => {
-                    write!(f, r#""{}""#, utils::escape(&*s, '\\', '"'))
+                    write!(f, r#""{}""#, utils::escape(&*s, '\\', &parser::PATH_ESC))
                 }
                 Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
                 Value::True => write!(f, "true"),
@@ -69,20 +69,32 @@ impl fmt::Display for Source {
                 Value::Null => write!(f, "null"),
                 Value::Ok => write!(f, "ok"),
                 Value::Error(v) => {
-                    write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', '"'))
+                    write!(
+                        f,
+                        r#"error:"{}""#,
+                        utils::escape(&*v, '\\', &parser::PATH_ESC)
+                    )
                 }
             },
             Source::Load(s) => write!(f, r#"load_path({})"#, s),
             Source::Variable(s) => write!(f, "load_var({})", s),
             Source::Map { from, function } => {
-                write!(f, "{}(", function)?;
-                for i in 0..from.len() {
-                    write!(f, "{}", &from[i])?;
-                    if i < from.len() - 1 {
-                        write!(f, ", ")?;
+                if function == "string_concat" { // it's an interpolation
+                    write!(f, "\"")?;
+                    for s in from {
+                        write!(f, "[{}]", s)?;
                     }
+                    write!(f, "\"")?;
+                } else { // it's a normal function
+                    write!(f, "{}(", function)?;
+                    for i in 0..from.len() {
+                        write!(f, "{}", &from[i])?;
+                        if i < from.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, ")")
                 }
-                write!(f, ")")
             }
         }
     }
@@ -116,12 +128,16 @@ impl fmt::Display for Sink {
         match self {
             Sink::Store(tgt) => match tgt {
                 StoreTarget::Path(p) => {
-                    write!(f, r#"store_path("{}")"#, utils::escape(&*p, '\\', '"'))
+                    write!(
+                        f,
+                        r#"store_path("{}")"#,
+                        utils::escape(&*p, '\\', &parser::PATH_ESC)
+                    )
                 }
                 StoreTarget::Variable(v) => {
                     write!(f, r#"store_path({})"#, &*v)
                 }
-            }
+            },
             Sink::Variable(v) => write!(f, "store_var({})", v),
             Sink::Navigate => write!(f, "navigate()"),
             Sink::Confirm(sink) => write!(f, "confirm({})", sink),
@@ -408,12 +424,12 @@ mod tests {
     }
 
     fn store_target() -> impl Strategy<Value = StoreTarget> {
-        prop_oneof! [
+        prop_oneof![
             path().prop_map(StoreTarget::Path),
             fname().prop_map(StoreTarget::Variable)
         ]
     }
-    
+
     fn sink() -> impl Strategy<Value = Sink> {
         let leaf = prop_oneof![
             store_target().prop_map(Sink::Store),

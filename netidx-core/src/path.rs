@@ -238,7 +238,7 @@ impl Path {
     /// assert_eq!("\\\\hello world", &*Path::escape("\\hello world"));
     /// ```
     pub fn escape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
-        utils::escape(s, ESC, SEP)
+        utils::escape(s, ESC, &[SEP])
     }
 
     /// This will unescape the path seperator and the escape character
