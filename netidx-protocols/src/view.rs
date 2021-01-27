@@ -353,10 +353,6 @@ mod tests {
         ]
     }
 
-    fn path() -> impl Strategy<Value = Path> {
-        chars().prop_map(Path::from)
-    }
-
     prop_compose! {
         fn fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
             s != "ok" && s != "true" && s != "false" && s != "null"

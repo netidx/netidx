@@ -2,7 +2,7 @@ use crate::view::Expr;
 use base64;
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
+    attempt, between, choice, from_str, many, many1, none_of, not_followed_by, one_of,
     optional,
     parser::{
         char::{digit, spaces, string},
@@ -14,8 +14,8 @@ use combine::{
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, path::Path, publisher::Value, utils};
-use std::{borrow::Cow, boxed, result::Result, str::FromStr, time::Duration};
+use netidx::{chars::Chars, publisher::Value, utils};
+use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 pub(crate) static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
@@ -26,7 +26,7 @@ where
     I::Range: Range,
 {
     recognize(escaped(
-        take_while1(move |c| !PATH_ESC.contains(&c)),
+        take_while1(|c| !PATH_ESC.contains(&c)),
         '\\',
         one_of(PATH_ESC.iter().copied()),
     ))
@@ -129,6 +129,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
+    #[derive(Debug)]
     enum Intp {
         Lit(String),
         Expr(Expr),
@@ -145,8 +146,8 @@ where
         .with(between(
             token('"'),
             token('"'),
-            many1(choice((
-                attempt(between(token('['), token(']'), expr().map(Intp::Expr))),
+            many(choice((
+                attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
                 escaped_string().map(Intp::Lit),
             ))),
         ))
@@ -176,7 +177,7 @@ where
         })
 }
 
-parser!{
+parser! {
     fn interpolated[I]()(I) -> Expr
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
@@ -200,9 +201,10 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
+        attempt(quoted()).map(|v| Expr::Constant(Value::from(v))),
+        //attempt(interpolated()),
         attempt(from_str(flt()).map(|v| Expr::Constant(Value::F64(v)))),
         attempt(from_str(int()).map(|v| Expr::Constant(Value::I64(v)))),
-        attempt(interpolated()),
         attempt(
             string("true")
                 .skip(not_followed_by(none_of(" ),".chars())))
@@ -219,54 +221,34 @@ where
                 .map(|_| Expr::Constant(Value::Null)),
         ),
         attempt(
-            constant("u32")
-                .with(from_str(uint()))
-                .map(|v| Expr::Constant(Value::U32(v))),
+            constant("u32").with(from_str(uint())).map(|v| Expr::Constant(Value::U32(v))),
         ),
         attempt(
-            constant("v32")
-                .with(from_str(uint()))
-                .map(|v| Expr::Constant(Value::V32(v))),
+            constant("v32").with(from_str(uint())).map(|v| Expr::Constant(Value::V32(v))),
         ),
         attempt(
-            constant("i32")
-                .with(from_str(int()))
-                .map(|v| Expr::Constant(Value::I32(v))),
+            constant("i32").with(from_str(int())).map(|v| Expr::Constant(Value::I32(v))),
         ),
         attempt(
-            constant("z32")
-                .with(from_str(int()))
-                .map(|v| Expr::Constant(Value::Z32(v))),
+            constant("z32").with(from_str(int())).map(|v| Expr::Constant(Value::Z32(v))),
         ),
         attempt(
-            constant("u64")
-                .with(from_str(uint()))
-                .map(|v| Expr::Constant(Value::U64(v))),
+            constant("u64").with(from_str(uint())).map(|v| Expr::Constant(Value::U64(v))),
         ),
         attempt(
-            constant("v64")
-                .with(from_str(uint()))
-                .map(|v| Expr::Constant(Value::V64(v))),
+            constant("v64").with(from_str(uint())).map(|v| Expr::Constant(Value::V64(v))),
         ),
         attempt(
-            constant("i64")
-                .with(from_str(int()))
-                .map(|v| Expr::Constant(Value::I64(v))),
+            constant("i64").with(from_str(int())).map(|v| Expr::Constant(Value::I64(v))),
         ),
         attempt(
-            constant("z64")
-                .with(from_str(int()))
-                .map(|v| Expr::Constant(Value::Z64(v))),
+            constant("z64").with(from_str(int())).map(|v| Expr::Constant(Value::Z64(v))),
         ),
         attempt(
-            constant("f32")
-                .with(from_str(flt()))
-                .map(|v| Expr::Constant(Value::F32(v))),
+            constant("f32").with(from_str(flt())).map(|v| Expr::Constant(Value::F32(v))),
         ),
         attempt(
-            constant("f64")
-                .with(from_str(flt()))
-                .map(|v| Expr::Constant(Value::F64(v))),
+            constant("f64").with(from_str(flt())).map(|v| Expr::Constant(Value::F64(v))),
         ),
         attempt(
             constant("bytes")
@@ -361,10 +343,7 @@ mod tests {
         assert_eq!(Expr::Constant(Value::U32(23)), parse_expr("u32:23").unwrap());
         assert_eq!(Expr::Constant(Value::V32(42)), parse_expr("v32:42").unwrap());
         assert_eq!(Expr::Constant(Value::I32(-10)), parse_expr("i32:-10").unwrap());
-        assert_eq!(
-            Expr::Constant(Value::I32(12321)),
-            parse_expr("i32:12321").unwrap()
-        );
+        assert_eq!(Expr::Constant(Value::I32(12321)), parse_expr("i32:12321").unwrap());
         assert_eq!(Expr::Constant(Value::Z32(-99)), parse_expr("z32:-99").unwrap());
         assert_eq!(Expr::Constant(Value::U64(100)), parse_expr("u64:100").unwrap());
         assert_eq!(Expr::Constant(Value::V64(100)), parse_expr("v64:100").unwrap());
@@ -374,14 +353,8 @@ mod tests {
         assert_eq!(Expr::Constant(Value::I64(100)), parse_expr("100").unwrap());
         assert_eq!(Expr::Constant(Value::Z64(-100)), parse_expr("z64:-100").unwrap());
         assert_eq!(Expr::Constant(Value::Z64(100)), parse_expr("z64:100").unwrap());
-        assert_eq!(
-            Expr::Constant(Value::F32(3.1415)),
-            parse_expr("f32:3.1415").unwrap()
-        );
-        assert_eq!(
-            Expr::Constant(Value::F32(675.6)),
-            parse_expr("f32:675.6").unwrap()
-        );
+        assert_eq!(Expr::Constant(Value::F32(3.1415)), parse_expr("f32:3.1415").unwrap());
+        assert_eq!(Expr::Constant(Value::F32(675.6)), parse_expr("f32:675.6").unwrap());
         assert_eq!(
             Expr::Constant(Value::F32(42.3435)),
             parse_expr("f32:42.3435").unwrap()
@@ -396,15 +369,9 @@ mod tests {
             parse_expr("f32:21.2443e-6").unwrap()
         );
         assert_eq!(Expr::Constant(Value::F32(3.)), parse_expr("f32:3.").unwrap());
-        assert_eq!(
-            Expr::Constant(Value::F64(3.1415)),
-            parse_expr("f64:3.1415").unwrap()
-        );
+        assert_eq!(Expr::Constant(Value::F64(3.1415)), parse_expr("f64:3.1415").unwrap());
         assert_eq!(Expr::Constant(Value::F64(3.1415)), parse_expr("3.1415").unwrap());
-        assert_eq!(
-            Expr::Constant(Value::F64(1.123e9)),
-            parse_expr("1.123e9").unwrap()
-        );
+        assert_eq!(Expr::Constant(Value::F64(1.123e9)), parse_expr("1.123e9").unwrap());
         assert_eq!(Expr::Constant(Value::F64(1e9)), parse_expr("1e9").unwrap());
         assert_eq!(
             Expr::Constant(Value::F64(21.2443e-6)),
@@ -438,17 +405,15 @@ mod tests {
                 from: vec![
                     Expr::Constant(Value::String(Chars::from("foo"))),
                     Expr::Constant(Value::String(Chars::from("bar"))),
-                    Expr::Variable(Box::new(Expr::Constant(Value::String(
-                        Chars::from("baz")
-                    ))))
+                    Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from(
+                        "baz"
+                    )))))
                 ],
             })),
             parse_expr(s).unwrap()
         );
         assert_eq!(
-            Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from(
-                "sum"
-            ))))),
+            Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from("sum"))))),
             parse_expr("load_var(\"sum\")").unwrap()
         );
         let src = Expr::Map {
@@ -460,9 +425,9 @@ mod tests {
                 Expr::Map {
                     from: vec![
                         Expr::Constant(Value::F32(675.6)),
-                        Expr::Load(Box::new(Expr::Constant(Value::String(
-                            Chars::from("/foo/baz"),
-                        )))),
+                        Expr::Load(Box::new(Expr::Constant(Value::String(Chars::from(
+                            "/foo/baz",
+                        ))))),
                     ],
                     function: String::from("max"),
                 },
