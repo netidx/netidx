@@ -153,52 +153,65 @@ enum Target<'a> {
 }
 
 #[derive(Debug, Clone)]
-enum Source {
-    Constant(view::Source, Value),
+enum Expr {
+    Constant(view::Expr, Value),
     Load {
-        spec: view::Source,
-        from: Box<Source>,
+        spec: view::Expr,
+        from: Box<Expr>,
         cur: Rc<RefCell<Option<Dval>>>,
         ctx: WidgetCtx,
     },
-    Variable {
-        spec: view::Source,
-        from: Box<Source>,
+    Store {
+        spec: view::Expr,
+        queued: RefCell<Vec<Value>>,
+        tgt: Box<Expr>,
+        value: Box<Expr>,
+        ctx: WidgetCtx,
+        dv: RefCell<Option<Dval>>,
+    },
+    LoadVar {
+        spec: view::Expr,
+        from: Box<Expr>,
         name: Rc<RefCell<Option<String>>>,
         variables: Rc<RefCell<HashMap<String, Value>>>,
     },
-    Map {
-        spec: view::Source,
-        from: Vec<Source>,
+    StoreVar {
+        spec: view::Expr,
+        tgt: Box<Expr>,
+        value: Box<Expr>,
+    },
+    Apply {
+        spec: view::Expr,
+        args: Vec<Expr>,
         function: Box<Formula>,
     },
 }
 
-impl fmt::Display for Source {
+impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
-            Source::Constant(s, _) => s,
-            Source::Load { spec, .. } => spec,
-            Source::Variable { spec, .. } => spec,
-            Source::Map { spec, .. } => spec,
+            Expr::Constant(s, _) => s,
+            Expr::Load { spec, .. } => spec,
+            Expr::Store { spec, .. } => spec,
+            Expr::LoadVar { spec, .. } => spec,
+            Expr::StoreVar { spec, .. } => spec,
+            Expr::Apply { spec, .. } => spec,
         };
         write!(f, "{}", s.to_string())
     }
 }
 
-impl Source {
+impl Expr {
     fn new(
         ctx: &WidgetCtx,
+        // CR estokes: move this into WidgetCtx?
         variables: Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::Source,
+        spec: view::Expr,
     ) -> Self {
         match &spec {
-            view::Source::Constant(v) => {
-                let v = v.clone();
-                Source::Constant(spec, v)
-            }
-            view::Source::Load(s) => {
-                let from = Box::new(Source::new(ctx, variables, view::Source::clone(&s)));
+            view::Expr::Constant(v) => Expr::Constant(spec, v.clone()),
+            view::Expr::Load(s) => {
+                let from = Box::new(Expr::new(ctx, variables, view::Expr::clone(&s)));
                 let dv =
                     from.current().and_then(|v| v.cast_to::<String>().ok()).map(|s| {
                         let dv = ctx.subscriber.durable_subscribe(Path::from(s));
@@ -206,22 +219,22 @@ impl Source {
                         dv
                     });
                 let cur = Rc::new(RefCell::new(dv));
-                Source::Load { spec, from, cur, ctx: ctx.clone() }
+                Expr::Load { spec, from, cur, ctx: ctx.clone() }
             }
-            view::Source::Variable(s) => {
-                let source = Source::new(ctx, variables.clone(), view::Source::clone(&s));
-                let name = source.current().and_then(|v| v.cast_to::<String>().ok());
+            view::Expr::LoadVar(s) => {
+                let from = Expr::new(ctx, variables.clone(), view::Expr::clone(&s));
+                let name = from.current().and_then(|v| v.cast_to::<String>().ok());
                 let name = Rc::new(RefCell::new(name));
-                Source::Variable { spec, from: Box::new(source), name, variables }
+                Expr::LoadVar { spec, from: Box::new(from), name, variables }
             }
-            view::Source::Map { from, function } => {
-                let from: Vec<Source> = from
+            view::Expr::Apply { args, function } => {
+                let args: Vec<Expr> = args
                     .iter()
-                    .map(|spec| Source::new(ctx, variables.clone(), spec.clone()))
+                    .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
                     .collect();
                 let function =
-                    Box::new(Formula::new(&*ctx, &variables, function, &*from));
-                Source::Map { spec, from, function }
+                    Box::new(Formula::new(&*ctx, &variables, function, &*args));
+                Expr::Apply { spec, args, function }
             }
         }
     }
