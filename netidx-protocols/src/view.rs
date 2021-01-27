@@ -347,7 +347,14 @@ mod tests {
 
     prop_compose! {
         fn random_fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
-            s != "ok" && s != "true" && s != "false" && s != "null"
+            s != "ok"
+                && s != "true"
+                && s != "false"
+                && s != "null"
+                && s != "load"
+                && s != "store"
+                && s != "load_var"
+                && s != "store_var"
         })) -> String {
             s
         }
@@ -376,8 +383,6 @@ mod tests {
             Just(String::from("sample")),
             Just(String::from("string_join")),
             Just(String::from("string_concat")),
-            Just(String::from("store_var")),
-            Just(String::from("store_path")),
             Just(String::from("navigate")),
             Just(String::from("confirm")),
         ]
@@ -419,11 +424,11 @@ mod tests {
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
                 (v0, v1) => v0 == v1,
             },
-            (Expr::Load(s0), Expr::Load(s1)) => check(&*s0, &*s1),
-            (Expr::Store(t0, e0), Expr::Store(t1, e1)) => check(t0, t1) && check(t1, e1),
-            (Expr::LoadVar(s0), Expr::LoadVar(s1)) => check(&*s0, &*s1),
+            (Expr::Load(s0), Expr::Load(s1)) => check(s0, s1),
+            (Expr::Store(t0, e0), Expr::Store(t1, e1)) => check(t0, t1) && check(e0, e1),
+            (Expr::LoadVar(s0), Expr::LoadVar(s1)) => check(s0, s1),
             (Expr::StoreVar(t0, e0), Expr::StoreVar(t1, e1)) => {
-                check(t0, t1) && check(t1, e1)
+                check(t0, t1) && check(e0, e1)
             }
             (
                 Expr::Apply { args: srs0, function: f0 },
@@ -438,7 +443,7 @@ mod tests {
     proptest! {
         #[test]
         fn expr_round_trip(s in expr()) {
-            assert!(check(dbg!(&s), &dbg!(s.to_string()).parse::<Expr>().unwrap()))
+            assert!(check(dbg!(&s), &dbg!(dbg!(s.to_string()).parse::<Expr>().unwrap())))
         }
     }
 }

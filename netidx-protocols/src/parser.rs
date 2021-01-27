@@ -309,14 +309,14 @@ where
         )
             .then(|(function, mut args): (String, Vec<Expr>)| {
                 match function.as_str() {
-                    "load_path" => {
+                    "load" => {
                         if args.len() != 1 {
                             unexpected_any("load_path: expected 1 argument").right()
                         } else {
                             value(Expr::Load(Box::new(args.pop().unwrap()))).left()
                         }
                     }
-                    "store_path" => {
+                    "store" => {
                         if args.len() != 2 {
                             unexpected_any("store_path: expected 2 arguments").right()
                         } else {
@@ -421,17 +421,17 @@ mod tests {
             parse_expr(r#"error:"error""#).unwrap()
         );
         let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
-        let s = r#"load_path("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
+        let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(
             Expr::Load(Box::new(Expr::Constant(Value::String(p)))),
             parse_expr(s).unwrap()
         );
-        let p = Expr::Load(Box::new(Expr::Map {
-            from: vec![
+        let p = Expr::Load(Box::new(Expr::Apply {
+            args: vec![
                 Expr::Constant(Value::from("/foo/")),
-                Expr::Variable(Box::new(Expr::Map {
-                    from: vec![
-                        Expr::Variable(Box::new(Expr::Constant(Value::from("sid")))),
+                Expr::LoadVar(Box::new(Expr::Apply {
+                    args: vec![
+                        Expr::LoadVar(Box::new(Expr::Constant(Value::from("sid")))),
                         Expr::Constant(Value::from("_var")),
                     ],
                     function: "string_concat".into(),
@@ -440,20 +440,20 @@ mod tests {
             ],
             function: "string_concat".into(),
         }));
-        let s = r#"load_path("/foo/[load_var("[load_var("sid")]_var")]/baz")"#;
+        let s = r#"load("/foo/[load_var("[load_var("sid")]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#""[true]""#;
-        let p = Expr::Map {
-            from: vec![Expr::Constant(Value::True)],
+        let p = Expr::Apply {
+            args: vec![Expr::Constant(Value::True)],
             function: "string_concat".into(),
         };
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"a(a(a(load_var("[true]"))))"#;
-        let p = Expr::Map {
-            from: vec![Expr::Map {
-                from: vec![Expr::Map {
-                    from: vec![Expr::Variable(Box::new(Expr::Map {
-                        from: vec![Expr::Constant(Value::True)],
+        let p = Expr::Apply {
+            args: vec![Expr::Apply {
+                args: vec![Expr::Apply {
+                    args: vec![Expr::LoadVar(Box::new(Expr::Apply {
+                        args: vec![Expr::Constant(Value::True)],
                         function: "string_concat".into(),
                     }))],
                     function: "a".into(),
@@ -463,14 +463,14 @@ mod tests {
             function: "a".into(),
         };
         assert_eq!(p, parse_expr(s).unwrap());
-        let s = r#"load_path(concat_path("foo", "bar", load_var("baz")))"#;
+        let s = r#"load(concat_path("foo", "bar", load_var("baz")))"#;
         assert_eq!(
-            Expr::Load(Box::new(Expr::Map {
+            Expr::Load(Box::new(Expr::Apply {
                 function: String::from("concat_path"),
-                from: vec![
+                args: vec![
                     Expr::Constant(Value::String(Chars::from("foo"))),
                     Expr::Constant(Value::String(Chars::from("bar"))),
-                    Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from(
+                    Expr::LoadVar(Box::new(Expr::Constant(Value::String(Chars::from(
                         "baz"
                     )))))
                 ],
@@ -478,17 +478,17 @@ mod tests {
             parse_expr(s).unwrap()
         );
         assert_eq!(
-            Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from("sum"))))),
+            Expr::LoadVar(Box::new(Expr::Constant(Value::String(Chars::from("sum"))))),
             parse_expr("load_var(\"sum\")").unwrap()
         );
-        let src = Expr::Map {
-            from: vec![
+        let src = Expr::Apply {
+            args: vec![
                 Expr::Constant(Value::F32(1.)),
                 Expr::Load(Box::new(Expr::Constant(Value::String(Chars::from(
                     "/foo/bar",
                 ))))),
-                Expr::Map {
-                    from: vec![
+                Expr::Apply {
+                    args: vec![
                         Expr::Constant(Value::F32(675.6)),
                         Expr::Load(Box::new(Expr::Constant(Value::String(Chars::from(
                             "/foo/baz",
@@ -496,11 +496,11 @@ mod tests {
                     ],
                     function: String::from("max"),
                 },
-                Expr::Map { from: vec![], function: String::from("rand") },
+                Expr::Apply { args: vec![], function: String::from("rand") },
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(f32:1., load_path("/foo/bar"), max(f32:675.6, load_path("/foo/baz")), rand())"#;
+        let chs = r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
         assert_eq!(src, parse_expr(chs).unwrap());
     }
 }
