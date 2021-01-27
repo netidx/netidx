@@ -1,4 +1,4 @@
-use crate::view::{Sink, Source, StoreTarget};
+use crate::view::Expr;
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -10,7 +10,7 @@ use combine::{
         range::{take_while, take_while1},
         repeat::escaped,
     },
-    sep_by, sep_by1,
+    sep_by,
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
@@ -123,7 +123,7 @@ where
     ))
 }
 
-fn interpolated_<I>() -> impl Parser<I, Output = Source>
+fn interpolated_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -131,12 +131,12 @@ where
 {
     enum Intp {
         Lit(String),
-        Expr(Source),
+        Expr(Expr),
     }
     impl Intp {
-        fn to_source(self) -> Source {
+        fn to_expr(self) -> Expr {
             match self {
-                Intp::Lit(s) => Source::Constant(Value::from(s)),
+                Intp::Lit(s) => Expr::Constant(Value::from(s)),
                 Intp::Expr(s) => s,
             }
         }
@@ -146,38 +146,38 @@ where
             token('"'),
             token('"'),
             many1(choice((
-                attempt(between(token('['), token(']'), source().map(Intp::Expr))),
+                attempt(between(token('['), token(']'), expr().map(Intp::Expr))),
                 escaped_string().map(Intp::Lit),
             ))),
         ))
         .map(|toks: Vec<Intp>| {
             toks.into_iter()
-                .fold(None, |src, tok| -> Option<Source> {
+                .fold(None, |src, tok| -> Option<Expr> {
                     match (src, tok) {
-                        (None, t @ Intp::Lit(_)) => Some(t.to_source()),
-                        (None, Intp::Expr(s)) => Some(Source::Map {
+                        (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
+                        (None, Intp::Expr(s)) => Some(Expr::Map {
                             from: vec![s],
                             function: "string_concat".into(),
                         }),
-                        (Some(src @ Source::Constant(_)), s) => Some(Source::Map {
-                            from: vec![src, s.to_source()],
+                        (Some(src @ Expr::Constant(_)), s) => Some(Expr::Map {
+                            from: vec![src, s.to_expr()],
                             function: "string_concat".into(),
                         }),
-                        (Some(Source::Map { mut from, function }), s) => {
-                            from.push(s.to_source());
-                            Some(Source::Map { from, function })
+                        (Some(Expr::Map { mut from, function }), s) => {
+                            from.push(s.to_expr());
+                            Some(Expr::Map { from, function })
                         }
-                        (Some(Source::Load(_)), _) | (Some(Source::Variable(_)), _) => {
+                        (Some(Expr::Load(_)), _) | (Some(Expr::Variable(_)), _) => {
                             unreachable!()
                         }
                     }
                 })
-                .unwrap_or(Source::Constant(Value::from("")))
+                .unwrap_or(Expr::Constant(Value::from("")))
         })
 }
 
 parser!{
-    fn interpolated[I]()(I) -> Source
+    fn interpolated[I]()(I) -> Expr
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
         interpolated_()
@@ -193,100 +193,100 @@ where
     string(typ).with(token(':'))
 }
 
-fn source_<I>() -> impl Parser<I, Output = Source>
+fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(from_str(flt()).map(|v| Source::Constant(Value::F64(v)))),
-        attempt(from_str(int()).map(|v| Source::Constant(Value::I64(v)))),
+        attempt(from_str(flt()).map(|v| Expr::Constant(Value::F64(v)))),
+        attempt(from_str(int()).map(|v| Expr::Constant(Value::I64(v)))),
         attempt(interpolated()),
         attempt(
             string("true")
                 .skip(not_followed_by(none_of(" ),".chars())))
-                .map(|_| Source::Constant(Value::True)),
+                .map(|_| Expr::Constant(Value::True)),
         ),
         attempt(
             string("false")
                 .skip(not_followed_by(none_of(" ),".chars())))
-                .map(|_| Source::Constant(Value::False)),
+                .map(|_| Expr::Constant(Value::False)),
         ),
         attempt(
             string("null")
                 .skip(not_followed_by(none_of(" ),".chars())))
-                .map(|_| Source::Constant(Value::Null)),
+                .map(|_| Expr::Constant(Value::Null)),
         ),
         attempt(
             constant("u32")
                 .with(from_str(uint()))
-                .map(|v| Source::Constant(Value::U32(v))),
+                .map(|v| Expr::Constant(Value::U32(v))),
         ),
         attempt(
             constant("v32")
                 .with(from_str(uint()))
-                .map(|v| Source::Constant(Value::V32(v))),
+                .map(|v| Expr::Constant(Value::V32(v))),
         ),
         attempt(
             constant("i32")
                 .with(from_str(int()))
-                .map(|v| Source::Constant(Value::I32(v))),
+                .map(|v| Expr::Constant(Value::I32(v))),
         ),
         attempt(
             constant("z32")
                 .with(from_str(int()))
-                .map(|v| Source::Constant(Value::Z32(v))),
+                .map(|v| Expr::Constant(Value::Z32(v))),
         ),
         attempt(
             constant("u64")
                 .with(from_str(uint()))
-                .map(|v| Source::Constant(Value::U64(v))),
+                .map(|v| Expr::Constant(Value::U64(v))),
         ),
         attempt(
             constant("v64")
                 .with(from_str(uint()))
-                .map(|v| Source::Constant(Value::V64(v))),
+                .map(|v| Expr::Constant(Value::V64(v))),
         ),
         attempt(
             constant("i64")
                 .with(from_str(int()))
-                .map(|v| Source::Constant(Value::I64(v))),
+                .map(|v| Expr::Constant(Value::I64(v))),
         ),
         attempt(
             constant("z64")
                 .with(from_str(int()))
-                .map(|v| Source::Constant(Value::Z64(v))),
+                .map(|v| Expr::Constant(Value::Z64(v))),
         ),
         attempt(
             constant("f32")
                 .with(from_str(flt()))
-                .map(|v| Source::Constant(Value::F32(v))),
+                .map(|v| Expr::Constant(Value::F32(v))),
         ),
         attempt(
             constant("f64")
                 .with(from_str(flt()))
-                .map(|v| Source::Constant(Value::F64(v))),
+                .map(|v| Expr::Constant(Value::F64(v))),
         ),
         attempt(
             constant("bytes")
                 .with(from_str(base64str()))
-                .map(|Base64Encoded(v)| Source::Constant(Value::Bytes(Bytes::from(v)))),
+                .map(|Base64Encoded(v)| Expr::Constant(Value::Bytes(Bytes::from(v)))),
         ),
         attempt(
             string("ok")
                 .skip(not_followed_by(none_of(" ),".chars())))
-                .map(|_| Source::Constant(Value::Ok)),
+                .map(|_| Expr::Constant(Value::Ok)),
         ),
         attempt(
             constant("error")
                 .with(quoted())
-                .map(|s| Source::Constant(Value::Error(Chars::from(s)))),
+                .map(|s| Expr::Constant(Value::Error(Chars::from(s)))),
         ),
         attempt(
             constant("datetime")
                 .with(from_str(quoted()))
-                .map(|d| Source::Constant(Value::DateTime(d))),
+                .map(|d| Expr::Constant(Value::DateTime(d))),
         ),
         attempt(
             constant("duration")
@@ -304,7 +304,7 @@ where
                         "s" => Duration::from_secs_f64(n),
                         _ => unreachable!(),
                     };
-                    Source::Constant(Value::Duration(d))
+                    Expr::Constant(Value::Duration(d))
                 }),
         ),
         attempt(
@@ -312,119 +312,41 @@ where
                 .with(between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
-                    source(),
+                    expr(),
                 ))
-                .map(|s| Source::Load(Box::new(s))),
+                .map(|s| Expr::Load(Box::new(s))),
         ),
         attempt(
             string("load_var")
                 .with(between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
-                    source(),
+                    expr(),
                 ))
-                .map(|s| Source::Variable(Box::new(s))),
+                .map(|s| Expr::Variable(Box::new(s))),
         ),
         (
             fname(),
             between(
                 spaces().with(token('(')),
                 spaces().with(token(')')),
-                spaces().with(sep_by(source(), spaces().with(token(',')))),
+                spaces().with(sep_by(expr(), spaces().with(token(',')))),
             ),
         )
-            .map(|(function, from)| Source::Map { function, from }),
+            .map(|(function, from)| Expr::Map { function, from }),
     )))
 }
 
 parser! {
-    fn source[I]()(I) -> Source
+    fn expr[I]()(I) -> Expr
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        source_()
+        expr_()
     }
 }
 
-pub fn parse_source(s: &str) -> anyhow::Result<Source> {
-    source()
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
-}
-
-fn sink_<I>() -> impl Parser<I, Output = Sink>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spaces().with(choice((
-        attempt(
-            string("store_path")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    fname(),
-                ))
-                .map(|s| Sink::Store(StoreTarget::Variable(s))),
-        ),
-        attempt(
-            string("store_path")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    quoted(),
-                ))
-                .map(|s| Sink::Store(StoreTarget::Path(Path::from(s)))),
-        ),
-        attempt(
-            string("store_var")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    spaces().with(fname()),
-                ))
-                .map(|s| Sink::Variable(s)),
-        ),
-        attempt(
-            string("navigate")
-                .with(spaces())
-                .with(token('('))
-                .with(spaces())
-                .with(token(')'))
-                .map(|_| Sink::Navigate),
-        ),
-        attempt(
-            string("all")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    spaces().with(sep_by1(sink(), spaces().with(token(',')))),
-                ))
-                .map(|sinks| Sink::All(sinks)),
-        ),
-        attempt(
-            string("confirm")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    spaces().with(sink()),
-                ))
-                .map(|s| Sink::Confirm(boxed::Box::new(s))),
-        ),
-    )))
-}
-
-parser! {
-    fn sink[I]()(I) -> Sink
-    where [I: RangeStream<Token = char>, I::Range: Range]
-    {
-        sink_()
-    }
-}
-
-pub fn parse_sink(s: &str) -> anyhow::Result<Sink> {
-    sink()
+pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
+    expr()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
@@ -433,148 +355,122 @@ pub fn parse_sink(s: &str) -> anyhow::Result<Sink> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::boxed;
 
     #[test]
-    fn sink_parse() {
-        let v = "foo_bar_baz";
-        let s = "store_path(foo_bar_baz)";
-        assert_eq!(Sink::Store(StoreTarget::Variable(v.into())), parse_sink(s).unwrap());
-        let p = Path::from(r#"/foo bar baz/"(zam)"/_ xyz+ "#);
-        let s = r#"store_path("/foo bar baz/\"(zam)\"/_ xyz+ ")"#;
-        assert_eq!(Sink::Store(StoreTarget::Path(p)), parse_sink(s).unwrap());
+    fn expr_parse() {
+        assert_eq!(Expr::Constant(Value::U32(23)), parse_expr("u32:23").unwrap());
+        assert_eq!(Expr::Constant(Value::V32(42)), parse_expr("v32:42").unwrap());
+        assert_eq!(Expr::Constant(Value::I32(-10)), parse_expr("i32:-10").unwrap());
         assert_eq!(
-            Sink::Variable(String::from("foo")),
-            parse_sink("store_var(foo)").unwrap()
+            Expr::Constant(Value::I32(12321)),
+            parse_expr("i32:12321").unwrap()
         );
-        let snk = Sink::All(vec![
-            Sink::Store(StoreTarget::Path(Path::from("/foo/bar"))),
-            Sink::Variable(String::from("foo")),
-        ]);
-        let chs = r#"all(store_path("/foo/bar"), store_var(foo))"#;
-        assert_eq!(snk, parse_sink(chs).unwrap());
-        assert_eq!(Sink::Navigate, parse_sink("navigate()").unwrap());
+        assert_eq!(Expr::Constant(Value::Z32(-99)), parse_expr("z32:-99").unwrap());
+        assert_eq!(Expr::Constant(Value::U64(100)), parse_expr("u64:100").unwrap());
+        assert_eq!(Expr::Constant(Value::V64(100)), parse_expr("v64:100").unwrap());
+        assert_eq!(Expr::Constant(Value::I64(-100)), parse_expr("i64:-100").unwrap());
+        assert_eq!(Expr::Constant(Value::I64(-100)), parse_expr("-100").unwrap());
+        assert_eq!(Expr::Constant(Value::I64(100)), parse_expr("i64:100").unwrap());
+        assert_eq!(Expr::Constant(Value::I64(100)), parse_expr("100").unwrap());
+        assert_eq!(Expr::Constant(Value::Z64(-100)), parse_expr("z64:-100").unwrap());
+        assert_eq!(Expr::Constant(Value::Z64(100)), parse_expr("z64:100").unwrap());
         assert_eq!(
-            Sink::Confirm(boxed::Box::new(Sink::Navigate)),
-            parse_sink("confirm(navigate())").unwrap()
-        );
-    }
-
-    #[test]
-    fn source_parse() {
-        assert_eq!(Source::Constant(Value::U32(23)), parse_source("u32:23").unwrap());
-        assert_eq!(Source::Constant(Value::V32(42)), parse_source("v32:42").unwrap());
-        assert_eq!(Source::Constant(Value::I32(-10)), parse_source("i32:-10").unwrap());
-        assert_eq!(
-            Source::Constant(Value::I32(12321)),
-            parse_source("i32:12321").unwrap()
-        );
-        assert_eq!(Source::Constant(Value::Z32(-99)), parse_source("z32:-99").unwrap());
-        assert_eq!(Source::Constant(Value::U64(100)), parse_source("u64:100").unwrap());
-        assert_eq!(Source::Constant(Value::V64(100)), parse_source("v64:100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(-100)), parse_source("i64:-100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(-100)), parse_source("-100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(100)), parse_source("i64:100").unwrap());
-        assert_eq!(Source::Constant(Value::I64(100)), parse_source("100").unwrap());
-        assert_eq!(Source::Constant(Value::Z64(-100)), parse_source("z64:-100").unwrap());
-        assert_eq!(Source::Constant(Value::Z64(100)), parse_source("z64:100").unwrap());
-        assert_eq!(
-            Source::Constant(Value::F32(3.1415)),
-            parse_source("f32:3.1415").unwrap()
+            Expr::Constant(Value::F32(3.1415)),
+            parse_expr("f32:3.1415").unwrap()
         );
         assert_eq!(
-            Source::Constant(Value::F32(675.6)),
-            parse_source("f32:675.6").unwrap()
+            Expr::Constant(Value::F32(675.6)),
+            parse_expr("f32:675.6").unwrap()
         );
         assert_eq!(
-            Source::Constant(Value::F32(42.3435)),
-            parse_source("f32:42.3435").unwrap()
+            Expr::Constant(Value::F32(42.3435)),
+            parse_expr("f32:42.3435").unwrap()
         );
         assert_eq!(
-            Source::Constant(Value::F32(1.123e9)),
-            parse_source("f32:1.123e9").unwrap()
+            Expr::Constant(Value::F32(1.123e9)),
+            parse_expr("f32:1.123e9").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F32(1e9)), parse_source("f32:1e9").unwrap());
+        assert_eq!(Expr::Constant(Value::F32(1e9)), parse_expr("f32:1e9").unwrap());
         assert_eq!(
-            Source::Constant(Value::F32(21.2443e-6)),
-            parse_source("f32:21.2443e-6").unwrap()
+            Expr::Constant(Value::F32(21.2443e-6)),
+            parse_expr("f32:21.2443e-6").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F32(3.)), parse_source("f32:3.").unwrap());
+        assert_eq!(Expr::Constant(Value::F32(3.)), parse_expr("f32:3.").unwrap());
         assert_eq!(
-            Source::Constant(Value::F64(3.1415)),
-            parse_source("f64:3.1415").unwrap()
+            Expr::Constant(Value::F64(3.1415)),
+            parse_expr("f64:3.1415").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F64(3.1415)), parse_source("3.1415").unwrap());
+        assert_eq!(Expr::Constant(Value::F64(3.1415)), parse_expr("3.1415").unwrap());
         assert_eq!(
-            Source::Constant(Value::F64(1.123e9)),
-            parse_source("1.123e9").unwrap()
+            Expr::Constant(Value::F64(1.123e9)),
+            parse_expr("1.123e9").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F64(1e9)), parse_source("1e9").unwrap());
+        assert_eq!(Expr::Constant(Value::F64(1e9)), parse_expr("1e9").unwrap());
         assert_eq!(
-            Source::Constant(Value::F64(21.2443e-6)),
-            parse_source("21.2443e-6").unwrap()
+            Expr::Constant(Value::F64(21.2443e-6)),
+            parse_expr("21.2443e-6").unwrap()
         );
-        assert_eq!(Source::Constant(Value::F64(3.)), parse_source("f64:3.").unwrap());
-        assert_eq!(Source::Constant(Value::F64(3.)), parse_source("3.").unwrap());
+        assert_eq!(Expr::Constant(Value::F64(3.)), parse_expr("f64:3.").unwrap());
+        assert_eq!(Expr::Constant(Value::F64(3.)), parse_expr("3.").unwrap());
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
         let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
-        assert_eq!(Source::Constant(Value::String(c)), parse_source(s).unwrap());
+        assert_eq!(Expr::Constant(Value::String(c)), parse_expr(s).unwrap());
         let c = Chars::new();
-        assert_eq!(Source::Constant(Value::String(c)), parse_source(r#""""#).unwrap());
-        assert_eq!(Source::Constant(Value::True), parse_source("true").unwrap());
-        assert_eq!(Source::Constant(Value::False), parse_source("false").unwrap());
-        assert_eq!(Source::Constant(Value::Null), parse_source("null").unwrap());
-        assert_eq!(Source::Constant(Value::Ok), parse_source("ok").unwrap());
+        assert_eq!(Expr::Constant(Value::String(c)), parse_expr(r#""""#).unwrap());
+        assert_eq!(Expr::Constant(Value::True), parse_expr("true").unwrap());
+        assert_eq!(Expr::Constant(Value::False), parse_expr("false").unwrap());
+        assert_eq!(Expr::Constant(Value::Null), parse_expr("null").unwrap());
+        assert_eq!(Expr::Constant(Value::Ok), parse_expr("ok").unwrap());
         assert_eq!(
-            Source::Constant(Value::Error(Chars::from("error"))),
-            parse_source(r#"error:"error""#).unwrap()
+            Expr::Constant(Value::Error(Chars::from("error"))),
+            parse_expr(r#"error:"error""#).unwrap()
         );
         let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
         let s = r#"load_path("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(
-            Source::Load(Box::new(Source::Constant(Value::String(p)))),
-            parse_source(s).unwrap()
+            Expr::Load(Box::new(Expr::Constant(Value::String(p)))),
+            parse_expr(s).unwrap()
         );
         let s = r#"load_path(concat_path("foo", "bar", load_var("baz")))"#;
         assert_eq!(
-            Source::Load(Box::new(Source::Map {
+            Expr::Load(Box::new(Expr::Map {
                 function: String::from("concat_path"),
                 from: vec![
-                    Source::Constant(Value::String(Chars::from("foo"))),
-                    Source::Constant(Value::String(Chars::from("bar"))),
-                    Source::Variable(Box::new(Source::Constant(Value::String(
+                    Expr::Constant(Value::String(Chars::from("foo"))),
+                    Expr::Constant(Value::String(Chars::from("bar"))),
+                    Expr::Variable(Box::new(Expr::Constant(Value::String(
                         Chars::from("baz")
                     ))))
                 ],
             })),
-            parse_source(s).unwrap()
+            parse_expr(s).unwrap()
         );
         assert_eq!(
-            Source::Variable(Box::new(Source::Constant(Value::String(Chars::from(
+            Expr::Variable(Box::new(Expr::Constant(Value::String(Chars::from(
                 "sum"
             ))))),
-            parse_source("load_var(\"sum\")").unwrap()
+            parse_expr("load_var(\"sum\")").unwrap()
         );
-        let src = Source::Map {
+        let src = Expr::Map {
             from: vec![
-                Source::Constant(Value::F32(1.)),
-                Source::Load(Box::new(Source::Constant(Value::String(Chars::from(
+                Expr::Constant(Value::F32(1.)),
+                Expr::Load(Box::new(Expr::Constant(Value::String(Chars::from(
                     "/foo/bar",
                 ))))),
-                Source::Map {
+                Expr::Map {
                     from: vec![
-                        Source::Constant(Value::F32(675.6)),
-                        Source::Load(Box::new(Source::Constant(Value::String(
+                        Expr::Constant(Value::F32(675.6)),
+                        Expr::Load(Box::new(Expr::Constant(Value::String(
                             Chars::from("/foo/baz"),
                         )))),
                     ],
                     function: String::from("max"),
                 },
-                Source::Map { from: vec![], function: String::from("rand") },
+                Expr::Map { from: vec![], function: String::from("rand") },
             ],
             function: String::from("sum"),
         };
         let chs = r#"sum(f32:1., load_path("/foo/bar"), max(f32:675.6, load_path("/foo/baz")), rand())"#;
-        assert_eq!(src, parse_source(chs).unwrap());
+        assert_eq!(src, parse_expr(chs).unwrap());
     }
 }

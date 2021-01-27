@@ -4,13 +4,13 @@ use netidx::{path::Path, publisher::Value, utils};
 use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum Source {
+pub enum Expr {
     Constant(Value),
-    Load(boxed::Box<Source>),
-    Variable(boxed::Box<Source>),
+    Load(boxed::Box<Expr>),
+    Variable(boxed::Box<Expr>),
     Map {
         /// the sources we are mapping from
-        from: Vec<Source>,
+        from: Vec<Expr>,
         /// the name of the built-in 'Value -> Option Value' function
         /// that will be called each time the source produces a
         /// value. If the function returns None then no value will be
@@ -25,10 +25,10 @@ pub enum Source {
     },
 }
 
-impl fmt::Display for Source {
+impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Source::Constant(v) => match v {
+            Expr::Constant(v) => match v {
                 Value::U32(v) => write!(f, "u32:{}", v),
                 Value::V32(v) => write!(f, "v32:{}", v),
                 Value::I32(v) => write!(f, "i32:{}", v),
@@ -76,15 +76,15 @@ impl fmt::Display for Source {
                     )
                 }
             },
-            Source::Load(s) => write!(f, r#"load_path({})"#, s),
-            Source::Variable(s) => write!(f, "load_var({})", s),
-            Source::Map { from, function } => {
+            Expr::Load(s) => write!(f, r#"load_path({})"#, s),
+            Expr::Variable(s) => write!(f, "load_var({})", s),
+            Expr::Map { from, function } => {
                 if function == "string_concat" { // it's an interpolation
                     write!(f, "\"")?;
                     for s in from {
                         write!(f, "[{}]", s)?;
                     }
-                    write!(f, "\"")?;
+                    write!(f, "\"")
                 } else { // it's a normal function
                     write!(f, "{}(", function)?;
                     for i in 0..from.len() {
@@ -100,74 +100,18 @@ impl fmt::Display for Source {
     }
 }
 
-impl FromStr for Source {
+impl FromStr for Expr {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::parse_source(s)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum StoreTarget {
-    Path(Path),
-    Variable(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum Sink {
-    Store(StoreTarget),
-    Variable(String),
-    Navigate,
-    All(Vec<Sink>),
-    Confirm(boxed::Box<Sink>),
-}
-
-impl fmt::Display for Sink {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Sink::Store(tgt) => match tgt {
-                StoreTarget::Path(p) => {
-                    write!(
-                        f,
-                        r#"store_path("{}")"#,
-                        utils::escape(&*p, '\\', &parser::PATH_ESC)
-                    )
-                }
-                StoreTarget::Variable(v) => {
-                    write!(f, r#"store_path({})"#, &*v)
-                }
-            },
-            Sink::Variable(v) => write!(f, "store_var({})", v),
-            Sink::Navigate => write!(f, "navigate()"),
-            Sink::Confirm(sink) => write!(f, "confirm({})", sink),
-            Sink::All(sinks) => {
-                write!(f, "all(")?;
-                for i in 0..sinks.len() {
-                    write!(f, "{}", &sinks[i])?;
-                    if i < sinks.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, ")")
-            }
-        }
-    }
-}
-
-impl FromStr for Sink {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::parse_sink(s)
+        parser::parse_expr(s)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keybind {
     pub key: String,
-    pub source: Source,
-    pub sink: Sink,
+    pub action: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -178,8 +122,7 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
-    pub source: Source,
-    pub sink: Sink,
+    pub action: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -204,33 +147,32 @@ pub struct Table {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Button {
-    pub enabled: Source,
-    pub label: Source,
-    pub source: Source,
-    pub sink: Sink,
+    pub enabled: Expr,
+    pub label: Expr,
+    pub on_click: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toggle {
-    pub enabled: Source,
-    pub source: Source,
-    pub sink: Sink,
+    pub enabled: Expr,
+    pub value: Expr,
+    pub on_change: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Selector {
-    pub enabled: Source,
-    pub choices: Source,
-    pub source: Source,
-    pub sink: Sink,
+    pub enabled: Expr,
+    pub choices: Expr,
+    pub selected: Expr,
+    pub on_change: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
-    pub enabled: Source,
-    pub visible: Source,
-    pub source: Source,
-    pub sink: Sink,
+    pub enabled: Expr,
+    pub visible: Expr,
+    pub text: Expr,
+    pub on_change: Expr,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
@@ -295,8 +237,8 @@ pub struct RGB {
 pub struct Series {
     pub title: String,
     pub line_color: RGB,
-    pub x: Source,
-    pub y: Source,
+    pub x: Expr,
+    pub y: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,11 +253,11 @@ pub struct LinePlot {
     pub fill: Option<RGB>,
     pub margin: u32,
     pub label_area: u32,
-    pub x_min: Source,
-    pub x_max: Source,
-    pub y_min: Source,
-    pub y_max: Source,
-    pub keep_points: Source,
+    pub x_min: Expr,
+    pub x_max: Expr,
+    pub y_min: Expr,
+    pub y_max: Expr,
+    pub keep_points: Expr,
     pub series: Vec<Series>,
 }
 
@@ -323,7 +265,7 @@ pub struct LinePlot {
 pub enum WidgetKind {
     Action(Action),
     Table(Table),
-    Label(Source),
+    Label(Expr),
     Button(Button),
     Toggle(Toggle),
     Selector(Selector),
@@ -423,42 +365,21 @@ mod tests {
         }
     }
 
-    fn store_target() -> impl Strategy<Value = StoreTarget> {
-        prop_oneof![
-            path().prop_map(StoreTarget::Path),
-            fname().prop_map(StoreTarget::Variable)
-        ]
-    }
-
-    fn sink() -> impl Strategy<Value = Sink> {
-        let leaf = prop_oneof![
-            store_target().prop_map(Sink::Store),
-            fname().prop_map(Sink::Variable),
-            Just(Sink::Navigate),
-        ];
+    fn expr() -> impl Strategy<Value = Expr> {
+        let leaf = value().prop_map(Expr::Constant);
         leaf.prop_recursive(100, 1000000, 10, |inner| {
             prop_oneof![
-                collection::vec(inner.clone(), (1, 10)).prop_map(Sink::All),
-                inner.prop_map(|s| Sink::Confirm(boxed::Box::new(s)))
-            ]
-        })
-    }
-
-    fn source() -> impl Strategy<Value = Source> {
-        let leaf = value().prop_map(Source::Constant);
-        leaf.prop_recursive(100, 1000000, 10, |inner| {
-            prop_oneof![
-                inner.clone().prop_map(|s| Source::Load(boxed::Box::new(s))),
-                inner.clone().prop_map(|s| Source::Variable(boxed::Box::new(s))),
+                inner.clone().prop_map(|s| Expr::Load(boxed::Box::new(s))),
+                inner.clone().prop_map(|s| Expr::Variable(boxed::Box::new(s))),
                 (collection::vec(inner, (0, 10)), fname())
-                    .prop_map(|(s, f)| { Source::Map { function: f, from: s } })
+                    .prop_map(|(s, f)| { Expr::Map { function: f, from: s } })
             ]
         })
     }
 
-    fn check(s0: &Source, s1: &Source) -> bool {
+    fn check(s0: &Expr, s1: &Expr) -> bool {
         match (s0, s1) {
-            (Source::Constant(v0), Source::Constant(v1)) => match (v0, v1) {
+            (Expr::Constant(v0), Expr::Constant(v1)) => match (v0, v1) {
                 (Value::Duration(d0), Value::Duration(d1)) => {
                     let f0 = d0.as_secs_f64();
                     let f1 = d1.as_secs_f64();
@@ -468,11 +389,11 @@ mod tests {
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
                 (v0, v1) => v0 == v1,
             },
-            (Source::Load(s0), Source::Load(s1)) => check(&*s0, &*s1),
-            (Source::Variable(s0), Source::Variable(s1)) => check(&*s0, &*s1),
+            (Expr::Load(s0), Expr::Load(s1)) => check(&*s0, &*s1),
+            (Expr::Variable(s0), Expr::Variable(s1)) => check(&*s0, &*s1),
             (
-                Source::Map { from: srs0, function: f0 },
-                Source::Map { from: srs1, function: f1 },
+                Expr::Map { from: srs0, function: f0 },
+                Expr::Map { from: srs1, function: f1 },
             ) if f0 == f1 && srs0.len() == srs1.len() => {
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }
@@ -482,13 +403,8 @@ mod tests {
 
     proptest! {
         #[test]
-        fn sink_round_trip(s in sink()) {
-            assert_eq!(dbg!(&s), &dbg!(s.to_string()).parse::<Sink>().unwrap());
-        }
-
-        #[test]
-        fn source_round_trip(s in source()) {
-            assert!(check(dbg!(&s), &dbg!(s.to_string()).parse::<Source>().unwrap()))
+        fn expr_round_trip(s in expr()) {
+            assert!(check(dbg!(&s), &dbg!(s.to_string()).parse::<Expr>().unwrap()))
         }
     }
 }
