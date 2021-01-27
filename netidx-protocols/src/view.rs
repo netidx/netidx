@@ -7,22 +7,10 @@ use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
 pub enum Expr {
     Constant(Value),
     Load(boxed::Box<Expr>),
-    Variable(boxed::Box<Expr>),
-    Map {
-        /// the sources we are mapping from
-        from: Vec<Expr>,
-        /// the name of the built-in 'Value -> Option Value' function
-        /// that will be called each time the source produces a
-        /// value. If the function returns None then no value will be
-        /// produced by the source, otherwise the returned value will
-        /// be produced. You must define the function in one of the
-        /// scripts imported by the view. Note, if the wrapped source
-        /// is a group, and the function is an aggregate function then
-        /// it will operate on all the values (e.g. sum, mean, ewma,
-        /// etc ...), otherwise it will operate on the first value in
-        /// the group to update.
-        function: String,
-    },
+    Store(boxed::Box<Expr>, boxed::Box<Expr>),
+    LoadVar(boxed::Box<Expr>),
+    StoreVar(boxed::Box<Expr>, boxed::Box<Expr>),
+    Apply { args: Vec<Expr>, function: String },
 }
 
 impl fmt::Display for Expr {
@@ -76,20 +64,24 @@ impl fmt::Display for Expr {
                     )
                 }
             },
-            Expr::Load(s) => write!(f, r#"load_path({})"#, s),
-            Expr::Variable(s) => write!(f, "load_var({})", s),
-            Expr::Map { from, function } => {
-                if function == "string_concat" && from.len() > 0 { // interpolation
+            Expr::Load(s) => write!(f, r#"load({})"#, s),
+            Expr::Store(tgt, e) => write!(f, r#"store({}, {})"#, tgt, e),
+            Expr::LoadVar(s) => write!(f, "load_var({})", s),
+            Expr::StoreVar(tgt, e) => write!(f, "store_var({}, {})", tgt, e),
+            Expr::Apply { args, function } => {
+                if function == "string_concat" && args.len() > 0 {
+                    // interpolation
                     write!(f, "\"")?;
-                    for s in from {
+                    for s in args {
                         write!(f, "[{}]", s)?;
                     }
                     write!(f, "\"")
-                } else { // it's a normal function
+                } else {
+                    // it's a normal function
                     write!(f, "{}(", function)?;
-                    for i in 0..from.len() {
-                        write!(f, "{}", &from[i])?;
-                        if i < from.len() - 1 {
+                    for i in 0..args.len() {
+                        write!(f, "{}", &args[i])?;
+                        if i < args.len() - 1 {
                             write!(f, ", ")?;
                         }
                     }
@@ -362,7 +354,7 @@ mod tests {
     }
 
     fn valid_fname() -> impl Strategy<Value = String> {
-        prop_oneof! [
+        prop_oneof![
             Just(String::from("any")),
             Just(String::from("all")),
             Just(String::from("sum")),
@@ -392,20 +384,25 @@ mod tests {
     }
 
     fn fname() -> impl Strategy<Value = String> {
-        prop_oneof! [
-            random_fname(),
-            valid_fname(),
-        ]
+        prop_oneof![random_fname(), valid_fname(),]
     }
-    
+
     fn expr() -> impl Strategy<Value = Expr> {
         let leaf = value().prop_map(Expr::Constant);
         leaf.prop_recursive(100, 1000000, 10, |inner| {
             prop_oneof![
                 inner.clone().prop_map(|s| Expr::Load(boxed::Box::new(s))),
-                inner.clone().prop_map(|s| Expr::Variable(boxed::Box::new(s))),
+                (inner.clone(), inner.clone()).prop_map(|(t, e)| Expr::Store(
+                    boxed::Box::new(t),
+                    boxed::Box::new(e)
+                )),
+                inner.clone().prop_map(|s| Expr::LoadVar(boxed::Box::new(s))),
+                (inner.clone(), inner.clone()).prop_map(|(t, e)| Expr::StoreVar(
+                    boxed::Box::new(t),
+                    boxed::Box::new(e)
+                )),
                 (collection::vec(inner, (0, 10)), fname())
-                    .prop_map(|(s, f)| { Expr::Map { function: f, from: s } })
+                    .prop_map(|(s, f)| { Expr::Apply { function: f, args: s } })
             ]
         })
     }
@@ -423,10 +420,14 @@ mod tests {
                 (v0, v1) => v0 == v1,
             },
             (Expr::Load(s0), Expr::Load(s1)) => check(&*s0, &*s1),
-            (Expr::Variable(s0), Expr::Variable(s1)) => check(&*s0, &*s1),
+            (Expr::Store(t0, e0), Expr::Store(t1, e1)) => check(t0, t1) && check(t1, e1),
+            (Expr::LoadVar(s0), Expr::LoadVar(s1)) => check(&*s0, &*s1),
+            (Expr::StoreVar(t0, e0), Expr::StoreVar(t1, e1)) => {
+                check(t0, t1) && check(t1, e1)
+            }
             (
-                Expr::Map { from: srs0, function: f0 },
-                Expr::Map { from: srs1, function: f1 },
+                Expr::Apply { args: srs0, function: f0 },
+                Expr::Apply { args: srs1, function: f1 },
             ) if f0 == f1 && srs0.len() == srs1.len() => {
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }

@@ -164,19 +164,22 @@ where
                 .fold(None, |src, tok| -> Option<Expr> {
                     match (src, tok) {
                         (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                        (None, Intp::Expr(s)) => Some(Expr::Map {
-                            from: vec![s],
+                        (None, Intp::Expr(s)) => Some(Expr::Apply {
+                            args: vec![s],
                             function: "string_concat".into(),
                         }),
-                        (Some(src @ Expr::Constant(_)), s) => Some(Expr::Map {
-                            from: vec![src, s.to_expr()],
+                        (Some(src @ Expr::Constant(_)), s) => Some(Expr::Apply {
+                            args: vec![src, s.to_expr()],
                             function: "string_concat".into(),
                         }),
-                        (Some(Expr::Map { mut from, function }), s) => {
-                            from.push(s.to_expr());
-                            Some(Expr::Map { from, function })
+                        (Some(Expr::Apply { mut args, function }), s) => {
+                            args.push(s.to_expr());
+                            Some(Expr::Apply { args, function })
                         }
-                        (Some(Expr::Load(_)), _) | (Some(Expr::Variable(_)), _) => {
+                        (Some(Expr::Load(_)), _)
+                        | (Some(Expr::LoadVar(_)), _)
+                        | (Some(Expr::Store(_, _)), _)
+                        | (Some(Expr::StoreVar(_, _)), _) => {
                             unreachable!()
                         }
                     }
@@ -296,24 +299,6 @@ where
                     Expr::Constant(Value::Duration(d))
                 }),
         ),
-        attempt(
-            string("load_path")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    expr(),
-                ))
-                .map(|s| Expr::Load(Box::new(s))),
-        ),
-        attempt(
-            string("load_var")
-                .with(between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    expr(),
-                ))
-                .map(|s| Expr::Variable(Box::new(s))),
-        ),
         (
             fname(),
             between(
@@ -322,7 +307,43 @@ where
                 spaces().with(sep_by(expr(), spaces().with(token(',')))),
             ),
         )
-            .map(|(function, from)| Expr::Map { function, from }),
+            .then(|(function, mut args): (String, Vec<Expr>)| {
+                match function.as_str() {
+                    "load_path" => {
+                        if args.len() != 1 {
+                            unexpected_any("load_path: expected 1 argument").right()
+                        } else {
+                            value(Expr::Load(Box::new(args.pop().unwrap()))).left()
+                        }
+                    }
+                    "store_path" => {
+                        if args.len() != 2 {
+                            unexpected_any("store_path: expected 2 arguments").right()
+                        } else {
+                            let e = Box::new(args.pop().unwrap());
+                            let tgt = Box::new(args.pop().unwrap());
+                            value(Expr::Store(tgt, e)).left()
+                        }
+                    }
+                    "load_var" => {
+                        if args.len() != 1 {
+                            unexpected_any("load_var: expected 1 argument").right()
+                        } else {
+                            value(Expr::LoadVar(Box::new(args.pop().unwrap()))).left()
+                        }
+                    }
+                    "store_var" => {
+                        if args.len() != 2 {
+                            unexpected_any("store_var: expected 2 arguments").right()
+                        } else {
+                            let e = Box::new(args.pop().unwrap());
+                            let tgt = Box::new(args.pop().unwrap());
+                            value(Expr::StoreVar(tgt, e)).left()
+                        }
+                    }
+                    _ => value(Expr::Apply { function, args }).left(),
+                }
+            }),
     )))
 }
 
