@@ -12,7 +12,7 @@ use combine::{
     },
     sep_by,
     stream::{position, Range},
-    token, EasyParser, ParseError, Parser, RangeStream,
+    token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
 use netidx::{chars::Chars, publisher::Value, utils};
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
@@ -147,8 +147,16 @@ where
             token('"'),
             token('"'),
             many(choice((
-                attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
-                escaped_string().map(Intp::Lit),
+                attempt(between(token('['), token(']'), expr())).map(Intp::Expr),
+                escaped_string()
+                    .then(|s| {
+                        if s.is_empty() {
+                            unexpected_any("empty string").right()
+                        } else {
+                            value(s).left()
+                        }
+                    })
+                    .map(Intp::Lit),
             ))),
         ))
         .map(|toks: Vec<Intp>| {
@@ -201,8 +209,7 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(quoted()).map(|v| Expr::Constant(Value::from(v))),
-        //attempt(interpolated()),
+        attempt(interpolated()),
         attempt(from_str(flt()).map(|v| Expr::Constant(Value::F64(v)))),
         attempt(from_str(int()).map(|v| Expr::Constant(Value::I64(v)))),
         attempt(
@@ -398,6 +405,16 @@ mod tests {
             Expr::Load(Box::new(Expr::Constant(Value::String(p)))),
             parse_expr(s).unwrap()
         );
+        let p = Expr::Map {
+            from: vec![
+                Expr::Constant(Value::from("/foo/")),
+                Expr::Variable(Box::new(Expr::Constant(Value::from("sid")))),
+                Expr::Constant(Value::from("/baz")),
+            ],
+            function: "string_concat".into(),
+        };
+        let s = r#""/foo/[load_var("sid")]/baz""#;
+        assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"load_path(concat_path("foo", "bar", load_var("baz")))"#;
         assert_eq!(
             Expr::Load(Box::new(Expr::Map {
