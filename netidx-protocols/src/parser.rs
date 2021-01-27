@@ -147,7 +147,7 @@ where
             token('"'),
             token('"'),
             many(choice((
-                attempt(between(token('['), token(']'), expr())).map(Intp::Expr),
+                attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
                 escaped_string()
                     .then(|s| {
                         if s.is_empty() {
@@ -214,17 +214,17 @@ where
         attempt(from_str(int()).map(|v| Expr::Constant(Value::I64(v)))),
         attempt(
             string("true")
-                .skip(not_followed_by(none_of(" ),".chars())))
+                .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Expr::Constant(Value::True)),
         ),
         attempt(
             string("false")
-                .skip(not_followed_by(none_of(" ),".chars())))
+                .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Expr::Constant(Value::False)),
         ),
         attempt(
             string("null")
-                .skip(not_followed_by(none_of(" ),".chars())))
+                .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Expr::Constant(Value::Null)),
         ),
         attempt(
@@ -264,7 +264,7 @@ where
         ),
         attempt(
             string("ok")
-                .skip(not_followed_by(none_of(" ),".chars())))
+                .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Expr::Constant(Value::Ok)),
         ),
         attempt(
@@ -411,7 +411,7 @@ mod tests {
                 Expr::Variable(Box::new(Expr::Map {
                     from: vec![
                         Expr::Variable(Box::new(Expr::Constant(Value::from("sid")))),
-                        Expr::Constant(Value::from("_var"))
+                        Expr::Constant(Value::from("_var")),
                     ],
                     function: "string_concat".into(),
                 })),
@@ -420,6 +420,27 @@ mod tests {
             function: "string_concat".into(),
         }));
         let s = r#"load_path("/foo/[load_var("[load_var("sid")]_var")]/baz")"#;
+        assert_eq!(p, parse_expr(s).unwrap());
+        let s = r#""[true]""#;
+        let p = Expr::Map {
+            from: vec![Expr::Constant(Value::True)],
+            function: "string_concat".into(),
+        };
+        assert_eq!(p, parse_expr(s).unwrap());
+        let s = r#"a(a(a(load_var("[true]"))))"#;
+        let p = Expr::Map {
+            from: vec![Expr::Map {
+                from: vec![Expr::Map {
+                    from: vec![Expr::Variable(Box::new(Expr::Map {
+                        from: vec![Expr::Constant(Value::True)],
+                        function: "string_concat".into(),
+                    }))],
+                    function: "a".into(),
+                }],
+                function: "a".into(),
+            }],
+            function: "a".into(),
+        };
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"load_path(concat_path("foo", "bar", load_var("baz")))"#;
         assert_eq!(

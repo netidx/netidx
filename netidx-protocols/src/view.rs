@@ -79,7 +79,7 @@ impl fmt::Display for Expr {
             Expr::Load(s) => write!(f, r#"load_path({})"#, s),
             Expr::Variable(s) => write!(f, "load_var({})", s),
             Expr::Map { from, function } => {
-                if function == "string_concat" { // it's an interpolation
+                if function == "string_concat" && from.len() > 0 { // interpolation
                     write!(f, "\"")?;
                     for s in from {
                         write!(f, "[{}]", s)?;
