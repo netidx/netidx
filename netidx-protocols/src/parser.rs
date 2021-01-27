@@ -405,15 +405,21 @@ mod tests {
             Expr::Load(Box::new(Expr::Constant(Value::String(p)))),
             parse_expr(s).unwrap()
         );
-        let p = Expr::Map {
+        let p = Expr::Load(Box::new(Expr::Map {
             from: vec![
                 Expr::Constant(Value::from("/foo/")),
-                Expr::Variable(Box::new(Expr::Constant(Value::from("sid")))),
+                Expr::Variable(Box::new(Expr::Map {
+                    from: vec![
+                        Expr::Variable(Box::new(Expr::Constant(Value::from("sid")))),
+                        Expr::Constant(Value::from("_var"))
+                    ],
+                    function: "string_concat".into(),
+                })),
                 Expr::Constant(Value::from("/baz")),
             ],
             function: "string_concat".into(),
-        };
-        let s = r#""/foo/[load_var("sid")]/baz""#;
+        }));
+        let s = r#"load_path("/foo/[load_var("[load_var("sid")]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"load_path(concat_path("foo", "bar", load_var("baz")))"#;
         assert_eq!(

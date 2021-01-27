@@ -354,13 +354,50 @@ mod tests {
     }
 
     prop_compose! {
-        fn fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
+        fn random_fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
             s != "ok" && s != "true" && s != "false" && s != "null"
         })) -> String {
             s
         }
     }
 
+    fn valid_fname() -> impl Strategy<Value = String> {
+        prop_oneof! [
+            Just(String::from("any")),
+            Just(String::from("all")),
+            Just(String::from("sum")),
+            Just(String::from("product")),
+            Just(String::from("divide")),
+            Just(String::from("mean")),
+            Just(String::from("min")),
+            Just(String::from("max")),
+            Just(String::from("and")),
+            Just(String::from("or")),
+            Just(String::from("not")),
+            Just(String::from("cmp")),
+            Just(String::from("if")),
+            Just(String::from("filter")),
+            Just(String::from("cast")),
+            Just(String::from("isa")),
+            Just(String::from("eval")),
+            Just(String::from("count")),
+            Just(String::from("sample")),
+            Just(String::from("string_join")),
+            Just(String::from("string_concat")),
+            Just(String::from("store_var")),
+            Just(String::from("store_path")),
+            Just(String::from("navigate")),
+            Just(String::from("confirm")),
+        ]
+    }
+
+    fn fname() -> impl Strategy<Value = String> {
+        prop_oneof! [
+            random_fname(),
+            valid_fname(),
+        ]
+    }
+    
     fn expr() -> impl Strategy<Value = Expr> {
         let leaf = value().prop_map(Expr::Constant);
         leaf.prop_recursive(100, 1000000, 10, |inner| {
