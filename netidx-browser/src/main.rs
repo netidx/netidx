@@ -56,6 +56,7 @@ use util::{ask_modal, err_modal};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
+type Vars = Rc<RefCell<HashMap<Chars, Value>>>;
 
 #[derive(Debug, Clone, Copy)]
 enum WidgetPath {
@@ -165,20 +166,22 @@ enum Expr {
         spec: view::Expr,
         queued: RefCell<Vec<Value>>,
         tgt: Box<Expr>,
-        value: Box<Expr>,
+        val: Box<Expr>,
         ctx: WidgetCtx,
         dv: RefCell<Option<Dval>>,
     },
     LoadVar {
         spec: view::Expr,
         from: Box<Expr>,
-        name: Rc<RefCell<Option<String>>>,
-        variables: Rc<RefCell<HashMap<String, Value>>>,
+        name: Rc<RefCell<Option<Chars>>>,
+        variables: Vars,
     },
     StoreVar {
         spec: view::Expr,
         tgt: Box<Expr>,
-        value: Box<Expr>,
+        val: Box<Expr>,
+        variables: Vars,
+        ctx: WidgetCtx,
     },
     Apply {
         spec: view::Expr,
@@ -202,12 +205,7 @@ impl fmt::Display for Expr {
 }
 
 impl Expr {
-    fn new(
-        ctx: &WidgetCtx,
-        // CR estokes: move this into WidgetCtx?
-        variables: Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::Expr,
-    ) -> Self {
+    fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
         match &spec {
             view::Expr::Constant(v) => Expr::Constant(spec, v.clone()),
             view::Expr::Load(s) => {
@@ -221,11 +219,57 @@ impl Expr {
                 let cur = Rc::new(RefCell::new(dv));
                 Expr::Load { spec, from, cur, ctx: ctx.clone() }
             }
+            view::Expr::Store(tgt, val) => {
+                let tgt = Expr::new(ctx, variables.clone(), view::Expr::clone(&tgt));
+                let val = Expr::new(ctx, variables.clone(), view::Expr::clone(&val));
+                let dv =
+                    tgt.current().and_then(|v| v.cast_to::<String>().ok()).map(|s| {
+                        let dv = ctx.subscriber.durable_subscribe(Path::from(s));
+                        dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.updates.clone());
+                        dv
+                    });
+                let mut queued = Vec::new();
+                match (&dv, val.current()) {
+                    (Some(dv), Some(v)) => {
+                        dv.write(v);
+                    }
+                    (None, Some(v)) => {
+                        queued.push(v);
+                    }
+                    (Some(_), None) | (None, None) => (),
+                }
+                Expr::Store {
+                    spec,
+                    queued: RefCell::new(queued),
+                    tgt: Box::new(tgt),
+                    val: Box::new(val),
+                    ctx: ctx.clone(),
+                    dv: RefCell::new(dv),
+                }
+            }
             view::Expr::LoadVar(s) => {
                 let from = Expr::new(ctx, variables.clone(), view::Expr::clone(&s));
-                let name = from.current().and_then(|v| v.cast_to::<String>().ok());
-                let name = Rc::new(RefCell::new(name));
+                let name = Rc::new(RefCell::new(
+                    from.current().and_then(|v| v.cast_to::<Chars>().ok()),
+                ));
                 Expr::LoadVar { spec, from: Box::new(from), name, variables }
+            }
+            view::Expr::StoreVar(tgt, val) => {
+                let tgt = Expr::new(ctx, variables.clone(), view::Expr::clone(&tgt));
+                let val = Expr::new(ctx, variables.clone(), view::Expr::clone(&val));
+                if let Some(n) = tgt.current().and_then(|v| v.cast_to::<String>().ok()) {
+                    if let Some(v) = val.current() {
+                        variables.borrow_mut().insert(n.clone(), v.clone());
+                        ctx.to_gui.send(ToGui::UpdateVar(n, v));
+                    }
+                }
+                Expr::StoreVar {
+                    spec,
+                    tgt: Box::new(tgt),
+                    val: Box::new(val),
+                    variables: variables.clone(),
+                    ctx: ctx.clone(),
+                }
             }
             view::Expr::Apply { args, function } => {
                 let args: Vec<Expr> = args
@@ -241,47 +285,51 @@ impl Expr {
 
     fn current(&self) -> Option<Value> {
         match self {
-            Source::Constant(_, v) => Some(v.clone()),
-            Source::Load { cur, .. } => match cur.borrow().as_ref().map(|dv| dv.last()) {
+            Expr::Constant(_, v) => Some(v.clone()),
+            Expr::Load { cur, .. } => match cur.borrow().as_ref().map(|dv| dv.last()) {
                 None | Some(Event::Unsubscribed) => None,
                 Some(Event::Update(v)) => Some(v),
             },
-            Source::Variable { name, variables, .. } => {
-                name.borrow().as_ref().and_then(|n| variables.borrow().get(&*n).cloned())
+            Expr::Store { .. } => None,
+            Expr::LoadVar { name, variables, .. } => {
+                name.borrow().as_ref().and_then(|n| variables.borrow().get(&**n).cloned())
             }
-            Source::Map { spec: _, from: _, function } => function.current(),
+            Expr::StoreVar { .. } => None,
+            Expr::Apply { spec: _, args: _, function } => function.current(),
         }
     }
 
     fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
-            Source::Constant(_, _) => None,
-            Source::Variable { from, name, variables, .. } => match from
-                .update(tgt, value)
-            {
-                None => match tgt {
-                    Target::Netidx(_) => None,
-                    Target::Variable(n) => {
-                        if name.borrow().as_ref().map(|s| s.as_str()) != Some(n) {
-                            None
-                        } else {
-                            variables.borrow_mut().insert(String::from(n), value.clone());
-                            Some(value.clone())
+            Expr::Constant(_, _) => None,
+            Expr::LoadVar { from, name, variables, .. } => {
+                match from.update(tgt, value) {
+                    None => match tgt {
+                        Target::Netidx(_) => None,
+                        Target::Variable(n) => match &*name.borrow() {
+                            None => None,
+                            Some(name) if &**name == n => {
+                                variables
+                                    .borrow_mut()
+                                    .insert(String::from(&**name), value.clone());
+                                Some(value.clone())
+                            }
+                            Some(_) => None,
+                        },
+                    },
+                    Some(v) => match v.cast_to::<String>() {
+                        Ok(s) => {
+                            let res = variables.borrow().get(&s).cloned();
+                            *name.borrow_mut() = Some(s);
+                            res
                         }
-                    }
-                },
-                Some(v) => match v.cast_to::<String>() {
-                    Ok(s) => {
-                        let res = variables.borrow().get(&s).cloned();
-                        *name.borrow_mut() = Some(s);
-                        res
-                    }
-                    Err(_) => {
-                        *name.borrow_mut() = None;
-                        None
-                    }
-                },
-            },
+                        Err(_) => {
+                            *name.borrow_mut() = None;
+                            None
+                        }
+                    },
+                }
+            }
             Source::Map { spec: _, from, function } => function.update(from, tgt, value),
             Source::Load { from, cur, ctx, .. } => match from.update(tgt, value) {
                 None => match tgt {
@@ -323,7 +371,7 @@ enum Sink {
     IndirectStore {
         spec: view::Sink,
         queued: RefCell<Vec<Value>>,
-        variables: Rc<RefCell<HashMap<String, Value>>>,
+        variables: Vars,
         ctx: WidgetCtx,
         dv: RefCell<Option<Dval>>,
     },
@@ -348,11 +396,7 @@ impl fmt::Display for Sink {
 }
 
 impl Sink {
-    fn new(
-        ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::Sink,
-    ) -> Self {
+    fn new(ctx: &WidgetCtx, variables: &Vars, spec: view::Sink) -> Self {
         match &spec {
             view::Sink::Variable(name) => {
                 let name = name.clone();
@@ -516,7 +560,7 @@ enum Widget {
 impl Widget {
     fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Widget,
         selected_path: gtk::Label,
     ) -> Widget {
@@ -767,7 +811,7 @@ struct View {
 impl View {
     fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         path: &ViewLoc,
         saved: &Rc<Cell<bool>>,
         spec: view::View,
@@ -1269,8 +1313,7 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
-    let variables: Rc<RefCell<HashMap<String, Value>>> =
-        Rc::new(RefCell::new(HashMap::new()));
+    let variables: Vars = Rc::new(RefCell::new(HashMap::new()));
     ctx.window.connect_delete_event(clone!(
         @weak ctx,
         @strong saved => @default-return Inhibit(false), move |w, _| {
