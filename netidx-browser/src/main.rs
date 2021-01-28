@@ -91,7 +91,7 @@ enum ToGui {
     },
     Highlight(Vec<WidgetPath>),
     Update(Batch),
-    UpdateVar(String, Value),
+    UpdateVar(Chars, Value),
     TryNavigate(Value),
     ShowError(String),
     SaveError(String),
@@ -178,8 +178,10 @@ enum Expr {
     },
     StoreVar {
         spec: view::Expr,
+        queued: RefCell<Vec<Value>>,
         tgt: Box<Expr>,
         val: Box<Expr>,
+        name: Rc<RefCell<Option<Chars>>>,
         variables: Vars,
         ctx: WidgetCtx,
     },
@@ -257,16 +259,24 @@ impl Expr {
             view::Expr::StoreVar(tgt, val) => {
                 let tgt = Expr::new(ctx, variables.clone(), view::Expr::clone(&tgt));
                 let val = Expr::new(ctx, variables.clone(), view::Expr::clone(&val));
-                if let Some(n) = tgt.current().and_then(|v| v.cast_to::<String>().ok()) {
-                    if let Some(v) = val.current() {
+                let name = tgt.current().and_then(|v| v.cast_to::<Chars>().ok());
+                let mut queued = Vec::new();
+                match (&name, val.current()) {
+                    (Some(n), Some(v)) => {
                         variables.borrow_mut().insert(n.clone(), v.clone());
-                        ctx.to_gui.send(ToGui::UpdateVar(n, v));
+                        ctx.to_gui.send(ToGui::UpdateVar(n.clone(), v));
                     }
+                    (None, Some(v)) => {
+                        queued.push(v);
+                    }
+                    (Some(_), None) | (None, None) => (),
                 }
                 Expr::StoreVar {
                     spec,
+                    queued: RefCell::new(queued),
                     tgt: Box::new(tgt),
                     val: Box::new(val),
+                    name: Rc::new(RefCell::new(name)),
                     variables: variables.clone(),
                     ctx: ctx.clone(),
                 }
@@ -311,27 +321,56 @@ impl Expr {
                             Some(name) if &**name == n => {
                                 variables
                                     .borrow_mut()
-                                    .insert(String::from(&**name), value.clone());
+                                    .insert(name.clone(), value.clone());
                                 Some(value.clone())
                             }
                             Some(_) => None,
                         },
                     },
-                    Some(v) => match v.cast_to::<String>() {
-                        Ok(s) => {
-                            let res = variables.borrow().get(&s).cloned();
+                    Some(v) => match v.cast_to::<Chars>() {
+                        Ok(s) if Some(&s) != name.borrow().as_ref() => {
+                            let res = variables.borrow().get(&*s).cloned();
                             *name.borrow_mut() = Some(s);
                             res
                         }
-                        Err(_) => {
+                        Ok(_) | Err(_) => {
                             *name.borrow_mut() = None;
                             None
                         }
                     },
                 }
             }
-            Source::Map { spec: _, from, function } => function.update(from, tgt, value),
-            Source::Load { from, cur, ctx, .. } => match from.update(tgt, value) {
+            Expr::StoreVar { tgt: to, queued, val, name, variables, ctx, .. } => match to
+                .update(tgt, value)
+            {
+                None => match val.update(tgt, value) {
+                    None => None,
+                    Some(v) => match name.borrow().as_ref() {
+                        None => {
+                            queued.borrow_mut().push(v.clone());
+                            None
+                        }
+                        Some(name) => {
+                            variables.borrow_mut().insert(name.clone(), v.clone());
+                            ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v.clone()));
+                            None
+                        }
+                    },
+                },
+                Some(v) => match v.cast_to::<Chars>() {
+                    Ok(n) if Some(&n) != name.borrow().as_ref() => {
+                        for v in queued.borrow_mut().drain(..) {
+                            variables.borrow_mut().insert(n.clone(), v.clone());
+                            ctx.to_gui.send(ToGui::UpdateVar(n.clone(), v));
+                        }
+                        *name.borrow_mut() = Some(n);
+                        None
+                    }
+                    Ok(_) | Err(_) => None
+                },
+            },
+            Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),
+            Expr::Load { from, cur, ctx, .. } => match from.update(tgt, value) {
                 None => match tgt {
                     Target::Variable(_) => None,
                     Target::Netidx(id) => {
