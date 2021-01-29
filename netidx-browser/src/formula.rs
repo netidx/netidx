@@ -9,9 +9,9 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
     collections::HashMap,
+    ops::Deref,
     rc::Rc,
     result::Result,
-    ops::Deref,
 };
 
 #[derive(Debug, Clone)]
@@ -634,16 +634,18 @@ impl Store {
                 self.invalid.set(true);
                 None
             }
-            None => None
+            None => None,
         };
         match (path, val) {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
-                None => {self.queued.borrow_mut().push(v); }
+                None => {
+                    self.queued.borrow_mut().push(v);
+                }
                 Some(dv) => {
                     dv.write(v);
                 }
-            }
+            },
             (Some(p), val) => {
                 let dv = self.ctx.subscriber.durable_subscribe(Path::from(p));
                 dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
@@ -686,7 +688,7 @@ impl Store {
 
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
-    Any(RefCell<Option<Value>>),
+    Any(Rc<RefCell<Option<Value>>>),
     All(All),
     Sum(CachedVals),
     Product(CachedVals),
@@ -742,7 +744,9 @@ impl Formula {
         from: &[Expr],
     ) -> Formula {
         match name {
-            "any" => Formula::Any(RefCell::new(from.iter().find_map(|s| s.current()))),
+            "any" => {
+                Formula::Any(Rc::new(RefCell::new(from.iter().find_map(|s| s.current()))))
+            }
             "all" => Formula::All(All::new(from)),
             "sum" => Formula::Sum(CachedVals::new(from)),
             "product" => Formula::Product(CachedVals::new(from)),
@@ -762,6 +766,7 @@ impl Formula {
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
+            "store" => Formula::Store(Store::new(ctx, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -788,6 +793,7 @@ impl Formula {
             Formula::Count(c) => c.eval(),
             Formula::Sample(c) => c.eval(),
             Formula::StringJoin(c) => eval_string_join(c),
+            Formula::Store(s) => s.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -833,6 +839,7 @@ impl Formula {
             Formula::StringJoin(c) => {
                 update_cached(eval_string_join, c, from, tgt, value)
             }
+            Formula::Store(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
