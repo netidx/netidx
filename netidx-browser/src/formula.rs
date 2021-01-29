@@ -1,7 +1,8 @@
 use super::{Expr, Target, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
-    subscriber::{Typ, Value},
+    path::Path,
+    subscriber::{Dval, Typ, UpdatesFlags, Value},
 };
 use netidx_protocols::view;
 use std::{
@@ -10,6 +11,7 @@ use std::{
     collections::HashMap,
     rc::Rc,
     result::Result,
+    ops::Deref,
 };
 
 #[derive(Debug, Clone)]
@@ -590,6 +592,98 @@ fn update_cached(
     }
 }
 
+#[derive(Debug)]
+struct StoreInner {
+    queued: RefCell<Vec<Value>>,
+    ctx: WidgetCtx,
+    dv: RefCell<Option<Dval>>,
+    invalid: Cell<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct Store(Rc<StoreInner>);
+
+impl Deref for Store {
+    type Target = StoreInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Store {
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
+        let t = Store(Rc::new(StoreInner {
+            queued: RefCell::new(Vec::new()),
+            ctx: ctx.clone(),
+            dv: RefCell::new(None),
+            invalid: Cell::new(false),
+        }));
+        match from {
+            [to, val] => t.set(to.current(), val.current()),
+            _ => t.invalid.set(true),
+        }
+        t
+    }
+
+    fn set(&self, to: Option<Value>, val: Option<Value>) {
+        self.invalid.set(false);
+        let path = match to.map(|v| v.cast_to::<String>()) {
+            Some(Ok(p)) => Some(p),
+            Some(Err(_)) => {
+                self.invalid.set(true);
+                None
+            }
+            None => None
+        };
+        match (path, val) {
+            (None, None) => (),
+            (None, Some(v)) => match self.dv.borrow().as_ref() {
+                None => {self.queued.borrow_mut().push(v); }
+                Some(dv) => {
+                    dv.write(v);
+                }
+            }
+            (Some(p), val) => {
+                let dv = self.ctx.subscriber.durable_subscribe(Path::from(p));
+                dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
+                if let Some(v) = val {
+                    self.queued.borrow_mut().push(v);
+                }
+                for v in self.queued.borrow_mut().drain(..) {
+                    dv.write(v);
+                }
+                *self.dv.borrow_mut() = Some(dv);
+            }
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "store(tgt: string, val): expected 2 arguments",
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [path, val] => {
+                let path = path.update(tgt, value);
+                let val = val.update(tgt, value);
+                self.set(path, val);
+                self.eval()
+            }
+            _ => {
+                self.invalid.set(true);
+                self.eval()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
     Any(RefCell<Option<Value>>),
@@ -612,10 +706,11 @@ pub(super) enum Formula {
     Count(Count),
     Sample(Sample),
     StringJoin(CachedVals),
+    Store(Store),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 20] = [
+pub(super) static FORMULAS: [&'static str; 21] = [
     "any",
     "all",
     "sum",
@@ -636,6 +731,7 @@ pub(super) static FORMULAS: [&'static str; 20] = [
     "count",
     "sample",
     "string_join",
+    "store",
 ];
 
 impl Formula {
