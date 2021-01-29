@@ -340,12 +340,10 @@ impl Expr {
                     },
                 }
             }
-            Expr::StoreVar { tgt: to, queued, val, name, variables, ctx, .. } => match to
-                .update(tgt, value)
-            {
-                None => match val.update(tgt, value) {
-                    None => None,
-                    Some(v) => match name.borrow().as_ref() {
+            Expr::StoreVar { tgt: to, queued, val, name, variables, ctx, .. } => {
+                match (to.update(tgt, value), val.update(tgt, value)) {
+                    (None, None) => None,
+                    (None, Some(v)) => match name.borrow().as_ref() {
                         None => {
                             queued.borrow_mut().push(v.clone());
                             None
@@ -356,19 +354,22 @@ impl Expr {
                             None
                         }
                     },
-                },
-                Some(v) => match v.cast_to::<Chars>() {
-                    Ok(n) if Some(&n) != name.borrow().as_ref() => {
-                        for v in queued.borrow_mut().drain(..) {
-                            variables.borrow_mut().insert(n.clone(), v.clone());
-                            ctx.to_gui.send(ToGui::UpdateVar(n.clone(), v));
+                    (Some(n), val) => match n.cast_to::<Chars>() {
+                        Ok(n) if Some(&n) != name.borrow().as_ref() => {
+                            if let Some(v) = val {
+                                queued.borrow_mut().push(v);
+                            }
+                            for v in queued.borrow_mut().drain(..) {
+                                variables.borrow_mut().insert(n.clone(), v.clone());
+                                ctx.to_gui.send(ToGui::UpdateVar(n.clone(), v));
+                            }
+                            *name.borrow_mut() = Some(n);
+                            None
                         }
-                        *name.borrow_mut() = Some(n);
-                        None
-                    }
-                    Ok(_) | Err(_) => None
-                },
-            },
+                        Ok(_) | Err(_) => None,
+                    },
+                }
+            }
             Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),
             Expr::Load { from, cur, ctx, .. } => match from.update(tgt, value) {
                 None => match tgt {
@@ -400,6 +401,39 @@ impl Expr {
                     }
                 },
             },
+            Expr::Store { queued, tgt: to, val, ctx, dv, .. } => {
+                match (to.update(tgt, value), val.update(tgt, value)) {
+                    (None, None) => None,
+                    (None, Some(v)) => match dv.borrow().as_ref() {
+                        None => {
+                            queued.borrow_mut().push(v);
+                            None
+                        }
+                        Some(dv) => {
+                            dv.write(v);
+                            None
+                        }
+                    },
+                    (Some(n), val) => match n.cast_to::<String>().ok() {
+                        None => {
+                            *dv.borrow_mut() = None;
+                            None
+                        }
+                        Some(n) => {
+                            if let Some(v) = val {
+                                queued.borrow_mut().push(v);
+                            }
+                            let dv_v = ctx.subscriber.durable_subscribe(Path::from(n));
+                            dv_v.updates(
+                                UpdatesFlags::BEGIN_WITH_LAST,
+                                ctx.updates.clone(),
+                            );
+                            *dv.borrow_mut() = Some(dv_v);
+                            None
+                        }
+                    },
+                }
+            }
         }
     }
 }
