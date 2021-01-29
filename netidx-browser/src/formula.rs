@@ -1,4 +1,4 @@
-use super::{Source, Target, WidgetCtx};
+use super::{Expr, Target, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
@@ -16,11 +16,11 @@ use std::{
 pub struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);
 
 impl CachedVals {
-    fn new(from: &[Source]) -> CachedVals {
+    fn new(from: &[Expr]) -> CachedVals {
         CachedVals(Rc::new(RefCell::new(from.into_iter().map(|s| s.current()).collect())))
     }
 
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> bool {
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> bool {
         let mut vals = self.0.borrow_mut();
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
             match src.update(tgt, value) {
@@ -41,7 +41,7 @@ pub struct All {
 }
 
 impl All {
-    fn new(from: &[Source]) -> Self {
+    fn new(from: &[Expr]) -> Self {
         let cached = CachedVals::new(from);
         let current = Rc::new(RefCell::new(All::eval_sources(&cached)));
         All { cached, current }
@@ -66,8 +66,8 @@ impl All {
     fn eval(&self) -> Option<Value> {
         self.current.borrow().clone()
     }
-    
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         if !self.cached.update(from, tgt, value) {
             None
         } else {
@@ -138,7 +138,7 @@ pub(super) struct Mean {
 }
 
 impl Mean {
-    fn new(from: &[Source]) -> Self {
+    fn new(from: &[Expr]) -> Self {
         Mean {
             from: CachedVals::new(from),
             total: Rc::new(Cell::new(0.)),
@@ -146,7 +146,7 @@ impl Mean {
         }
     }
 
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         if self.from.update(from, tgt, value) {
             for v in &*self.from.0.borrow() {
                 if let Some(v) = v {
@@ -184,11 +184,11 @@ pub(super) struct Count {
 }
 
 impl Count {
-    fn new(from: &[Source]) -> Self {
+    fn new(from: &[Expr]) -> Self {
         Count { from: CachedVals::new(from), count: Rc::new(Cell::new(0)) }
     }
 
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         if self.from.update(from, tgt, value) {
             for v in &*self.from.0.borrow() {
                 if v.is_some() {
@@ -216,7 +216,7 @@ pub(super) struct Sample {
 }
 
 impl Sample {
-    fn new(from: &[Source]) -> Self {
+    fn new(from: &[Expr]) -> Self {
         let v = match from {
             [trigger, source] => match trigger.current() {
                 None => None,
@@ -229,7 +229,7 @@ impl Sample {
         Sample { current: Rc::new(RefCell::new(v)) }
     }
 
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         match from {
             [trigger, source] => {
                 source.update(tgt, value);
@@ -522,16 +522,12 @@ fn eval_string_join(from: &CachedVals) -> Option<Value> {
 pub(super) struct Eval {
     ctx: WidgetCtx,
     cached: CachedVals,
-    current: RefCell<Result<Source, Value>>,
-    variables: Rc<RefCell<HashMap<String, Value>>>,
+    current: RefCell<Result<Expr, Value>>,
+    variables: Vars,
 }
 
 impl Eval {
-    fn new(
-        ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
-        from: &[Source],
-    ) -> Self {
+    fn new(ctx: &WidgetCtx, variables: &Vars, from: &[Expr]) -> Self {
         let t = Eval {
             ctx: ctx.clone(),
             cached: CachedVals::new(from),
@@ -553,8 +549,8 @@ impl Eval {
         *self.current.borrow_mut() = match &**self.cached.0.borrow() {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
-                Value::String(s) => match s.parse::<view::Source>() {
-                    Ok(spec) => Ok(Source::new(&self.ctx, self.variables.clone(), spec)),
+                Value::String(s) => match s.parse::<view::Expr>() {
+                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -569,7 +565,7 @@ impl Eval {
         }
     }
 
-    fn update(&self, from: &[Source], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         if self.cached.update(from, tgt, value) {
             self.compile();
         }
@@ -583,7 +579,7 @@ impl Eval {
 fn update_cached(
     eval: impl Fn(&CachedVals) -> Option<Value>,
     cached: &CachedVals,
-    from: &[Source],
+    from: &[Expr],
     tgt: Target,
     value: &Value,
 ) -> Option<Value> {
@@ -645,9 +641,9 @@ pub(super) static FORMULAS: [&'static str; 20] = [
 impl Formula {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         name: &str,
-        from: &[Source],
+        from: &[Expr],
     ) -> Formula {
         match name {
             "any" => Formula::Any(RefCell::new(from.iter().find_map(|s| s.current()))),
@@ -704,7 +700,7 @@ impl Formula {
 
     pub(super) fn update(
         &self,
-        from: &[Source],
+        from: &[Expr],
         tgt: Target,
         value: &Value,
     ) -> Option<Value> {
