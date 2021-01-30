@@ -2,7 +2,7 @@ use super::{Expr, Target, ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{Dval, Typ, UpdatesFlags, Value},
+    subscriber::{Dval, Event, Typ, UpdatesFlags, Value},
 };
 use netidx_protocols::view;
 use regex::Regex;
@@ -630,6 +630,7 @@ impl Store {
     fn set(&self, to: Option<Value>, val: Option<Value>) {
         self.invalid.set(false);
         let path = match to.map(|v| v.cast_to::<String>()) {
+            None => None,
             Some(Ok(p)) => {
                 if Path::is_absolute(&p) {
                     Some(p)
@@ -642,7 +643,6 @@ impl Store {
                 self.invalid.set(true);
                 None
             }
-            None => None,
         };
         match (path, val) {
             (None, None) => (),
@@ -737,6 +737,7 @@ impl StoreVar {
         lazy_static! {
             static ref VNAME: Regex = Regex::new("[a-z][a-z0-9_]+").unwrap();
         }
+        self.invalid.set(false);
         let name = match name.map(|n| n.cast_to::<Chars>()) {
             None => None,
             Some(Err(_)) => {
@@ -799,6 +800,97 @@ impl StoreVar {
     }
 }
 
+#[derive(Debug)]
+struct LoadInner {
+    cur: RefCell<Option<Dval>>,
+    ctx: WidgetCtx,
+    invalid: Cell<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct Load(Rc<LoadInner>);
+
+impl Deref for Load {
+    type Target = LoadInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Load {
+    fn new(from: &[Expr], ctx: &WidgetCtx) -> Self {
+        let t = Load(Rc::new(LoadInner {
+            cur: RefCell::new(None),
+            ctx: ctx.clone(),
+            invalid: Cell::new(false),
+        }));
+        match from {
+            [path] => t.subscribe(path.current()),
+            _ => t.invalid.set(true),
+        }
+        t
+    }
+
+    fn subscribe(&self, name: Option<Value>) {
+        self.invalid.set(false);
+        let path = match name.map(|n| n.cast_to::<Chars>()) {
+            None => None,
+            Some(Err(_)) => {
+                self.invalid.set(true);
+                None
+            }
+            Some(Ok(path)) => {
+                let path = Path::from(path);
+                if Path::is_absolute(&path) {
+                    Some(path)
+                } else {
+                    self.invalid.set(true);
+                    None
+                }
+            }
+        };
+        if let Some(path) = path {
+            let dv = self.ctx.subscriber.durable_subscribe(path);
+            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
+            *self.cur.borrow_mut() = Some(dv);
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "load(expr: path) expected 1 absolute path as argument",
+            )))
+        } else {
+            self.cur.borrow().as_ref().and_then(|dv| match dv.last() {
+                Event::Unsubscribed => None,
+                Event::Update(v) => Some(v),
+            })
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [name] => {
+                self.subscribe(name.update(tgt, value));
+                self.cur.borrow().as_ref().and_then(|dv| match tgt {
+                    Target::Variable(_) => None,
+                    Target::Netidx(id) if dv.id() == id => Some(value.clone()),
+                    Target::Netidx(_) => None,
+                })
+            }
+            exprs => {
+                for e in exprs {
+                    e.update(tgt, value);
+                }
+                self.invalid.set(true);
+                self.eval()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
@@ -821,12 +913,16 @@ pub(super) enum Formula {
     Count(Count),
     Sample(Sample),
     StringJoin(CachedVals),
+    Load(Load),
+    LoadVar(LoadVar),
     Store(Store),
     StoreVar(StoreVar),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 22] = [
+pub(super) static FORMULAS: [&'static str; 24] = [
+    "load",
+    "load_var",
     "store",
     "store_var",
     "any",
@@ -881,6 +977,8 @@ impl Formula {
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
+            "load" => Formula::Load(Load::new(ctx, from)),
+            "load_var" => Formula::LoadVar(LoadVar::new(ctx, from, variables)),
             "store" => Formula::Store(Store::new(ctx, from)),
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
             _ => Formula::Unknown(String::from(name)),
@@ -909,6 +1007,8 @@ impl Formula {
             Formula::Count(c) => c.eval(),
             Formula::Sample(c) => c.eval(),
             Formula::StringJoin(c) => eval_string_join(c),
+            Formula::Load(s) => s.eval(),
+            Formula::LoadVar(s) => s.eval(),
             Formula::Store(s) => s.eval(),
             Formula::StoreVar(s) => s.eval(),
             Formula::Unknown(s) => {
@@ -956,6 +1056,8 @@ impl Formula {
             Formula::StringJoin(c) => {
                 update_cached(eval_string_join, c, from, tgt, value)
             }
+            Formula::Load(s) => s.update(from, tgt, value),
+            Formula::LoadVar(s) => s.update(from, tgt, value),
             Formula::Store(s) => s.update(from, tgt, value),
             Formula::StoreVar(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
