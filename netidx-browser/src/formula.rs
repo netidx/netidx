@@ -1,10 +1,11 @@
-use super::{Expr, Target, Vars, WidgetCtx};
+use super::{Expr, Target, ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, Typ, UpdatesFlags, Value},
 };
 use netidx_protocols::view;
+use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -629,7 +630,14 @@ impl Store {
     fn set(&self, to: Option<Value>, val: Option<Value>) {
         self.invalid.set(false);
         let path = match to.map(|v| v.cast_to::<String>()) {
-            Some(Ok(p)) => Some(p),
+            Some(Ok(p)) => {
+                if Path::is_absolute(&p) {
+                    Some(p)
+                } else {
+                    self.invalid.set(true);
+                    None
+                }
+            }
             Some(Err(_)) => {
                 self.invalid.set(true);
                 None
@@ -663,7 +671,7 @@ impl Store {
     fn eval(&self) -> Option<Value> {
         if self.invalid.get() {
             Some(Value::Error(Chars::from(
-                "store(tgt: string, val): expected 2 arguments",
+                "store(tgt: absolute path, val): expected 2 arguments",
             )))
         } else {
             None
@@ -678,7 +686,112 @@ impl Store {
                 self.set(path, val);
                 self.eval()
             }
-            _ => {
+            exprs => {
+                for expr in exprs {
+                    expr.update(tgt, value);
+                }
+                self.invalid.set(true);
+                self.eval()
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StoreVarInner {
+    queued: RefCell<Vec<Value>>,
+    ctx: WidgetCtx,
+    name: RefCell<Option<Chars>>,
+    variables: Vars,
+    invalid: Cell<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct StoreVar(Rc<StoreVarInner>);
+
+impl Deref for StoreVar {
+    type Target = StoreVarInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl StoreVar {
+    fn new(ctx: &WidgetCtx, from: &[Expr], variables: &Vars) -> Self {
+        let t = StoreVar(Rc::new(StoreVarInner {
+            queued: RefCell::new(Vec::new()),
+            ctx: ctx.clone(),
+            name: RefCell::new(None),
+            variables: variables.clone(),
+            invalid: Cell::new(false),
+        }));
+        match from {
+            [name, value] => t.set(name.current(), value.current()),
+            _ => t.invalid.set(true),
+        }
+        t
+    }
+
+    fn set(&self, name: Option<Value>, value: Option<Value>) {
+        lazy_static! {
+            static ref VNAME: Regex = Regex::new("[a-z][a-z0-9_]+").unwrap();
+        }
+        let name = match name.map(|n| n.cast_to::<Chars>()) {
+            None => None,
+            Some(Err(_)) => {
+                self.invalid.set(true);
+                None
+            }
+            Some(Ok(n)) => {
+                if VNAME.is_match(&*n) {
+                    Some(n)
+                } else {
+                    self.invalid.set(true);
+                    None
+                }
+            }
+        };
+        if let Some(name) = name {
+            for v in self.queued.borrow_mut().drain(..) {
+                self.variables.borrow_mut().insert(name.clone(), v.clone());
+                self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+            }
+            *self.name.borrow_mut() = Some(name);
+        }
+        if let Some(value) = value {
+            match self.name.borrow().as_ref() {
+                None => self.queued.borrow_mut().push(value),
+                Some(name) => {
+                    self.variables.borrow_mut().insert(name.clone(), value.clone());
+                    self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), value));
+                }
+            }
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [name, val] => {
+                let name = name.update(tgt, value);
+                let val = val.update(tgt, value);
+                self.set(name, val);
+                self.eval()
+            }
+            exprs => {
+                for expr in exprs {
+                    expr.update(tgt, value);
+                }
                 self.invalid.set(true);
                 self.eval()
             }
@@ -709,10 +822,13 @@ pub(super) enum Formula {
     Sample(Sample),
     StringJoin(CachedVals),
     Store(Store),
+    StoreVar(StoreVar),
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 21] = [
+pub(super) static FORMULAS: [&'static str; 22] = [
+    "store",
+    "store_var",
     "any",
     "all",
     "sum",
@@ -733,7 +849,6 @@ pub(super) static FORMULAS: [&'static str; 21] = [
     "count",
     "sample",
     "string_join",
-    "store",
 ];
 
 impl Formula {
@@ -767,6 +882,7 @@ impl Formula {
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
             "store" => Formula::Store(Store::new(ctx, from)),
+            "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -794,6 +910,7 @@ impl Formula {
             Formula::Sample(c) => c.eval(),
             Formula::StringJoin(c) => eval_string_join(c),
             Formula::Store(s) => s.eval(),
+            Formula::StoreVar(s) => s.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -840,6 +957,7 @@ impl Formula {
                 update_cached(eval_string_join, c, from, tgt, value)
             }
             Formula::Store(s) => s.update(from, tgt, value),
+            Formula::StoreVar(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
