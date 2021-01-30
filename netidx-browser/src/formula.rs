@@ -593,6 +593,25 @@ fn update_cached(
     }
 }
 
+fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
+    invalid.set(false);
+    match to.map(|v| v.cast_to::<String>()) {
+        None => None,
+        Some(Ok(p)) => {
+            if Path::is_absolute(&p) {
+                Some(p)
+            } else {
+                invalid.set(true);
+                None
+            }
+        }
+        Some(Err(_)) => {
+            invalid.set(true);
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 struct StoreInner {
     queued: RefCell<Vec<Value>>,
@@ -628,23 +647,7 @@ impl Store {
     }
 
     fn set(&self, to: Option<Value>, val: Option<Value>) {
-        self.invalid.set(false);
-        let path = match to.map(|v| v.cast_to::<String>()) {
-            None => None,
-            Some(Ok(p)) => {
-                if Path::is_absolute(&p) {
-                    Some(p)
-                } else {
-                    self.invalid.set(true);
-                    None
-                }
-            }
-            Some(Err(_)) => {
-                self.invalid.set(true);
-                None
-            }
-        };
-        match (path, val) {
+        match (pathname(&self.invalid, to), val) {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
                 None => {
@@ -706,6 +709,28 @@ struct StoreVarInner {
     invalid: Cell<bool>,
 }
 
+fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
+    lazy_static! {
+        static ref VNAME: Regex = Regex::new("[a-z][a-z0-9_]+").unwrap();
+    }
+    invalid.set(false);
+    match name.map(|n| n.cast_to::<Chars>()) {
+        None => None,
+        Some(Err(_)) => {
+            invalid.set(true);
+            None
+        }
+        Some(Ok(n)) => {
+            if VNAME.is_match(&n) {
+                Some(n)
+            } else {
+                invalid.set(true);
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct StoreVar(Rc<StoreVarInner>);
 
@@ -734,26 +759,7 @@ impl StoreVar {
     }
 
     fn set(&self, name: Option<Value>, value: Option<Value>) {
-        lazy_static! {
-            static ref VNAME: Regex = Regex::new("[a-z][a-z0-9_]+").unwrap();
-        }
-        self.invalid.set(false);
-        let name = match name.map(|n| n.cast_to::<Chars>()) {
-            None => None,
-            Some(Err(_)) => {
-                self.invalid.set(true);
-                None
-            }
-            Some(Ok(n)) => {
-                if VNAME.is_match(&*n) {
-                    Some(n)
-                } else {
-                    self.invalid.set(true);
-                    None
-                }
-            }
-        };
-        if let Some(name) = name {
+        if let Some(name) = varname(&self.invalid, name) {
             for v in self.queued.borrow_mut().drain(..) {
                 self.variables.borrow_mut().insert(name.clone(), v.clone());
                 self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
@@ -819,7 +825,7 @@ impl Deref for Load {
 }
 
 impl Load {
-    fn new(from: &[Expr], ctx: &WidgetCtx) -> Self {
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
         let t = Load(Rc::new(LoadInner {
             cur: RefCell::new(None),
             ctx: ctx.clone(),
@@ -833,35 +839,22 @@ impl Load {
     }
 
     fn subscribe(&self, name: Option<Value>) {
-        self.invalid.set(false);
-        let path = match name.map(|n| n.cast_to::<Chars>()) {
-            None => None,
-            Some(Err(_)) => {
-                self.invalid.set(true);
-                None
-            }
-            Some(Ok(path)) => {
-                let path = Path::from(path);
-                if Path::is_absolute(&path) {
-                    Some(path)
-                } else {
-                    self.invalid.set(true);
-                    None
-                }
-            }
-        };
-        if let Some(path) = path {
+        if let Some(path) = pathname(&self.invalid, name) {
             let dv = self.ctx.subscriber.durable_subscribe(path);
             dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
             *self.cur.borrow_mut() = Some(dv);
         }
     }
 
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load(expr: path) expected 1 absolute path as argument",
+        )))
+    }
+
     fn eval(&self) -> Option<Value> {
         if self.invalid.get() {
-            Some(Value::Error(Chars::from(
-                "load(expr: path) expected 1 absolute path as argument",
-            )))
+            Load::err()
         } else {
             self.cur.borrow().as_ref().and_then(|dv| match dv.last() {
                 Event::Unsubscribed => None,
@@ -874,18 +867,105 @@ impl Load {
         match from {
             [name] => {
                 self.subscribe(name.update(tgt, value));
-                self.cur.borrow().as_ref().and_then(|dv| match tgt {
-                    Target::Variable(_) => None,
-                    Target::Netidx(id) if dv.id() == id => Some(value.clone()),
-                    Target::Netidx(_) => None,
-                })
+                if self.invalid.get() {
+                    Load::err()
+                } else {
+                    self.cur.borrow().as_ref().and_then(|dv| match tgt {
+                        Target::Variable(_) => None,
+                        Target::Netidx(id) if dv.id() == id => Some(value.clone()),
+                        Target::Netidx(_) => None,
+                    })
+                }
             }
             exprs => {
                 for e in exprs {
                     e.update(tgt, value);
                 }
                 self.invalid.set(true);
-                self.eval()
+                Load::err()
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LoadVarInner {
+    name: RefCell<Option<Chars>>,
+    variables: Vars,
+    invalid: Cell<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadVar(Rc<LoadVarInner>);
+
+impl Deref for LoadVar {
+    type Target = LoadVarInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl LoadVar {
+    fn new(from: &[Expr], variables: &Vars) -> Self {
+        let t = LoadVar(Rc::new(LoadVarInner {
+            name: RefCell::new(None),
+            variables: variables.clone(),
+            invalid: Cell::new(false),
+        }));
+        match from {
+            [name] => t.subscribe(name.current()),
+            _ => t.invalid.set(true),
+        }
+        t
+    }
+
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load_var(expr: variable name): expected 1 variable name as argument",
+        )))
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if self.invalid.get() {
+            LoadVar::err()
+        } else {
+            self.name
+                .borrow()
+                .as_ref()
+                .and_then(|n| self.variables.borrow().get(n).cloned())
+        }
+    }
+
+    fn subscribe(&self, name: Option<Value>) {
+        if let Some(name) = varname(&self.invalid, name) {
+            *self.name.borrow_mut() = Some(name);
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [name] => {
+                self.subscribe(name.update(tgt, value));
+                if self.invalid.get() {
+                    LoadVar::err()
+                } else {
+                    match (self.name.borrow().as_ref(), tgt) {
+                        (None, _) => None,
+                        (Some(_), Target::Netidx(_)) => None,
+                        (Some(vn), Target::Variable(tn)) if &**vn == tn => {
+                            Some(value.clone())
+                        }
+                        (Some(_), Target::Variable(_)) => None,
+                    }
+                }
+            }
+            exprs => {
+                for e in exprs {
+                    e.update(tgt, value);
+                }
+                self.invalid.set(true);
+                LoadVar::err()
             }
         }
     }
@@ -978,7 +1058,7 @@ impl Formula {
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
             "load" => Formula::Load(Load::new(ctx, from)),
-            "load_var" => Formula::LoadVar(LoadVar::new(ctx, from, variables)),
+            "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
             "store" => Formula::Store(Store::new(ctx, from)),
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
             _ => Formula::Unknown(String::from(name)),
