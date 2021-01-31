@@ -132,11 +132,6 @@ pub enum Direction {
     Vertical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Action {
-    pub action: Expr,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SortDir {
     Ascending,
@@ -275,7 +270,7 @@ pub struct LinePlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
-    Action(Action),
+    Action(Expr),
     Table(Table),
     Label(Expr),
     Button(Button),

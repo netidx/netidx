@@ -1,5 +1,8 @@
-use super::{val_to_bool, WidgetCtx};
-use crate::{view, formula::{Expr, Target}};
+use super::{val_to_bool, Vars, WidgetCtx};
+use crate::{
+    formula::{Expr, Target},
+    view,
+};
 use anyhow::{anyhow, Result};
 use cairo;
 use chrono::prelude::*;
@@ -18,52 +21,43 @@ use std::{
 };
 
 pub(super) struct Button {
-    enabled: Source,
-    label: Source,
-    source: Source,
-    sink: Sink,
+    enabled: Expr,
+    label: Expr,
+    on_click: Expr,
     button: gtk::Button,
 }
 
 impl Button {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Button,
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
-        let label = Source::new(&ctx, variables.clone(), spec.label.clone());
-        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, variables, spec.sink.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let label = Expr::new(&ctx, variables.clone(), spec.label.clone());
+        let on_click = Expr::new(&ctx, variables.clone(), spec.on_click.clone());
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
         if let Some(v) = label.current() {
             button.set_label(&format!("{}", v));
         }
-        button.connect_clicked(clone!(@strong ctx, @strong source, @strong sink =>
-        move |_| {
-            if let Some(v) = source.current() {
-                sink.set(&ctx, v);
-            }
+        button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
+            on_click.update(Target::Event, &Value::Null);
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(
-                &format!("source: {}, sink: {}", spec.source, spec.sink)
-            );
+            selected_path.set_label(&format!("on_click: {}", spec.on_click));
             Inhibit(false)
         }));
         button.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(
-                    &format!("source: {}, sink: {}", spec.source, spec.sink)
-                );
+                selected_path.set_label(&format!("on_click: {}", spec.on_click));
                 Inhibit(false)
             }),
         );
-        Button { enabled, label, source, sink, button }
+        Button { enabled, label, on_click, button }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -71,33 +65,30 @@ impl Button {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        let _: Option<Value> = self.source.update(tgt, value);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.label.update(tgt, value) {
             self.button.set_label(&format!("{}", new));
         }
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name, value)
-        }
+        self.on_click.update(tgt, value);
     }
 }
 
 pub(super) struct Label {
     label: gtk::Label,
-    source: Source,
+    text: Expr,
 }
 
 impl Label {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::Source,
+        variables: &Vars,
+        spec: view::Expr,
         selected_path: gtk::Label,
     ) -> Label {
-        let source = Source::new(&ctx, variables.clone(), spec.clone());
-        let txt = match source.current() {
+        let text = Expr::new(&ctx, variables.clone(), spec.clone());
+        let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
         };
@@ -114,7 +105,7 @@ impl Label {
             selected_path.set_label(&format!("{}", spec));
             Inhibit(false)
         }));
-        Label { source, label }
+        Label { text, label }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -122,56 +113,43 @@ impl Label {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some(new) = self.source.update(tgt, value) {
+        if let Some(new) = self.text.update(tgt, value) {
             self.label.set_label(&format!("{}", new));
         }
     }
 }
 
 pub(super) struct Action {
-    source: Source,
-    sink: Sink,
+    action: Expr,
     ctx: WidgetCtx,
 }
 
 impl Action {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::Action,
-    ) -> Self {
-        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, variables, spec.sink.clone());
-        if let Some(cur) = source.current() {
-            sink.set(&ctx, cur);
-        }
-        Action { source, sink, ctx }
+    pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::Expr) -> Self {
+        let action = Expr::new(&ctx, variables.clone(), spec.clone());
+        action.update(Target::Event, &Value::Null);
+        Action { action, ctx }
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name, value)
-        }
-        if let Some(new) = self.source.update(tgt, value) {
-            self.sink.set(&self.ctx, new);
-        }
+        self.action.update(tgt, value);
     }
 }
 
 pub(super) struct Selector {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
-    enabled: Source,
-    choices: Source,
-    source: Source,
-    sink: Sink,
+    enabled: Expr,
+    choices: Expr,
+    selected: Expr,
+    on_change: Expr,
     we_set: Rc<Cell<bool>>,
 }
 
 impl Selector {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Selector,
         selected_path: gtk::Label,
     ) -> Self {
@@ -180,57 +158,54 @@ impl Selector {
         root.add(&combo);
         combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
-                &format!(
-                    "source: {}, sink: {}, choices: {}",
-                    spec.source, spec.sink, spec.choices
-                )
+                &format!("on_change: {}, choices: {}", spec.on_change, spec.choices)
             );
             Inhibit(false)
         }));
         root.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
-                    &format!(
-                        "source: {}, sink: {}, choices: {}",
-                        spec.source, spec.sink, spec.choices
-                    )
+                    &format!("on_change: {}, choices: {}", spec.on_change, spec.choices)
                 );
                 Inhibit(false)
             }),
         );
-        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
-        let choices = Source::new(&ctx, variables.clone(), spec.choices.clone());
-        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, variables, spec.sink.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let choices = Expr::new(&ctx, variables.clone(), spec.choices.clone());
+        let selected = Expr::new(&ctx, variables.clone(), spec.selected.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
         }
         if let Some(choices) = choices.current() {
-            Selector::update_choices(&combo, &choices, &source.current());
+            Selector::update_choices(&combo, &choices, &selected.current());
         }
         we_set.set(true);
-        Selector::update_active(&combo, &source.current());
+        Selector::update_active(&combo, &selected.current());
         we_set.set(false);
         combo.connect_changed(clone!(
-            @strong we_set, @strong sink, @strong ctx, @strong source => move |combo| {
+            @strong we_set,
+            @strong on_change,
+            @strong ctx,
+            @strong selected => move |combo| {
             if !we_set.get() {
                 if let Some(id) = combo.get_active_id() {
                     if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                        sink.set(&ctx, idv);
+                        on_change.update(Target::Event, &idv);
                     }
                 }
                 idle_add_local(clone!(
-                    @strong source, @strong combo, @strong we_set => move || {
+                    @strong selected, @strong combo, @strong we_set => move || {
                         we_set.set(true);
-                        Selector::update_active(&combo, &source.current());
+                        Selector::update_active(&combo, &selected.current());
                         we_set.set(false);
                         Continue(false)
                     })
                 );
             }
         }));
-        Selector { root, combo, enabled, choices, source, sink, we_set }
+        Selector { root, combo, enabled, choices, selected, on_change, we_set }
     }
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Option<Value>) {
@@ -274,16 +249,14 @@ impl Selector {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name, value)
-        }
         self.we_set.set(true);
+        self.on_change.update(tgt, value);
         if let Some(new) = self.enabled.update(tgt, value) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        Selector::update_active(&self.combo, &self.source.update(tgt, value));
+        Selector::update_active(&self.combo, &self.selected.update(tgt, value));
         if let Some(new) = self.choices.update(tgt, value) {
-            Selector::update_choices(&self.combo, &new, &self.source.current());
+            Selector::update_choices(&self.combo, &new, &self.selected.current());
         }
         self.we_set.set(false);
     }

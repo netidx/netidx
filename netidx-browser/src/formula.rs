@@ -1246,7 +1246,7 @@ impl fmt::Display for Expr {
 }
 
 impl Expr {
-    fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
+    pub fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
         match &spec {
             view::Expr::Constant(v) => Expr::Constant(spec, v.clone()),
             view::Expr::Apply { args, function } => {
@@ -1261,14 +1261,14 @@ impl Expr {
         }
     }
 
-    fn current(&self) -> Option<Value> {
+    pub fn current(&self) -> Option<Value> {
         match self {
             Expr::Constant(_, v) => Some(v.clone()),
             Expr::Apply { spec: _, args: _, function } => function.current(),
         }
     }
 
-    fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
+    pub fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
             Expr::Constant(_, _) => None,
             Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),
