@@ -293,15 +293,27 @@ where
                     Expr::Constant(Value::Duration(d))
                 }),
         ),
-        (
-            fname(),
-            between(
-                spaces().with(token('(')),
-                spaces().with(token(')')),
-                spaces().with(sep_by(expr(), spaces().with(token(',')))),
-            ),
-        )
-            .map(|(function, args)| Expr::Apply { function, args }),
+        attempt(fname().skip(spaces().with(token('='))).and(expr()).map(|(v, e)| {
+            Expr::Apply {
+                function: "store_var".into(),
+                args: vec![Expr::Constant(Value::from(v)), e],
+            }
+        })),
+        attempt(
+            (
+                fname(),
+                between(
+                    spaces().with(token('(')),
+                    spaces().with(token(')')),
+                    spaces().with(sep_by(expr(), spaces().with(token(',')))),
+                ),
+            )
+                .map(|(function, args)| Expr::Apply { function, args }),
+        ),
+        fname().map(|var| Expr::Apply {
+            function: "load_var".into(),
+            args: vec![Expr::Constant(Value::String(Chars::from(var)))],
+        }),
     )))
 }
 
@@ -325,7 +337,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expr_parse() {
+    fn const_expr_parse() {
         assert_eq!(Expr::Constant(Value::U32(23)), parse_expr("u32:23").unwrap());
         assert_eq!(Expr::Constant(Value::V32(42)), parse_expr("v32:42").unwrap());
         assert_eq!(Expr::Constant(Value::I32(-10)), parse_expr("i32:-10").unwrap());
@@ -378,6 +390,10 @@ mod tests {
             Expr::Constant(Value::Error(Chars::from("error"))),
             parse_expr(r#"error:"error""#).unwrap()
         );
+    }
+
+    #[test]
+    fn interp_parse() {
         let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
         let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(
@@ -410,7 +426,7 @@ mod tests {
                 function: "string_concat".into(),
             }],
         };
-        let s = r#"load("/foo/[load_var("[load_var("sid")]_var")]/baz")"#;
+        let s = r#"load("/foo/[load_var("[sid]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#""[true]""#;
         let p = Expr::Apply {
@@ -436,7 +452,11 @@ mod tests {
             function: "a".into(),
         };
         assert_eq!(p, parse_expr(s).unwrap());
-        let s = r#"load(concat_path("foo", "bar", load_var("baz")))"#;
+    }
+
+    #[test]
+    fn expr_parse() {
+        let s = r#"load(concat_path("foo", "bar", baz)))"#;
         assert_eq!(
             Expr::Apply {
                 args: vec![Expr::Apply {
@@ -459,7 +479,7 @@ mod tests {
                 function: "load_var".into(),
                 args: vec![Expr::Constant(Value::String(Chars::from("sum")))]
             },
-            parse_expr("load_var(\"sum\")").unwrap()
+            parse_expr("sum").unwrap()
         );
         let src = Expr::Apply {
             args: vec![

@@ -1,5 +1,5 @@
-use super::{val_to_bool, Sink, Source, Target, WidgetCtx};
-use crate::view;
+use super::{val_to_bool, WidgetCtx};
+use crate::{view, formula::{Expr, Target}};
 use anyhow::{anyhow, Result};
 use cairo;
 use chrono::prelude::*;

@@ -1154,7 +1154,7 @@ impl Formula {
 }
 
 #[derive(Debug, Clone)]
-enum Expr {
+pub enum Expr {
     Constant(view::Expr, Value),
     Apply {
         spec: view::Expr,

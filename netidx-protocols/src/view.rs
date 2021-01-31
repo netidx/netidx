@@ -9,6 +9,15 @@ pub enum Expr {
     Apply { args: Vec<Expr>, function: String },
 }
 
+impl Expr {
+    fn is_cstr(&self) -> bool {
+        match self {
+            Expr::Constant(Value::String(_)) => true,
+            Expr::Constant(_) | Expr::Apply { .. } => false,
+        }
+    }
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -68,6 +77,21 @@ impl fmt::Display for Expr {
                         write!(f, "[{}]", s)?;
                     }
                     write!(f, "\"")
+                } else if function == "load_var" && args.len() == 1 && args[0].is_cstr() {
+                    // constant variable load
+                    match &args[0] {
+                        Expr::Constant(Value::String(c)) => write!(f, "{}", c),
+                        _ => unreachable!(),
+                    }
+                } else if function == "store_var" && args.len() == 2 && args[0].is_cstr()
+                {
+                    // constant variable store
+                    match &args[0] {
+                        Expr::Constant(Value::String(c)) => {
+                            write!(f, "{} = {}", c, &args[1])
+                        }
+                        _ => unreachable!(),
+                    }
                 } else {
                     // it's a normal function
                     write!(f, "{}(", function)?;
@@ -391,10 +415,8 @@ mod tests {
     fn expr() -> impl Strategy<Value = Expr> {
         let leaf = value().prop_map(Expr::Constant);
         leaf.prop_recursive(100, 1000000, 10, |inner| {
-            prop_oneof![
-                (collection::vec(inner, (0, 10)), fname())
-                    .prop_map(|(s, f)| { Expr::Apply { function: f, args: s } })
-            ]
+            prop_oneof![(collection::vec(inner, (0, 10)), fname())
+                .prop_map(|(s, f)| { Expr::Apply { function: f, args: s } })]
         })
     }
 
