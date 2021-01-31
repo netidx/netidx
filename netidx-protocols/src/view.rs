@@ -6,10 +6,6 @@ use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Expr {
     Constant(Value),
-    Load(boxed::Box<Expr>),
-    Store(boxed::Box<Expr>, boxed::Box<Expr>),
-    LoadVar(boxed::Box<Expr>),
-    StoreVar(boxed::Box<Expr>, boxed::Box<Expr>),
     Apply { args: Vec<Expr>, function: String },
 }
 
@@ -64,10 +60,6 @@ impl fmt::Display for Expr {
                     )
                 }
             },
-            Expr::Load(s) => write!(f, r#"load({})"#, s),
-            Expr::Store(tgt, e) => write!(f, r#"store({}, {})"#, tgt, e),
-            Expr::LoadVar(s) => write!(f, "load_var({})", s),
-            Expr::StoreVar(tgt, e) => write!(f, "store_var({}, {})", tgt, e),
             Expr::Apply { args, function } => {
                 if function == "string_concat" && args.len() > 0 {
                     // interpolation
@@ -385,6 +377,10 @@ mod tests {
             Just(String::from("string_concat")),
             Just(String::from("navigate")),
             Just(String::from("confirm")),
+            Just(String::from("load")),
+            Just(String::from("load_var")),
+            Just(String::from("store")),
+            Just(String::from("store_var")),
         ]
     }
 
@@ -396,16 +392,6 @@ mod tests {
         let leaf = value().prop_map(Expr::Constant);
         leaf.prop_recursive(100, 1000000, 10, |inner| {
             prop_oneof![
-                inner.clone().prop_map(|s| Expr::Load(boxed::Box::new(s))),
-                (inner.clone(), inner.clone()).prop_map(|(t, e)| Expr::Store(
-                    boxed::Box::new(t),
-                    boxed::Box::new(e)
-                )),
-                inner.clone().prop_map(|s| Expr::LoadVar(boxed::Box::new(s))),
-                (inner.clone(), inner.clone()).prop_map(|(t, e)| Expr::StoreVar(
-                    boxed::Box::new(t),
-                    boxed::Box::new(e)
-                )),
                 (collection::vec(inner, (0, 10)), fname())
                     .prop_map(|(s, f)| { Expr::Apply { function: f, args: s } })
             ]
@@ -424,12 +410,6 @@ mod tests {
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
                 (v0, v1) => v0 == v1,
             },
-            (Expr::Load(s0), Expr::Load(s1)) => check(s0, s1),
-            (Expr::Store(t0, e0), Expr::Store(t1, e1)) => check(t0, t1) && check(e0, e1),
-            (Expr::LoadVar(s0), Expr::LoadVar(s1)) => check(s0, s1),
-            (Expr::StoreVar(t0, e0), Expr::StoreVar(t1, e1)) => {
-                check(t0, t1) && check(e0, e1)
-            }
             (
                 Expr::Apply { args: srs0, function: f0 },
                 Expr::Apply { args: srs1, function: f1 },

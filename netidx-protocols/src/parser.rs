@@ -176,12 +176,6 @@ where
                             args.push(s.to_expr());
                             Some(Expr::Apply { args, function })
                         }
-                        (Some(Expr::Load(_)), _)
-                        | (Some(Expr::LoadVar(_)), _)
-                        | (Some(Expr::Store(_, _)), _)
-                        | (Some(Expr::StoreVar(_, _)), _) => {
-                            unreachable!()
-                        }
                     }
                 })
                 .unwrap_or(Expr::Constant(Value::from("")))
@@ -307,43 +301,7 @@ where
                 spaces().with(sep_by(expr(), spaces().with(token(',')))),
             ),
         )
-            .then(|(function, mut args): (String, Vec<Expr>)| {
-                match function.as_str() {
-                    "load" => {
-                        if args.len() != 1 {
-                            unexpected_any("load_path: expected 1 argument").right()
-                        } else {
-                            value(Expr::Load(Box::new(args.pop().unwrap()))).left()
-                        }
-                    }
-                    "store" => {
-                        if args.len() != 2 {
-                            unexpected_any("store_path: expected 2 arguments").right()
-                        } else {
-                            let e = Box::new(args.pop().unwrap());
-                            let tgt = Box::new(args.pop().unwrap());
-                            value(Expr::Store(tgt, e)).left()
-                        }
-                    }
-                    "load_var" => {
-                        if args.len() != 1 {
-                            unexpected_any("load_var: expected 1 argument").right()
-                        } else {
-                            value(Expr::LoadVar(Box::new(args.pop().unwrap()))).left()
-                        }
-                    }
-                    "store_var" => {
-                        if args.len() != 2 {
-                            unexpected_any("store_var: expected 2 arguments").right()
-                        } else {
-                            let e = Box::new(args.pop().unwrap());
-                            let tgt = Box::new(args.pop().unwrap());
-                            value(Expr::StoreVar(tgt, e)).left()
-                        }
-                    }
-                    _ => value(Expr::Apply { function, args }).left(),
-                }
-            }),
+            .map(|(function, args)| Expr::Apply { function, args }),
     )))
 }
 
@@ -500,7 +458,8 @@ mod tests {
             ],
             function: String::from("sum"),
         };
-        let chs = r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
+        let chs =
+            r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
         assert_eq!(src, parse_expr(chs).unwrap());
     }
 }

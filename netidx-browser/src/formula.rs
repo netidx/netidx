@@ -1,4 +1,4 @@
-use super::{Expr, Target, ToGui, Vars, WidgetCtx};
+use super::{Target, ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -9,11 +9,17 @@ use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
-    collections::HashMap,
     ops::Deref,
     rc::Rc,
     result::Result,
+    fmt,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub enum Target<'a> {
+    Variable(&'a str),
+    Netidx(SubId),
+}
 
 #[derive(Debug, Clone)]
 pub struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);
@@ -1143,6 +1149,57 @@ impl Formula {
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Expr {
+    Constant(view::Expr, Value),
+    Apply {
+        spec: view::Expr,
+        args: Vec<Expr>,
+        function: Box<Formula>,
+    },
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Expr::Constant(s, _) => s,
+            Expr::Apply { spec, .. } => spec,
+        };
+        write!(f, "{}", s.to_string())
+    }
+}
+
+impl Expr {
+    fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
+        match &spec {
+            view::Expr::Constant(v) => Expr::Constant(spec, v.clone()),
+            view::Expr::Apply { args, function } => {
+                let args: Vec<Expr> = args
+                    .iter()
+                    .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
+                    .collect();
+                let function =
+                    Box::new(Formula::new(&*ctx, &variables, function, &*args));
+                Expr::Apply { spec, args, function }
+            }
+        }
+    }
+
+    fn current(&self) -> Option<Value> {
+        match self {
+            Expr::Constant(_, v) => Some(v.clone()),
+            Expr::Apply { spec: _, args: _, function } => function.current(),
+        }
+    }
+
+    fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
+        match self {
+            Expr::Constant(_, _) => None,
+            Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),
         }
     }
 }
