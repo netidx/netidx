@@ -310,7 +310,7 @@ where
             )
                 .map(|(function, args)| Expr::Apply { function, args }),
         ),
-        fname().map(|var| Expr::Apply {
+        fname().skip(not_followed_by(none_of(" ),]".chars()))).map(|var| Expr::Apply {
             function: "load_var".into(),
             args: vec![Expr::Constant(Value::String(Chars::from(var)))],
         }),

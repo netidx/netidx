@@ -1,11 +1,10 @@
-use super::{Target, ToGui, Vars, WidgetCtx};
+use super::{ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{Dval, Event, Typ, UpdatesFlags, Value},
+    subscriber::{self, Dval, Typ, UpdatesFlags, Value, SubId},
 };
 use netidx_protocols::view;
-use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -17,6 +16,7 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub enum Target<'a> {
+    Event,
     Variable(&'a str),
     Netidx(SubId),
 }
@@ -527,6 +527,68 @@ fn eval_string_join(from: &CachedVals) -> Option<Value> {
     }
 }
 
+fn eval_string_concat(from: &CachedVals) -> Option<Value> {
+    use bytes::BytesMut;
+    let vals = from.0.borrow();
+    let mut parts = vals
+        .iter()
+        .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
+    let mut res = BytesMut::new();
+    for p in parts {
+        res.extend_from_slice(p.bytes());
+    }
+    Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
+}
+
+#[derive(Debug)]
+struct EventInner {
+    cur: RefCell<Option<Value>>,
+    invalid: Cell<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct Event(Rc<EventInner>);
+
+impl Deref for Event {
+    type Target = EventInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Event {
+    fn new(from: &[Expr]) -> Self {
+        Event(Rc::new(EventInner {
+            cur: RefCell::new(None),
+            invalid: Cell::new(from.len() > 0)
+        }))
+    }
+
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from("event(): expected 0 arguments")))
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Event::err()
+        } else {
+            self.cur.borrow().cloned()
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        self.invalid.set(from.len() > 0);
+        match tgt {
+            Target::Variable(_) | Target::Netidx(_) => None,
+            Target::Event => {
+                *self.cur.borrow_mut() = Some(value.clone());
+                self.eval()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Eval {
     ctx: WidgetCtx,
@@ -716,9 +778,6 @@ struct StoreVarInner {
 }
 
 fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
-    lazy_static! {
-        static ref VNAME: Regex = Regex::new("[a-z][a-z0-9_]+").unwrap();
-    }
     invalid.set(false);
     match name.map(|n| n.cast_to::<Chars>()) {
         None => None,
@@ -727,7 +786,7 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
             None
         }
         Some(Ok(n)) => {
-            if VNAME.is_match(&n) {
+            if view::VNAME.is_match(&n) {
                 Some(n)
             } else {
                 invalid.set(true);
@@ -863,8 +922,8 @@ impl Load {
             Load::err()
         } else {
             self.cur.borrow().as_ref().and_then(|dv| match dv.last() {
-                Event::Unsubscribed => None,
-                Event::Update(v) => Some(v),
+                subscriber::Event::Unsubscribed => None,
+                subscriber::Event::Update(v) => Some(v),
             })
         }
     }
@@ -879,7 +938,7 @@ impl Load {
                     self.cur.borrow().as_ref().and_then(|dv| match tgt {
                         Target::Variable(_) => None,
                         Target::Netidx(id) if dv.id() == id => Some(value.clone()),
-                        Target::Netidx(_) => None,
+                        Target::Netidx(_) | Target::Event => None,
                     })
                 }
             }
@@ -963,6 +1022,7 @@ impl LoadVar {
                             Some(value.clone())
                         }
                         (Some(_), Target::Variable(_)) => None,
+                        (Some(_), Target::Event) => None,
                     }
                 }
             }
@@ -999,6 +1059,8 @@ pub(super) enum Formula {
     Count(Count),
     Sample(Sample),
     StringJoin(CachedVals),
+    StringConcat(CachedVals),
+    Event(Event),
     Load(Load),
     LoadVar(LoadVar),
     Store(Store),
@@ -1006,7 +1068,7 @@ pub(super) enum Formula {
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 24] = [
+pub(super) static FORMULAS: [&'static str; 26] = [
     "load",
     "load_var",
     "store",
@@ -1031,6 +1093,8 @@ pub(super) static FORMULAS: [&'static str; 24] = [
     "count",
     "sample",
     "string_join",
+    "string_concat",
+    "event"
 ];
 
 impl Formula {
@@ -1063,6 +1127,8 @@ impl Formula {
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
+            "string_concat" => Formula::StringConcat(CachedVals::new(from)),
+            "event" => Formula::Event(Event::new(from)),
             "load" => Formula::Load(Load::new(ctx, from)),
             "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
             "store" => Formula::Store(Store::new(ctx, from)),
@@ -1093,6 +1159,8 @@ impl Formula {
             Formula::Count(c) => c.eval(),
             Formula::Sample(c) => c.eval(),
             Formula::StringJoin(c) => eval_string_join(c),
+            Formula::StringConcat(c) => eval_string_concat(c),
+            Formula::Event(s) => s.eval(),
             Formula::Load(s) => s.eval(),
             Formula::LoadVar(s) => s.eval(),
             Formula::Store(s) => s.eval(),
@@ -1142,6 +1210,10 @@ impl Formula {
             Formula::StringJoin(c) => {
                 update_cached(eval_string_join, c, from, tgt, value)
             }
+            Formula::StringConcat(c) => {
+                update_cached(eval_string_concat, c, from, tgt, value)
+            }
+            Formula::Event(s) => s.update(from, tgt, value),
             Formula::Load(s) => s.update(from, tgt, value),
             Formula::LoadVar(s) => s.update(from, tgt, value),
             Formula::Store(s) => s.update(from, tgt, value),

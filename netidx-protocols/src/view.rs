@@ -1,7 +1,12 @@
 use crate::parser;
 use base64;
 use netidx::{path::Path, publisher::Value, utils};
+use regex::Regex;
 use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
+
+lazy_static! {
+    pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]+$").unwrap();
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
 pub enum Expr {
@@ -10,9 +15,9 @@ pub enum Expr {
 }
 
 impl Expr {
-    fn is_cstr(&self) -> bool {
+    fn is_fn(&self) -> bool {
         match self {
-            Expr::Constant(Value::String(_)) => true,
+            Expr::Constant(Value::String(c)) => VNAME.is_match(&*c),
             Expr::Constant(_) | Expr::Apply { .. } => false,
         }
     }
@@ -77,14 +82,13 @@ impl fmt::Display for Expr {
                         write!(f, "[{}]", s)?;
                     }
                     write!(f, "\"")
-                } else if function == "load_var" && args.len() == 1 && args[0].is_cstr() {
+                } else if function == "load_var" && args.len() == 1 && args[0].is_fn() {
                     // constant variable load
                     match &args[0] {
                         Expr::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
-                } else if function == "store_var" && args.len() == 2 && args[0].is_cstr()
-                {
+                } else if function == "store_var" && args.len() == 2 && args[0].is_fn() {
                     // constant variable store
                     match &args[0] {
                         Expr::Constant(Value::String(c)) => {
