@@ -267,9 +267,9 @@ impl Selector {
 }
 
 pub(super) struct Toggle {
-    enabled: Source,
-    source: Source,
-    sink: Sink,
+    enabled: Expr,
+    value: Expr,
+    on_change: Expr,
     we_set: Rc<Cell<bool>>,
     switch: gtk::Switch,
 }
@@ -277,32 +277,35 @@ pub(super) struct Toggle {
 impl Toggle {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Toggle,
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
-        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, variables, spec.sink.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let value = Expr::new(&ctx, variables.clone(), spec.value.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
         }
-        if let Some(v) = source.current() {
+        if let Some(v) = value.current() {
             let v = val_to_bool(&v);
             switch.set_active(v);
             switch.set_state(v);
         }
         switch.connect_state_set(clone!(
-        @strong ctx, @strong sink, @strong we_set, @strong source =>
+        @strong ctx, @strong on_change, @strong we_set, @strong value =>
         move |switch, state| {
             if !we_set.get() {
-                sink.set(&ctx, if state { Value::True } else { Value::False });
+                on_change.update(
+                    Target::Event,
+                    &if state { Value::True } else { Value::False }
+                );
                 idle_add_local(
-                    clone!(@strong source, @strong switch, @strong we_set => move || {
+                    clone!(@strong value, @strong switch, @strong we_set => move || {
                     we_set.set(true);
-                    if let Some(v) = source.current() {
+                    if let Some(v) = value.current() {
                         let v = val_to_bool(&v);
                         switch.set_active(v);
                         switch.set_state(v);
@@ -315,19 +318,19 @@ impl Toggle {
         }));
         switch.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
-                &format!("source: {}, sink: {}", spec.source, spec.sink)
+                &format!("value: {}, on_change: {}", spec.value, spec.on_change)
             );
             Inhibit(false)
         }));
         switch.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
-                    &format!("source: {}, sink: {}", spec.source, spec.sink)
+                    &format!("value: {}, on_change: {}", spec.value, spec.on_change)
                 );
                 Inhibit(false)
             }),
         );
-        Toggle { enabled, source, sink, switch, we_set }
+        Toggle { enabled, value, on_change, switch, we_set }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -335,40 +338,38 @@ impl Toggle {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name, value);
-        }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(tgt, value) {
+        if let Some(new) = self.value.update(tgt, value) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
             self.switch.set_state(val_to_bool(&new));
             self.we_set.set(false);
         }
+        self.on_change.update(tgt, value);
     }
 }
 
 pub(super) struct Entry {
     entry: gtk::Entry,
-    enabled: Source,
-    visible: Source,
-    source: Source,
-    sink: Sink,
+    enabled: Expr,
+    visible: Expr,
+    text: Expr,
+    on_change: Expr,
 }
 
 impl Entry {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Entry,
         selected_path: gtk::Label,
     ) -> Self {
-        let enabled = Source::new(&ctx, variables.clone(), spec.enabled.clone());
-        let visible = Source::new(&ctx, variables.clone(), spec.visible.clone());
-        let source = Source::new(&ctx, variables.clone(), spec.source.clone());
-        let sink = Sink::new(&ctx, variables, spec.sink.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let visible = Expr::new(&ctx, variables.clone(), spec.visible.clone());
+        let text = Expr::new(&ctx, variables.clone(), spec.text.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -376,15 +377,18 @@ impl Entry {
         if let Some(v) = visible.current() {
             entry.set_visibility(val_to_bool(&v));
         }
-        match source.current() {
+        match text.current() {
             None => entry.set_text(""),
             Some(Value::String(s)) => entry.set_text(&*s),
             Some(v) => entry.set_text(&format!("{}", v)),
         }
-        fn submit(ctx: &WidgetCtx, source: &Source, sink: &Sink, entry: &gtk::Entry) {
-            sink.set(&ctx, Value::String(Chars::from(String::from(entry.get_text()))));
-            idle_add_local(clone!(@strong source, @strong entry => move || {
-                match source.current() {
+        fn submit(ctx: &WidgetCtx, text: &Expr, on_change: &Expr, entry: &gtk::Entry) {
+            on_change.update(
+                Target::Event,
+                &Value::String(Chars::from(String::from(entry.get_text()))),
+            );
+            idle_add_local(clone!(@strong text, @strong entry => move || {
+                match text.current() {
                     None => entry.set_text(""),
                     Some(Value::String(s)) => entry.set_text(&*s),
                     Some(v) => entry.set_text(&format!("{}", v)),
@@ -393,25 +397,25 @@ impl Entry {
             }));
         }
         entry.connect_activate(
-            clone!(@strong source, @strong ctx, @strong sink => move |entry| {
-                submit(&ctx, &source, &sink, entry)
+            clone!(@strong text, @strong ctx, @strong on_change => move |entry| {
+                submit(&ctx, &text, &on_change, entry)
             }),
         );
         entry.connect_focus_out_event(
-            clone!(@strong source, @strong ctx, @strong sink => move |w, _| {
+            clone!(@strong text, @strong ctx, @strong on_change => move |w, _| {
                 let entry = w.downcast_ref::<gtk::Entry>().unwrap();
-                submit(&ctx, &source, &sink, entry);
+                submit(&ctx, &text, &on_change, entry);
                 Inhibit(false)
             }),
         );
         entry.connect_focus(clone!(@strong spec, @strong selected_path => move |_, _| {
             selected_path.set_label(
-                &format!("source: {}, sink: {}", spec.source, spec.sink)
+                &format!("text: {}, on_change: {}", spec.text, spec.on_change)
             );
             Inhibit(false)
         }));
         // CR estokes: give the user an indication that it's out of sync
-        Entry { entry, enabled, visible, source, sink }
+        Entry { entry, enabled, visible, text, on_change }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -419,65 +423,63 @@ impl Entry {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Target::Variable(name) = tgt {
-            self.sink.update(name, value);
-        }
         if let Some(new) = self.enabled.update(tgt, value) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.visible.update(tgt, value) {
             self.entry.set_visibility(val_to_bool(&new));
         }
-        if let Some(new) = self.source.update(tgt, value) {
+        if let Some(new) = self.text.update(tgt, value) {
             match new {
                 Value::String(s) => self.entry.set_text(&*s),
                 v => self.entry.set_text(&format!("{}", v)),
             }
         }
+        self.on_change.update(tgt, value);
     }
 }
 
 struct Series {
     line_color: view::RGB,
-    x: Source,
-    y: Source,
+    x: Expr,
+    y: Expr,
     x_data: VecDeque<Value>,
     y_data: VecDeque<Value>,
 }
 
 pub(super) struct LinePlot {
     root: gtk::Box,
-    x_min: Rc<Source>,
-    x_max: Rc<Source>,
-    y_min: Rc<Source>,
-    y_max: Rc<Source>,
-    keep_points: Rc<Source>,
+    x_min: Rc<Expr>,
+    x_max: Rc<Expr>,
+    y_min: Rc<Expr>,
+    y_max: Rc<Expr>,
+    keep_points: Rc<Expr>,
     series: Rc<RefCell<Vec<Series>>>,
 }
 
 impl LinePlot {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::LinePlot,
         _selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min = Rc::new(Source::new(&ctx, variables.clone(), spec.x_min.clone()));
-        let x_max = Rc::new(Source::new(&ctx, variables.clone(), spec.x_max.clone()));
-        let y_min = Rc::new(Source::new(&ctx, variables.clone(), spec.y_min.clone()));
-        let y_max = Rc::new(Source::new(&ctx, variables.clone(), spec.y_max.clone()));
+        let x_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_min.clone()));
+        let x_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_max.clone()));
+        let y_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_min.clone()));
+        let y_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_max.clone()));
         let keep_points =
-            Rc::new(Source::new(&ctx, variables.clone(), spec.keep_points.clone()));
+            Rc::new(Expr::new(&ctx, variables.clone(), spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
                     line_color: series.line_color,
-                    x: Source::new(&ctx, variables.clone(), series.x.clone()),
-                    y: Source::new(&ctx, variables.clone(), series.y.clone()),
+                    x: Expr::new(&ctx, variables.clone(), series.x.clone()),
+                    y: Expr::new(&ctx, variables.clone(), series.y.clone()),
                     x_data: VecDeque::new(),
                     y_data: VecDeque::new(),
                 })
@@ -524,10 +526,10 @@ impl LinePlot {
         spec: &view::LinePlot,
         width: &Rc<Cell<u32>>,
         height: &Rc<Cell<u32>>,
-        x_min: &Rc<Source>,
-        x_max: &Rc<Source>,
-        y_min: &Rc<Source>,
-        y_max: &Rc<Source>,
+        x_min: &Rc<Expr>,
+        x_max: &Rc<Expr>,
+        y_min: &Rc<Expr>,
+        y_max: &Rc<Expr>,
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
