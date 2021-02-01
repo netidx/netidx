@@ -1,7 +1,7 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};
+use super::{FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS, Vars};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -9,7 +9,6 @@ use netidx_protocols::view;
 use std::{
     boxed,
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
     result,
 };
@@ -222,7 +221,7 @@ struct Widget {
 impl Widget {
     fn insert(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -574,11 +573,7 @@ static KINDS: [&'static str; 13] = [
 ];
 
 impl Editor {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
-        spec: view::View,
-    ) -> Editor {
+    pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::View) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -935,7 +930,7 @@ impl Editor {
 
     fn build_tree(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: &OnChange,
         store: &gtk::TreeStore,
         parent: Option<&gtk::TreeIter>,

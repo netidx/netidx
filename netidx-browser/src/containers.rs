@@ -1,10 +1,10 @@
-use super::{set_common_props, Target, Widget, WidgetCtx, DEFAULT_PROPS, Vars};
+use super::{set_common_props, Target, Vars, Widget, WidgetCtx, DEFAULT_PROPS};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::subscriber::Value;
-use std::{cell::RefCell, cmp::max, collections::HashMap, rc::Rc};
+use std::cmp::max;
 
 pub(super) struct Box {
     root: gtk::Box,

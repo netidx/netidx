@@ -15,14 +15,14 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy)]
-pub enum Target<'a> {
+pub(crate) enum Target<'a> {
     Event,
     Variable(&'a str),
     Netidx(SubId),
 }
 
 #[derive(Debug, Clone)]
-pub struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);
+pub(crate) struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);
 
 impl CachedVals {
     fn new(from: &[Expr]) -> CachedVals {
@@ -44,7 +44,7 @@ impl CachedVals {
 }
 
 #[derive(Debug, Clone)]
-pub struct All {
+pub(crate) struct All {
     cached: CachedVals,
     current: Rc<RefCell<Option<Value>>>,
 }
@@ -530,7 +530,7 @@ fn eval_string_join(from: &CachedVals) -> Option<Value> {
 fn eval_string_concat(from: &CachedVals) -> Option<Value> {
     use bytes::BytesMut;
     let vals = from.0.borrow();
-    let mut parts = vals
+    let parts = vals
         .iter()
         .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
     let mut res = BytesMut::new();
@@ -541,13 +541,13 @@ fn eval_string_concat(from: &CachedVals) -> Option<Value> {
 }
 
 #[derive(Debug)]
-struct EventInner {
+pub(crate) struct EventInner {
     cur: RefCell<Option<Value>>,
     invalid: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
-struct Event(Rc<EventInner>);
+pub(crate) struct Event(Rc<EventInner>);
 
 impl Deref for Event {
     type Target = EventInner;
@@ -573,7 +573,7 @@ impl Event {
         if self.invalid.get() {
             Event::err()
         } else {
-            self.cur.borrow().cloned()
+            self.cur.borrow().as_ref().cloned()
         }
     }
 
@@ -663,11 +663,11 @@ fn update_cached(
 
 fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
     invalid.set(false);
-    match to.map(|v| v.cast_to::<String>()) {
+    match path.map(|v| v.cast_to::<String>()) {
         None => None,
         Some(Ok(p)) => {
             if Path::is_absolute(&p) {
-                Some(p)
+                Some(Path::from(p))
             } else {
                 invalid.set(true);
                 None
@@ -681,7 +681,7 @@ fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
 }
 
 #[derive(Debug)]
-struct StoreInner {
+pub(crate) struct StoreInner {
     queued: RefCell<Vec<Value>>,
     ctx: WidgetCtx,
     dv: RefCell<Option<Dval>>,
@@ -689,7 +689,7 @@ struct StoreInner {
 }
 
 #[derive(Debug, Clone)]
-struct Store(Rc<StoreInner>);
+pub(crate) struct Store(Rc<StoreInner>);
 
 impl Deref for Store {
     type Target = StoreInner;
@@ -769,7 +769,7 @@ impl Store {
 }
 
 #[derive(Debug)]
-struct StoreVarInner {
+pub(crate) struct StoreVarInner {
     queued: RefCell<Vec<Value>>,
     ctx: WidgetCtx,
     name: RefCell<Option<Chars>>,
@@ -797,7 +797,7 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
 }
 
 #[derive(Debug, Clone)]
-struct StoreVar(Rc<StoreVarInner>);
+pub(crate) struct StoreVar(Rc<StoreVarInner>);
 
 impl Deref for StoreVar {
     type Target = StoreVarInner;
@@ -827,7 +827,7 @@ impl StoreVar {
         if let Some(name) = varname(&self.invalid, name) {
             for v in self.queued.borrow_mut().drain(..) {
                 self.variables.borrow_mut().insert(name.clone(), v.clone());
-                self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+                let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
             *self.name.borrow_mut() = Some(name);
         }
@@ -836,7 +836,7 @@ impl StoreVar {
                 None => self.queued.borrow_mut().push(value),
                 Some(name) => {
                     self.variables.borrow_mut().insert(name.clone(), value.clone());
-                    self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), value));
+                    let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), value));
                 }
             }
         }
@@ -872,14 +872,14 @@ impl StoreVar {
 }
 
 #[derive(Debug)]
-struct LoadInner {
+pub(crate) struct LoadInner {
     cur: RefCell<Option<Dval>>,
     ctx: WidgetCtx,
     invalid: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
-struct Load(Rc<LoadInner>);
+pub(crate) struct Load(Rc<LoadInner>);
 
 impl Deref for Load {
     type Target = LoadInner;
@@ -954,14 +954,14 @@ impl Load {
 }
 
 #[derive(Debug)]
-struct LoadVarInner {
+pub(crate) struct LoadVarInner {
     name: RefCell<Option<Chars>>,
     variables: Vars,
     invalid: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
-struct LoadVar(Rc<LoadVarInner>);
+pub(crate) struct LoadVar(Rc<LoadVarInner>);
 
 impl Deref for LoadVar {
     type Target = LoadVarInner;
@@ -1038,7 +1038,7 @@ impl LoadVar {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Formula {
+pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
     All(All),
     Sum(CachedVals),
@@ -1068,7 +1068,7 @@ pub(super) enum Formula {
     Unknown(String),
 }
 
-pub(super) static FORMULAS: [&'static str; 26] = [
+pub(crate) static FORMULAS: [&'static str; 26] = [
     "load",
     "load_var",
     "store",
@@ -1226,7 +1226,7 @@ impl Formula {
 }
 
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub(crate) enum Expr {
     Constant(view::Expr, Value),
     Apply {
         spec: view::Expr,
@@ -1246,9 +1246,9 @@ impl fmt::Display for Expr {
 }
 
 impl Expr {
-    pub fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
+    pub(crate) fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
         match &spec {
-            view::Expr::Constant(v) => Expr::Constant(spec, v.clone()),
+            view::Expr::Constant(v) => Expr::Constant(spec.clone(), v.clone()),
             view::Expr::Apply { args, function } => {
                 let args: Vec<Expr> = args
                     .iter()
@@ -1261,14 +1261,14 @@ impl Expr {
         }
     }
 
-    pub fn current(&self) -> Option<Value> {
+    pub(crate) fn current(&self) -> Option<Value> {
         match self {
             Expr::Constant(_, v) => Some(v.clone()),
             Expr::Apply { spec: _, args: _, function } => function.current(),
         }
     }
 
-    pub fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
+    pub(crate) fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
             Expr::Constant(_, _) => None,
             Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),

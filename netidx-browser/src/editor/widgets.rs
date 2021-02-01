@@ -7,12 +7,10 @@ use super::{
 use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::subscriber::Value;
 use netidx_protocols::view;
 use std::{
-    boxed::Box,
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
 };
 

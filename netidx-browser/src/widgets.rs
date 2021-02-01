@@ -121,14 +121,13 @@ impl Label {
 
 pub(super) struct Action {
     action: Expr,
-    ctx: WidgetCtx,
 }
 
 impl Action {
     pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::Expr) -> Self {
         let action = Expr::new(&ctx, variables.clone(), spec.clone());
         action.update(Target::Event, &Value::Null);
-        Action { action, ctx }
+        Action { action }
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
@@ -382,7 +381,7 @@ impl Entry {
             Some(Value::String(s)) => entry.set_text(&*s),
             Some(v) => entry.set_text(&format!("{}", v)),
         }
-        fn submit(ctx: &WidgetCtx, text: &Expr, on_change: &Expr, entry: &gtk::Entry) {
+        fn submit(text: &Expr, on_change: &Expr, entry: &gtk::Entry) {
             on_change.update(
                 Target::Event,
                 &Value::String(Chars::from(String::from(entry.get_text()))),
@@ -396,15 +395,13 @@ impl Entry {
                 Continue(false)
             }));
         }
-        entry.connect_activate(
-            clone!(@strong text, @strong ctx, @strong on_change => move |entry| {
-                submit(&ctx, &text, &on_change, entry)
-            }),
-        );
+        entry.connect_activate(clone!(@strong text, @strong on_change => move |entry| {
+            submit(&text, &on_change, entry)
+        }));
         entry.connect_focus_out_event(
-            clone!(@strong text, @strong ctx, @strong on_change => move |w, _| {
+            clone!(@strong text, @strong on_change => move |w, _| {
                 let entry = w.downcast_ref::<gtk::Entry>().unwrap();
-                submit(&ctx, &text, &on_change, entry);
+                submit(&text, &on_change, entry);
                 Inhibit(false)
             }),
         );

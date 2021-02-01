@@ -65,9 +65,9 @@ pub(super) struct Grid {
 
 #[derive(Debug, Clone)]
 pub(super) enum WidgetKind {
-    Action(view::Action),
+    Action(view::Expr),
     Table(view::Table, resolver::Table),
-    Label(view::Source),
+    Label(view::Expr),
     Button(view::Button),
     Toggle(view::Toggle),
     Selector(view::Selector),
