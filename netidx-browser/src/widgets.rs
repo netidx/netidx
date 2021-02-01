@@ -16,7 +16,7 @@ use netidx::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     rc::Rc,
 };
 

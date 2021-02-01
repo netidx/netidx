@@ -1,4 +1,4 @@
-use super::{set_common_props, Target, Widget, WidgetCtx, DEFAULT_PROPS};
+use super::{set_common_props, Target, Widget, WidgetCtx, DEFAULT_PROPS, Vars};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
@@ -14,7 +14,7 @@ pub(super) struct Box {
 impl Box {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Box,
         selected_path: gtk::Label,
     ) -> Self {
@@ -105,7 +105,7 @@ pub(super) struct Grid {
 impl Grid {
     pub(super) fn new(
         ctx: WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         spec: view::Grid,
         selected_path: gtk::Label,
     ) -> Self {

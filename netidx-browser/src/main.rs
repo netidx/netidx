@@ -12,7 +12,7 @@ mod view;
 mod widgets;
 use anyhow::{anyhow, Error, Result};
 use editor::Editor;
-use formula::{Expr, Target};
+use formula::Target;
 use futures::{
     channel::{mpsc, oneshot},
     future::{pending, FutureExt},
@@ -250,7 +250,7 @@ impl Widget {
                 }
                 view::WidgetKind::GridRow(_) => {
                     let s = Value::String(Chars::from("orphaned grid row"));
-                    let spec = view::Source::Constant(s);
+                    let spec = view::Expr::Constant(s);
                     Widget::Label(widgets::Label::new(
                         ctx.clone(),
                         variables,
