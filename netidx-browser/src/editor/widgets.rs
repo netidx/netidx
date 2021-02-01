@@ -606,21 +606,22 @@ impl Toggle {
 pub(super) struct Selector {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Selector>>,
-    enabled_source: DbgSrc,
-    choices_source: DbgSrc,
-    source: DbgSrc,
+    enabled_expr: DbgExpr,
+    choices_expr: DbgExpr,
+    selected_expr: DbgExpr,
+    on_change_expr: DbgExpr,
 }
 
 impl Selector {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::Selector,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_source) = source(
+        let (l, e, enabled_expr) = expr(
             ctx,
             variables,
             "Enabled:",
@@ -631,7 +632,7 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        let (l, e, choices_source) = source(
+        let (l, e, choices_expr) = expr(
             ctx,
             variables,
             "Choices:",
@@ -642,26 +643,29 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        let (l, e, source) = source(
+        let (l, e, selected_expr) = expr(
             ctx,
             variables,
-            "Source:",
-            &spec.borrow().source,
+            "Selected:",
+            &spec.borrow().selected,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
+                spec.borrow_mut().selected = s;
                 on_change();
             }),
         );
         root.add((l, e));
-        root.add(parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
+        let (l, e, on_change_expr) = expr(
+            ctx,
+            variables,
+            "On Change:",
+            &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
-                on_change()
+                spec.borrow_mut().on_change = s;
+                on_change();
             }),
-        ));
-        Selector { root, spec, enabled_source, choices_source, source }
+        );
+        root.add((l, e));
+        Selector { root, spec, enabled_expr, choices_expr, selected_expr, on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -673,13 +677,16 @@ impl Selector {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
+        if let Some((_, si)) = &*self.enabled_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.choices_source.borrow() {
+        if let Some((_, si)) = &*self.choices_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.selected_expr.borrow() {
+            si.update(tgt, value);
+        }
+        if let Some((_, si)) = &*self.on_change_expr.borrow() {
             si.update(tgt, value);
         }
     }
