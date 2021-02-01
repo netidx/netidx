@@ -1,4 +1,4 @@
-use super::super::{util::err_modal, Target, WidgetCtx, Vars};
+use super::super::{util::err_modal, Target, Vars, WidgetCtx};
 use super::{
     expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
@@ -388,7 +388,7 @@ impl Action {
     pub(super) fn moved(&self, iter: &gtk::TreeIter) {
         *self.iter.borrow_mut() = iter.clone();
     }
-    
+
     pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Action(self.spec.borrow().clone())
     }
@@ -784,8 +784,8 @@ impl Entry {
 
 #[derive(Clone, Debug)]
 struct Series {
-    x: DbgSrc,
-    y: DbgSrc,
+    x: DbgExpr,
+    y: DbgExpr,
     spec: Rc<RefCell<view::Series>>,
 }
 
@@ -793,18 +793,18 @@ struct Series {
 pub(super) struct LinePlot {
     root: gtk::Box,
     spec: Rc<RefCell<view::LinePlot>>,
-    x_min: DbgSrc,
-    x_max: DbgSrc,
-    y_min: DbgSrc,
-    y_max: DbgSrc,
-    keep_points: DbgSrc,
+    x_min: DbgExpr,
+    x_max: DbgExpr,
+    y_min: DbgExpr,
+    y_max: DbgExpr,
+    keep_points: DbgExpr,
     series: Rc<RefCell<IndexMap<usize, Series>>>,
 }
 
 impl LinePlot {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::LinePlot,
     ) -> Self {
@@ -879,17 +879,17 @@ impl LinePlot {
 
     fn build_axis_range_editor(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
-    ) -> (DbgSrc, DbgSrc, DbgSrc, DbgSrc, DbgSrc) {
+    ) -> (DbgExpr, DbgExpr, DbgExpr, DbgExpr, DbgExpr) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         util::expander_touch_enable(&range_exp);
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
         range_exp.add(range.root());
-        let (l, e, x_min) = source(
+        let (l, e, x_min) = expr(
             ctx,
             variables,
             "x min:",
@@ -900,7 +900,7 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
-        let (l, e, x_max) = source(
+        let (l, e, x_max) = expr(
             ctx,
             variables,
             "x max:",
@@ -911,7 +911,7 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
-        let (l, e, y_min) = source(
+        let (l, e, y_min) = expr(
             ctx,
             variables,
             "y min:",
@@ -922,7 +922,7 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
-        let (l, e, y_max) = source(
+        let (l, e, y_max) = expr(
             ctx,
             variables,
             "y max:",
@@ -933,7 +933,7 @@ impl LinePlot {
             }),
         );
         range.add((l, e));
-        let (l, e, keep_points) = source(
+        let (l, e, keep_points) = expr(
             ctx,
             variables,
             "Keep Points:",
@@ -1024,7 +1024,7 @@ impl LinePlot {
 
     fn build_series_editor(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
@@ -1077,7 +1077,7 @@ impl LinePlot {
                         on_change()
                     }));
                 grid.add((lbl_line_color, line_color));
-                let (l, e, x) = source(
+                let (l, e, x) = expr(
                     &ctx,
                     &variables,
                     "X:",
@@ -1088,7 +1088,7 @@ impl LinePlot {
                     })
                 );
                 grid.add((l, e));
-                let (l, e, y) = source(
+                let (l, e, y) = expr(
                     &ctx,
                     &variables,
                     "Y:",
@@ -1125,12 +1125,15 @@ impl LinePlot {
             build_series(view::Series {
                 title: String::from("Series"),
                 line_color: view::RGB { r: 0., g: 0., b: 0. },
-                x: view::Source::Load(Box::new(view::Source::Constant(
-                    Value::String(Chars::from("/somewhere/in/netidx/x")))
-                )),
-                y: view::Source::Load(Box::new(view::Source::Constant(
-                    Value::String(Chars::from("/somewhere/in/netidx/y")))
-                )),
+                x: view::Expr::Apply {
+
+                    args: vec![view::Expr::Constant(Value::from("/somewhere/in/netidx/x"))],
+                    function: "load".into()
+                },
+                y: view::Expr::Apply {
+                    args: vec![view::Expr::Constant(Value::from("/somewhere/in/netidx/y"))],
+                    function: "load".into()
+                },
             })
         }));
         for s in spec.borrow().series.iter() {
