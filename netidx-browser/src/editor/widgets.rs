@@ -262,10 +262,10 @@ fn expr(
     txt: &str,
     init: &view::Expr,
     on_change: impl Fn(view::Expr) + 'static,
-) -> (gtk::Label, gtk::Box, DbgSrc) {
+) -> (gtk::Label, gtk::Box, DbgExpr) {
     let on_change = Rc::new(on_change);
     let source = Rc::new(RefCell::new(init.clone()));
-    let inspector: Rc<RefCell<Option<(gtk::Window, SourceInspector)>>> =
+    let inspector: Rc<RefCell<Option<(gtk::Window, ExprInspector)>>> =
         Rc::new(RefCell::new(None));
     let lbl = gtk::Label::new(Some(txt));
     let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -319,7 +319,7 @@ fn expr(
                     entry.emit_activate();
                 }
             };
-            let si = SourceInspector::new(
+            let si = ExprInspector::new(
                 ctx.clone(),
                 &variables,
                 on_change,
@@ -343,7 +343,7 @@ fn expr(
 pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Expr>>,
-    expr: DbgSrc,
+    expr: DbgExpr,
     iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
@@ -408,13 +408,13 @@ impl Action {
 pub(super) struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<view::Expr>>,
-    source: DbgSrc,
+    expr: DbgExpr,
 }
 
 impl Label {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::Expr,
     ) -> Self {
@@ -425,7 +425,7 @@ impl Label {
         let (l, e, expr) = expr(
             ctx,
             variables,
-            "Source:",
+            "Expr:",
             &*spec.borrow(),
             clone!(@strong spec => move |s| {
                 *spec.borrow_mut() = s;
@@ -434,7 +434,7 @@ impl Label {
         );
         pathbox.pack_start(&l, false, false, 0);
         pathbox.pack_start(&e, true, true, 0);
-        Label { root, spec, source }
+        Label { root, spec, expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -446,7 +446,7 @@ impl Label {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.expr.borrow() {
             si.update(tgt, value);
         }
     }
@@ -456,21 +456,21 @@ impl Label {
 pub(super) struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
-    enabled_source: DbgSrc,
-    label_source: DbgSrc,
-    source: DbgSrc,
+    enabled_expr: DbgExpr,
+    label_expr: DbgExpr,
+    on_click_expr: DbgExpr,
 }
 
 impl Button {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::Button,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_source) = source(
+        let (l, e, enabled_expr) = expr(
             ctx,
             variables,
             "Enabled:",
@@ -481,7 +481,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        let (l, e, label_source) = source(
+        let (l, e, label_expr) = expr(
             ctx,
             variables,
             "Label:",
@@ -492,26 +492,18 @@ impl Button {
             }),
         );
         root.add((l, e));
-        let (l, e, source) = source(
+        let (l, e, on_click_expr) = expr(
             ctx,
             variables,
             "Source:",
-            &spec.borrow().source,
+            &spec.borrow().on_click,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
+                spec.borrow_mut().on_click = s;
                 on_change()
             }),
         );
         root.add((l, e));
-        root.add(parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
-                on_change()
-            }),
-        ));
-        Button { root, spec, enabled_source, label_source, source }
+        Button { root, spec, enabled_expr, label_expr, on_click_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -523,13 +515,13 @@ impl Button {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
+        if let Some((_, si)) = &*self.enabled_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.label_source.borrow() {
+        if let Some((_, si)) = &*self.label_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.on_click_expr.borrow() {
             si.update(tgt, value);
         }
     }
@@ -539,20 +531,21 @@ impl Button {
 pub(super) struct Toggle {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Toggle>>,
-    enabled_source: DbgSrc,
-    source: DbgSrc,
+    enabled_expr: DbgExpr,
+    value_expr: DbgExpr,
+    on_change_expr: DbgExpr,
 }
 
 impl Toggle {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::Toggle,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_source) = source(
+        let (l, e, enabled_expr) = expr(
             ctx,
             variables,
             "Enabled:",
@@ -563,26 +556,29 @@ impl Toggle {
             }),
         );
         root.add((l, e));
-        let (l, e, source) = source(
+        let (l, e, value_expr) = expr(
             ctx,
             variables,
-            "Source:",
-            &spec.borrow().source,
+            "Value:",
+            &spec.borrow().value,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
+                spec.borrow_mut().value = s;
                 on_change();
             }),
         );
         root.add((l, e));
-        root.add(parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
+        let (l, e, on_change_expr) = expr(
+            ctx,
+            variables,
+            "On Change:",
+            &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
+                spec.borrow_mut().on_change = s;
                 on_change();
             }),
-        ));
-        Toggle { root, spec, enabled_source, source }
+        );
+        root.add((l, e));
+        Toggle { root, spec, enabled_expr, value_expr, on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -594,10 +590,13 @@ impl Toggle {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
+        if let Some((_, si)) = &*self.enabled_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.value_expr.borrow() {
+            si.update(tgt, value);
+        }
+        if let Some((_, si)) = &*self.on_change_expr.borrow() {
             si.update(tgt, value);
         }
     }

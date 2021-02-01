@@ -12,11 +12,10 @@ use netidx::{
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
 };
 
-fn set_dbg_src(
+fn set_dbg_expr(
     ctx: &WidgetCtx,
     variables: &Vars,
     store: &gtk::TreeStore,
@@ -28,7 +27,7 @@ fn set_dbg_src(
         None => store.set_value(&iter, 1, &None::<&str>.to_value()),
         Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value()),
     }
-    store.set_value(&iter, 3, &SourceWrap(expr).to_value());
+    store.set_value(&iter, 3, &ExprWrap(expr).to_value());
     spec
 }
 
@@ -105,7 +104,7 @@ impl Constant {
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
         store.set_value(iter, 0, &"constant".to_value());
         let t = Constant { root, spec };
-        set_dbg_src(ctx, variables, store, iter, t.spec());
+        set_dbg_expr(ctx, variables, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Constant(t).to_value());
     }
 
@@ -152,7 +151,7 @@ impl Apply {
         }));
         store.set_value(iter, 0, &spec.borrow().to_value());
         let s = view::Expr::Apply { function: spec.borrow().clone(), args };
-        set_dbg_src(ctx, variables, store, iter, s);
+        set_dbg_expr(ctx, variables, store, iter, s);
         store.set_value(iter, 2, &Properties::Apply(Apply { root, spec }).to_value());
     }
 
@@ -207,8 +206,8 @@ impl Properties {
 }
 
 #[derive(Clone, Debug, GBoxed)]
-#[gboxed(type_name = "NetidxSourceInspectorWrap")]
-struct SourceWrap(Expr);
+#[gboxed(type_name = "NetidxExprInspectorWrap")]
+struct ExprWrap(Expr);
 
 static KINDS: [&'static str; 2] = ["constant", "function"];
 
@@ -243,7 +242,7 @@ fn build_tree(
     }
 }
 
-fn build_source(
+fn build_expr(
     ctx: &WidgetCtx,
     variables: &Vars,
     store: &gtk::TreeStore,
@@ -253,19 +252,19 @@ fn build_source(
     match v.get::<&Properties>() {
         Err(e) => {
             let v = Value::String(Chars::from(format!("tree error: {}", e)));
-            set_dbg_src(ctx, variables, store, root, view::Expr::Constant(v))
+            set_dbg_expr(ctx, variables, store, root, view::Expr::Constant(v))
         }
         Ok(None) => {
             let v = Value::String(Chars::from("tree error: missing widget"));
-            set_dbg_src(ctx, variables, store, root, view::Expr::Constant(v))
+            set_dbg_expr(ctx, variables, store, root, view::Expr::Constant(v))
         }
         Ok(Some(p)) => match p.spec() {
-            v @ view::Expr::Constant(_) => set_dbg_src(ctx, variables, store, root, v),
+            v @ view::Expr::Constant(_) => set_dbg_expr(ctx, variables, store, root, v),
             view::Expr::Apply { mut args, function } => {
                 args.clear();
                 store.set_value(root, 0, &function.to_value());
                 match store.iter_children(Some(root)) {
-                    None => set_dbg_src(
+                    None => set_dbg_expr(
                         ctx,
                         variables,
                         store,
@@ -274,12 +273,12 @@ fn build_source(
                     ),
                     Some(iter) => {
                         loop {
-                            args.push(build_source(ctx, variables, store, &iter));
+                            args.push(build_expr(ctx, variables, store, &iter));
                             if !store.iter_next(&iter) {
                                 break;
                             }
                         }
-                        set_dbg_src(
+                        set_dbg_expr(
                             ctx,
                             variables,
                             store,
@@ -294,24 +293,24 @@ fn build_source(
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SourceInspector {
+pub(super) struct ExprInspector {
     root: gtk::Box,
     store: gtk::TreeStore,
 }
 
-impl SourceInspector {
+impl ExprInspector {
     pub(super) fn new(
         ctx: WidgetCtx,
         variables: &Vars,
         on_change: impl Fn(view::Expr) + 'static,
         init: view::Expr,
-    ) -> SourceInspector {
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let store = gtk::TreeStore::new(&[
             String::static_type(),
             String::static_type(),
             Properties::static_type(),
-            SourceWrap::static_type(),
+            ExprWrap::static_type(),
         ]);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         root.pack_start(&treebtns, false, false, 0);
@@ -393,8 +392,8 @@ impl SourceInspector {
                         @strong scheduled,
                         @strong on_change => move || {
                             if let Some(root) = store.get_iter_first() {
-                                let src = build_source(&ctx, &variables, &store, &root);
-                                on_change(src)
+                                let expr = build_expr(&ctx, &variables, &store, &root);
+                                on_change(expr)
                             }
                             scheduled.set(false);
                             glib::Continue(false)
@@ -486,9 +485,9 @@ impl SourceInspector {
             @weak store,
             @strong selected => move || {
             if let Some(iter) = &*selected.borrow() {
-                let src = build_source(&ctx, &variables, &store, iter);
+                let expr = build_expr(&ctx, &variables, &store, iter);
                 let parent = store.iter_parent(iter);
-                build_tree(&ctx, &variables, &on_change, &store, parent.as_ref(), &src);
+                build_tree(&ctx, &variables, &on_change, &store, parent.as_ref(), &expr);
                 on_change()
             }
         }));
@@ -548,15 +547,15 @@ impl SourceInspector {
         store.connect_row_inserted(clone!(@strong on_change => move |_, _, _| {
             on_change();
         }));
-        SourceInspector { root, store }
+        ExprInspector { root, store }
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
         self.store.foreach(|store, _, iter| {
             let v = store.get_value(iter, 3);
-            match v.get::<&SourceWrap>() {
+            match v.get::<&ExprWrap>() {
                 Err(_) | Ok(None) => false,
-                Ok(Some(SourceWrap(source))) => {
+                Ok(Some(ExprWrap(source))) => {
                     if let Some(v) = source.update(tgt, value) {
                         self.store.set_value(iter, 1, &format!("{}", v).to_value());
                     }
