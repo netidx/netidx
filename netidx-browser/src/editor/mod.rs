@@ -1,4 +1,4 @@
-mod source_inspector;
+mod expr_inspector;
 mod util;
 mod widgets;
 use super::{FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS};

@@ -1,6 +1,6 @@
-use super::super::{util::err_modal, Target, WidgetCtx};
+use super::super::{util::err_modal, Target, WidgetCtx, Vars};
 use super::{
-    source_inspector::SourceInspector,
+    expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
     OnChange,
 };
@@ -254,14 +254,14 @@ impl Table {
     }
 }
 
-type DbgSrc = Rc<RefCell<Option<(gtk::Window, SourceInspector)>>>;
+type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 
-fn source(
+fn expr(
     ctx: &WidgetCtx,
-    variables: &Rc<RefCell<HashMap<String, Value>>>,
+    variables: &Vars,
     txt: &str,
-    init: &view::Source,
-    on_change: impl Fn(view::Source) + 'static,
+    init: &view::Expr,
+    on_change: impl Fn(view::Expr) + 'static,
 ) -> (gtk::Label, gtk::Box, DbgSrc) {
     let on_change = Rc::new(on_change);
     let source = Rc::new(RefCell::new(init.clone()));
@@ -289,7 +289,7 @@ fn source(
     entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
-        match e.get_text().parse::<view::Source>() {
+        match e.get_text().parse::<view::Expr>() {
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
                 e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
@@ -314,7 +314,7 @@ fn source(
             w.set_default_size(640, 480);
             let on_change = {
                 let entry = entry.clone();
-                move |s: view::Source| {
+                move |s: view::Expr| {
                     entry.set_text(&s.to_string());
                     entry.emit_activate();
                 }
@@ -342,19 +342,19 @@ fn source(
 #[derive(Clone, Debug)]
 pub(super) struct Action {
     root: TwoColGrid,
-    spec: Rc<RefCell<view::Action>>,
-    source: DbgSrc,
+    spec: Rc<RefCell<view::Expr>>,
+    expr: DbgSrc,
     iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
 impl Action {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: view::Action,
+        spec: view::Expr,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
@@ -365,33 +365,24 @@ impl Action {
             let spec = spec.clone();
             move || {
                 let spec = spec.borrow();
-                let desc = format!("{}", &spec.sink);
+                let desc = format!("{}", &spec);
                 store.set_value(&*iter.borrow(), 2, &desc.to_value());
             }
         });
         update_desc();
-        let (srclbl, srcent, source) = source(
+        let (l, e, expr) = expr(
             ctx,
             variables,
-            "Source:",
-            &spec.borrow().source,
+            "Action:",
+            &*spec.borrow(),
             clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().source = s;
+                *spec.borrow_mut() = s;
                 update_desc();
                 on_change()
             }),
         );
-        root.add((srclbl, srcent));
-        root.add(parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
-            clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().sink = s;
-                update_desc();
-                on_change()
-            }),
-        ));
-        Action { root, spec, source, iter }
+        root.add((l, e));
+        Action { root, spec, expr, iter }
     }
 
     pub(super) fn moved(&self, iter: &gtk::TreeIter) {
@@ -407,7 +398,7 @@ impl Action {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.expr.borrow() {
             si.update(tgt, value);
         }
     }
@@ -416,7 +407,7 @@ impl Action {
 #[derive(Clone, Debug)]
 pub(super) struct Label {
     root: gtk::Box,
-    spec: Rc<RefCell<view::Source>>,
+    spec: Rc<RefCell<view::Expr>>,
     source: DbgSrc,
 }
 
@@ -425,13 +416,13 @@ impl Label {
         ctx: &WidgetCtx,
         variables: &Rc<RefCell<HashMap<String, Value>>>,
         on_change: OnChange,
-        spec: view::Source,
+        spec: view::Expr,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
         root.pack_start(&pathbox, false, false, 0);
-        let (l, e, source) = source(
+        let (l, e, expr) = expr(
             ctx,
             variables,
             "Source:",
