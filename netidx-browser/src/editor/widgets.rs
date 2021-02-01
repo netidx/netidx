@@ -696,21 +696,22 @@ impl Selector {
 pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
-    enabled_source: DbgSrc,
-    visible_source: DbgSrc,
-    source: DbgSrc,
+    enabled_expr: DbgExpr,
+    visible_expr: DbgExpr,
+    text_expr: DbgExpr,
+    on_change_expr: DbgExpr,
 }
 
 impl Entry {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        variables: &Rc<RefCell<HashMap<String, Value>>>,
+        variables: &Vars,
         on_change: OnChange,
         spec: view::Entry,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_source) = source(
+        let (l, e, enabled_expr) = expr(
             ctx,
             variables,
             "Enabled:",
@@ -721,7 +722,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, visible_source) = source(
+        let (l, e, visible_expr) = expr(
             ctx,
             variables,
             "Visible:",
@@ -732,26 +733,29 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, source) = source(
+        let (l, e, text_expr) = expr(
             ctx,
             variables,
-            "Source:",
-            &spec.borrow().source,
+            "Text:",
+            &spec.borrow().text,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().source = s;
+                spec.borrow_mut().text = s;
                 on_change()
             }),
         );
         root.add((l, e));
-        root.add(parse_entry(
-            "Sink:",
-            &spec.borrow().sink,
+        let (l, e, on_change_expr) = expr(
+            ctx,
+            variables,
+            "On Change:",
+            &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().sink = s;
+                spec.borrow_mut().on_change = s;
                 on_change()
             }),
-        ));
-        Entry { root, spec, enabled_source, visible_source, source }
+        );
+        root.add((l, e));
+        Entry { root, spec, enabled_expr, visible_expr, text_expr, on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -763,13 +767,16 @@ impl Entry {
     }
 
     pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_source.borrow() {
+        if let Some((_, si)) = &*self.enabled_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.visible_source.borrow() {
+        if let Some((_, si)) = &*self.visible_expr.borrow() {
             si.update(tgt, value);
         }
-        if let Some((_, si)) = &*self.source.borrow() {
+        if let Some((_, si)) = &*self.text_expr.borrow() {
+            si.update(tgt, value);
+        }
+        if let Some((_, si)) = &*self.on_change_expr.borrow() {
             si.update(tgt, value);
         }
     }
