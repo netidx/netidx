@@ -213,7 +213,7 @@ static KINDS: [&'static str; 2] = ["constant", "function"];
 
 fn default_expr(id: Option<&str>) -> view::Expr {
     match id {
-        None => view::Expr::Constant(Value::U64(42)),
+        Some("constant") | None => view::Expr::Constant(Value::U64(42)),
         Some("function") => {
             let args = vec![view::Expr::Constant(Value::U64(42))];
             view::Expr::Apply { function: "any".into(), args }
