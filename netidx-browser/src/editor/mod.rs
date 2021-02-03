@@ -442,13 +442,6 @@ impl Widget {
                 },
                 on_change: view::Expr::Apply {
                     args: vec![
-                        view::Expr::Constant(Value::from("/somewhere")),
-                        view::Expr::Apply { args: vec![], function: "event".into() },
-                    ],
-                    function: "store".into(),
-                },
-                on_activate: view::Expr::Apply {
-                    args: vec![
                         view::Expr::Apply {
                             args: vec![],
                             function: "event".into()
@@ -456,6 +449,13 @@ impl Widget {
                         view::Expr::Constant(Value::True)
                     ],
                     function: "sample".into()
+                },
+                on_activate: view::Expr::Apply {
+                    args: vec![
+                        view::Expr::Constant(Value::from("/somewhere")),
+                        view::Expr::Apply { args: vec![], function: "event".into() },
+                    ],
+                    function: "store".into(),
                 },
             })),
             Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
