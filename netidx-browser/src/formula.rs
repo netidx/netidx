@@ -2,16 +2,16 @@ use super::{ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{self, Dval, Typ, UpdatesFlags, Value, SubId},
+    subscriber::{self, Dval, SubId, Typ, UpdatesFlags, Value},
 };
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
+    fmt,
     ops::Deref,
     rc::Rc,
     result::Result,
-    fmt,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -561,7 +561,7 @@ impl Event {
     fn new(from: &[Expr]) -> Self {
         Event(Rc::new(EventInner {
             cur: RefCell::new(None),
-            invalid: Cell::new(from.len() > 0)
+            invalid: Cell::new(from.len() > 0),
         }))
     }
 
@@ -595,15 +595,17 @@ pub(super) struct Eval {
     cached: CachedVals,
     current: RefCell<Result<Expr, Value>>,
     variables: Vars,
+    debug: bool,
 }
 
 impl Eval {
-    fn new(ctx: &WidgetCtx, variables: &Vars, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, debug: bool, variables: &Vars, from: &[Expr]) -> Self {
         let t = Eval {
             ctx: ctx.clone(),
             cached: CachedVals::new(from),
             current: RefCell::new(Err(Value::Null)),
             variables: variables.clone(),
+            debug,
         };
         t.compile();
         t
@@ -621,7 +623,9 @@ impl Eval {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<view::Expr>() {
-                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
+                    Ok(spec) => {
+                        Ok(Expr::new(&self.ctx, self.debug, self.variables.clone(), spec))
+                    }
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -686,6 +690,7 @@ pub(crate) struct StoreInner {
     ctx: WidgetCtx,
     dv: RefCell<Option<Dval>>,
     invalid: Cell<bool>,
+    debug: Option<RefCell<Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -700,12 +705,15 @@ impl Deref for Store {
 }
 
 impl Store {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
+        let debug =
+            if debug { Some(RefCell::new(Value::from("never set"))) } else { None };
         let t = Store(Rc::new(StoreInner {
             queued: RefCell::new(Vec::new()),
             ctx: ctx.clone(),
             dv: RefCell::new(None),
             invalid: Cell::new(false),
+            debug,
         }));
         match from {
             [to, val] => t.set(to.current(), val.current()),
@@ -714,25 +722,40 @@ impl Store {
         t
     }
 
+    fn queue(&self, v: Value) {
+        match &self.debug {
+            None => self.queued.borrow_mut().push(v),
+            Some(d) => {
+                *d.borrow_mut() = Value::from(format!("queued: {}", v));
+                self.queued.borrow_mut().push(v);
+            }
+        }
+    }
+
+    fn write(&self, dv: &Dval, v: Value) {
+        match &self.debug {
+            None => {
+                dv.write(v);
+            }
+            Some(d) => *d.borrow_mut() = Value::from(format!("would write: {}", v)),
+        }
+    }
+
     fn set(&self, to: Option<Value>, val: Option<Value>) {
         match (pathname(&self.invalid, to), val) {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
-                None => {
-                    self.queued.borrow_mut().push(v);
-                }
-                Some(dv) => {
-                    dv.write(v);
-                }
+                None => self.queue(v),
+                Some(dv) => self.write(dv, v),
             },
             (Some(p), val) => {
                 let dv = self.ctx.subscriber.durable_subscribe(Path::from(p));
                 dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
                 if let Some(v) = val {
-                    self.queued.borrow_mut().push(v);
+                    self.queue(v)
                 }
                 for v in self.queued.borrow_mut().drain(..) {
-                    dv.write(v);
+                    self.write(&dv, v);
                 }
                 *self.dv.borrow_mut() = Some(dv);
             }
@@ -744,6 +767,8 @@ impl Store {
             Some(Value::Error(Chars::from(
                 "store(tgt: absolute path, val): expected 2 arguments",
             )))
+        } else if let Some(d) = &self.debug {
+            Some(d.borrow().clone())
         } else {
             None
         }
@@ -775,6 +800,7 @@ pub(crate) struct StoreVarInner {
     name: RefCell<Option<Chars>>,
     variables: Vars,
     invalid: Cell<bool>,
+    debug: Option<RefCell<Value>>,
 }
 
 fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
@@ -808,13 +834,16 @@ impl Deref for StoreVar {
 }
 
 impl StoreVar {
-    fn new(ctx: &WidgetCtx, from: &[Expr], variables: &Vars) -> Self {
+    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr], variables: &Vars) -> Self {
+        let debug =
+            if debug { Some(RefCell::new(Value::from("never set"))) } else { None };
         let t = StoreVar(Rc::new(StoreVarInner {
             queued: RefCell::new(Vec::new()),
             ctx: ctx.clone(),
             name: RefCell::new(None),
             variables: variables.clone(),
             invalid: Cell::new(false),
+            debug,
         }));
         match from {
             [name, value] => t.set(name.current(), value.current()),
@@ -823,21 +852,39 @@ impl StoreVar {
         t
     }
 
+    fn set_var(&self, name: Chars, v: Value) {
+        match &self.debug {
+            None => {
+                self.variables.borrow_mut().insert(name.clone(), v.clone());
+                let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+            }
+            Some(d) => {
+                *d.borrow_mut() = Value::from(format!("set var: {} to: {}", name, v));
+            }
+        }
+    }
+
+    fn queue_set(&self, v: Value) {
+        match &self.debug {
+            None => self.queued.borrow_mut().push(v),
+            Some(d) => {
+                *d.borrow_mut() = Value::from(format!("queued: {}", v));
+                self.queued.borrow_mut().push(v)
+            }
+        }
+    }
+
     fn set(&self, name: Option<Value>, value: Option<Value>) {
         if let Some(name) = varname(&self.invalid, name) {
             for v in self.queued.borrow_mut().drain(..) {
-                self.variables.borrow_mut().insert(name.clone(), v.clone());
-                let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+                self.set_var(name.clone(), v)
             }
             *self.name.borrow_mut() = Some(name);
         }
         if let Some(value) = value {
             match self.name.borrow().as_ref() {
-                None => self.queued.borrow_mut().push(value),
-                Some(name) => {
-                    self.variables.borrow_mut().insert(name.clone(), value.clone());
-                    let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), value));
-                }
+                None => self.queue_set(value),
+                Some(name) => self.set_var(name.clone(), value),
             }
         }
     }
@@ -847,6 +894,8 @@ impl StoreVar {
             Some(Value::Error(Chars::from(
                 "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
             )))
+        } else if let Some(d) = &self.debug {
+            Some(d.borrow().clone())
         } else {
             None
         }
@@ -1094,12 +1143,13 @@ pub(crate) static FORMULAS: [&'static str; 26] = [
     "sample",
     "string_join",
     "string_concat",
-    "event"
+    "event",
 ];
 
 impl Formula {
     pub(super) fn new(
         ctx: &WidgetCtx,
+        debug: bool,
         variables: &Vars,
         name: &str,
         from: &[Expr],
@@ -1123,7 +1173,7 @@ impl Formula {
             "filter" => Formula::Filter(CachedVals::new(from)),
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
-            "eval" => Formula::Eval(Eval::new(ctx, variables, from)),
+            "eval" => Formula::Eval(Eval::new(ctx, debug, variables, from)),
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
@@ -1131,8 +1181,8 @@ impl Formula {
             "event" => Formula::Event(Event::new(from)),
             "load" => Formula::Load(Load::new(ctx, from)),
             "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
-            "store" => Formula::Store(Store::new(ctx, from)),
-            "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
+            "store" => Formula::Store(Store::new(ctx, debug, from)),
+            "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1228,11 +1278,7 @@ impl Formula {
 #[derive(Debug, Clone)]
 pub(crate) enum Expr {
     Constant(view::Expr, Value),
-    Apply {
-        spec: view::Expr,
-        args: Vec<Expr>,
-        function: Box<Formula>,
-    },
+    Apply { spec: view::Expr, args: Vec<Expr>, function: Box<Formula> },
 }
 
 impl fmt::Display for Expr {
@@ -1246,16 +1292,21 @@ impl fmt::Display for Expr {
 }
 
 impl Expr {
-    pub(crate) fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
+    pub(crate) fn new(
+        ctx: &WidgetCtx,
+        debug: bool,
+        variables: Vars,
+        spec: view::Expr,
+    ) -> Self {
         match &spec {
             view::Expr::Constant(v) => Expr::Constant(spec.clone(), v.clone()),
             view::Expr::Apply { args, function } => {
                 let args: Vec<Expr> = args
                     .iter()
-                    .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
+                    .map(|spec| Expr::new(ctx, debug, variables.clone(), spec.clone()))
                     .collect();
                 let function =
-                    Box::new(Formula::new(&*ctx, &variables, function, &*args));
+                    Box::new(Formula::new(&*ctx, debug, &variables, function, &*args));
                 Expr::Apply { spec, args, function }
             }
         }

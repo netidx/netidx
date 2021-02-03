@@ -22,7 +22,7 @@ fn set_dbg_expr(
     iter: &gtk::TreeIter,
     spec: view::Expr,
 ) -> view::Expr {
-    let expr = Expr::new(ctx, variables.clone(), spec.clone());
+    let expr = Expr::new(ctx, true, variables.clone(), spec.clone());
     match expr.current() {
         None => store.set_value(&iter, 1, &None::<&str>.to_value()),
         Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value()),
