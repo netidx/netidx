@@ -1097,6 +1097,7 @@ enum ConfirmState {
 pub(crate) struct ConfirmInner {
     ctx: WidgetCtx,
     state: RefCell<ConfirmState>,
+    debug: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1111,10 +1112,11 @@ impl Deref for Confirm {
 }
 
 impl Confirm {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
         let t = Confirm(Rc::new(ConfirmInner {
             ctx: ctx.clone(),
             state: RefCell::new(ConfirmState::Empty),
+            debug,
         }));
         match from {
             [msg, val] => {
@@ -1140,9 +1142,11 @@ impl Confirm {
     }
 
     fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
-        let default = Value::from("proceed with");
-        let msg = msg.unwrap_or(&default);
-        ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
+        self.debug || {
+            let default = Value::from("proceed with");
+            let msg = msg.unwrap_or(&default);
+            ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
+        }
     }
 
     fn eval(&self) -> Option<Value> {
@@ -1239,7 +1243,7 @@ pub(crate) static FORMULAS: [&'static str; 27] = [
     "string_join",
     "string_concat",
     "event",
-    "confirm"
+    "confirm",
 ];
 
 impl Formula {
@@ -1279,7 +1283,7 @@ impl Formula {
             "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
             "store" => Formula::Store(Store::new(ctx, debug, from)),
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
-            "confirm" => Formula::Confirm(Confirm::new(ctx, from)),
+            "confirm" => Formula::Confirm(Confirm::new(ctx, debug, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
