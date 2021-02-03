@@ -79,7 +79,18 @@ impl fmt::Display for Expr {
                     // interpolation
                     write!(f, "\"")?;
                     for s in args {
-                        write!(f, "[{}]", s)?;
+                        match s {
+                            Expr::Constant(Value::String(s)) if s.len() > 0 => {
+                                write!(
+                                    f,
+                                    "{}",
+                                    utils::escape(&*s, '\\', &parser::PATH_ESC)
+                                )?;
+                            }
+                            s => {
+                                write!(f, "[{}]", s)?;
+                            }
+                        }
                     }
                     write!(f, "\"")
                 } else if function == "load_var" && args.len() == 1 && args[0].is_fn() {
@@ -419,6 +430,29 @@ mod tests {
         })
     }
 
+    fn acc_strings(args: &Vec<Expr>) -> Vec<Expr> {
+        let mut v: Vec<Expr> = Vec::new();
+        for s in args {
+            let s = s.clone();
+            match s {
+                Expr::Constant(Value::String(ref c1)) => match v.last_mut() {
+                    None => v.push(s),
+                    Some(e0) => match e0 {
+                        Expr::Constant(Value::String(c0)) if c1.len() > 0 => {
+                            let mut st = String::new();
+                            st.push_str(&*c0);
+                            st.push_str(&*c1);
+                            *c0 = Chars::from(st);
+                        }
+                        _ => v.push(s),
+                    },
+                },
+                _ => v.push(s),
+            }
+        }
+        v
+    }
+
     fn check(s0: &Expr, s1: &Expr) -> bool {
         match (s0, s1) {
             (Expr::Constant(v0), Expr::Constant(v1)) => match (v0, v1) {
@@ -431,6 +465,20 @@ mod tests {
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
                 (v0, v1) => v0 == v1,
             },
+            (
+                Expr::Apply { args: srs0, function: fn0 },
+                Expr::Constant(Value::String(c1)),
+            ) if fn0 == "string_concat" => match &acc_strings(srs0)[..] {
+                [Expr::Constant(Value::String(c0))] => c0 == c1,
+                _ => false,
+            },
+            (
+                Expr::Apply { args: srs0, function: fn0 },
+                Expr::Apply { args: srs1, function: fn1 },
+            ) if fn0 == fn1 && fn0.as_str() == "string_concat" => {
+                let srs0 = acc_strings(srs0);
+                srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
+            }
             (
                 Expr::Apply { args: srs0, function: f0 },
                 Expr::Apply { args: srs1, function: f1 },
