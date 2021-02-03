@@ -41,7 +41,7 @@ use std::{
     ops::Deref,
     path::PathBuf,
     rc::{Rc, Weak},
-    result,
+    result, str,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc as smpsc, Arc,
@@ -71,6 +71,24 @@ enum ViewLoc {
     Netidx(Path),
 }
 
+impl str::FromStr for ViewLoc {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if Path::is_absolute(s) {
+            Ok(ViewLoc::Netidx(Path::from(Arc::from(s))))
+        } else if s.starts_with("netidx:") && Path::is_absolute(&s[7..]) {
+            Ok(ViewLoc::Netidx(Path::from(Arc::from(&s[7..]))))
+        } else if s.starts_with("file:") {
+            let mut buf = PathBuf::new();
+            buf.push(&s[5..]);
+            Ok(ViewLoc::File(buf))
+        } else {
+            Err(())
+        }
+    }
+}
+
 impl fmt::Display for ViewLoc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -88,10 +106,10 @@ enum ToGui {
         raeified: view::View,
         generated: bool,
     },
+    OpenNewWindow,
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
-    TryNavigate(Value),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -115,6 +133,7 @@ struct WidgetCtxInner {
     from_gui: mpsc::UnboundedSender<FromGui>,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
+    new_window_loc: Rc<RefCell<ViewLoc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1036,6 +1055,10 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     ctx.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
+        ToGui::OpenNewWindow => {
+            app.activate();
+            Continue(true)
+        }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = Vec::new();
@@ -1124,20 +1147,6 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
-        ToGui::TryNavigate(v) => {
-            match v {
-                Value::String(path) => {
-                    let loc = ViewLoc::Netidx(Path::from(path));
-                    let m = FromGui::Navigate(loc);
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
-                }
-                v => err_modal(
-                    &ctx.window,
-                    &format!("can't navigate to {}, expected string", v),
-                ),
-            }
-            Continue(true)
-        }
         ToGui::ShowError(s) => {
             err_modal(&ctx.window, &s);
             Continue(true)
@@ -1208,6 +1217,13 @@ fn main() {
     let subscriber = Arc::new(OnceCell::new());
     let (tx_tokio, rx_tokio) = mpsc::unbounded();
     let jh = run_tokio(rx_tokio);
+    let new_window_loc = Rc::new(RefCell::new(match &opt.path {
+        Some(path) => ViewLoc::Netidx(path.clone()),
+        None => match &opt.file {
+            Some(file) => ViewLoc::File(file.clone()),
+            None => ViewLoc::Netidx(Path::from("/")),
+        },
+    }));
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
@@ -1215,14 +1231,9 @@ fn main() {
         let (tx_init, rx_init) = smpsc::channel();
         let raw_view = Arc::new(AtomicBool::new(false));
         // navigate to the initial location
-        let loc = match &opt.path {
-            Some(path) => ViewLoc::Netidx(path.clone()),
-            None => match &opt.file {
-                Some(file) => ViewLoc::File(file.clone()),
-                None => ViewLoc::Netidx(Path::from("/")),
-            },
-        };
-        tx_from_gui.unbounded_send(FromGui::Navigate(loc)).unwrap();
+        tx_from_gui
+            .unbounded_send(FromGui::Navigate(new_window_loc.borrow().clone()))
+            .unwrap();
         tx_tokio
             .unbounded_send(StartNetidx {
                 cfg: cfg.clone(),
@@ -1245,6 +1256,7 @@ fn main() {
             from_gui: tx_from_gui,
             raw_view,
             window: window.clone(),
+            new_window_loc: new_window_loc.clone(),
         }));
         run_gui(ctx, app, rx_to_gui);
     });

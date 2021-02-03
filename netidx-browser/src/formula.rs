@@ -1,4 +1,4 @@
-use super::{util::ask_modal, ToGui, Vars, WidgetCtx};
+use super::{util::ask_modal, FromGui, ToGui, Vars, ViewLoc, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -1184,6 +1184,97 @@ impl Confirm {
     }
 }
 
+#[derive(Debug)]
+enum NavState {
+    Normal,
+    Invalid,
+    Debug(Value),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Navigate {
+    ctx: WidgetCtx,
+    state: Rc<RefCell<NavState>>,
+    debug: bool,
+}
+
+impl Navigate {
+    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
+        let t = Navigate {
+            ctx: ctx.clone(),
+            state: Rc::new(RefCell::new(NavState::Normal)),
+            debug,
+        };
+        match from {
+            [new_window, to] => t.navigate(new_window.current(), to.current()),
+            [to] => t.navigate(None, to.current()),
+            _ => *t.state.borrow_mut() = NavState::Invalid,
+        }
+        t
+    }
+
+    fn navigate(&self, new_window: Option<Value>, to: Option<Value>) {
+        if let Some(to) = to {
+            let new_window =
+                new_window.and_then(|v| v.cast_to::<bool>().ok()).unwrap_or(false);
+            match to.cast_to::<Chars>() {
+                Err(_) => *self.state.borrow_mut() = NavState::Invalid,
+                Ok(s) => match s.parse::<ViewLoc>() {
+                    Err(()) => *self.state.borrow_mut() = NavState::Invalid,
+                    Ok(loc) => {
+                        if new_window {
+                            if self.debug {
+                                *self.state.borrow_mut() = NavState::Debug(Value::from(
+                                    format!("would navigate in window to: {}", loc),
+                                ));
+                            } else {
+                                *self.ctx.new_window_loc.borrow_mut() = loc;
+                                let _ = self.ctx.to_gui.send(ToGui::OpenNewWindow);
+                            }
+                        } else {
+                            if self.debug {
+                                *self.state.borrow_mut() = NavState::Debug(Value::from(
+                                    format!("would navigate in window to: {}", loc),
+                                ));
+                            } else {
+                                let _ = self
+                                    .ctx
+                                    .from_gui
+                                    .unbounded_send(FromGui::Navigate(loc));
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn usage() -> Option<Value> {
+        Some(Value::from("navigate([new_window], to): expected 1 or two arguments where to is e.g. /foo/bar, or netidx:/foo/bar, or, file:/path/to/view"))
+    }
+
+    fn eval(&self) -> Option<Value> {
+        match &*self.state.borrow() {
+            NavState::Normal => None,
+            NavState::Invalid => Navigate::usage(),
+            NavState::Debug(v) => Some(v.clone())
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [new_window, to] => {
+                let new_window =
+                    new_window.update(tgt, value).or_else(|| new_window.current());
+                self.navigate(new_window, to.update(tgt, value))
+            }
+            [to] => self.navigate(None, to.update(tgt, value)),
+            _ => *self.state.borrow_mut() = NavState::Invalid,
+        }
+        self.eval()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
@@ -1213,10 +1304,11 @@ pub(crate) enum Formula {
     Store(Store),
     StoreVar(StoreVar),
     Confirm(Confirm),
+    Navigate(Navigate),
     Unknown(String),
 }
 
-pub(crate) static FORMULAS: [&'static str; 27] = [
+pub(crate) static FORMULAS: [&'static str; 28] = [
     "load",
     "load_var",
     "store",
@@ -1244,6 +1336,7 @@ pub(crate) static FORMULAS: [&'static str; 27] = [
     "string_concat",
     "event",
     "confirm",
+    "navigate",
 ];
 
 impl Formula {
@@ -1284,6 +1377,7 @@ impl Formula {
             "store" => Formula::Store(Store::new(ctx, debug, from)),
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
             "confirm" => Formula::Confirm(Confirm::new(ctx, debug, from)),
+            "navigate" => Formula::Navigate(Navigate::new(ctx, debug, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1317,6 +1411,7 @@ impl Formula {
             Formula::Store(s) => s.eval(),
             Formula::StoreVar(s) => s.eval(),
             Formula::Confirm(s) => s.eval(),
+            Formula::Navigate(s) => s.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -1371,6 +1466,7 @@ impl Formula {
             Formula::Store(s) => s.update(from, tgt, value),
             Formula::StoreVar(s) => s.update(from, tgt, value),
             Formula::Confirm(s) => s.update(from, tgt, value),
+            Formula::Navigate(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
