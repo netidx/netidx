@@ -1,4 +1,4 @@
-use super::{ToGui, Vars, WidgetCtx};
+use super::{util::ask_modal, ToGui, Vars, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -8,7 +8,7 @@ use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
-    fmt,
+    fmt, mem,
     ops::Deref,
     rc::Rc,
     result::Result,
@@ -1086,6 +1086,100 @@ impl LoadVar {
     }
 }
 
+#[derive(Debug)]
+enum ConfirmState {
+    Empty,
+    Invalid,
+    Ready { message: Option<Value>, value: Value },
+}
+
+#[derive(Debug)]
+pub(crate) struct ConfirmInner {
+    ctx: WidgetCtx,
+    state: RefCell<ConfirmState>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Confirm(Rc<ConfirmInner>);
+
+impl Deref for Confirm {
+    type Target = ConfirmInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Confirm {
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
+        let t = Confirm(Rc::new(ConfirmInner {
+            ctx: ctx.clone(),
+            state: RefCell::new(ConfirmState::Empty),
+        }));
+        match from {
+            [msg, val] => {
+                if let Some(value) = val.current() {
+                    *t.state.borrow_mut() =
+                        ConfirmState::Ready { message: msg.current(), value };
+                }
+            }
+            [val] => {
+                if let Some(value) = val.current() {
+                    *t.state.borrow_mut() = ConfirmState::Ready { message: None, value };
+                }
+            }
+            _ => {
+                *t.state.borrow_mut() = ConfirmState::Invalid;
+            }
+        }
+        t
+    }
+
+    fn usage() -> Option<Value> {
+        Some(Value::Error(Chars::from("confirm([msg], val): expected 1 or 2 arguments")))
+    }
+
+    fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
+        let default = Value::from("proceed with");
+        let msg = msg.unwrap_or(&default);
+        ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
+    }
+
+    fn eval(&self) -> Option<Value> {
+        match mem::replace(&mut *self.state.borrow_mut(), ConfirmState::Empty) {
+            ConfirmState::Empty => None,
+            ConfirmState::Invalid => Confirm::usage(),
+            ConfirmState::Ready { message, value } => {
+                if self.ask(message.as_ref(), &value) {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [msg, val] => {
+                let m = msg.update(tgt, value).or_else(|| msg.current());
+                let v = val.update(tgt, value);
+                v.and_then(|v| if self.ask(m.as_ref(), &v) { Some(v) } else { None })
+            }
+            [val] => {
+                let v = val.update(tgt, value);
+                v.and_then(|v| if self.ask(None, &v) { Some(v) } else { None })
+            }
+            exprs => {
+                for expr in exprs {
+                    expr.update(tgt, value);
+                }
+                Confirm::usage()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
@@ -1114,10 +1208,11 @@ pub(crate) enum Formula {
     LoadVar(LoadVar),
     Store(Store),
     StoreVar(StoreVar),
+    Confirm(Confirm),
     Unknown(String),
 }
 
-pub(crate) static FORMULAS: [&'static str; 26] = [
+pub(crate) static FORMULAS: [&'static str; 27] = [
     "load",
     "load_var",
     "store",
@@ -1144,6 +1239,7 @@ pub(crate) static FORMULAS: [&'static str; 26] = [
     "string_join",
     "string_concat",
     "event",
+    "confirm"
 ];
 
 impl Formula {
@@ -1183,6 +1279,7 @@ impl Formula {
             "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
             "store" => Formula::Store(Store::new(ctx, debug, from)),
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
+            "confirm" => Formula::Confirm(Confirm::new(ctx, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1215,6 +1312,7 @@ impl Formula {
             Formula::LoadVar(s) => s.eval(),
             Formula::Store(s) => s.eval(),
             Formula::StoreVar(s) => s.eval(),
+            Formula::Confirm(s) => s.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -1268,6 +1366,7 @@ impl Formula {
             Formula::LoadVar(s) => s.update(from, tgt, value),
             Formula::Store(s) => s.update(from, tgt, value),
             Formula::StoreVar(s) => s.update(from, tgt, value),
+            Formula::Confirm(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
