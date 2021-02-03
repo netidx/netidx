@@ -106,7 +106,7 @@ enum ToGui {
         raeified: view::View,
         generated: bool,
     },
-    OpenNewWindow,
+    NavigateInWindow(ViewLoc),
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
@@ -1055,7 +1055,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
     ctx.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
-        ToGui::OpenNewWindow => {
+        ToGui::NavigateInWindow(loc) => {
+            *ctx.new_window_loc.borrow_mut() = loc;
             app.activate();
             Continue(true)
         }
@@ -1217,23 +1218,25 @@ fn main() {
     let subscriber = Arc::new(OnceCell::new());
     let (tx_tokio, rx_tokio) = mpsc::unbounded();
     let jh = run_tokio(rx_tokio);
-    let new_window_loc = Rc::new(RefCell::new(match &opt.path {
+    let default_loc = match &opt.path {
         Some(path) => ViewLoc::Netidx(path.clone()),
         None => match &opt.file {
             Some(file) => ViewLoc::File(file.clone()),
             None => ViewLoc::Netidx(Path::from("/")),
         },
-    }));
+    };
+    let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
     application.connect_activate(move |app| {
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         let (tx_init, rx_init) = smpsc::channel();
         let raw_view = Arc::new(AtomicBool::new(false));
-        // navigate to the initial location
+        // navigate to the requested location
         tx_from_gui
             .unbounded_send(FromGui::Navigate(new_window_loc.borrow().clone()))
             .unwrap();
+        *new_window_loc.borrow_mut() = default_loc.clone();
         tx_tokio
             .unbounded_send(StartNetidx {
                 cfg: cfg.clone(),

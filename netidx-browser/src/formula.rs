@@ -1228,8 +1228,7 @@ impl Navigate {
                                     format!("would navigate in window to: {}", loc),
                                 ));
                             } else {
-                                *self.ctx.new_window_loc.borrow_mut() = loc;
-                                let _ = self.ctx.to_gui.send(ToGui::OpenNewWindow);
+                                let _ = self.ctx.to_gui.send(ToGui::NavigateInWindow(loc));
                             }
                         } else {
                             if self.debug {
