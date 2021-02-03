@@ -352,6 +352,7 @@ impl Toggle {
 
 pub(super) struct Entry {
     entry: gtk::Entry,
+    we_changed: Rc<Cell<bool>>,
     enabled: Expr,
     visible: Expr,
     text: Expr,
@@ -365,6 +366,7 @@ impl Entry {
         spec: view::Entry,
         selected_path: gtk::Label,
     ) -> Self {
+        let we_changed = Rc::new(Cell::new(false));
         let enabled = Expr::new(&ctx, false, variables.clone(), spec.enabled.clone());
         let visible = Expr::new(&ctx, false, variables.clone(), spec.visible.clone());
         let text = Expr::new(&ctx, false, variables.clone(), spec.text.clone());
@@ -381,38 +383,44 @@ impl Entry {
             Some(Value::String(s)) => entry.set_text(&*s),
             Some(v) => entry.set_text(&format!("{}", v)),
         }
-        fn submit(text: &Expr, on_change: &Expr, entry: &gtk::Entry) {
+        entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
+        entry.connect_activate(clone!(
+        @strong we_changed,
+        @strong text,
+        @strong on_change => move |entry| {
+            entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
             on_change.update(
                 Target::Event,
                 &Value::String(Chars::from(String::from(entry.get_text()))),
             );
-            idle_add_local(clone!(@strong text, @strong entry => move || {
-                match text.current() {
-                    None => entry.set_text(""),
-                    Some(Value::String(s)) => entry.set_text(&*s),
-                    Some(v) => entry.set_text(&format!("{}", v)),
-                }
-                Continue(false)
-            }));
-        }
-        entry.connect_activate(clone!(@strong text, @strong on_change => move |entry| {
-            submit(&text, &on_change, entry)
+            idle_add_local(clone!(
+                @strong we_changed, @strong text, @strong entry => move || {
+                    we_changed.set(true);
+                    match text.current() {
+                        None => entry.set_text(""),
+                        Some(Value::String(s)) => entry.set_text(&*s),
+                        Some(v) => entry.set_text(&format!("{}", v)),
+                    }
+                    we_changed.set(false);
+                    Continue(false)
+                }));
         }));
-        entry.connect_focus_out_event(
-            clone!(@strong text, @strong on_change => move |w, _| {
-                let entry = w.downcast_ref::<gtk::Entry>().unwrap();
-                submit(&text, &on_change, entry);
-                Inhibit(false)
-            }),
-        );
+        entry.connect_changed(clone!(@strong we_changed => move |e| {
+            if !we_changed.get() {
+                e.set_icon_from_icon_name(
+                    gtk::EntryIconPosition::Secondary,
+                    Some("media-floppy")
+                );
+            }
+        }));
+        entry.connect_icon_press(move |e, _, _| e.emit_activate());
         entry.connect_focus(clone!(@strong spec, @strong selected_path => move |_, _| {
             selected_path.set_label(
                 &format!("text: {}, on_change: {}", spec.text, spec.on_change)
             );
             Inhibit(false)
         }));
-        // CR estokes: give the user an indication that it's out of sync
-        Entry { entry, enabled, visible, text, on_change }
+        Entry { we_changed, entry, enabled, visible, text, on_change }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -427,10 +435,12 @@ impl Entry {
             self.entry.set_visibility(val_to_bool(&new));
         }
         if let Some(new) = self.text.update(tgt, value) {
+            self.we_changed.set(true);
             match new {
                 Value::String(s) => self.entry.set_text(&*s),
                 v => self.entry.set_text(&format!("{}", v)),
             }
+            self.we_changed.set(false);
         }
         self.on_change.update(tgt, value);
     }
@@ -464,10 +474,14 @@ impl LinePlot {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min = Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_min.clone()));
-        let x_max = Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_max.clone()));
-        let y_min = Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_min.clone()));
-        let y_max = Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_max.clone()));
+        let x_min =
+            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_min.clone()));
+        let x_max =
+            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_max.clone()));
+        let y_min =
+            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_min.clone()));
+        let y_max =
+            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_max.clone()));
         let keep_points =
             Rc::new(Expr::new(&ctx, false, variables.clone(), spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
