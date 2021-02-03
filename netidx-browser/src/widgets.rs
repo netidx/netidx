@@ -357,6 +357,7 @@ pub(super) struct Entry {
     visible: Expr,
     text: Expr,
     on_change: Expr,
+    on_activate: Expr,
 }
 
 impl Entry {
@@ -371,6 +372,8 @@ impl Entry {
         let visible = Expr::new(&ctx, false, variables.clone(), spec.visible.clone());
         let text = Expr::new(&ctx, false, variables.clone(), spec.text.clone());
         let on_change = Expr::new(&ctx, false, variables.clone(), spec.on_change.clone());
+        let on_activate =
+            Expr::new(&ctx, false, variables.clone(), spec.on_activate.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -387,9 +390,9 @@ impl Entry {
         entry.connect_activate(clone!(
         @strong we_changed,
         @strong text,
-        @strong on_change => move |entry| {
+        @strong on_activate => move |entry| {
             entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
-            on_change.update(
+            on_activate.update(
                 Target::Event,
                 &Value::String(Chars::from(String::from(entry.get_text()))),
             );
@@ -405,12 +408,22 @@ impl Entry {
                     Continue(false)
                 }));
         }));
-        entry.connect_changed(clone!(@strong we_changed => move |e| {
+        entry.connect_changed(clone!(@strong we_changed, @strong on_change => move |e| {
             if !we_changed.get() {
-                e.set_icon_from_icon_name(
-                    gtk::EntryIconPosition::Secondary,
-                    Some("media-floppy")
+                let v = on_change.update(
+                    Target::Event,
+                    &Value::String(Chars::from(String::from(e.get_text())))
                 );
+                if let Some(v) = v {
+                    if let Some(set) = v.cast_to::<bool>().ok() {
+                        if set {
+                            e.set_icon_from_icon_name(
+                                gtk::EntryIconPosition::Secondary,
+                                Some("media-floppy")
+                            );
+                        }
+                    }
+                }
             }
         }));
         entry.connect_icon_press(move |e, _, _| e.emit_activate());
@@ -420,7 +433,7 @@ impl Entry {
             );
             Inhibit(false)
         }));
-        Entry { we_changed, entry, enabled, visible, text, on_change }
+        Entry { we_changed, entry, enabled, visible, text, on_change, on_activate }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -443,6 +456,7 @@ impl Entry {
             self.we_changed.set(false);
         }
         self.on_change.update(tgt, value);
+        self.on_activate.update(tgt, value);
     }
 }
 

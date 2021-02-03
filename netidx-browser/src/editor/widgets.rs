@@ -698,6 +698,7 @@ pub(super) struct Entry {
     visible_expr: DbgExpr,
     text_expr: DbgExpr,
     on_change_expr: DbgExpr,
+    on_activate_expr: DbgExpr,
 }
 
 impl Entry {
@@ -753,7 +754,26 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        Entry { root, spec, enabled_expr, visible_expr, text_expr, on_change_expr }
+        let (l, e, on_activate_expr) = expr(
+            ctx,
+            variables,
+            "On Activate:",
+            &spec.borrow().on_activate,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().on_activate = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Entry {
+            root,
+            spec,
+            enabled_expr,
+            visible_expr,
+            text_expr,
+            on_change_expr,
+            on_activate_expr,
+        }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -775,6 +795,9 @@ impl Entry {
             si.update(tgt, value);
         }
         if let Some((_, si)) = &*self.on_change_expr.borrow() {
+            si.update(tgt, value);
+        }
+        if let Some((_, si)) = &*self.on_activate_expr.borrow() {
             si.update(tgt, value);
         }
     }

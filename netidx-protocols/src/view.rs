@@ -191,6 +191,7 @@ pub struct Entry {
     pub visible: Expr,
     pub text: Expr,
     pub on_change: Expr,
+    pub on_activate: Expr,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, PartialEq, PartialOrd, Eq, Ord, Deserialize)]

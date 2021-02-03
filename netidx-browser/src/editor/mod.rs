@@ -447,6 +447,16 @@ impl Widget {
                     ],
                     function: "store".into(),
                 },
+                on_activate: view::Expr::Apply {
+                    args: vec![
+                        view::Expr::Apply {
+                            args: vec![],
+                            function: "event".into()
+                        },
+                        view::Expr::Constant(Value::True)
+                    ],
+                    function: "sample".into()
+                },
             })),
             Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
                 title: String::from("Line Plot"),
