@@ -438,7 +438,9 @@ mod tests {
                 Expr::Constant(Value::String(ref c1)) => match v.last_mut() {
                     None => v.push(s),
                     Some(e0) => match e0 {
-                        Expr::Constant(Value::String(c0)) if c1.len() > 0 => {
+                        Expr::Constant(Value::String(c0))
+                            if c1.len() > 0 && c0.len() > 0 =>
+                        {
                             let mut st = String::new();
                             st.push_str(&*c0);
                             st.push_str(&*c1);
@@ -463,7 +465,7 @@ mod tests {
                 }
                 (Value::F32(v0), Value::F32(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-7,
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
-                (v0, v1) => v0 == v1,
+                (v0, v1) => dbg!(dbg!(v0) == dbg!(v1)),
             },
             (
                 Expr::Apply { args: srs0, function: fn0 },
