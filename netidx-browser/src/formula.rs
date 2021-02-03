@@ -1228,7 +1228,8 @@ impl Navigate {
                                     format!("would navigate in window to: {}", loc),
                                 ));
                             } else {
-                                let _ = self.ctx.to_gui.send(ToGui::NavigateInWindow(loc));
+                                let _ =
+                                    self.ctx.to_gui.send(ToGui::NavigateInWindow(loc));
                             }
                         } else {
                             if self.debug {
@@ -1236,10 +1237,17 @@ impl Navigate {
                                     format!("would navigate in window to: {}", loc),
                                 ));
                             } else {
-                                let _ = self
-                                    .ctx
-                                    .from_gui
-                                    .unbounded_send(FromGui::Navigate(loc));
+                                if self.ctx.view_saved.get()
+                                    || ask_modal(
+                                        &self.ctx.window,
+                                        "Unsaved view will be lost.",
+                                    )
+                                {
+                                    let _ = self
+                                        .ctx
+                                        .from_gui
+                                        .unbounded_send(FromGui::Navigate(loc));
+                                }
                             }
                         }
                     }
@@ -1256,7 +1264,7 @@ impl Navigate {
         match &*self.state.borrow() {
             NavState::Normal => None,
             NavState::Invalid => Navigate::usage(),
-            NavState::Debug(v) => Some(v.clone())
+            NavState::Debug(v) => Some(v.clone()),
         }
     }
 
