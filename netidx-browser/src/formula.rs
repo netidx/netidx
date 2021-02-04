@@ -789,15 +789,25 @@ impl Store {
                 } else {
                     value
                 };
+                let up = value.is_some();
                 self.set(path, value);
-                self.eval()
+                if up {
+                    self.eval()
+                } else {
+                    None
+                }
             }
             exprs => {
+                let mut up = false;
                 for expr in exprs {
-                    expr.update(tgt, value);
+                    up = expr.update(tgt, value).is_some() || up;
                 }
                 self.invalid.set(true);
-                self.eval()
+                if up {
+                    self.eval()
+                } else {
+                    None
+                }
             }
         }
     }
@@ -928,15 +938,25 @@ impl StoreVar {
                 } else {
                     value
                 };
+                let up = value.is_some();
                 self.set(name, value);
-                self.eval()
+                if up {
+                    self.eval()
+                } else {
+                    None
+                }
             }
             exprs => {
+                let mut up = false;
                 for expr in exprs {
-                    expr.update(tgt, value);
+                    up = expr.update(tgt, value).is_some() || up;
                 }
                 self.invalid.set(true);
-                self.eval()
+                if up {
+                    self.eval()
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1002,9 +1022,15 @@ impl Load {
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         match from {
             [name] => {
-                self.subscribe(name.update(tgt, value));
+                let target = name.update(tgt, value);
+                let up = target.is_some();
+                self.subscribe(target);
                 if self.invalid.get() {
-                    Load::err()
+                    if up {
+                        Load::err()
+                    } else {
+                        None
+                    }
                 } else {
                     self.cur.borrow().as_ref().and_then(|dv| match tgt {
                         Target::Variable(_) => None,
@@ -1014,11 +1040,16 @@ impl Load {
                 }
             }
             exprs => {
+                let mut up = false;
                 for e in exprs {
-                    e.update(tgt, value);
+                    up = e.update(tgt, value).is_some() || up;
                 }
                 self.invalid.set(true);
-                Load::err()
+                if up {
+                    Load::err()
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1082,9 +1113,15 @@ impl LoadVar {
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         match from {
             [name] => {
-                self.subscribe(name.update(tgt, value));
+                let target = name.update(tgt, value);
+                let up = target.is_some();
+                self.subscribe(target);
                 if self.invalid.get() {
-                    LoadVar::err()
+                    if up {
+                        LoadVar::err()
+                    } else {
+                        None
+                    }
                 } else {
                     match (self.name.borrow().as_ref(), tgt) {
                         (None, _) => None,
@@ -1098,11 +1135,16 @@ impl LoadVar {
                 }
             }
             exprs => {
+                let mut up = false;
                 for e in exprs {
-                    e.update(tgt, value);
+                    up = e.update(tgt, value).is_some() || up;
                 }
                 self.invalid.set(true);
-                LoadVar::err()
+                if up {
+                    LoadVar::err()
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1197,10 +1239,15 @@ impl Confirm {
                 v.and_then(|v| if self.ask(None, &v) { Some(v) } else { None })
             }
             exprs => {
+                let mut up = false;
                 for expr in exprs {
-                    expr.update(tgt, value);
+                    up = expr.update(tgt, value).is_some() || up;
                 }
-                Confirm::usage()
+                if up {
+                    Confirm::usage()
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1291,16 +1338,35 @@ impl Navigate {
     }
 
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        match from {
+        let up = match from {
             [new_window, to] => {
                 let new_window =
                     new_window.update(tgt, value).or_else(|| new_window.current());
-                self.navigate(new_window, to.update(tgt, value))
+                let target = to.update(tgt, value);
+                let up = target.is_some();
+                self.navigate(new_window, target);
+                up
             }
-            [to] => self.navigate(None, to.update(tgt, value)),
-            _ => *self.state.borrow_mut() = NavState::Invalid,
+            [to] => {
+                let target = to.update(tgt, value);
+                let up = target.is_some();
+                self.navigate(None, target);
+                up
+            },
+            exprs => {
+                let mut up = false;
+                for e in exprs {
+                    up = e.update(tgt, value).is_some() || up;
+                }
+                *self.state.borrow_mut() = NavState::Invalid;
+                up
+            }
+        };
+        if up {
+            self.eval()
+        } else {
+            None
         }
-        self.eval()
     }
 }
 
@@ -1337,11 +1403,16 @@ impl Uniq {
                 }
             }),
             exprs => {
+                let mut up = false;
                 for e in exprs {
-                    e.update(tgt, value);
+                    up = e.update(tgt, value).is_some() || up;
                 }
                 *self.0.borrow_mut() = Uniq::usage();
-                Uniq::usage()
+                if up {
+                    self.eval()
+                } else {
+                    None
+                }
             }
         }
     }
