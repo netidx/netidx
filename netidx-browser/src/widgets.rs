@@ -460,6 +460,44 @@ impl Entry {
     }
 }
 
+fn valid_typ(v: &Value) -> bool {
+    v.is_number() || Typ::get(v) == Some(Typ::DateTime)
+}
+
+struct ValidTypIter<'a, I> {
+    last_valid: Option<&'a Value>,
+    inner: I,
+}
+
+impl<'a, I: Iterator<Item = &'a Value>> ValidTypIter<'a, I> {
+    fn new(i: I) -> Self {
+        ValidTypIter {
+            last_valid: None,
+            inner: i
+        }
+    }
+}
+
+impl<'a, I: Iterator<Item = &'a Value>> Iterator for ValidTypIter<'a, I> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next() {
+                None => break None,
+                Some(v) => {
+                    if valid_typ(v) {
+                        self.last_valid = Some(v);
+                        break Some(v)
+                    } else if let Some(v) = self.last_valid {
+                        break Some(v)
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct Series {
     line_color: view::RGB,
     x: Expr,
@@ -596,9 +634,6 @@ impl LinePlot {
             }
             mesh.draw().map_err(|e| anyhow!("{}", e))
         }
-        fn valid_typ(v: &Value) -> bool {
-            v.is_number() || Typ::get(v) == Some(Typ::DateTime)
-        }
         if width.get() > 0 && height.get() > 0 {
             let (x_min, x_max, y_min, y_max) =
                 (x_min.current(), x_max.current(), y_min.current(), y_max.current());
@@ -617,7 +652,7 @@ impl LinePlot {
                 .clone();
             let mut computed_y_max = computed_y_min.clone();
             for s in series.borrow().iter() {
-                for x in s.x_data.iter().filter(|v| valid_typ(v)) {
+                for x in ValidTypIter::new(s.x_data.iter()) {
                     if x < &computed_x_min {
                         computed_x_min = x.clone();
                     }
@@ -625,7 +660,7 @@ impl LinePlot {
                         computed_x_max = x.clone();
                     }
                 }
-                for y in s.y_data.iter().filter(|v| valid_typ(v)) {
+                for y in ValidTypIter::new(s.y_data.iter()) {
                     if y < &computed_y_min {
                         computed_y_min = y.clone();
                     }
