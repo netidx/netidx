@@ -1305,6 +1305,49 @@ impl Navigate {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct Uniq(Rc<RefCell<Option<Value>>>);
+
+impl Uniq {
+    fn new(from: &[Expr]) -> Self {
+        let t = Uniq(Rc::new(RefCell::new(None)));
+        match from {
+            [e] => *t.0.borrow_mut() = e.current(),
+            _ => *t.0.borrow_mut() = Uniq::usage(),
+        }
+        t
+    }
+
+    fn usage() -> Option<Value> {
+        Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
+    }
+
+    fn eval(&self) -> Option<Value> {
+        self.0.borrow().as_ref().cloned()
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [e] => e.update(tgt, value).and_then(|v| {
+                let cur = &mut *self.0.borrow_mut();
+                if Some(&v) != cur.as_ref() {
+                    *cur = Some(v.clone());
+                    Some(v)
+                } else {
+                    None
+                }
+            }),
+            exprs => {
+                for e in exprs {
+                    e.update(tgt, value);
+                }
+                *self.0.borrow_mut() = Uniq::usage();
+                Uniq::usage()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
     All(All),
@@ -1325,6 +1368,7 @@ pub(crate) enum Formula {
     Eval(Eval),
     Count(Count),
     Sample(Sample),
+    Uniq(Uniq),
     StringJoin(CachedVals),
     StringConcat(CachedVals),
     Event(Event),
@@ -1337,7 +1381,7 @@ pub(crate) enum Formula {
     Unknown(String),
 }
 
-pub(crate) static FORMULAS: [&'static str; 28] = [
+pub(crate) static FORMULAS: [&'static str; 29] = [
     "load",
     "load_var",
     "store",
@@ -1361,6 +1405,7 @@ pub(crate) static FORMULAS: [&'static str; 28] = [
     "eval",
     "count",
     "sample",
+    "uniq",
     "string_join",
     "string_concat",
     "event",
@@ -1398,6 +1443,7 @@ impl Formula {
             "eval" => Formula::Eval(Eval::new(ctx, debug, variables, from)),
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
+            "uniq" => Formula::Uniq(Uniq::new(from)),
             "string_join" => Formula::StringJoin(CachedVals::new(from)),
             "string_concat" => Formula::StringConcat(CachedVals::new(from)),
             "event" => Formula::Event(Event::new(from)),
@@ -1432,6 +1478,7 @@ impl Formula {
             Formula::Eval(e) => e.eval(),
             Formula::Count(c) => c.eval(),
             Formula::Sample(c) => c.eval(),
+            Formula::Uniq(c) => c.eval(),
             Formula::StringJoin(c) => eval_string_join(c),
             Formula::StringConcat(c) => eval_string_concat(c),
             Formula::Event(s) => s.eval(),
@@ -1483,6 +1530,7 @@ impl Formula {
             Formula::Eval(e) => e.update(from, tgt, value),
             Formula::Count(c) => c.update(from, tgt, value),
             Formula::Sample(c) => c.update(from, tgt, value),
+            Formula::Uniq(c) => c.update(from, tgt, value),
             Formula::StringJoin(c) => {
                 update_cached(eval_string_join, c, from, tgt, value)
             }
