@@ -396,10 +396,7 @@ fn eval_cmp(from: &CachedVals) -> Option<Value> {
                     (Value::Ok, Value::Ok) => Some(eval_op(&*op, true, true)),
                     (Value::Error(v0), Value::Error(v1)) => Some(eval_op(&*op, v0, v1)),
                     (Value::Null, Value::Null) => Some(Value::True),
-                    (v0, v1) => Some(Value::Error(Chars::from(format!(
-                        "can't compare incompatible types {:?} and {:?}",
-                        v0, v1
-                    )))),
+                    (_, _) => Some(Value::False),
                 },
             },
             Some(_) => Some(Value::Error(Chars::from(
@@ -688,7 +685,7 @@ fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
 pub(crate) struct StoreInner {
     queued: RefCell<Vec<Value>>,
     ctx: WidgetCtx,
-    dv: RefCell<Option<Dval>>,
+    dv: RefCell<Option<(Path, Dval)>>,
     invalid: Cell<bool>,
     debug: Option<RefCell<Value>>,
 }
@@ -746,10 +743,11 @@ impl Store {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
                 None => self.queue(v),
-                Some(dv) => self.write(dv, v),
+                Some((_, dv)) => self.write(dv, v),
             },
             (Some(p), val) => {
-                let dv = self.ctx.subscriber.durable_subscribe(Path::from(p));
+                let path = Path::from(p);
+                let dv = self.ctx.subscriber.durable_subscribe(path.clone());
                 dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
                 if let Some(v) = val {
                     self.queue(v)
@@ -757,7 +755,7 @@ impl Store {
                 for v in self.queued.borrow_mut().drain(..) {
                     self.write(&dv, v);
                 }
-                *self.dv.borrow_mut() = Some(dv);
+                *self.dv.borrow_mut() = Some((path, dv));
             }
         }
     }
@@ -774,12 +772,19 @@ impl Store {
         }
     }
 
+    fn same_path(&self, new_path: &Option<Value>) -> bool {
+        match (new_path.as_ref(), self.dv.borrow().as_ref()) {
+            (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
+            _ => false,
+        }
+    }
+
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         match from {
             [path, val] => {
                 let path = path.update(tgt, value);
                 let value = val.update(tgt, value);
-                let value = if path.is_some() {
+                let value = if path.is_some() && !self.same_path(&path) {
                     value.or_else(|| val.current())
                 } else {
                     value
@@ -906,12 +911,19 @@ impl StoreVar {
         }
     }
 
+    fn same_name(&self, new_name: &Option<Value>) -> bool {
+        match (new_name, self.name.borrow().as_ref()) {
+            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
+            _ => false,
+        }
+    }
+
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         match from {
             [name, val] => {
                 let name = name.update(tgt, value);
                 let value = val.update(tgt, value);
-                let value = if name.is_some() {
+                let value = if name.is_some() && !self.same_name(&name) {
                     value.or_else(|| val.current())
                 } else {
                     value
