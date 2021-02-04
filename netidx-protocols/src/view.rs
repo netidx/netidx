@@ -99,14 +99,6 @@ impl fmt::Display for Expr {
                         Expr::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
-                } else if function == "store_var" && args.len() == 2 && args[0].is_fn() {
-                    // constant variable store
-                    match &args[0] {
-                        Expr::Constant(Value::String(c)) => {
-                            write!(f, "{} = {}", c, &args[1])
-                        }
-                        _ => unreachable!(),
-                    }
                 } else {
                     // it's a normal function
                     write!(f, "{}(", function)?;

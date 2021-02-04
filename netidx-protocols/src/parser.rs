@@ -293,12 +293,6 @@ where
                     Expr::Constant(Value::Duration(d))
                 }),
         ),
-        attempt(fname().skip(spaces().with(token('='))).and(expr()).map(|(v, e)| {
-            Expr::Apply {
-                function: "store_var".into(),
-                args: vec![Expr::Constant(Value::from(v)), e],
-            }
-        })),
         attempt(
             (
                 fname(),
