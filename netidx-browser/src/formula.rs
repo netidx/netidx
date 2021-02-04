@@ -910,8 +910,13 @@ impl StoreVar {
         match from {
             [name, val] => {
                 let name = name.update(tgt, value);
-                let val = val.update(tgt, value);
-                self.set(name, val);
+                let value = val.update(tgt, value);
+                let value = if name.is_some() {
+                    value.or_else(|| val.current())
+                } else {
+                    value
+                };
+                self.set(name, value);
                 self.eval()
             }
             exprs => {
