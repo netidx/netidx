@@ -7,4 +7,5 @@
 pub mod view;
 pub mod archive;
 pub mod cluster;
+pub mod rpc;
 mod parser;
