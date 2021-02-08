@@ -14,7 +14,13 @@ use netidx::{
     publisher::{Id, Publisher, Val, Value, WriteRequest},
     subscriber::{Dval, Subscriber},
 };
-use std::{collections::HashMap, iter, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    iter,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::task;
 
 pub mod server {
@@ -37,18 +43,34 @@ pub mod server {
         _doc: Val,
     }
 
+    struct PendingCall {
+        args: Pooled<HashMap<Arc<str>, Value>>,
+        initiated: Instant,
+    }
+
     struct ProcInner {
         call: Val,
         _doc: Val,
         args: HashMap<Id, Arg, FxBuildHasher>,
-        pending: HashMap<SocketAddr, Pooled<HashMap<Arc<str>, Value>>, FxBuildHasher>,
+        pending: HashMap<SocketAddr, PendingCall, FxBuildHasher>,
         handler: Handler,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
+        last_gc: Instant,
     }
 
     impl ProcInner {
         async fn run(mut self) {
+            static GC_FREQ: Duration = Duration::from_secs(1);
+            static GC_THRESHOLD: usize = 128;
+            fn gc_pending(
+                pending: &mut HashMap<SocketAddr, PendingCall, FxBuildHasher>,
+                now: Instant,
+            ) {
+                static STALE: Duration = Duration::from_secs(60);
+                pending.retain(|_, pc| now - pc.initiated < STALE);
+                pending.shrink_to_fit();
+            }
             let mut stop = self.stop;
             loop {
                 select_biased! {
@@ -57,7 +79,7 @@ pub mod server {
                         None => break, // publisher died?
                         Some(mut batch) => for req in batch.drain(..) {
                             if req.id == self.call.id() {
-                                let args = self.pending.remove(&req.addr)
+                                let args = self.pending.remove(&req.addr).map(|pc| pc.args)
                                     .unwrap_or_else(|| ARGS.take());
                                 let handler = self.handler.clone();
                                 let call = self.call.clone();
@@ -69,10 +91,24 @@ pub mod server {
                                     }
                                 });
                             } else {
+                                let mut gc = false;
                                 let pending = self.pending.entry(req.addr)
-                                    .or_insert_with(|| ARGS.take());
+                                    .or_insert_with(|| {
+                                        gc = true;
+                                        PendingCall {
+                                            args: ARGS.take(),
+                                            initiated: Instant::now()
+                                        }
+                                    });
                                 if let Some(Arg {name, ..}) = self.args.get(&req.id) {
-                                    pending.insert(name.clone(), req.value);
+                                    pending.args.insert(name.clone(), req.value);
+                                }
+                                if gc && self.pending.len() > GC_THRESHOLD {
+                                    let now = Instant::now();
+                                    if now - self.last_gc > GC_FREQ {
+                                        self.last_gc = now;
+                                        gc_pending(&mut self.pending, now);
+                                    }
                                 }
                             }
                         }
@@ -118,6 +154,7 @@ pub mod server {
                 handler,
                 events: rx_ev.fuse(),
                 stop: rx_stop.fuse(),
+                last_gc: Instant::now(),
             };
             task::spawn(async move { inner.run() });
             publisher.flush(None).await;
