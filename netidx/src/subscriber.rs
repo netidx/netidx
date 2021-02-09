@@ -71,6 +71,26 @@ impl error::Error for NoSuchValue {}
 atomic_id!(SubId);
 
 bitflags! {
+    pub struct SubscribeFlags: u32 {
+        /// if set, then if an existing connection exists to any
+        /// publisher that publishes the value we are subscribing,
+        /// then subscriber will use that connection instead of
+        /// picking a random publisher and potentially creating a new
+        /// connection.
+        ///
+        /// Because the creation of connections is atomic, this flag
+        /// guarantees that all subscriptions that can will use the
+        /// same connection.
+        ///
+        /// This can be important for control interfaces, and is used
+        /// by the RPC protocol to ensure that all function parameters
+        /// are written to the same publisher, even if a procedure is
+        /// published by multiple publishers.
+        const USE_EXISTING = 0x01;
+    }
+}
+
+bitflags! {
     pub struct UpdatesFlags: u32 {
         /// if set, then an immediate update will be sent consisting
         /// of the last value received from the publisher.
@@ -233,13 +253,23 @@ impl Val {
 }
 
 #[derive(Debug)]
-struct DvalInner {
-    sub_id: SubId,
-    sub: Option<Val>,
+struct DvDead {
     queued_writes: Vec<(Value, Option<oneshot::Sender<Value>>)>,
-    streams: Vec<(UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     tries: usize,
     next_try: Instant,
+}
+
+#[derive(Debug)]
+enum DvState {
+    Subscribed(Val),
+    Dead(Box<DvDead>),
+}
+
+#[derive(Debug)]
+struct DvalInner {
+    sub_id: SubId,
+    sub: DvState,
+    streams: Vec<(UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,8 +331,8 @@ impl Dval {
     /// if the subscription is currently dead.
     pub fn last(&self) -> Event {
         match &self.0.lock().sub {
-            None => Event::Unsubscribed,
-            Some(val) => val.last(),
+            DvState::Dead(_) => Event::Unsubscribed,
+            DvState::Subscribed(val) => val.last(),
         }
     }
 
@@ -321,7 +351,7 @@ impl Dval {
         if !t.streams.iter().any(|(_, s)| tx.same_receiver(s)) {
             t.streams.push((flags, tx.clone()));
         }
-        if let Some(ref sub) = t.sub {
+        if let DvState::Subscribed(ref sub) = t.sub {
             let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
             sub.0.connection.send(m);
         }
@@ -335,13 +365,13 @@ impl Dval {
     /// dies while we are writing it.
     pub fn write(&self, v: Value) -> bool {
         let mut t = self.0.lock();
-        match t.sub {
-            Some(ref val) => {
+        match &mut t.sub {
+            DvState::Subscribed(ref val) => {
                 val.write(v);
                 true
             }
-            None => {
-                t.queued_writes.push((v, None));
+            DvState::Dead(dead) => {
+                dead.queued_writes.push((v, None));
                 false
             }
         }
@@ -362,12 +392,12 @@ impl Dval {
     pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
         let mut t = self.0.lock();
-        match t.sub {
-            Some(ref sub) => {
+        match &mut t.sub {
+            DvState::Subscribed(ref sub) => {
                 sub.0.connection.send(ToCon::Write(sub.0.id, v, Some(tx)));
             }
-            None => {
-                t.queued_writes.push((v, Some(tx)));
+            DvState::Dead(dead) => {
+                dead.queued_writes.push((v, Some(tx)));
             }
         }
         rx
@@ -375,12 +405,18 @@ impl Dval {
 
     /// Clear the write queue
     pub fn clear_queued_writes(&self) {
-        self.0.lock().queued_writes.clear()
+        let mut t = self.0.lock();
+        if let DvState::Dead(dead) = &mut t.sub {
+            dead.queued_writes.clear();
+        }
     }
 
     /// Return the number of queued writes
     pub fn queued_writes(&self) -> usize {
-        self.0.lock().queued_writes.len()
+        match &mut self.0.lock().sub {
+            DvState::Subscribed(_) => 0,
+            DvState::Dead(dead) => dead.queued_writes.len(),
+        }
     }
 
     /// return the unique id of this `Dval`
@@ -485,7 +521,10 @@ impl Subscriber {
                 .durable_dead
                 .values()
                 .filter_map(|w| w.upgrade())
-                .map(|ds| ds.0.lock().next_try)
+                .map(|ds| match &ds.0.lock().sub {
+                    DvState::Dead(dead) => dead.next_try,
+                    DvState::Subscribed(_) => unreachable!(),
+                })
                 .fold(None, |min, v| match min {
                     None => Some(v),
                     Some(min) => {
@@ -515,8 +554,11 @@ impl Subscriber {
                             }
                             Some(s) => {
                                 let (next_try, tries) = {
-                                    let s = s.0.lock();
-                                    (s.next_try, s.tries)
+                                    let dv = s.0.lock();
+                                    match &dv.sub {
+                                        DvState::Dead(d) => (d.next_try, d.tries),
+                                        DvState::Subscribed(_) => unreachable!(),
+                                    }
                                 };
                                 if next_try <= now {
                                     b.insert(p.clone(), s);
@@ -547,18 +589,20 @@ impl Subscriber {
                     for (p, r) in r {
                         let mut ds = batch.get_mut(&p).unwrap().0.lock();
                         match r {
-                            Err(e) => {
-                                ds.tries += 1;
-                                ds.next_try =
-                                    now + Duration::from_secs(pick(ds.tries) as u64);
-                                warn!(
-                                    "resubscription error {}: {}, next try: {:?}",
-                                    p, e, ds.next_try
-                                );
-                            }
+                            Err(e) => match &mut ds.sub {
+                                DvState::Dead(d) => {
+                                    d.tries += 1;
+                                    d.next_try =
+                                        now + Duration::from_secs(pick(d.tries) as u64);
+                                    warn!(
+                                        "resubscription error {}: {}, next try: {:?}",
+                                        p, e, d.next_try
+                                    );
+                                }
+                                DvState::Subscribed(_) => unreachable!(),
+                            },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
-                                ds.tries = 0;
                                 ds.streams.retain(|(_, c)| !c.is_closed());
                                 for (flags, tx) in ds.streams.iter().cloned() {
                                     sub.0.connection.send(ToCon::Stream {
@@ -568,12 +612,14 @@ impl Subscriber {
                                         flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
                                     });
                                 }
-                                for (v, resp) in ds.queued_writes.drain(..) {
-                                    sub.0
-                                        .connection
-                                        .send(ToCon::Write(sub.0.id, v, resp));
+                                if let DvState::Dead(d) = &mut ds.sub {
+                                    for (v, resp) in d.queued_writes.drain(..) {
+                                        sub.0
+                                            .connection
+                                            .send(ToCon::Write(sub.0.id, v, resp));
+                                    }
                                 }
-                                ds.sub = Some(sub);
+                                ds.sub = DvState::Subscribed(sub);
                                 let w = subscriber.durable_dead.remove(&p).unwrap();
                                 subscriber.durable_alive.insert(p.clone(), w.clone());
                             }
@@ -879,11 +925,12 @@ impl Subscriber {
         }
         let s = Dval(Arc::new(Mutex::new(DvalInner {
             sub_id: SubId::new(),
-            sub: None,
-            queued_writes: Vec::new(),
+            sub: DvState::Dead(Box::new(DvDead {
+                queued_writes: Vec::new(),
+                tries: 0,
+                next_try: Instant::now(),
+            })),
             streams: Vec::new(),
-            tries: 0,
-            next_try: Instant::now(),
         })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
@@ -944,7 +991,11 @@ fn unsubscribe(
     if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
-            inner.sub = None;
+            inner.sub = DvState::Dead(Box::new(DvDead {
+                queued_writes: Vec::new(),
+                tries: 0,
+                next_try: Instant::now(),
+            }));
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
             let _ = subscriber.trigger_resub.unbounded_send(());
         }
