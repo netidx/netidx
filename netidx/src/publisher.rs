@@ -19,7 +19,9 @@ use bytes::Buf;
 use crossbeam::queue::SegQueue;
 use futures::{
     channel::{
-        mpsc::{unbounded, channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        mpsc::{
+            channel, unbounded, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+        },
         oneshot,
     },
     prelude::*,
@@ -130,9 +132,8 @@ impl Drop for ValInner {
                     }
                 }
             }
-            if !pb.to_publish.remove(&self.path) {
-                pb.to_unpublish.insert(self.path.clone());
-            }
+            pb.to_publish.remove(&self.path);
+            pb.to_unpublish.insert(self.path.clone());
             for q in self.locked.lock().subscribed.values() {
                 q.push(ToClientMsg::Unpublish(self.id));
             }
@@ -384,8 +385,8 @@ struct PublisherInner {
     on_write:
         HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
-    to_publish: HashSet<Path>,
-    to_publish_default: HashSet<Path>,
+    to_publish: HashMap<Path, Option<u16>>,
+    to_publish_default: HashMap<Path, Option<u16>>,
     to_unpublish: HashSet<Path>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
@@ -643,8 +644,8 @@ impl Publisher {
             on_subscribe_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
-            to_publish: HashSet::new(),
-            to_publish_default: HashSet::new(),
+            to_publish: HashMap::new(),
+            to_publish_default: HashMap::new(),
             to_unpublish: HashSet::new(),
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
             wait_any_client: Vec::new(),
@@ -691,12 +692,18 @@ impl Publisher {
         self.0.lock().addr
     }
 
-    /// Publish `Path` with initial value `init`. It is an error for
-    /// the same publisher to publish the same path twice, however
-    /// different publishers may publish a given path as many times as
-    /// they like. Subscribers will then pick randomly among the
-    /// advertised publishers when subscribing. See `subscriber`
-    pub fn publish(&self, path: Path, init: Value) -> Result<Val> {
+    /// Publish `Path` with initial value `init` and flags `flags`. It
+    /// is an error for the same publisher to publish the same path
+    /// twice, however different publishers may publish a given path
+    /// as many times as they like. Subscribers will then pick
+    /// randomly among the advertised publishers when subscribing. See
+    /// `subscriber`
+    pub fn publish_with_flags(
+        &self,
+        flags: PublishFlags,
+        path: Path,
+        init: Value,
+    ) -> Result<Val> {
         let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             bail!("can't publish to relative path")
@@ -720,19 +727,73 @@ impl Publisher {
                 locked: Mutex::new(ValLocked { current: init, subscribed }),
             }));
             pb.by_id.insert(id, val.downgrade());
-            if !pb.to_unpublish.remove(&path) {
-                pb.to_publish.insert(path.clone());
-            }
+            pb.to_unpublish.remove(&path);
+            pb.to_publish.insert(
+                path.clone(),
+                if flags.is_empty() { None } else { Some(flags.bits) },
+            );
             pb.by_path.insert(path, id);
             Ok(val)
         }
     }
 
-    /// Install a default publisher rooted at `base`. Once installed,
-    /// any subscription request for a child of `base`, regardless if
-    /// it doesn't exist in the resolver, will be routed to this
-    /// publisher or one of it's peers in the case of multiple default
-    /// publishers.
+    /// Publish `Path` with initial value `init` and no flags. It is
+    /// an error for the same publisher to publish the same path
+    /// twice, however different publishers may publish a given path
+    /// as many times as they like. Subscribers will then pick
+    /// randomly among the advertised publishers when subscribing. See
+    /// `subscriber`
+    pub fn publish(&self, path: Path, init: Value) -> Result<Val> {
+        self.publish_with_flags(PublishFlags::empty(), path, init)
+    }
+
+    /// Install a default publisher rooted at `base` with flags
+    /// `flags`. Once installed, any subscription request for a child
+    /// of `base`, regardless if it doesn't exist in the resolver,
+    /// will be routed to this publisher or one of it's peers in the
+    /// case of multiple default publishers.
+    ///
+    /// You must listen for requests on the returned channel handle,
+    /// and if they are valid, you should publish the requested value,
+    /// and signal the subscriber by sending () to the oneshot channel
+    /// that comes with the request. In the case the request is not
+    /// valid, just send to the oneshot channel and the subscriber
+    /// will be told the value doesn't exist.
+    ///
+    /// This functionality is useful if, for example, you have a huge
+    /// namespace and you know your subscribers will only want small
+    /// parts of it, but you can't predict ahead of time which
+    /// parts. It can also be used to implement e.g. a database query
+    /// by appending the escaped query to the base path, with the
+    /// added bonus that the result will be automatically cached and
+    /// distributed to anyone making the same query again.
+    pub fn publish_default_with_flags(
+        &self,
+        flags: PublishFlags,
+        base: Path,
+    ) -> Result<DefaultHandle> {
+        let mut pb = self.0.lock();
+        if !Path::is_absolute(base.as_ref()) {
+            bail!("can't publish a relative path")
+        } else if pb.stop.is_none() {
+            bail!("publisher is dead")
+        } else {
+            pb.to_unpublish.remove(base.as_ref());
+            pb.to_publish_default.insert(
+                base.clone(),
+                if flags.is_empty() { None } else { Some(flags.bits) },
+            );
+            let (tx, rx) = unbounded();
+            pb.default.insert(base.clone(), tx);
+            Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
+        }
+    }
+
+    /// Install a default publisher rooted at `base` with no
+    /// flags. Once installed, any subscription request for a child of
+    /// `base`, regardless if it doesn't exist in the resolver, will
+    /// be routed to this publisher or one of it's peers in the case
+    /// of multiple default publishers.
     ///
     /// You must listen for requests on the returned channel handle,
     /// and if they are valid, you should publish the requested value,
@@ -749,21 +810,7 @@ impl Publisher {
     /// added bonus that the result will be automatically cached and
     /// distributed to anyone making the same query again.
     pub fn publish_default(&self, base: Path) -> Result<DefaultHandle> {
-        let mut pb = self.0.lock();
-        if !Path::is_absolute(base.as_ref()) {
-            bail!("can't publish a relative path")
-        } else if pb.stop.is_none() {
-            bail!("publisher is dead")
-        } else {
-            if !pb.to_unpublish.remove(base.as_ref()) {
-                if !pb.default.contains_key(base.as_ref()) {
-                    pb.to_publish_default.insert(base.clone());
-                }
-            }
-            let (tx, rx) = unbounded();
-            pb.default.insert(base.clone(), tx);
-            Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
-        }
+        self.publish_default_with_flags(PublishFlags::empty(), base)
     }
 
     /// Flush initiates sending queued updates out to subscribers, and
@@ -792,8 +839,8 @@ impl Publisher {
         let clients;
         let resolver = {
             let mut pb = self.0.lock();
-            to_publish = mem::replace(&mut pb.to_publish, HashSet::new());
-            to_publish_default = mem::replace(&mut pb.to_publish_default, HashSet::new());
+            to_publish = mem::replace(&mut pb.to_publish, HashMap::new());
+            to_publish_default = mem::replace(&mut pb.to_publish_default, HashMap::new());
             to_unpublish = mem::replace(&mut pb.to_unpublish, HashSet::new());
             clients = pb
                 .clients
@@ -809,12 +856,14 @@ impl Publisher {
             let _ = client.send(timeout).await;
         }
         if to_publish.len() > 0 {
-            if let Err(e) = resolver.publish(to_publish.drain()).await {
+            if let Err(e) = resolver.publish_with_flags(to_publish.drain()).await {
                 error!("failed to publish some paths {} will retry", e);
             }
         }
         if to_publish_default.len() > 0 {
-            if let Err(e) = resolver.publish_default(to_publish_default.drain()).await {
+            if let Err(e) =
+                resolver.publish_default_with_flags(to_publish_default.drain()).await
+            {
                 error!("failed to publish_default some paths {} will retry", e)
             }
         }
@@ -1045,8 +1094,11 @@ async fn handle_batch(
                                         path.as_bytes(),
                                     ],
                                 );
-                                let permissions = Permissions::from_bits(permissions as u16)
-                                    .ok_or_else(|| anyhow!("invalid permission bits"))?;
+                                let permissions =
+                                    Permissions::from_bits(permissions as u16)
+                                        .ok_or_else(|| {
+                                            anyhow!("invalid permission bits")
+                                        })?;
                                 let age = std::cmp::max(
                                     u64::saturating_sub(now, timestamp),
                                     u64::saturating_sub(timestamp, now),

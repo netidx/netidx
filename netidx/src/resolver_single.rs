@@ -2,7 +2,6 @@ use crate::{
     channel::Channel,
     chars::Chars,
     os::{self, ClientCtx, Krb5Ctx},
-    path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,

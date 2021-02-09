@@ -659,7 +659,7 @@ impl Pack for FromRead {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ToWrite {
     /// Publish the path
     Publish(Path),
@@ -745,7 +745,7 @@ impl Pack for ToWrite {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FromWrite {
     Published,
     Unpublished,

@@ -613,11 +613,11 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Published, ToWrite::Publish).await
     }
 
-    pub async fn publish_with_flags<I: IntoIterator<Item = (Option<u16>, Path)>>(
+    pub async fn publish_with_flags<I: IntoIterator<Item = (Path, Option<u16>)>>(
         &self,
         batch: I,
     ) -> Result<()> {
-        self.send_expect(batch, FromWrite::Published, |(flags, path)| match flags {
+        self.send_expect(batch, FromWrite::Published, |(path, flags)| match flags {
             Some(flags) => ToWrite::PublishWithFlags(path, flags),
             None => ToWrite::Publish(path)
         }).await
@@ -630,11 +630,11 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Published, ToWrite::PublishDefault).await
     }
 
-    pub async fn publish_default_with_flags<I: IntoIterator<Item = (Option<u16>, Path)>>(
+    pub async fn publish_default_with_flags<I: IntoIterator<Item = (Path, Option<u16>)>>(
         &self,
         batch: I,
     ) -> Result<()> {
-        self.send_expect(batch, FromWrite::Published, |(flags, path)| match flags {
+        self.send_expect(batch, FromWrite::Published, |(path, flags)| match flags {
             Some(flags) => ToWrite::PublishDefaultWithFlags(path, flags),
             None => ToWrite::Publish(path)
         }).await
