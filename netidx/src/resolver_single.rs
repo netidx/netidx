@@ -1,6 +1,7 @@
 use crate::{
     channel::Channel,
     chars::Chars,
+    path::Path,
     os::{self, ClientCtx, Krb5Ctx},
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -24,7 +25,7 @@ use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
     cmp::max,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     net::SocketAddr,
     sync::Arc,
@@ -266,7 +267,7 @@ async fn connect_write(
     resolver: &Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: &Arc<RwLock<HashSet<ToWrite>>>,
+    published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     security_context: &mut Option<ClientCtx>,
     desired_auth: &Auth,
@@ -341,7 +342,7 @@ async fn connect_write(
         info!("connected to resolver {:?} for write", resolver_addr);
         Ok((r.ttl, con))
     } else {
-        let names = published.read().iter().cloned().collect::<Vec<ToWrite>>();
+        let names = published.read().values().cloned().collect::<Vec<ToWrite>>();
         let len = names.len();
         if len == 0 {
             info!("connected to resolver {:?} for write", resolver_addr);
@@ -394,7 +395,7 @@ async fn connection_write(
     resolver: Arc<Referral>,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: Arc<RwLock<HashSet<ToWrite>>>,
+    published: Arc<RwLock<HashMap<Path, ToWrite>>>,
     desired_auth: Auth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
@@ -570,7 +571,7 @@ async fn write_mgr(
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
-    let published: Arc<RwLock<HashSet<ToWrite>>> = Arc::new(RwLock::new(HashSet::new()));
+    let published: Arc<RwLock<HashMap<Path, ToWrite>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut senders = {
         let mut senders = Vec::new();
         for addr in resolver.addrs.iter() {
@@ -604,11 +605,11 @@ async fn write_mgr(
             let mut published = published.write();
             for (_, tx) in tx_batch.iter() {
                 match tx {
-                    ToWrite::Publish(_)
-                    | ToWrite::PublishDefault(_)
-                    | ToWrite::PublishWithFlags(_, _)
-                    | ToWrite::PublishDefaultWithFlags(_, _) => {
-                        published.insert(tx.clone());
+                    ToWrite::Publish(p)
+                    | ToWrite::PublishDefault(p)
+                    | ToWrite::PublishWithFlags(p, _)
+                    | ToWrite::PublishDefaultWithFlags(p, _) => {
+                        published.insert(p.clone(), tx.clone());
                     }
                     ToWrite::Unpublish(_) | ToWrite::Clear | ToWrite::Heartbeat => (),
                 }
