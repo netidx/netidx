@@ -801,7 +801,7 @@ impl Subscriber {
                             let r = con.send(ToCon::Subscribe(SubscribeValRequest {
                                 path: p.clone(),
                                 timestamp: resolved.timestamp,
-                                permissions: resolved.permissions,
+                                permissions: resolved.permissions as u32,
                                 token: addr.1,
                                 resolver: resolved.resolver,
                                 finished: tx,

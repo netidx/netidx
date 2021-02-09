@@ -17,7 +17,7 @@ pub use crate::{
     resolver_single::Auth,
 };
 use anyhow::Result;
-use futures::{future, channel::oneshot};
+use futures::{channel::oneshot, future};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -55,9 +55,11 @@ impl ToPath for ToWrite {
     fn path(&self) -> Option<&Path> {
         match self {
             ToWrite::Clear | ToWrite::Heartbeat => None,
-            ToWrite::Publish(p) | ToWrite::Unpublish(p) | ToWrite::PublishDefault(p) => {
-                Some(p)
-            }
+            ToWrite::Publish(p)
+            | ToWrite::Unpublish(p)
+            | ToWrite::PublishDefault(p)
+            | ToWrite::PublishWithFlags(p, _)
+            | ToWrite::PublishDefaultWithFlags(p, _) => Some(p),
         }
     }
 }
@@ -587,10 +589,10 @@ impl ResolverWrite {
         self.0.send(batch).await
     }
 
-    async fn send_expect<F, I>(&self, batch: I, f: F, expected: FromWrite) -> Result<()>
+    async fn send_expect<V, F, I>(&self, batch: I, expected: FromWrite, f: F) -> Result<()>
     where
-        F: Fn(Path) -> ToWrite,
-        I: IntoIterator<Item = Path>,
+        F: Fn(V) -> ToWrite,
+        I: IntoIterator<Item = V>,
     {
         let mut to = RAWTOWRITEPOOL.take();
         let len = to.len();
@@ -608,18 +610,38 @@ impl ResolverWrite {
     }
 
     pub async fn publish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
-        self.send_expect(batch, ToWrite::Publish, FromWrite::Published).await
+        self.send_expect(batch, FromWrite::Published, ToWrite::Publish).await
+    }
+
+    pub async fn publish_with_flags<I: IntoIterator<Item = (Option<u16>, Path)>>(
+        &self,
+        batch: I,
+    ) -> Result<()> {
+        self.send_expect(batch, FromWrite::Published, |(flags, path)| match flags {
+            Some(flags) => ToWrite::PublishWithFlags(path, flags),
+            None => ToWrite::Publish(path)
+        }).await
     }
 
     pub async fn publish_default<I: IntoIterator<Item = Path>>(
         &self,
         batch: I,
     ) -> Result<()> {
-        self.send_expect(batch, ToWrite::PublishDefault, FromWrite::Published).await
+        self.send_expect(batch, FromWrite::Published, ToWrite::PublishDefault).await
+    }
+
+    pub async fn publish_default_with_flags<I: IntoIterator<Item = (Option<u16>, Path)>>(
+        &self,
+        batch: I,
+    ) -> Result<()> {
+        self.send_expect(batch, FromWrite::Published, |(flags, path)| match flags {
+            Some(flags) => ToWrite::PublishDefaultWithFlags(path, flags),
+            None => ToWrite::Publish(path)
+        }).await
     }
 
     pub async fn unpublish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
-        self.send_expect(batch, ToWrite::Unpublish, FromWrite::Unpublished).await
+        self.send_expect(batch, FromWrite::Unpublished, ToWrite::Unpublish).await
     }
 
     // CR estokes: this is broken on complex clusters, but it's also

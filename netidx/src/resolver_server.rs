@@ -154,7 +154,10 @@ async fn client_loop_write(
                         for m in batch.drain(..) {
                             match m {
                                 ToWrite::Heartbeat => (),
-                                ToWrite::Publish(_) | ToWrite::PublishDefault(_) =>
+                                ToWrite::Publish(_)
+                                    | ToWrite::PublishDefault(_)
+                                    | ToWrite::PublishWithFlags(_, _)
+                                    | ToWrite::PublishDefaultWithFlags(_, _) =>
                                     c.queue_send(&FromWrite::Published)?,
                                 ToWrite::Unpublish(_) =>
                                     c.queue_send(&FromWrite::Unpublished)?,

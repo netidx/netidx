@@ -1,12 +1,12 @@
 use crate::glob::GlobSet;
+use bytes::{Buf, BufMut, Bytes};
+use fxhash::FxBuildHasher;
 use netidx_core::{
     chars::Chars,
     pack::{Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
 };
-use bytes::{Buf, BufMut, Bytes};
-use fxhash::FxBuildHasher;
 use std::{
     cmp::{Eq, PartialEq},
     collections::HashMap,
@@ -414,7 +414,8 @@ pub struct Resolved {
     pub resolver: SocketAddr,
     pub addrs: Pooled<Vec<(SocketAddr, Bytes)>>,
     pub timestamp: u64,
-    pub permissions: u32,
+    pub flags: u16,
+    pub permissions: u16,
 }
 
 impl Pack for Resolved {
@@ -424,7 +425,8 @@ impl Pack for Resolved {
         ) + <SocketAddr as Pack>::encoded_len(&self.resolver)
             + <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::encoded_len(&self.addrs)
             + <u64 as Pack>::encoded_len(&self.timestamp)
-            + <u32 as Pack>::encoded_len(&self.permissions)
+            + <u16 as Pack>::encoded_len(&self.flags)
+            + <u16 as Pack>::encoded_len(&self.permissions)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
@@ -435,7 +437,8 @@ impl Pack for Resolved {
         <SocketAddr as Pack>::encode(&self.resolver, buf)?;
         <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)?;
         <u64 as Pack>::encode(&self.timestamp, buf)?;
-        <u32 as Pack>::encode(&self.permissions, buf)
+        <u16 as Pack>::encode(&self.flags, buf)?;
+        <u16 as Pack>::encode(&self.permissions, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
@@ -444,8 +447,9 @@ impl Pack for Resolved {
         let resolver = <SocketAddr as Pack>::decode(buf)?;
         let addrs = <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
         let timestamp = <u64 as Pack>::decode(buf)?;
-        let permissions = <u32 as Pack>::decode(buf)?;
-        Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions })
+        let flags = <u16 as Pack>::decode(buf)?;
+        let permissions = <u16 as Pack>::decode(buf)?;
+        Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions, flags })
     }
 }
 
@@ -667,6 +671,10 @@ pub enum ToWrite {
     Clear,
     /// Tell the resolver that we are still alive
     Heartbeat,
+    /// Publish the path and set associated flags
+    PublishWithFlags(Path, u16),
+    /// Add a default publisher to path and set associated flags
+    PublishDefaultWithFlags(Path, u16),
 }
 
 impl Pack for ToWrite {
@@ -677,6 +685,12 @@ impl Pack for ToWrite {
             ToWrite::Unpublish(p) => <Path as Pack>::encoded_len(p),
             ToWrite::Clear => 0,
             ToWrite::Heartbeat => 0,
+            ToWrite::PublishWithFlags(p, f) => {
+                <Path as Pack>::encoded_len(p) + <u16 as Pack>::encoded_len(f)
+            }
+            ToWrite::PublishDefaultWithFlags(p, f) => {
+                <Path as Pack>::encoded_len(p) + <u16 as Pack>::encoded_len(f)
+            }
         }
     }
 
@@ -696,6 +710,16 @@ impl Pack for ToWrite {
             }
             ToWrite::Clear => Ok(buf.put_u8(3)),
             ToWrite::Heartbeat => Ok(buf.put_u8(4)),
+            ToWrite::PublishWithFlags(p, f) => {
+                buf.put_u8(5);
+                <Path as Pack>::encode(p, buf)?;
+                <u16 as Pack>::encode(f, buf)
+            }
+            ToWrite::PublishDefaultWithFlags(p, f) => {
+                buf.put_u8(6);
+                <Path as Pack>::encode(p, buf)?;
+                <u16 as Pack>::encode(f, buf)
+            }
         }
     }
 
@@ -706,6 +730,16 @@ impl Pack for ToWrite {
             2 => Ok(ToWrite::Unpublish(<Path as Pack>::decode(buf)?)),
             3 => Ok(ToWrite::Clear),
             4 => Ok(ToWrite::Heartbeat),
+            5 => {
+                let p = <Path as Pack>::decode(buf)?;
+                let f = <u16 as Pack>::decode(buf)?;
+                Ok(ToWrite::PublishWithFlags(p, f))
+            }
+            6 => {
+                let p = <Path as Pack>::decode(buf)?;
+                let f = <u16 as Pack>::decode(buf)?;
+                Ok(ToWrite::PublishDefaultWithFlags(p, f))
+            }
             _ => Err(Error::UnknownTag),
         }
     }

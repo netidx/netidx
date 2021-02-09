@@ -340,6 +340,24 @@ impl Pack for u32 {
     }
 }
 
+impl Pack for u16 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<u16>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<u16>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_u16(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(buf.get_u16())
+    }
+}
+
 impl<T: Pack> Pack for Vec<T> {
     fn encoded_len(&self) -> usize {
         self.iter().fold(varint_len(Vec::len(self) as u64), |len, t| {

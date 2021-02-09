@@ -149,14 +149,16 @@ impl Shard {
                 } else {
                     match secstore {
                         None => {
+                            let (flags, addrs) = store.resolve(&path);
                             let a = Resolved {
                                 krb5_spns: Pooled::orphan(HashMap::with_hasher(
                                     FxBuildHasher::default(),
                                 )),
                                 resolver,
-                                addrs: store.resolve(&path),
+                                addrs,
                                 timestamp: now,
                                 permissions: Permissions::all().bits(),
+                                flags,
                             };
                             (id, FromRead::Resolved(a))
                         }
@@ -165,7 +167,7 @@ impl Shard {
                             if !perm.contains(Permissions::SUBSCRIBE) {
                                 (id, FromRead::Denied)
                             } else {
-                                let (krb5_spns, addrs) = store.resolve_and_sign(
+                                let (flags, krb5_spns, addrs) = store.resolve_and_sign(
                                     &**sec.as_ref().unwrap(),
                                     now,
                                     perm,
@@ -177,6 +179,7 @@ impl Shard {
                                     addrs,
                                     timestamp: now,
                                     permissions: perm.bits(),
+                                    flags,
                                 };
                                 (id, FromRead::Resolved(a))
                             }
@@ -276,7 +279,8 @@ impl Shard {
         let write_addr = req.write_addr;
         let publish = |s: &mut resolver_store::Store,
                        path: Path,
-                       default: bool|
+                       default: bool,
+                       flags: Option<u16>|
          -> FromWrite {
             if !Path::is_absolute(&*path) {
                 FromWrite::Error("absolute paths required".into())
@@ -290,7 +294,7 @@ impl Shard {
                 };
                 if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true)
                 {
-                    s.publish(path, write_addr, default);
+                    s.publish(path, write_addr, default, flags);
                     FromWrite::Published
                 } else {
                     FromWrite::Denied
@@ -300,8 +304,14 @@ impl Shard {
         let mut resp = FROM_WRITE_POOL.take();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToWrite::Heartbeat | ToWrite::Clear => unreachable!(),
-            ToWrite::Publish(path) => (id, publish(store, path, false)),
-            ToWrite::PublishDefault(path) => (id, publish(store, path, true)),
+            ToWrite::Publish(path) => (id, publish(store, path, false, None)),
+            ToWrite::PublishDefault(path) => (id, publish(store, path, true, None)),
+            ToWrite::PublishWithFlags(path, flags) => {
+                (id, publish(store, path, false, Some(flags)))
+            }
+            ToWrite::PublishDefaultWithFlags(path, flags) => {
+                (id, publish(store, path, true, Some(flags)))
+            }
             ToWrite::Unpublish(path) => {
                 if !Path::is_absolute(&*path) {
                     (id, FromWrite::Error("absolute paths required".into()))
@@ -588,6 +598,15 @@ impl Store {
                     Some(ToWrite::PublishDefault(path)) => {
                         for b in by_shard.iter_mut() {
                             b.push((n, ToWrite::PublishDefault(path.clone())));
+                        }
+                    }
+                    Some(ToWrite::PublishWithFlags(path, flags)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push((n, ToWrite::PublishWithFlags(path, flags)));
+                    }
+                    Some(ToWrite::PublishDefaultWithFlags(path, flags)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::PublishDefaultWithFlags(path.clone(), flags)));
                         }
                     }
                 }

@@ -50,6 +50,26 @@ use tokio::{
     task, time,
 };
 
+bitflags! {
+    pub struct PublishFlags: u16 {
+        /// if set, then if an existing connection exists to any
+        /// publisher that publishes the value we are subscribing,
+        /// then subscriber will use that connection instead of
+        /// picking a random publisher and potentially creating a new
+        /// connection.
+        ///
+        /// Because the creation of connections is atomic, this flag
+        /// guarantees that all subscriptions that can will use the
+        /// same connection.
+        ///
+        /// This can be important for control interfaces, and is used
+        /// by the RPC protocol to ensure that all function parameters
+        /// are written to the same publisher, even if a procedure is
+        /// published by multiple publishers.
+        const USE_EXISTING = 0x01;
+    }
+}
+
 static MAX_CLIENTS: usize = 768;
 
 #[derive(Debug)]
@@ -1019,7 +1039,7 @@ async fn handle_batch(
                                         path.as_bytes(),
                                     ],
                                 );
-                                let permissions = Permissions::from_bits(permissions)
+                                let permissions = Permissions::from_bits(permissions as u16)
                                     .ok_or_else(|| anyhow!("invalid permission bits"))?;
                                 let age = std::cmp::max(
                                     u64::saturating_sub(now, timestamp),

@@ -8,7 +8,7 @@ use std::{
 };
 
 bitflags! {
-    pub struct Permissions: u32 {
+    pub struct Permissions: u16 {
         const DENY             = 0x01;
         const SUBSCRIBE        = 0x02;
         const WRITE            = 0x04;
