@@ -11,7 +11,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::glob::{Glob, GlobSet},
-    publisher::{Id, Publisher, Val, Value, WriteRequest},
+    publisher::{Id, PublishFlags, Publisher, Val, Value, WriteRequest},
     subscriber::{Dval, Subscriber},
 };
 use std::{
@@ -130,19 +130,36 @@ pub mod server {
         ) -> Result<Proc> {
             let (tx_ev, rx_ev) = mpsc::channel(3);
             let (tx_stop, rx_stop) = oneshot::channel();
-            let call = publisher.publish(name.clone(), Value::Null)?;
-            let _doc = publisher.publish(name.append("doc"), doc)?;
+            let call = publisher.publish_with_flags(
+                PublishFlags::USE_EXISTING,
+                name.clone(),
+                Value::Null,
+            )?;
+            let _doc = publisher.publish_with_flags(
+                PublishFlags::USE_EXISTING,
+                name.append("doc"),
+                doc,
+            )?;
             call.writes(tx_ev.clone());
             let args = args
                 .into_iter()
                 .map(|(arg, (def, doc))| {
                     let base = name.append(&*arg);
-                    let _value =
-                        publisher.publish(base.append("val"), def).map(|val| {
+                    let _value = publisher
+                        .publish_with_flags(
+                            PublishFlags::USE_EXISTING,
+                            base.append("val"),
+                            def,
+                        )
+                        .map(|val| {
                             val.writes(tx_ev.clone());
                             val
                         })?;
-                    let _doc = publisher.publish(base.append("doc"), doc)?;
+                    let _doc = publisher.publish_with_flags(
+                        PublishFlags::USE_EXISTING,
+                        base.append("doc"),
+                        doc,
+                    )?;
                     Ok((_value.id(), Arg { name: arg, _value, _doc }))
                 })
                 .collect::<Result<HashMap<Id, Arg, FxBuildHasher>>>()?;
