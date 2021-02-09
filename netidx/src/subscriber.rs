@@ -12,6 +12,7 @@ use crate::{
         self,
         publisher::{From, Id, To},
     },
+    publisher::PublishFlags,
     resolver::{Auth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
@@ -451,8 +452,20 @@ struct SubscriberInner {
 }
 
 impl SubscriberInner {
-    fn choose_addr(&mut self, addrs: &[(SocketAddr, Bytes)]) -> (SocketAddr, Bytes) {
+    fn choose_addr(
+        &mut self,
+        addrs: &[(SocketAddr, Bytes)],
+        flags: u16,
+    ) -> (SocketAddr, Bytes) {
         use rand::seq::IteratorRandom;
+        let flags = unsafe { PublishFlags::from_bits_unchecked(flags) };
+        if flags.contains(PublishFlags::USE_EXISTING) {
+            for (addr, tok) in addrs {
+                if self.connections.contains_key(addr) {
+                    return (*addr, tok.clone());
+                }
+            }
+        }
         let mut rng = rand::thread_rng();
         match addrs
             .iter()
@@ -755,7 +768,7 @@ impl Subscriber {
                         if resolved.addrs.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
-                            let addr = t.choose_addr(&*resolved.addrs);
+                            let addr = t.choose_addr(&*resolved.addrs, resolved.flags);
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {
