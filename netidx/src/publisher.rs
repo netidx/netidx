@@ -52,15 +52,21 @@ use tokio::{
 
 bitflags! {
     pub struct PublishFlags: u16 {
-        /// if set, then if an existing connection exists to any
-        /// publisher that publishes the value we are subscribing,
-        /// then subscriber will use that connection instead of
-        /// picking a random publisher and potentially creating a new
-        /// connection.
+        /// if set, then subscribers will be forced to use an existing
+        /// connection, if it exists, when subscribing to this value.
         ///
         /// Because the creation of connections is atomic, this flag
         /// guarantees that all subscriptions that can will use the
         /// same connection.
+        ///
+        /// The net effect is that a group of published values that,
+        ///
+        /// 1. all have this flag set
+        /// 2. are published by multiple publishers
+        ///
+        /// will behave differently from the default, in that a
+        /// subscriber that subscribes to all of them will connect to
+        /// exactly one of the publishers.
         ///
         /// This can be important for control interfaces, and is used
         /// by the RPC protocol to ensure that all function parameters

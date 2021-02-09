@@ -267,7 +267,7 @@ async fn connect_write(
     resolver: &Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: &Arc<RwLock<HashSet<Path>>>,
+    published: &Arc<RwLock<HashSet<ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     security_context: &mut Option<ClientCtx>,
     desired_auth: &Auth,
@@ -342,7 +342,7 @@ async fn connect_write(
         info!("connected to resolver {:?} for write", resolver_addr);
         Ok((r.ttl, con))
     } else {
-        let names: Vec<Path> = published.read().iter().cloned().collect();
+        let names = published.read().iter().cloned().collect::<Vec<ToWrite>>();
         let len = names.len();
         if len == 0 {
             info!("connected to resolver {:?} for write", resolver_addr);
@@ -361,17 +361,19 @@ async fn connect_write(
                 "write_con ttl: {} degraded: {}, republishing: {}",
                 len, r.ttl_expired, *degraded
             );
-            for p in &names {
-                con.queue_send(&ToWrite::Publish(p.clone()))?
+            for msg in &names {
+                con.queue_send(msg)?
             }
             con.flush().await?;
             let mut success = 0;
-            for p in &names {
+            for msg in &names {
                 match try_cf!("replublish reply", continue, con.receive().await) {
                     FromWrite::Published => {
                         success += 1;
                     }
-                    r => warn!("unexpected republish reply for {} {:?}", p, r),
+                    r => {
+                        warn!("unexpected republish reply for {:?} {:?}", msg, r)
+                    }
                 }
             }
             *degraded = success != len;
@@ -393,7 +395,7 @@ async fn connection_write(
     resolver: Arc<Referral>,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: Arc<RwLock<HashSet<Path>>>,
+    published: Arc<RwLock<HashSet<ToWrite>>>,
     desired_auth: Auth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
@@ -569,7 +571,7 @@ async fn write_mgr(
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
-    let published: Arc<RwLock<HashSet<Path>>> = Arc::new(RwLock::new(HashSet::new()));
+    let published: Arc<RwLock<HashSet<ToWrite>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut senders = {
         let mut senders = Vec::new();
         for addr in resolver.addrs.iter() {
@@ -602,8 +604,14 @@ async fn write_mgr(
         {
             let mut published = published.write();
             for (_, tx) in tx_batch.iter() {
-                if let ToWrite::Publish(path) = tx {
-                    published.insert(path.clone());
+                match tx {
+                    ToWrite::Publish(_)
+                    | ToWrite::PublishDefault(_)
+                    | ToWrite::PublishWithFlags(_, _)
+                    | ToWrite::PublishDefaultWithFlags(_, _) => {
+                        published.insert(tx.clone());
+                    }
+                    ToWrite::Unpublish(_) | ToWrite::Clear | ToWrite::Heartbeat => (),
                 }
             }
         }
