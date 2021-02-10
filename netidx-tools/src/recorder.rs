@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Error, Result};
 use chrono::prelude::*;
 use futures::{
     channel::{mpsc, oneshot},
@@ -13,7 +13,10 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    protocol::glob::{Glob, GlobSet},
+    protocol::{
+        glob::{Glob, GlobSet},
+        value::FromValue,
+    },
     publisher::{BindCfg, PublishFlags, Publisher, Val, Value, WriteRequest},
     resolver::{Auth, ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
@@ -25,6 +28,7 @@ use netidx_protocols::{
         RecordTooLarge, Seek, Timestamp, BATCH_POOL,
     },
     cluster::{uuid_string, Cluster},
+    rpc::server::Proc,
 };
 use parking_lot::Mutex;
 use std::{
@@ -32,7 +36,9 @@ use std::{
     mem,
     net::SocketAddr,
     ops::Bound,
+    str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adapter::SimpleRef, Uuid};
@@ -51,10 +57,28 @@ mod publish {
     static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is 1";
     static STATE_DOC: &'static str = "The current state of playback, {pause, play, tail}. Tail, seek to the end of the archive and play any new messages that arrive. Default pause.";
     static POS_DOC: &'static str = "The current playback position. Null if the archive is empty, or the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhmsu] to step forward or back that amount of time, e.g. -1y step back 1 year. -1u to step back 1 microsecond. set to 'beginning' to seek to the beginning and 'end' to seek to the end. By default the initial position is set to 'beginning' when opening the archive.";
+    static PLAY_AFTER_DOC: &'static str =
+        "Start playing after waiting the specified timeout";
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
         let mut buf = [0u8; SimpleRef::LENGTH];
         publish_base.append(id.to_simple_ref().encode_lower(&mut buf))
+    }
+
+    fn parse_speed(v: Value) -> Result<Option<f64>> {
+        match v.clone().cast_to::<f64>() {
+            Ok(speed) => Ok(Some(speed)),
+            Err(_) => match v.cast_to::<Chars>() {
+                Err(_) => bail!("expected a float, or unlimited"),
+                Ok(s) => {
+                    if s.trim().to_lowercase().as_str() == "unlimited" {
+                        Ok(None)
+                    } else {
+                        bail!("expected a float, or unlimited")
+                    }
+                }
+            },
+        }
     }
 
     fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
@@ -107,6 +131,31 @@ mod publish {
         Play,
         Pause,
         Tail,
+    }
+
+    impl FromStr for State {
+        type Err = Error;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let s = s.trim().to_lowercase();
+            if s.as_str() == "play" {
+                Ok(State::Play)
+            } else if s.as_str() == "pause" {
+                Ok(State::Play)
+            } else if s.as_str() == "tail" {
+                Ok(State::Tail)
+            } else {
+                bail!("expected state {play, pause, tail}")
+            }
+        }
+    }
+
+    impl FromValue for State {
+        type Error = Error;
+
+        fn from_value(v: Value) -> Result<Self> {
+            Ok(v.cast_to::<Chars>()?.parse::<State>()?)
+        }
     }
 
     impl State {
@@ -213,6 +262,36 @@ mod publish {
         }
     }
 
+    struct NewSessionConfig {
+        client: SocketAddr,
+        start: Option<Bound<DateTime<Utc>>>,
+        end: Option<Bound<DateTime<Utc>>>,
+        speed: Option<Option<f64>>,
+        pos: Option<Seek>,
+        state: Option<State>,
+        play_after: Option<Duration>,
+    }
+
+    impl NewSessionConfig {
+        fn new(
+            client: SocketAddr,
+            mut args: Pooled<HashMap<Arc<str>, Value>>,
+        ) -> Result<NewSessionConfig> {
+            Ok(NewSessionConfig {
+                client,
+                start: args.remove("start").map(|v| parse_bound(v)).transpose()?,
+                end: args.remove("end").map(|v| parse_bound(v)).transpose()?,
+                speed: args.remove("speed").map(|v| parse_speed(v)).transpose()?,
+                pos: args.remove("pos").map(|v| v.cast_to::<Seek>()).transpose()?,
+                state: args.remove("state").map(|v| v.cast_to::<State>()).transpose()?,
+                play_after: args
+                    .remove("play_after")
+                    .map(|v| v.cast_to::<Duration>())
+                    .transpose()?,
+            })
+        }
+    }
+
     struct T {
         controls: Controls,
         publisher: Publisher,
@@ -271,7 +350,6 @@ mod publish {
                         }
                     },
                     Speed::Limited { rate, next, current } => {
-                        use std::time::Duration;
                         use tokio::time::Instant;
                         if current.len() < 2 {
                             let archive = &self.archive;
@@ -408,13 +486,50 @@ mod publish {
             }
         }
 
+        async fn apply_config(
+            &mut self,
+            cluster: &Cluster<ClusterCmd>,
+            cfg: NewSessionConfig,
+        ) -> Result<()> {
+            if let Some(start) = cfg.start {
+                self.set_start(start)?;
+                cluster.send_cmd(&ClusterCmd::SetStart(start));
+            }
+            if let Some(end) = cfg.end {
+                self.set_end(end)?;
+                cluster.send_cmd(&ClusterCmd::SetEnd(end))
+            }
+            if let Some(speed) = cfg.speed {
+                self.set_speed(speed);
+                cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
+            }
+            if let Some(pos) = cfg.pos {
+                self.seek(pos)?;
+                cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
+            }
+            if let Some(state) = cfg.state {
+                self.set_state(state);
+                cluster.send_cmd(&ClusterCmd::SetState(state));
+            }
+            if let Some(play_after) = cfg.play_after {
+                time::sleep(play_after).await;
+                self.set_state(State::Play);
+                cluster.send_cmd(&ClusterCmd::SetState(State::Play));
+            }
+            Ok(())
+        }
+
         async fn process_control_batch(
             &mut self,
             session_id: Uuid,
             cluster: &Cluster<ClusterCmd>,
             mut batch: Pooled<Vec<WriteRequest>>,
         ) -> Result<()> {
+            let mut inst = HashMap::new();
             for req in batch.drain(..) {
+                inst.insert(req.id, req);
+            }
+            for (_, req) in inst {
                 if req.id == self.controls.start_ctl.id() {
                     info!("set start {}: {}", session_id, req.value);
                     if let Some(new_start) = get_bound(req) {
@@ -429,46 +544,27 @@ mod publish {
                     }
                 } else if req.id == self.controls.speed_ctl.id() {
                     info!("set speed {}: {}", session_id, req.value);
-                    if let Ok(mp) = req.value.clone().cast_to::<f64>() {
-                        self.set_speed(Some(mp));
-                        cluster.send_cmd(&ClusterCmd::SetSpeed(Some(mp)));
-                    } else if let Ok(s) = req.value.cast_to::<Chars>() {
-                        if s.trim().to_lowercase().as_str() == "unlimited" {
-                            self.set_speed(None);
-                            cluster.send_cmd(&ClusterCmd::SetSpeed(None));
-                        } else if let Some(reply) = req.send_result {
-                            let e = Chars::from("invalid speed");
-                            reply.send(Value::Error(e));
+                    match parse_speed(req.value) {
+                        Ok(speed) => {
+                            self.set_speed(speed);
+                            cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
                         }
-                    } else if let Some(reply) = req.send_result {
-                        let e = Chars::from("invalid speed");
-                        reply.send(Value::Error(e));
+                        Err(e) => {
+                            if let Some(reply) = req.send_result {
+                                reply.send(Value::Error(Chars::from(format!("{}", e))));
+                            }
+                        }
                     }
                 } else if req.id == self.controls.state_ctl.id() {
                     info!("set state {}: {}", session_id, req.value);
-                    match req.value.cast_to::<Chars>() {
-                        Err(_) => {
-                            if let Some(reply) = req.send_result {
-                                let e = Chars::from("expected string");
-                                reply.send(Value::Error(e))
-                            }
+                    match req.value.cast_to::<State>() {
+                        Ok(state) => {
+                            self.set_state(state);
+                            cluster.send_cmd(&ClusterCmd::SetState(state));
                         }
-                        Ok(s) => {
-                            let s = s.trim().to_lowercase();
-                            if s.as_str() == "play" {
-                                self.set_state(State::Play);
-                                cluster.send_cmd(&ClusterCmd::SetState(State::Play));
-                            } else if s.as_str() == "pause" {
-                                self.set_state(State::Pause);
-                                cluster.send_cmd(&ClusterCmd::SetState(State::Pause));
-                            } else if s.as_str() == "tail" {
-                                self.seek(Seek::End)?;
-                                self.set_state(State::Tail);
-                                cluster.send_cmd(&ClusterCmd::SetState(State::Tail));
-                            } else if let Some(reply) = req.send_result {
-                                let e = format!("invalid command {}", s);
-                                let e = Chars::from(e);
-                                reply.send(Value::Error(e));
+                        Err(e) => {
+                            if let Some(reply) = req.send_result {
+                                reply.send(Value::Error(Chars::from(format!("{}", e))))
                             }
                         }
                     }
@@ -487,8 +583,7 @@ mod publish {
                         }
                         Err(e) => {
                             if let Some(reply) = req.send_result {
-                                let e = Chars::from(format!("{}", e));
-                                reply.send(Value::Error(e))
+                                reply.send(Value::Error(Chars::from(format!("{}", e))))
                             }
                         }
                     }
@@ -608,6 +703,7 @@ mod publish {
         publish_base: Path,
         session_id: Uuid,
         shards: usize,
+        cfg: Option<NewSessionConfig>,
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
         let session_base = session_base(&publish_base, session_id);
@@ -618,6 +714,9 @@ mod publish {
         let mut t = T::new(publisher.clone(), archive, session_base, &control_tx).await?;
         t.seek(Seek::Beginning)?;
         t.publisher.flush(None).await;
+        if let Some(cfg) = cfg {
+            t.apply_config(&cluster, cfg).await?
+        }
         let mut control_rx = control_rx.fuse();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         let mut idle = false;
@@ -720,6 +819,7 @@ mod publish {
         archive: &ArchiveReader,
         shards: usize,
         publish_base: &Path,
+        cfg: Option<NewSessionConfig>,
     ) -> Result<()> {
         let publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
@@ -738,6 +838,7 @@ mod publish {
                 publish_base,
                 session_id,
                 shards,
+                cfg,
             )
             .await;
             if let Err(e) = publisher.shutdown().await {
@@ -772,9 +873,39 @@ mod publish {
         let session_publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
                 .await?;
-        let session_ctl =
-            session_publisher.publish(publish_base.append("session"), Value::Null)?;
         let (control_tx, control_rx) = mpsc::channel(3);
+        let _new_session = Proc::new(
+            &session_publisher,
+            publish_base.append("session"),
+            Value::from("create a new playback session"),
+            vec![
+                (Arc::from("start"), (Value::from("Unbounded"), Value::from(START_DOC))),
+                (Arc::from("end"), (Value::from("Unbounded"), Value::from(END_DOC))),
+                (Arc::from("speed"), (Value::from(1.), Value::from(SPEED_DOC))),
+                (Arc::from("pos"), (Value::Null, Value::from(POS_DOC))),
+                (Arc::from("play_after"), (Value::Null, Value::from(PLAY_AFTER_DOC))),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+            Arc::new(move |cl, args| {
+                let cfg = NewSessionConfig::new(cl, args);
+                let mut control_tx = control_tx.clone();
+                Box::pin(async move {
+                    match cfg {
+                        Err(e) => {
+                            Value::Error(Chars::from(format!("invalid config {}", e)))
+                        }
+                        Ok(cfg) => {
+                            let (tx, rx) = oneshot::channel();
+                            let _ = control_tx.send((cfg, tx)).await;
+                            rx.await.unwrap_or_else(|_| {
+                                Value::Error(Chars::from("cancelled"))
+                            })
+                        }
+                    }
+                })
+            }),
+        );
         let mut cluster = Cluster::<Uuid>::new(
             &session_publisher,
             subscriber.clone(),
@@ -785,7 +916,6 @@ mod publish {
         let mut control_rx = control_rx.fuse();
         let mut bcast_rx = bcast.subscribe();
         let mut poll_members = time::interval(std::time::Duration::from_secs(30));
-        session_ctl.writes(control_tx);
         loop {
             select_biased! {
                 m = bcast_rx.recv().fuse() => match m {
@@ -807,42 +937,37 @@ mod publish {
                             &subscriber,
                             &archive,
                             shards,
-                            &publish_base
+                            &publish_base,
+                            None
                         ).await?
                     }
                 },
                 m = control_rx.next() => match m {
                     None => break Ok(()),
-                    Some(mut batch) => {
-                        for req in batch.drain(..) {
-                            if req.id == session_ctl.id() {
-                                match sessions.add_session(req.addr) {
-                                    None => {
-                                        warn!("too many sessions, client {}", req.addr)
-                                    },
-                                    Some(session_token) => {
-                                        let session_id = Uuid::new_v4();
-                                        info!("start session {}", session_id);
-                                        start_session(
-                                            session_id,
-                                            Some(session_token),
-                                            &bcast,
-                                            &resolver,
-                                            &desired_auth,
-                                            &bind_cfg,
-                                            &subscriber,
-                                            &archive,
-                                            shards,
-                                            &publish_base,
-                                        ).await?;
-                                        cluster.send_cmd(&session_id);
-                                        session_ctl.update_subscriber(
-                                            &req.addr,
-                                            uuid_string(session_id).into()
-                                        );
-                                        session_publisher.flush(None).await;
-                                    }
-                                }
+                    Some((cfg, reply)) => {
+                        match sessions.add_session(cfg.client) {
+                            None => {
+                                let m = format!("too many sessions, client {}", cfg.client);
+                                let _ = reply.send(Value::Error(Chars::from(m)));
+                            },
+                            Some(session_token) => {
+                                let session_id = Uuid::new_v4();
+                                info!("start session {}", session_id);
+                                start_session(
+                                    session_id,
+                                    Some(session_token),
+                                    &bcast,
+                                    &resolver,
+                                    &desired_auth,
+                                    &bind_cfg,
+                                    &subscriber,
+                                    &archive,
+                                    shards,
+                                    &publish_base,
+                                    Some(cfg)
+                                ).await?;
+                                cluster.send_cmd(&session_id);
+                                let _ = reply.send(Value::from(uuid_string(session_id)));
                             }
                         }
                     }
