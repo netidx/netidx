@@ -11,6 +11,7 @@ use crate::{
     protocol::{
         self,
         publisher::{From, Id, To},
+        resolver::Resolved,
     },
     publisher::PublishFlags,
     resolver::{Auth, ResolverRead},
@@ -452,33 +453,31 @@ struct SubscriberInner {
 }
 
 impl SubscriberInner {
-    fn choose_addr(
-        &mut self,
-        addrs: &[(SocketAddr, Bytes)],
-        flags: u16,
-    ) -> (SocketAddr, Bytes) {
+    fn choose_addr(&mut self, resolved: &Resolved) -> (SocketAddr, Bytes) {
         use rand::seq::IteratorRandom;
-        let flags = unsafe { PublishFlags::from_bits_unchecked(flags) };
+        let flags = unsafe { PublishFlags::from_bits_unchecked(resolved.flags) };
         if flags.contains(PublishFlags::USE_EXISTING) {
-            for (addr, tok) in addrs {
+            for (addr, tok) in &*resolved.addrs {
                 if self.connections.contains_key(addr) {
                     return (*addr, tok.clone());
                 }
             }
         }
         let mut rng = rand::thread_rng();
-        match addrs
+        match resolved
+            .addrs
             .iter()
             .filter(|(a, _)| !self.recently_failed.contains_key(a))
             .choose(&mut rng)
         {
-            None => addrs.iter().choose(&mut rng).unwrap().clone(),
+            None => resolved.addrs.iter().choose(&mut rng).unwrap().clone(),
             Some((addr, tok)) => (*addr, tok.clone()),
         }
     }
 
     fn gc_recently_failed(&mut self) {
-        self.recently_failed.retain(|_, v| v.elapsed() < REMEBER_FAILED)
+        let now = Instant::now();
+        self.recently_failed.retain(|_, v| (now - *v) < REMEBER_FAILED)
     }
 }
 
@@ -768,7 +767,7 @@ impl Subscriber {
                         if resolved.addrs.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
-                            let addr = t.choose_addr(&*resolved.addrs, resolved.flags);
+                            let addr = t.choose_addr(&resolved);
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {

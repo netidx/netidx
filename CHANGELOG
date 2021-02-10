@@ -1,3 +1,15 @@
+* 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
+  - major update to the filter language syntax and semantics
+  - add netidx rpc to protocols, use it in the recorder, implement it
+    in the browser formula language
+  - add the ability for the publisher to set flags on a published path
+    in the resolver server. Implement a flag to force subscriber to
+    use an existing connection where possible instead of picking a
+    random publisher address. Use this flag to handle multiple
+    publishers of the same rpc, and the control interface in the
+    recorder. This protocol change requires the resolver server to be
+    updated, and is backwards compatible with older clients.
+
 * 0.6.1 netidx netidx-tools netidx-core:
   - small semantic change in subscriber, writes to a dval now queue
     when the subscription is not connected and are sent on
@@ -6,9 +18,6 @@
   - Put limits on the number of sessions allowed per client and total,
     and pick reasonable defaults.
   - add a few support methods to netidx core
-
-* 0.6.2 browser, netidx-protocols:
-  - major update to the filter language syntax and semantics
 
 * 0.6.1 browser:
   - Fix several really dumb bugs in the formula parser
