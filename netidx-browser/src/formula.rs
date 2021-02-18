@@ -4,7 +4,7 @@ use netidx::{
     path::Path,
     subscriber::{self, Dval, SubId, Typ, UpdatesFlags, Value},
 };
-use netidx_protocols::view;
+use netidx_protocols::{view, rpc::client as rpc};
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -1418,6 +1418,45 @@ impl Uniq {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct RpcCallInner {
+    proc: RefCell<Option<rpc::Proc>>,
+    args: CachedVals,
+    ret: RefCell<Option<Value>>,
+    invalid: Cell<bool>,
+    ctx: WidgetCtx,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RpcCall(Rc<RpcCallInner>);
+
+impl Deref for RpcCall {
+    type Target = RpcCallInner;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl RpcCall {
+    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
+        let t = RpcCall(Rc::new(RpcCallInner {
+            proc: RefCell::new(None),
+            args: CachedVals::new(from),
+            ret: RefCell::new(None),
+            invalid: Cell::new(false),
+            ctx: ctx.clone()
+        }));
+        if from.len() == 0 || from.len().is_power_of_two() {
+            t.invalid.set(true);
+        } else if t.args.0.borrow().iter().all(|v| v.is_some()) {
+            let args = &*t.args.0.borrow();
+            
+        }
+        t
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
@@ -1449,10 +1488,11 @@ pub(crate) enum Formula {
     StoreVar(StoreVar),
     Confirm(Confirm),
     Navigate(Navigate),
+    RpcCall(RpcCall),
     Unknown(String),
 }
 
-pub(crate) static FORMULAS: [&'static str; 29] = [
+pub(crate) static FORMULAS: [&'static str; 30] = [
     "load",
     "load_var",
     "store",
@@ -1482,6 +1522,7 @@ pub(crate) static FORMULAS: [&'static str; 29] = [
     "event",
     "confirm",
     "navigate",
+    "rpccall",
 ];
 
 impl Formula {
@@ -1524,6 +1565,7 @@ impl Formula {
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
             "confirm" => Formula::Confirm(Confirm::new(ctx, debug, from)),
             "navigate" => Formula::Navigate(Navigate::new(ctx, debug, from)),
+            "rpccall" => Formula::RpcCall(RpcCall::new(ctx, debug, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1559,6 +1601,7 @@ impl Formula {
             Formula::StoreVar(s) => s.eval(),
             Formula::Confirm(s) => s.eval(),
             Formula::Navigate(s) => s.eval(),
+            Formula::RpcCall(s) => unreachable!(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -1615,6 +1658,7 @@ impl Formula {
             Formula::StoreVar(s) => s.update(from, tgt, value),
             Formula::Confirm(s) => s.update(from, tgt, value),
             Formula::Navigate(s) => s.update(from, tgt, value),
+            Formula::RpcCall(s) => unreachable!(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

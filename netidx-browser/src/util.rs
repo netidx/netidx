@@ -31,3 +31,29 @@ pub(super) fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
     d.run();
     unsafe { d.destroy() };
 }
+
+use std::sync::Arc;
+use parking_lot::{Mutex, Condvar};
+
+#[derive(Clone)]
+pub(crate) struct OneShot<T>(Arc<(Mutex<Option<T>>, Condvar)>);
+
+impl<T> OneShot<T> {
+    pub(crate) fn new() -> Self {
+        OneShot(Arc::new((Mutex::new(None), Condvar::new())))
+    }
+
+    pub(crate) fn wait(&self) -> T {
+        let mut inner = self.0.0.lock();
+        if inner.is_none() {
+            self.0.1.wait(&mut inner);
+        }
+        inner.take().unwrap()
+    }
+
+    pub(crate) fn send(&self, t: T) {
+        let mut inner = self.0.0.lock();
+        *inner = Some(t);
+        self.0.1.notify_one();
+    }
+}

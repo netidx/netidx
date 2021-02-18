@@ -183,6 +183,7 @@ pub mod server {
 pub mod client {
     use super::*;
 
+    #[derive(Debug)]
     pub struct Proc {
         call: Dval,
         args: HashMap<String, Dval>,

@@ -3,6 +3,7 @@
 extern crate glib;
 #[macro_use]
 extern crate lazy_static;
+mod backend;
 mod containers;
 mod editor;
 mod formula;
@@ -32,8 +33,9 @@ use netidx::{
     resolver::{Auth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
-use netidx_protocols::view as protocol_view;
+use netidx_protocols::{rpc::client as rpc, view as protocol_view};
 use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -44,10 +46,10 @@ use std::{
     result, str,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc as smpsc, Arc,
+        Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use structopt::StructOpt;
 use tokio::{runtime::Runtime, task};
@@ -110,6 +112,7 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
+    RpcUpdate(Path, Value),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -120,6 +123,7 @@ enum FromGui {
     Navigate(ViewLoc),
     Render(protocol_view::View),
     Save(ViewLoc, protocol_view::View, oneshot::Sender<Result<()>>),
+    CallRpc(Path, Vec<Value>),
     Updated,
     Terminate,
 }
@@ -459,12 +463,7 @@ struct View {
 }
 
 impl View {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        path: &ViewLoc,
-        spec: view::View,
-    ) -> View {
+    fn new(ctx: WidgetCtx, variables: &Vars, path: &ViewLoc, spec: view::View) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -519,258 +518,6 @@ static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
     margin_start: 0,
     margin_end: 0,
 };
-
-fn default_view(path: Path) -> protocol_view::View {
-    protocol_view::View {
-        variables: HashMap::new(),
-        keybinds: Vec::new(),
-        root: protocol_view::Widget {
-            kind: protocol_view::WidgetKind::Table(protocol_view::Table {
-                path,
-                default_sort_column: None,
-                columns: protocol_view::ColumnSpec::Auto,
-            }),
-            props: None,
-        },
-    }
-}
-
-#[derive(Debug)]
-struct StartNetidx {
-    cfg: Config,
-    auth: Auth,
-    subscriber: Arc<OnceCell<Subscriber>>,
-    updates: mpsc::Receiver<RawBatch>,
-    from_gui: mpsc::UnboundedReceiver<FromGui>,
-    to_gui: glib::Sender<ToGui>,
-    to_init: smpsc::Sender<(Subscriber, ResolverRead)>,
-    raw_view: Arc<AtomicBool>,
-}
-
-lazy_static! {
-    static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5, 100000);
-}
-
-async fn netidx_main(mut ctx: StartNetidx) {
-    async fn read_view(
-        rx_view: &mut Option<mpsc::Receiver<RawBatch>>,
-    ) -> Option<RawBatch> {
-        match rx_view {
-            None => pending().await,
-            Some(rx_view) => rx_view.next().await,
-        }
-    }
-    let cfg = ctx.cfg;
-    let auth = ctx.auth;
-    let subscriber =
-        ctx.subscriber.get_or_init(move || Subscriber::new(cfg, auth).unwrap()).clone();
-    let resolver = subscriber.resolver();
-    let _: result::Result<_, _> =
-        ctx.to_init.send((subscriber.clone(), resolver.clone()));
-    let mut view_path: Option<Path> = None;
-    let mut rx_view: Option<mpsc::Receiver<RawBatch>> = None;
-    let mut _dv_view: Option<Dval> = None;
-    let mut changed = UPDATES.take();
-    let mut refreshing = false;
-    fn refresh(
-        refreshing: &mut bool,
-        changed: &mut Batch,
-        to_gui: &glib::Sender<ToGui>,
-    ) -> Result<()> {
-        if !*refreshing && !changed.is_empty() {
-            *refreshing = true;
-            to_gui.send(ToGui::Update(mem::replace(changed, UPDATES.take())))?
-        }
-        Ok(())
-    }
-    loop {
-        select_biased! {
-            m = ctx.from_gui.next() => match m {
-                None => break,
-                Some(FromGui::Terminate) => break,
-                Some(FromGui::Updated) => {
-                    refreshing = false;
-                    break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
-                },
-                Some(FromGui::Render(view)) => {
-                    view_path = None;
-                    rx_view = None;
-                    _dv_view = None;
-                    match view::View::new(&resolver, view.clone()).await {
-                        Err(e) => warn!("failed to raeify view {}", e),
-                        Ok(v) => {
-                            let m = ToGui::View {
-                                loc: None,
-                                original: view,
-                                raeified: v,
-                                generated: false,
-                            };
-                            break_err!(ctx.to_gui.send(m));
-                            info!("updated gui view (render)")
-                        }
-                    }
-                },
-                Some(FromGui::Save(ViewLoc::Netidx(path), view, fin)) => {
-                    let to = Some(Duration::from_secs(10));
-                    match subscriber.subscribe_one(path, to).await {
-                        Err(e) => { let _ = fin.send(Err(e)); }
-                        Ok(val) => match serde_json::to_string(&view) {
-                            Err(e) => { let _ = fin.send(Err(Error::from(e))); }
-                            Ok(s) => {
-                                let v = Value::String(Chars::from(s));
-                                match val.write_with_recipt(v).await {
-                                    Err(e) => { let _ = fin.send(Err(Error::from(e))); }
-                                    Ok(v) => {
-                                        let _ = fin.send(match v {
-                                            Value::Error(s) =>
-                                                Err(anyhow!(String::from(&*s))),
-                                            _ => Ok(())
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                Some(FromGui::Save(ViewLoc::File(file), view, fin)) => {
-                    match serde_json::to_string(&view) {
-                        Err(e) => { let _ = fin.send(Err(Error::from(e))); }
-                        Ok(s) => match fs::write(file, s) {
-                            Err(e) => { let _ = fin.send(Err(Error::from(e))); }
-                            Ok(()) => { let _ = fin.send(Ok(())); }
-                        }
-                    }
-                },
-                Some(FromGui::Navigate(ViewLoc::Netidx(base_path))) => {
-                    match resolver.table(base_path.clone()).await {
-                        Err(e) => {
-                            let m =
-                                format!("can't fetch table spec for {}, {}", base_path, e);
-                            break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
-                        },
-                        Ok(spec) => {
-                            let raeified_default = view::View {
-                                variables: HashMap::new(),
-                                root: view::Widget {
-                                    props: None,
-                                    kind: view::WidgetKind::Table(view::Table {
-                                        path: base_path.clone(),
-                                        default_sort_column: None,
-                                        columns: view::ColumnSpec::Auto
-                                    }, spec)
-                                }
-                            };
-                            let raw = ctx.raw_view.load(Ordering::Relaxed);
-                            let m = ToGui::View {
-                                loc: Some(ViewLoc::Netidx(base_path.clone())),
-                                original: default_view(base_path.clone()),
-                                raeified: raeified_default,
-                                generated: true,
-                            };
-                            break_err!(ctx.to_gui.send(m));
-                            if !raw {
-                                let s = subscriber
-                                    .durable_subscribe(base_path.append(".view"));
-                                let (tx, rx) = mpsc::channel(2);
-                                s.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
-                                view_path = Some(base_path.clone());
-                                rx_view = Some(rx);
-                                _dv_view = Some(s);
-                            }
-                        }
-                    }
-                },
-                Some(FromGui::Navigate(ViewLoc::File(file))) => {
-                    // CR estokes: async!
-                    match fs::read_to_string(&file) {
-                        Err(e) => {
-                            let m =
-                                format!("can't load view from file {:?}, {}", file, e);
-                            break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
-                        },
-                        Ok(s) => match serde_json::from_str::<protocol_view::View>(&s) {
-                            Err(e) => {
-                                let m = format!("invalid view: {:?}, {}", file, e);
-                                break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
-                            },
-                            Ok(v) => match view::View::new(&resolver, v.clone()).await {
-                                Err(e) => {
-                                    let m = format!("error building view: {}", e);
-                                    break_err!(ctx.to_gui.send(ToGui::ShowError(m)));
-                                },
-                                Ok(r) => {
-                                    let m = ToGui::View {
-                                        loc: Some(ViewLoc::File(file)),
-                                        original: v,
-                                        raeified: r,
-                                        generated: false,
-                                    };
-                                    break_err!(ctx.to_gui.send(m));
-                                },
-                            },
-                        }
-                    }
-                },
-            },
-            b = ctx.updates.next() => if let Some(mut batch) = b {
-                for (id, ev) in batch.drain(..) {
-                    match ev {
-                        Event::Update(v) => changed.push((id, v)),
-                        Event::Unsubscribed =>
-                            changed.push((id, Value::String(Chars::from("#LOST")))),
-                    }
-                }
-                break_err!(refresh(&mut refreshing, &mut changed, &ctx.to_gui))
-            },
-            m = read_view(&mut rx_view).fuse() => match m {
-                None => {
-                    view_path = None;
-                    rx_view = None;
-                    _dv_view = None;
-                },
-                Some(mut batch) => if let Some((_, view)) = batch.pop() {
-                    match view {
-                        Event::Update(Value::String(s)) => {
-                            match serde_json::from_str::<protocol_view::View>(&*s) {
-                                Err(e) => warn!("error parsing view definition {}", e),
-                                Ok(view) => if let Some(path) = &view_path {
-                                    match view::View::new(&resolver, view.clone()).await {
-                                        Err(e) => warn!("failed to raeify view {}", e),
-                                        Ok(v) => {
-                                            let m = ToGui::View {
-                                                loc: Some(ViewLoc::Netidx(path.clone())),
-                                                original: view,
-                                                raeified: v,
-                                                generated: false,
-                                            };
-                                            break_err!(ctx.to_gui.send(m));
-                                            info!("updated gui view")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        v => warn!("unexpected type of view definition {:?}", v),
-                    }
-                }
-            },
-        }
-    }
-    let _: result::Result<_, _> = ctx.to_gui.send(ToGui::Terminate);
-}
-
-fn run_tokio(
-    mut start_netidx: mpsc::UnboundedReceiver<StartNetidx>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let rt = Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(async move {
-            while let Some(ctx) = start_netidx.next().await {
-                task::spawn(netidx_main(ctx));
-            }
-        });
-    })
-}
 
 fn setup_css(screen: &gdk::Screen) {
     let style = gtk::CssProvider::new();
@@ -911,8 +658,7 @@ fn save_view(
     }
 }
 
-fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
-    let app = app.clone();
+fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
     group.add_window(&ctx.window);
     let headerbar = gtk::HeaderBar::new();
@@ -1104,12 +850,8 @@ fn run_gui(ctx: WidgetCtx, app: &Application, to_gui: glib::Receiver<ToGui>) {
             }
             variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
-            let cur = View::new(
-                (*ctx).clone(),
-                &variables,
-                &*current_loc.borrow(),
-                raeified,
-            );
+            let cur =
+                View::new((*ctx).clone(), &variables, &*current_loc.borrow(), raeified);
             ctx.window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();
@@ -1203,8 +945,8 @@ fn main() {
     )
     .expect("failed to initialize GTK application");
     let subscriber = Arc::new(OnceCell::new());
-    let (tx_tokio, rx_tokio) = mpsc::unbounded();
-    let jh = run_tokio(rx_tokio);
+    let (tx_backend, rx_backend) = mpsc::unbounded();
+    let jh = backend::start(rx_backend);
     let default_loc = match &opt.path {
         Some(path) => ViewLoc::Netidx(path.clone()),
         None => match &opt.file {
@@ -1214,30 +956,43 @@ fn main() {
     };
     let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
     application.connect_activate(move |app| {
+        let app = app.clone();
         let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
-        let (tx_init, rx_init) = smpsc::channel();
         let raw_view = Arc::new(AtomicBool::new(false));
         // navigate to the requested location
         tx_from_gui
             .unbounded_send(FromGui::Navigate(new_window_loc.borrow().clone()))
             .unwrap();
         *new_window_loc.borrow_mut() = default_loc.clone();
-        tx_tokio
-            .unbounded_send(StartNetidx {
+        let init = Arc::new(Mutex::new(None));
+        tx_backend
+            .unbounded_send(NetidxCtx {
                 cfg: cfg.clone(),
                 auth: auth.clone(),
                 subscriber: Arc::clone(&subscriber),
                 updates: rx_updates,
                 from_gui: rx_from_gui,
                 to_gui: tx_to_gui.clone(),
-                to_init: tx_init,
+                init: init.clone(),
                 raw_view: raw_view.clone(),
+                view_path: None,
+                rx_view: None,
+                dv_view: None,
+                rpcs: HashMap::new(),
+                last_rpc_gc: Instant::now(),
+                changed: UPDATES.take(),
+                refreshing: false,
             })
             .unwrap();
-        let (subscriber, resolver) = rx_init.recv().unwrap();
-        let window = ApplicationWindow::new(app);
+        let (subscriber, resolver) = loop {
+            match init.lock().take() {
+                Some((subscriber, resolver)) => break (subscriber, resolver),
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let window = ApplicationWindow::new(&app);
         let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
             subscriber,
             resolver,
