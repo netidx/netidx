@@ -1,7 +1,7 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{FromGui, Target, ToGui, WidgetCtx, WidgetPath, DEFAULT_PROPS, Vars};
+use super::{Target, WidgetCtx, WidgetPath, DEFAULT_PROPS, Vars};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -10,7 +10,6 @@ use std::{
     boxed,
     cell::{Cell, RefCell},
     rc::Rc,
-    result,
 };
 use util::{parse_entry, TwoColGrid};
 
@@ -690,8 +689,7 @@ impl Editor {
                                 undo_stack.borrow_mut().push(spec.borrow().clone());
                             }
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            let m = FromGui::Render(spec.borrow().clone());
-                            let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                            ctx.backend.render(spec.borrow().clone());
                         }
                         scheduled.set(false);
                         glib::Continue(false)
@@ -782,15 +780,14 @@ impl Editor {
             match s.get_selected() {
                 None => {
                     *selected.borrow_mut() = None;
-                    let _: result::Result<_, _> =
-                        ctx.to_gui.send(ToGui::Highlight(vec![]));
+                    ctx.backend.highlight(vec![]);
                     reveal_properties.set_reveal_child(false);
                 }
                 Some((_, iter)) => {
                     *selected.borrow_mut() = Some(iter.clone());
                     let mut path = Vec::new();
                     Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
-                    let _: result::Result<_,_> = ctx.to_gui.send(ToGui::Highlight(path));
+                    ctx.backend.highlight(path);
                     let v = store.get_value(&iter, 0);
                     if let Ok(Some(id)) = v.get::<&str>() {
                         inhibit_change.set(true);

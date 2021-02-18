@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    FromGui, Target, ViewLoc, WidgetCtx,
+    Target, ViewLoc, WidgetCtx,
 };
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
@@ -253,8 +253,7 @@ impl Table {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
                     let path = t.0.spec.path.append(row_name);
-                    let m = FromGui::Navigate(ViewLoc::Netidx(path));
-                    let _: result::Result<_, _> = t.0.ctx.from_gui.unbounded_send(m);
+                    t.0.ctx.backend.navigate(ViewLoc::Netidx(path));
                 }
             }
         }));
@@ -336,7 +335,7 @@ impl Table {
         } else {
             let path = Path::from(Arc::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
-            let dv = self.0.ctx.subscriber.durable_subscribe(path);
+            let dv = self.0.ctx.backend.subscriber.durable_subscribe(path);
             let val = Rc::new(RefCell::new(match dv.last() {
                 Event::Unsubscribed => Some(Value::Null),
                 Event::Update(v) => Some(v),
@@ -529,8 +528,11 @@ impl Table {
                 } else {
                     p.append(&self.0.descriptor.cols[(id - 1) as usize].0)
                 };
-                let s = self.0.ctx.subscriber.durable_subscribe(p);
-                s.updates(UpdatesFlags::BEGIN_WITH_LAST, self.0.ctx.updates.clone());
+                let s = self.0.ctx.backend.subscriber.durable_subscribe(p);
+                s.updates(
+                    UpdatesFlags::BEGIN_WITH_LAST,
+                    self.0.ctx.backend.updates.clone(),
+                );
                 self.0.by_id.borrow_mut().insert(
                     s.id(),
                     Subscription { _sub: s, row: row.clone(), col: id as u32 },

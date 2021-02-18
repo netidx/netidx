@@ -1,4 +1,4 @@
-use super::{default_view, FromGui, RawBatch, ToGui, ViewLoc};
+use super::{default_view, FromGui, RawBatch, ToGui, ViewLoc, WidgetPath};
 use crate::{util::OneShot, view};
 use anyhow::{anyhow, Error, Result};
 use futures::{
@@ -18,7 +18,6 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_protocols::{rpc::client as rpc, view as protocol_view};
-use parking_log::Mutex;
 use std::{
     collections::HashMap,
     fs, mem,
@@ -57,7 +56,7 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     pub(crate) fn navigate(&self, loc: ViewLoc) {
-        let _: std::result::Result<_, _> =
+        let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Navigate(loc));
     }
 
@@ -67,18 +66,25 @@ impl Ctx {
         spec: protocol_view::View,
     ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        let _: std::result::Result<_, _> =
+        let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Save(loc, spec, tx));
         Ok(rx.await??)
     }
 
     pub(crate) fn terminate(&self) {
-        let _: std::result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::Terminate);
+        let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Terminate);
     }
 
     pub(crate) fn updated(&self) {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Updated);
+    }
+
+    pub(crate) fn render(&self, spec: protocol_view::View) {
+        let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Render(spec));
+    }
+
+    pub(crate) fn highlight(&self, paths: Vec<WidgetPath>) {
+        let _: result::Result<_, _> = self.to_gui.send(ToGui::Highlight(paths));
     }
 }
 
@@ -412,7 +418,7 @@ pub(crate) struct Backend {
 impl Backend {
     pub(crate) fn new(cfg: Config, auth: Auth) -> (thread::JoinHandle<()>, Backend) {
         let subscriber: OneShot<Subscriber> = OneShot::new();
-        let (tx_create_ctx, rx_create_ctx) = mpsc::unbounded();
+        let (tx_create_ctx, mut rx_create_ctx) = mpsc::unbounded();
         let join_handle = {
             let subscriber = subscriber.clone();
             thread::spawn(move || {

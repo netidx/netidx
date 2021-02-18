@@ -1,10 +1,10 @@
-use super::{util::ask_modal, FromGui, ToGui, Vars, ViewLoc, WidgetCtx};
+use super::{util::ask_modal, ToGui, Vars, ViewLoc, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{self, Dval, SubId, Typ, UpdatesFlags, Value},
 };
-use netidx_protocols::{view, rpc::client as rpc};
+use netidx_protocols::{rpc::client as rpc, view};
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -747,8 +747,11 @@ impl Store {
             },
             (Some(p), val) => {
                 let path = Path::from(p);
-                let dv = self.ctx.subscriber.durable_subscribe(path.clone());
-                dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
+                let dv = self.ctx.backend.subscriber.durable_subscribe(path.clone());
+                dv.updates(
+                    UpdatesFlags::BEGIN_WITH_LAST,
+                    self.ctx.backend.updates.clone(),
+                );
                 if let Some(v) = val {
                     self.queue(v)
                 }
@@ -876,7 +879,8 @@ impl StoreVar {
         match &self.debug {
             None => {
                 self.variables.borrow_mut().insert(name.clone(), v.clone());
-                let _ = self.ctx.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+                let _: Result<_, _> =
+                    self.ctx.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
             }
             Some(d) => {
                 *d.borrow_mut() = Value::from(format!("set var: {} to: {}", name, v));
@@ -996,8 +1000,8 @@ impl Load {
 
     fn subscribe(&self, name: Option<Value>) {
         if let Some(path) = pathname(&self.invalid, name) {
-            let dv = self.ctx.subscriber.durable_subscribe(path);
-            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.updates.clone());
+            let dv = self.ctx.backend.subscriber.durable_subscribe(path);
+            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.backend.updates.clone());
             *self.cur.borrow_mut() = Some(dv);
         }
     }
@@ -1297,8 +1301,11 @@ impl Navigate {
                                     format!("would navigate in window to: {}", loc),
                                 ));
                             } else {
-                                let _ =
-                                    self.ctx.to_gui.send(ToGui::NavigateInWindow(loc));
+                                let _: Result<_, _> = self
+                                    .ctx
+                                    .backend
+                                    .to_gui
+                                    .send(ToGui::NavigateInWindow(loc));
                             }
                         } else {
                             if self.debug {
@@ -1312,10 +1319,7 @@ impl Navigate {
                                         "Unsaved view will be lost.",
                                     )
                                 {
-                                    let _ = self
-                                        .ctx
-                                        .from_gui
-                                        .unbounded_send(FromGui::Navigate(loc));
+                                    self.ctx.backend.navigate(loc);
                                 }
                             }
                         }
@@ -1352,7 +1356,7 @@ impl Navigate {
                 let up = target.is_some();
                 self.navigate(None, target);
                 up
-            },
+            }
             exprs => {
                 let mut up = false;
                 for e in exprs {
@@ -1445,13 +1449,12 @@ impl RpcCall {
             args: CachedVals::new(from),
             ret: RefCell::new(None),
             invalid: Cell::new(false),
-            ctx: ctx.clone()
+            ctx: ctx.clone(),
         }));
         if from.len() == 0 || from.len().is_power_of_two() {
             t.invalid.set(true);
         } else if t.args.0.borrow().iter().all(|v| v.is_some()) {
             let args = &*t.args.0.borrow();
-            
         }
         t
     }

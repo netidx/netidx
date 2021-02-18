@@ -118,7 +118,7 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
-    RpcUpdate(Path, Value),
+    //RpcUpdate(Path, Value),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -129,7 +129,7 @@ enum FromGui {
     Navigate(ViewLoc),
     Render(protocol_view::View),
     Save(ViewLoc, protocol_view::View, oneshot::Sender<Result<()>>),
-    CallRpc(Path, Vec<Value>),
+    //CallRpc(Path, Vec<Value>),
     Updated,
     Terminate,
 }
@@ -604,7 +604,7 @@ fn save_view(
             let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
             async move {
-                match ctx.backend.save(loc, spec).await {
+                match ctx.backend.save(loc.clone(), spec).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
                             ctx.backend.to_gui.send(ToGui::SaveError(format!(
