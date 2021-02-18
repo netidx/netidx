@@ -3,6 +3,7 @@
 extern crate glib;
 #[macro_use]
 extern crate lazy_static;
+
 mod backend;
 mod containers;
 mod editor;
@@ -11,35 +12,28 @@ mod table;
 mod util;
 mod view;
 mod widgets;
-use anyhow::{anyhow, Error, Result};
+
+use anyhow::Result;
 use editor::Editor;
 use formula::Target;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{pending, FutureExt},
-    select_biased,
-    stream::StreamExt,
-};
+use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
-use log::{info, warn};
 use netidx::{
     chars::Chars,
     config::{self, Config},
     path::Path,
-    pool::{Pool, Pooled},
-    resolver::{Auth, ResolverRead},
-    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
+    pool::Pooled,
+    resolver::Auth,
+    subscriber::{Event, SubId, Value},
 };
-use netidx_protocols::{rpc::client as rpc, view as protocol_view};
-use once_cell::sync::OnceCell;
-use parking_lot::Mutex;
+use netidx_protocols::view as protocol_view;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    fmt, fs, mem,
+    fmt, mem,
     ops::Deref,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -48,16 +42,28 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    thread,
-    time::{Duration, Instant},
 };
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, task};
 use util::{ask_modal, err_modal};
 
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 type Vars = Rc<RefCell<HashMap<Chars, Value>>>;
+
+fn default_view(path: Path) -> protocol_view::View {
+    protocol_view::View {
+        variables: HashMap::new(),
+        keybinds: Vec::new(),
+        root: protocol_view::Widget {
+            kind: protocol_view::WidgetKind::Table(protocol_view::Table {
+                path,
+                default_sort_column: None,
+                columns: protocol_view::ColumnSpec::Auto,
+            }),
+            props: None,
+        },
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum WidgetPath {
@@ -130,11 +136,7 @@ enum FromGui {
 
 #[derive(Debug)]
 struct WidgetCtxInner {
-    subscriber: Subscriber,
-    resolver: ResolverRead,
-    updates: mpsc::Sender<RawBatch>,
-    to_gui: glib::Sender<ToGui>,
-    from_gui: mpsc::UnboundedSender<FromGui>,
+    backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
@@ -411,9 +413,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    let loc = ViewLoc::Netidx(Path::from(String::from(uri)));
-                    let m = FromGui::Navigate(loc);
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                    ctx.backend.navigate(ViewLoc::Netidx(Path::from(String::from(uri))));
                     Inhibit(false)
                 }));
             }
@@ -429,9 +429,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    let loc = ViewLoc::Netidx(Path::from("/"));
-                    let m = FromGui::Navigate(loc);
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                    ctx.backend.navigate(ViewLoc::Netidx(Path::from("/")));
                     Inhibit(false)
             }));
             let sep = gtk::Label::new(Some(" > "));
@@ -447,9 +445,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    let loc = ViewLoc::File(name.clone());
-                    let m = FromGui::Navigate(loc);
-                    let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                    ctx.backend.navigate(ViewLoc::File(name.clone()));
                     Inhibit(false)
             }));
         }
@@ -497,15 +493,6 @@ impl View {
     fn update(&self, waits: &mut Vec<oneshot::Receiver<()>>, tgt: Target, value: &Value) {
         self.widget.update(waits, tgt, value);
     }
-}
-
-macro_rules! break_err {
-    ($e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(_) => break,
-        }
-    };
 }
 
 static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
@@ -611,37 +598,29 @@ fn save_view(
     save_as: bool,
 ) {
     let do_save = |loc: ViewLoc| {
-        let (tx, rx) = oneshot::channel();
-        let spec = current_spec.borrow().clone();
-        let m = FromGui::Save(loc.clone(), spec, tx);
-        let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
         glib::MainContext::default().spawn_local({
             let save_button = save_button.clone();
             let save_loc = save_loc.clone();
+            let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
             async move {
-                match rx.await {
+                match ctx.backend.save(loc, spec).await {
                     Err(e) => {
-                        let _: result::Result<_, _> = ctx.to_gui.send(ToGui::SaveError(
-                            format!("error saving to: {:?}, {}", &*save_loc.borrow(), e),
-                        ));
+                        let _: result::Result<_, _> =
+                            ctx.backend.to_gui.send(ToGui::SaveError(format!(
+                                "error saving to: {:?}, {}",
+                                &*save_loc.borrow(),
+                                e
+                            )));
                         *save_loc.borrow_mut() = None;
                     }
-                    Ok(Err(e)) => {
-                        let _: result::Result<_, _> = ctx.to_gui.send(ToGui::SaveError(
-                            format!("error saving to: {:?}, {}", &*save_loc.borrow(), e),
-                        ));
-                        *save_loc.borrow_mut() = None;
-                    }
-                    Ok(Ok(())) => {
+                    Ok(()) => {
                         ctx.view_saved.set(true);
                         save_button.set_sensitive(false);
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
                             *sl = Some(loc.clone());
-                            let _: result::Result<_, _> = ctx
-                                .from_gui
-                                .unbounded_send(FromGui::Navigate(loc.clone()));
+                            ctx.backend.navigate(loc.clone());
                         }
                     }
                 }
@@ -709,8 +688,7 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ctx.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
             if ctx.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
-                let _: result::Result<_, _> =
-                    ctx.from_gui.unbounded_send(FromGui::Terminate);
+                ctx.backend.terminate();
                 Inhibit(false)
             } else {
                 Inhibit(true)
@@ -756,8 +734,7 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     go_act.connect_activate(clone!(@weak ctx, @weak design_mode => move |_, _| {
         if ctx.view_saved.get() || ask_modal(&ctx.window, "Unsaved view will be lost.") {
             if let Some(loc) = choose_location(&ctx.window, false) {
-                let m = FromGui::Navigate(loc);
-                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                ctx.backend.navigate(loc);
             }
         }
     }));
@@ -782,8 +759,7 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if !new_v || ctx.view_saved.get() || ask_modal(&ctx.window, m) {
                 ctx.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
-                let m = FromGui::Navigate(current_loc.borrow().clone());
-                let _: result::Result<_, _> = ctx.from_gui.unbounded_send(m);
+                ctx.backend.navigate(current_loc.borrow().clone());
             }
         }
     }));
@@ -807,16 +783,14 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     }
                 }
                 if waits.len() == 0 {
-                    let _: result::Result<_, _> =
-                        ctx.from_gui.unbounded_send(FromGui::Updated);
+                    ctx.backend.updated()
                 } else {
-                    let from_gui = ctx.from_gui.clone();
+                    let ctx = ctx.clone();
                     glib::MainContext::default().spawn_local(async move {
                         for r in waits {
                             let _: result::Result<_, _> = r.await;
                         }
-                        let _: result::Result<_, _> =
-                            from_gui.unbounded_send(FromGui::Updated);
+                        ctx.backend.updated();
                     });
                 }
             }
@@ -944,9 +918,7 @@ fn main() {
         gio::ApplicationFlags::NON_UNIQUE | Default::default(),
     )
     .expect("failed to initialize GTK application");
-    let subscriber = Arc::new(OnceCell::new());
-    let (tx_backend, rx_backend) = mpsc::unbounded();
-    let jh = backend::start(rx_backend);
+    let (jh, backend) = backend::Backend::new(cfg, auth);
     let default_loc = match &opt.path {
         Some(path) => ViewLoc::Netidx(path.clone()),
         None => match &opt.file {
@@ -957,48 +929,16 @@ fn main() {
     let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
     application.connect_activate(move |app| {
         let app = app.clone();
-        let (tx_updates, rx_updates) = mpsc::channel(2);
         let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
-        let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
         let raw_view = Arc::new(AtomicBool::new(false));
-        // navigate to the requested location
-        tx_from_gui
-            .unbounded_send(FromGui::Navigate(new_window_loc.borrow().clone()))
-            .unwrap();
-        *new_window_loc.borrow_mut() = default_loc.clone();
-        let init = Arc::new(Mutex::new(None));
-        tx_backend
-            .unbounded_send(NetidxCtx {
-                cfg: cfg.clone(),
-                auth: auth.clone(),
-                subscriber: Arc::clone(&subscriber),
-                updates: rx_updates,
-                from_gui: rx_from_gui,
-                to_gui: tx_to_gui.clone(),
-                init: init.clone(),
-                raw_view: raw_view.clone(),
-                view_path: None,
-                rx_view: None,
-                dv_view: None,
-                rpcs: HashMap::new(),
-                last_rpc_gc: Instant::now(),
-                changed: UPDATES.take(),
-                refreshing: false,
-            })
-            .unwrap();
-        let (subscriber, resolver) = loop {
-            match init.lock().take() {
-                Some((subscriber, resolver)) => break (subscriber, resolver),
-                None => thread::sleep(Duration::from_millis(10)),
-            }
-        };
+        let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
+        let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(
+            &mut *new_window_loc.borrow_mut(),
+            default_loc.clone(),
+        )));
         let window = ApplicationWindow::new(&app);
         let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
-            subscriber,
-            resolver,
-            updates: tx_updates,
-            to_gui: tx_to_gui,
-            from_gui: tx_from_gui,
+            backend,
             raw_view,
             window: window.clone(),
             new_window_loc: new_window_loc.clone(),

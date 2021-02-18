@@ -1,4 +1,4 @@
-use super::{FromGui, RawBatch, ToGui, ViewLoc};
+use super::{default_view, FromGui, RawBatch, ToGui, ViewLoc};
 use crate::{util::OneShot, view};
 use anyhow::{anyhow, Error, Result};
 use futures::{
@@ -22,7 +22,6 @@ use parking_log::Mutex;
 use std::{
     collections::HashMap,
     fs, mem,
-    ops::Drop,
     path::PathBuf,
     result,
     sync::{
@@ -33,21 +32,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{runtime::Runtime, task};
-
-fn default_view(path: Path) -> protocol_view::View {
-    protocol_view::View {
-        variables: HashMap::new(),
-        keybinds: Vec::new(),
-        root: protocol_view::Widget {
-            kind: protocol_view::WidgetKind::Table(protocol_view::Table {
-                path,
-                default_sort_column: None,
-                columns: protocol_view::ColumnSpec::Auto,
-            }),
-            props: None,
-        },
-    }
-}
 
 lazy_static! {
     static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5, 100000);
@@ -69,6 +53,33 @@ pub(crate) struct Ctx {
     pub(crate) to_gui: glib::Sender<ToGui>,
     pub(crate) from_gui: mpsc::UnboundedSender<FromGui>,
     pub(crate) updates: mpsc::Sender<RawBatch>,
+}
+
+impl Ctx {
+    pub(crate) fn navigate(&self, loc: ViewLoc) {
+        let _: std::result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::Navigate(loc));
+    }
+
+    pub(crate) async fn save(
+        &self,
+        loc: ViewLoc,
+        spec: protocol_view::View,
+    ) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let _: std::result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::Save(loc, spec, tx));
+        Ok(rx.await??)
+    }
+
+    pub(crate) fn terminate(&self) {
+        let _: std::result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::Terminate);
+    }
+
+    pub(crate) fn updated(&self) {
+        let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Updated);
+    }
 }
 
 #[derive(Debug)]
@@ -394,13 +405,12 @@ enum ToBackend {
 }
 
 pub(crate) struct Backend {
-    join_handle: thread::JoinHandle<()>,
     subscriber: Subscriber,
     create_ctx: mpsc::UnboundedSender<ToBackend>,
 }
 
 impl Backend {
-    pub(crate) fn start(cfg: Config, auth: Auth) -> Backend {
+    pub(crate) fn new(cfg: Config, auth: Auth) -> (thread::JoinHandle<()>, Backend) {
         let subscriber: OneShot<Subscriber> = OneShot::new();
         let (tx_create_ctx, rx_create_ctx) = mpsc::unbounded();
         let join_handle = {
@@ -419,7 +429,7 @@ impl Backend {
             })
         };
         let subscriber = subscriber.wait();
-        Backend { join_handle, subscriber, create_ctx: tx_create_ctx }
+        (join_handle, Backend { subscriber, create_ctx: tx_create_ctx })
     }
 
     pub(crate) fn create_ctx(
@@ -434,11 +444,5 @@ impl Backend {
             reply: reply.clone(),
         })?;
         Ok(reply.wait())
-    }
-
-    pub(crate) fn shutdown(self) {
-        mem::drop(self.create_ctx);
-        mem::drop(self.subscriber);
-        self.join_handle.join();
     }
 }
