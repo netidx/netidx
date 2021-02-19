@@ -1447,7 +1447,7 @@ impl RpcCall {
     fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
         let t = RpcCall(Rc::new(RpcCallInner {
             args: CachedVals::new(from),
-            invalid: Cell::new(false),
+            invalid: Cell::new(true),
             ctx: ctx.clone(),
             debug,
         }));
@@ -1458,9 +1458,7 @@ impl RpcCall {
     fn maybe_call(&self) {
         self.invalid.set(false);
         let len = self.args.0.borrow().len();
-        if self.debug {
-            return;
-        } else if len == 0 || len.is_power_of_two() {
+        if len == 0 || len.is_power_of_two() {
             self.invalid.set(true);
         } else if self.args.0.borrow().iter().all(|v| v.is_some()) {
             match &self.args.0.borrow()[..] {
@@ -1496,7 +1494,9 @@ impl RpcCall {
                                 }
                                 args
                             };
-                            self.ctx.backend.call_rpc(Path::from(name), args);
+                            if !self.debug {
+                                self.ctx.backend.call_rpc(Path::from(name), args);
+                            }
                         }
                     }
                 }
