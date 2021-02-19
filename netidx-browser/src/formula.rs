@@ -1458,7 +1458,9 @@ impl RpcCall {
     fn maybe_call(&self) {
         self.invalid.set(false);
         let len = self.args.0.borrow().len();
-        if len == 0 || len.is_power_of_two() {
+        if self.debug {
+            return;
+        } else if len == 0 || len.is_power_of_two() {
             self.invalid.set(true);
         } else if self.args.0.borrow().iter().all(|v| v.is_some()) {
             match &self.args.0.borrow()[..] {
@@ -1503,12 +1505,45 @@ impl RpcCall {
     }
 
     fn eval(&self) -> Option<Value> {
-        if !self.invalid.get() {
-            None
-        } else {
+        if self.invalid.get() {
             Some(Value::Error(Chars::from(
-                "call(rpc, kwargs): expected at least 1 argument",
+                "call(rpc, kwargs): expected at least 1 argument, and an even number of kwargs",
             )))
+        } else {
+            if !self.debug {
+                None
+            } else if self.args.0.borrow().iter().any(|v| v.is_none()) {
+                Some(Value::from("One or more args missing, no call made"))
+            } else {
+                let args = self.args.0.borrow();
+                let mut iter = args.iter();
+                let mut call = format!(
+                    "{}(",
+                    iter.next().cloned().unwrap().unwrap().cast_to::<Chars>().unwrap()
+                );
+                let mut first = true;
+                loop {
+                    match iter.next() {
+                        None | Some(None) => {
+                            call.push(')');
+                            break;
+                        }
+                        Some(Some(name)) => {
+                            if !first {
+                                call.push_str(", ");
+                            }
+                            call.push_str(&*name.clone().cast_to::<Chars>().unwrap());
+                            call.push_str(": ");
+                            call.push_str(&format!(
+                                "{}",
+                                iter.next().unwrap().as_ref().unwrap()
+                            ));
+                            first = false;
+                        }
+                    }
+                }
+                Some(Value::from(call))
+            }
         }
     }
 
