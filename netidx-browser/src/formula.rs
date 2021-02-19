@@ -4,7 +4,7 @@ use netidx::{
     path::Path,
     subscriber::{self, Dval, SubId, Typ, UpdatesFlags, Value},
 };
-use netidx_protocols::{rpc::client as rpc, view};
+use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     cmp::{PartialEq, PartialOrd},
@@ -1426,11 +1426,10 @@ impl Uniq {
 
 #[derive(Debug)]
 pub(crate) struct RpcCallInner {
-    proc: RefCell<Option<rpc::Proc>>,
     args: CachedVals,
-    ret: RefCell<Option<Value>>,
     invalid: Cell<bool>,
     ctx: WidgetCtx,
+    debug: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1447,18 +1446,99 @@ impl Deref for RpcCall {
 impl RpcCall {
     fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
         let t = RpcCall(Rc::new(RpcCallInner {
-            proc: RefCell::new(None),
             args: CachedVals::new(from),
-            ret: RefCell::new(None),
             invalid: Cell::new(false),
             ctx: ctx.clone(),
+            debug,
         }));
-        if from.len() == 0 || from.len().is_power_of_two() {
-            t.invalid.set(true);
-        } else if t.args.0.borrow().iter().all(|v| v.is_some()) {
-            let args = &*t.args.0.borrow();
-        }
+        t.maybe_call();
         t
+    }
+
+    fn maybe_call(&self) {
+        let len = self.args.0.borrow().len();
+        if len == 0 || len.is_power_of_two() {
+            self.invalid.set(true);
+        } else if self.args.0.borrow().iter().all(|v| v.is_some()) {
+            match &self.args.0.borrow()[..] {
+                [] => self.invalid.set(true),
+                [path, args @ ..] => {
+                    match path.as_ref().unwrap().clone().cast_to::<Chars>() {
+                        Err(_) => self.invalid.set(true),
+                        Ok(name) => {
+                            let args = {
+                                let mut iter = args.into_iter();
+                                let mut args = Vec::new();
+                                loop {
+                                    match iter.next() {
+                                        None | Some(None) => break,
+                                        Some(Some(name)) => {
+                                            match name.clone().cast_to::<Chars>() {
+                                                Err(_) => {
+                                                    self.invalid.set(true);
+                                                    return;
+                                                }
+                                                Ok(name) => match iter.next() {
+                                                    None | Some(None) => {
+                                                        self.invalid.set(true);
+                                                        return;
+                                                    }
+                                                    Some(Some(val)) => {
+                                                        args.push((name, val.clone()));
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                                args
+                            };
+                            self.ctx.backend.call_rpc(Path::from(name), args);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn eval(&self) -> Option<Value> {
+        if !self.invalid.get() {
+            None
+        } else {
+            Some(Value::Error(Chars::from(
+                "call(rpc, kwargs): expected at least 1 argument",
+            )))
+        }
+    }
+
+    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+        if self.args.update(from, tgt, value) {
+            self.maybe_call();
+            self.eval()
+        } else {
+            match tgt {
+                Target::Netidx(_) | Target::Variable(_) | Target::Event => None,
+                Target::Rpc(name) => {
+                    let args = self.args.0.borrow();
+                    if args.len() == 0 {
+                        self.invalid.set(true);
+                        self.eval()
+                    } else {
+                        match args[0]
+                            .as_ref()
+                            .and_then(|v| v.clone().cast_to::<Chars>().ok())
+                        {
+                            Some(fname) if &*fname == name => Some(value.clone()),
+                            Some(_) => None,
+                            None => {
+                                self.invalid.set(true);
+                                self.eval()
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1527,7 +1607,7 @@ pub(crate) static FORMULAS: [&'static str; 30] = [
     "event",
     "confirm",
     "navigate",
-    "rpccall",
+    "call",
 ];
 
 impl Formula {
@@ -1570,7 +1650,7 @@ impl Formula {
             "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
             "confirm" => Formula::Confirm(Confirm::new(ctx, debug, from)),
             "navigate" => Formula::Navigate(Navigate::new(ctx, debug, from)),
-            "rpccall" => Formula::RpcCall(RpcCall::new(ctx, debug, from)),
+            "call" => Formula::RpcCall(RpcCall::new(ctx, debug, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1606,7 +1686,7 @@ impl Formula {
             Formula::StoreVar(s) => s.eval(),
             Formula::Confirm(s) => s.eval(),
             Formula::Navigate(s) => s.eval(),
-            Formula::RpcCall(s) => unreachable!(),
+            Formula::RpcCall(s) => s.eval(),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }
@@ -1663,7 +1743,7 @@ impl Formula {
             Formula::StoreVar(s) => s.update(from, tgt, value),
             Formula::Confirm(s) => s.update(from, tgt, value),
             Formula::Navigate(s) => s.update(from, tgt, value),
-            Formula::RpcCall(s) => unreachable!(),
+            Formula::RpcCall(s) => s.update(from, tgt, value),
             Formula::Unknown(s) => {
                 Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
             }

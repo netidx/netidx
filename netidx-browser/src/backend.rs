@@ -83,6 +83,11 @@ impl Ctx {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Render(spec));
     }
 
+    pub(crate) fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>) {
+        let _: result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::CallRpc(name, args));
+    }
+
     pub(crate) fn highlight(&self, paths: Vec<WidgetPath>) {
         let _: result::Result<_, _> = self.to_gui.send(ToGui::Highlight(paths));
     }
