@@ -1455,48 +1455,52 @@ impl RpcCall {
         t
     }
 
-    fn maybe_call(&self) {
+    fn get_args(&self) -> Option<(Path, Vec<(Chars, Value)>)> {
         self.invalid.set(false);
         let len = self.args.0.borrow().len();
-        if len == 0 || len.is_power_of_two() {
+        if len == 0 || (len > 1 && len.is_power_of_two()) {
             self.invalid.set(true);
-        } else if self.args.0.borrow().iter().all(|v| v.is_some()) {
+            None
+        } else if self.args.0.borrow().iter().any(|v| v.is_none()) {
+            None
+        } else {
             match &self.args.0.borrow()[..] {
-                [] => self.invalid.set(true),
+                [] => {
+                    self.invalid.set(true);
+                    None
+                }
                 [path, args @ ..] => {
                     match path.as_ref().unwrap().clone().cast_to::<Chars>() {
-                        Err(_) => self.invalid.set(true),
+                        Err(_) => {
+                            self.invalid.set(true);
+                            None
+                        }
                         Ok(name) => {
-                            let args = {
-                                let mut iter = args.into_iter();
-                                let mut args = Vec::new();
-                                loop {
-                                    match iter.next() {
-                                        None | Some(None) => break,
-                                        Some(Some(name)) => {
-                                            match name.clone().cast_to::<Chars>() {
-                                                Err(_) => {
-                                                    self.invalid.set(true);
-                                                    return;
-                                                }
-                                                Ok(name) => match iter.next() {
-                                                    None | Some(None) => {
-                                                        self.invalid.set(true);
-                                                        return;
-                                                    }
-                                                    Some(Some(val)) => {
-                                                        args.push((name, val.clone()));
-                                                    }
-                                                },
+                            let mut iter = args.into_iter();
+                            let mut args = Vec::new();
+                            loop {
+                                match iter.next() {
+                                    None | Some(None) => break,
+                                    Some(Some(name)) => {
+                                        match name.clone().cast_to::<Chars>() {
+                                            Err(_) => {
+                                                self.invalid.set(true);
+                                                return None;
                                             }
+                                            Ok(name) => match iter.next() {
+                                                None | Some(None) => {
+                                                    self.invalid.set(true);
+                                                    return None;
+                                                }
+                                                Some(Some(val)) => {
+                                                    args.push((name, val.clone()));
+                                                }
+                                            },
                                         }
                                     }
                                 }
-                                args
-                            };
-                            if !self.debug {
-                                self.ctx.backend.call_rpc(Path::from(name), args);
                             }
+                            Some((Path::from(name), args))
                         }
                     }
                 }
@@ -1504,45 +1508,36 @@ impl RpcCall {
         }
     }
 
+    fn maybe_call(&self) {
+        if let Some((name, args)) = self.get_args() {
+            if !self.debug {
+                self.ctx.backend.call_rpc(Path::from(name), args);
+            }
+        }
+    }
+
     fn eval(&self) -> Option<Value> {
         if self.invalid.get() {
             Some(Value::Error(Chars::from(
-                "call(rpc, kwargs): expected at least 1 argument, and an even number of kwargs",
+                "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
             )))
         } else {
             if !self.debug {
                 None
-            } else if self.args.0.borrow().iter().any(|v| v.is_none()) {
-                Some(Value::from("One or more args missing, no call made"))
-            } else {
-                let args = self.args.0.borrow();
-                let mut iter = args.iter();
-                let mut call = format!(
-                    "{}(",
-                    iter.next().cloned().unwrap().unwrap().cast_to::<Chars>().unwrap()
-                );
+            } else if let Some((path, args)) = self.get_args() {
+                let mut call = format!("{}(", path);
                 let mut first = true;
-                loop {
-                    match iter.next() {
-                        None | Some(None) => {
-                            call.push(')');
-                            break;
-                        }
-                        Some(Some(name)) => {
-                            if !first {
-                                call.push_str(", ");
-                            }
-                            call.push_str(&*name.clone().cast_to::<Chars>().unwrap());
-                            call.push_str(": ");
-                            call.push_str(&format!(
-                                "{}",
-                                iter.next().unwrap().as_ref().unwrap()
-                            ));
-                            first = false;
-                        }
+                for (name, value) in args {
+                    if !first {
+                        call.push_str(", ");
                     }
+                    first = false;
+                    call.push_str(&format!("{}: {}", name, value));
                 }
+                call.push(')');
                 Some(Value::from(call))
+            } else {
+                Some(Value::from("One or more args missing, no call made"))
             }
         }
     }
