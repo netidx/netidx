@@ -1456,6 +1456,7 @@ impl RpcCall {
     }
 
     fn maybe_call(&self) {
+        self.invalid.set(false);
         let len = self.args.0.borrow().len();
         if len == 0 || len.is_power_of_two() {
             self.invalid.set(true);
