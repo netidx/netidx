@@ -19,6 +19,7 @@ pub(crate) enum Target<'a> {
     Event,
     Variable(&'a str),
     Netidx(SubId),
+    Rpc(&'a str),
 }
 
 #[derive(Debug, Clone)]
@@ -577,7 +578,7 @@ impl Event {
     fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
         self.invalid.set(from.len() > 0);
         match tgt {
-            Target::Variable(_) | Target::Netidx(_) => None,
+            Target::Variable(_) | Target::Netidx(_) | Target::Rpc(_) => None,
             Target::Event => {
                 *self.cur.borrow_mut() = Some(value.clone());
                 self.eval()
@@ -1037,9 +1038,9 @@ impl Load {
                     }
                 } else {
                     self.cur.borrow().as_ref().and_then(|dv| match tgt {
-                        Target::Variable(_) => None,
+                        Target::Variable(_) | Target::Rpc(_) | Target::Event => None,
                         Target::Netidx(id) if dv.id() == id => Some(value.clone()),
-                        Target::Netidx(_) | Target::Event => None,
+                        Target::Netidx(_) => None,
                     })
                 }
             }
@@ -1128,13 +1129,14 @@ impl LoadVar {
                     }
                 } else {
                     match (self.name.borrow().as_ref(), tgt) {
-                        (None, _) => None,
-                        (Some(_), Target::Netidx(_)) => None,
+                        (None, _)
+                        | (Some(_), Target::Netidx(_))
+                        | (Some(_), Target::Event)
+                        | (Some(_), Target::Rpc(_)) => None,
                         (Some(vn), Target::Variable(tn)) if &**vn == tn => {
                             Some(value.clone())
                         }
                         (Some(_), Target::Variable(_)) => None,
-                        (Some(_), Target::Event) => None,
                     }
                 }
             }

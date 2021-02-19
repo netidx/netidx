@@ -25,7 +25,7 @@ use netidx::{
     chars::Chars,
     config::{self, Config},
     path::Path,
-    pool::Pooled,
+    pool::{Pool, Pooled},
     resolver::Auth,
     subscriber::{Event, SubId, Value},
 };
@@ -118,7 +118,7 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
-    //RpcUpdate(Path, Value),
+    UpdateRpc(Path, Value),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -129,7 +129,7 @@ enum FromGui {
     Navigate(ViewLoc),
     Render(protocol_view::View),
     Save(ViewLoc, protocol_view::View, oneshot::Sender<Result<()>>),
-    //CallRpc(Path, Vec<Value>),
+    CallRpc(Path, Vec<(Chars, Value)>),
     Updated,
     Terminate,
 }
@@ -637,6 +637,26 @@ fn save_view(
     }
 }
 
+lazy_static! {
+    static ref WAITS: Pool<Vec<oneshot::Receiver<()>>> = Pool::new(10, 100);
+}
+
+fn update_single(
+    current: &Rc<RefCell<Option<View>>>,
+    editor: &Rc<RefCell<Option<Editor>>>,
+    target: Target,
+    value: &Value,
+) {
+    if let Some(root) = &mut *current.borrow_mut() {
+        let mut waits = Vec::new();
+        root.update(&mut waits, target, &value);
+        assert!(waits.is_empty());
+    }
+    if let Some(editor) = &*editor.borrow() {
+        editor.update(target, &value);
+    }
+}
+
 fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
     group.add_window(&ctx.window);
@@ -702,25 +722,25 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     @strong current,
     @strong current_spec,
     @weak ctx => move |b| {
-    if b.get_active() {
-        if let Some(editor) = editor.borrow_mut().take() {
-            mainbox.remove(editor.root());
-        }
-        let s = current_spec.borrow().clone();
-        let e = Editor::new(WidgetCtx::clone(&*ctx), &variables, s);
-        mainbox.add1(e.root());
-        mainbox.show_all();
-        *editor.borrow_mut() = Some(e);
-    } else {
-        if let Some(editor) = editor.borrow_mut().take() {
-            mainbox.remove(editor.root());
-            if let Some(cur) = &*current.borrow() {
-                let hl = highlight.borrow();
-                cur.widget.set_highlight(hl.iter().copied(), false);
+        if b.get_active() {
+            if let Some(editor) = editor.borrow_mut().take() {
+                mainbox.remove(editor.root());
             }
-            highlight.borrow_mut().clear();
+            let s = current_spec.borrow().clone();
+            let e = Editor::new(WidgetCtx::clone(&*ctx), &variables, s);
+            mainbox.add1(e.root());
+            mainbox.show_all();
+            *editor.borrow_mut() = Some(e);
+        } else {
+            if let Some(editor) = editor.borrow_mut().take() {
+                mainbox.remove(editor.root());
+                if let Some(cur) = &*current.borrow() {
+                    let hl = highlight.borrow();
+                    cur.widget.set_highlight(hl.iter().copied(), false);
+                }
+                highlight.borrow_mut().clear();
+            }
         }
-    }
     }));
     save_button.connect_clicked(clone!(
         @strong save_loc,
@@ -767,17 +787,20 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ctx.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
-        ToGui::NavigateInWindow(loc) => {
-            *ctx.new_window_loc.borrow_mut() = loc;
-            app.activate();
+        ToGui::UpdateVar(name, value) => {
+            update_single(&current, &editor, Target::Variable(&name), &value);
+            Continue(true)
+        }
+        ToGui::UpdateRpc(path, value) => {
+            update_single(&current, &editor, Target::Rpc(path.as_ref()), &value);
             Continue(true)
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
-                let mut waits = Vec::new();
+                let mut waits = WAITS.take();
                 let ed = editor.borrow();
                 for (id, value) in batch.drain(..) {
-                    root.update(&mut waits, Target::Netidx(id), &value);
+                    root.update(&mut *waits, Target::Netidx(id), &value);
                     if let Some(editor) = &*ed {
                         editor.update(Target::Netidx(id), &value)
                     }
@@ -787,13 +810,18 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 } else {
                     let ctx = ctx.clone();
                     glib::MainContext::default().spawn_local(async move {
-                        for r in waits {
+                        for r in waits.drain(..) {
                             let _: result::Result<_, _> = r.await;
                         }
                         ctx.backend.updated();
                     });
                 }
             }
+            Continue(true)
+        }
+        ToGui::NavigateInWindow(loc) => {
+            *ctx.new_window_loc.borrow_mut() = loc;
+            app.activate();
             Continue(true)
         }
         ToGui::View { loc, original, raeified, generated } => {
@@ -840,16 +868,6 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 cur.widget.set_highlight(hl.iter().copied(), false);
                 *hl = path;
                 cur.widget.set_highlight(hl.iter().copied(), true);
-            }
-            Continue(true)
-        }
-        ToGui::UpdateVar(name, value) => {
-            if let Some(root) = &mut *current.borrow_mut() {
-                let mut waits = Vec::new();
-                root.update(&mut waits, Target::Variable(&name), &value);
-            }
-            if let Some(editor) = &*editor.borrow() {
-                editor.update(Target::Variable(&name), &value);
             }
             Continue(true)
         }

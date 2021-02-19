@@ -20,6 +20,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
+    borrow::Borrow,
 };
 use tokio::task;
 
@@ -211,13 +212,14 @@ pub mod client {
             Ok(Proc { call, args })
         }
 
-        pub async fn call(
-            &self,
-            args: impl Iterator<Item = (&str, Value)>,
-        ) -> Result<Value> {
+        pub async fn call<I, K>(&self, args: I) -> Result<Value>
+        where
+            I: IntoIterator<Item = (K, Value)>,
+            K: Borrow<str>,
+        {
             for (name, val) in args {
-                match self.args.get(name) {
-                    None => bail!("no such argument {}", name),
+                match self.args.get(name.borrow()) {
+                    None => bail!("no such argument {}", name.borrow()),
                     Some(dv) => {
                         dv.write(val);
                     }

@@ -30,7 +30,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{runtime::Runtime, task};
+use tokio::{runtime::Runtime, task, time};
 
 lazy_static! {
     static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5, 100000);
@@ -100,7 +100,6 @@ struct CtxInner {
     rx_view: Option<mpsc::Receiver<RawBatch>>,
     dv_view: Option<Dval>,
     rpcs: HashMap<Path, (Instant, rpc::Proc)>,
-    last_rpc_gc: Instant,
     changed: Pooled<Vec<(SubId, Value)>>,
     refreshing: bool,
 }
@@ -124,7 +123,6 @@ impl CtxInner {
             rx_view: None,
             dv_view: None,
             rpcs: HashMap::new(),
-            last_rpc_gc: Instant::now(),
             changed: UPDATES.take(),
             refreshing: false,
         };
@@ -350,6 +348,38 @@ impl CtxInner {
         self.refresh()
     }
 
+    async fn try_call_rpc(
+        &mut self,
+        name: Path,
+        args: Vec<(Chars, Value)>,
+    ) -> Result<Value> {
+        let proc = match self.rpcs.get_mut(&name) {
+            Some((ref mut last, ref mut proc)) => {
+                *last = Instant::now();
+                proc
+            }
+            None => {
+                let p = rpc::Proc::new(&self.subscriber, name.clone()).await?;
+                self.rpcs.insert(name.clone(), (Instant::now(), p));
+                &self.rpcs.get(&name).unwrap().1
+            }
+        };
+        Ok(proc.call(args).await?)
+    }
+
+    async fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>) -> Result<()> {
+        let result = self.try_call_rpc(name.clone(), args).await.unwrap_or_else(|e| {
+            Value::Error(Chars::from(format!("failed to call rpc: {}, {}", name, e)))
+        });
+        Ok(self.to_gui.send(ToGui::UpdateRpc(name, result))?)
+    }
+
+    fn gc_rpcs(&mut self) {
+        static MAX_RPC_AGE: Duration = Duration::from_secs(120);
+        let now = Instant::now();
+        self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
+    }
+
     fn refresh(&mut self) -> Result<()> {
         if !self.refreshing && !self.changed.is_empty() {
             self.refreshing = true;
@@ -368,6 +398,7 @@ impl CtxInner {
                 Some(rx_view) => rx_view.next().await,
             }
         }
+        let mut gc_rpcs = time::interval(Duration::from_secs(60));
         loop {
             select_biased! {
                 m = self.from_gui.next() => match m {
@@ -389,6 +420,8 @@ impl CtxInner {
                         break_err!(self.navigate_path(path).await),
                     Some(FromGui::Navigate(ViewLoc::File(file))) =>
                         break_err!(self.navigate_file(file).await),
+                    Some(FromGui::CallRpc(path, args)) =>
+                        break_err!(self.call_rpc(path, args).await),
                 },
                 b = self.updates.next() => if let Some(batch) = b {
                     break_err!(self.process_updates(batch))
@@ -396,6 +429,7 @@ impl CtxInner {
                 m = read_view(&mut self.rx_view).fuse() => {
                     break_err!(self.load_custom_view(m).await)
                 },
+                _ = gc_rpcs.tick().fuse() => self.gc_rpcs(),
             }
         }
         let _: result::Result<_, _> = self.to_gui.send(ToGui::Terminate);

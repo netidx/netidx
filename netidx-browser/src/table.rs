@@ -635,7 +635,7 @@ impl Table {
         value: &Value,
     ) {
         match tgt {
-            Target::Event | Target::Variable(_) => (),
+            Target::Event | Target::Variable(_) | Target::Rpc(_) => (),
             Target::Netidx(id) => {
                 self.0.update.borrow_mut().insert(id, value.clone());
                 if self.0.update.borrow().len() == 1 {
