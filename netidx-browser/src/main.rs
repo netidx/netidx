@@ -945,26 +945,30 @@ fn main() {
         },
     };
     let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
-    application.connect_activate(move |app| {
-        let app = app.clone();
-        let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
-        let raw_view = Arc::new(AtomicBool::new(false));
-        let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
-        let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(
-            &mut *new_window_loc.borrow_mut(),
-            default_loc.clone(),
-        )));
-        let window = ApplicationWindow::new(&app);
-        let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
-            backend,
-            raw_view,
-            window: window.clone(),
-            new_window_loc: new_window_loc.clone(),
-            view_saved: Cell::new(true),
-        }));
-        run_gui(ctx, app, rx_to_gui);
+    application.connect_activate({
+        let backend = backend.clone();
+        move |app| {
+            let app = app.clone();
+            let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
+            let raw_view = Arc::new(AtomicBool::new(false));
+            let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
+            let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(
+                &mut *new_window_loc.borrow_mut(),
+                default_loc.clone(),
+            )));
+            let window = ApplicationWindow::new(&app);
+            let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
+                backend,
+                raw_view,
+                window: window.clone(),
+                new_window_loc: new_window_loc.clone(),
+                view_saved: Cell::new(true),
+            }));
+            run_gui(ctx, app, rx_to_gui);
+        }
     });
     application.run(&[]);
+    backend.stop();
     drop(application);
     let _: result::Result<_, _> = jh.join();
 }

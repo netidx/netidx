@@ -447,8 +447,10 @@ enum ToBackend {
         raw_view: Arc<AtomicBool>,
         reply: OneShot<Ctx>,
     },
+    Stop,
 }
 
+#[derive(Clone)]
 pub(crate) struct Backend(mpsc::UnboundedSender<ToBackend>);
 
 impl Backend {
@@ -459,15 +461,22 @@ impl Backend {
                 let rt = Runtime::new().expect("failed to create tokio runtime");
                 rt.block_on(async move {
                     let sub = Subscriber::new(cfg, auth).unwrap();
-                    while let Some(ToBackend::CreateCtx { to_gui, raw_view, reply }) =
-                        rx_create_ctx.next().await
-                    {
-                        reply.send(CtxInner::new(sub.clone(), to_gui, raw_view))
+                    while let Some(m) = rx_create_ctx.next().await {
+                        match m {
+                            ToBackend::Stop => break,
+                            ToBackend::CreateCtx { to_gui, raw_view, reply } => {
+                                reply.send(CtxInner::new(sub.clone(), to_gui, raw_view))
+                            }
+                        }
                     }
                 });
             })
         };
         (join_handle, Backend(tx_create_ctx))
+    }
+
+    pub(crate) fn stop(&self) {
+        let _: result::Result<_, _> = self.0.unbounded_send(ToBackend::Stop);
     }
 
     pub(crate) fn create_ctx(
