@@ -905,7 +905,7 @@ mod publish {
                     }
                 })
             }),
-        );
+        ).await?;
         let mut cluster = Cluster::<Uuid>::new(
             &session_publisher,
             subscriber.clone(),
