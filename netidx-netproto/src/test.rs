@@ -119,13 +119,15 @@ mod resolver {
         let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10))
             .prop_map(Pooled::orphan);
         let timestamp = any::<u64>();
-        let permissions = any::<u32>();
-        (krb5_spns(), resolver, addrs, timestamp, permissions).prop_map(
-            |(krb5_spns, resolver, addrs, timestamp, permissions)| Resolved {
+        let flags = any::<u16>();
+        let permissions = any::<u16>();
+        (krb5_spns(), resolver, addrs, timestamp, flags, permissions).prop_map(
+            |(krb5_spns, resolver, addrs, timestamp, flags, permissions)| Resolved {
                 krb5_spns,
                 resolver,
                 addrs,
                 timestamp,
+                flags,
                 permissions,
             },
         )

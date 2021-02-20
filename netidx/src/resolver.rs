@@ -636,7 +636,7 @@ impl ResolverWrite {
     ) -> Result<()> {
         self.send_expect(batch, FromWrite::Published, |(path, flags)| match flags {
             Some(flags) => ToWrite::PublishDefaultWithFlags(path, flags),
-            None => ToWrite::Publish(path)
+            None => ToWrite::PublishDefault(path)
         }).await
     }
 

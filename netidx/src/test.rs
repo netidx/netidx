@@ -6,6 +6,7 @@ mod resolver {
         chars::Chars,
         path::Path,
         protocol::glob::{Glob, GlobSet},
+        publisher::PublishFlags,
         resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
         resolver_server::Server,
     };
@@ -29,7 +30,10 @@ mod resolver {
             let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
             let r = ResolverRead::new(cfg, Auth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
-            w.publish(paths.clone()).await.unwrap();
+            let flags = Some(PublishFlags::USE_EXISTING.bits());
+            w.publish_with_flags(paths.clone().into_iter().map(|p| (p, flags)))
+                .await
+                .unwrap();
             for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
                 assert_eq!(r.addrs.len(), 1);
                 assert_eq!(r.addrs[0].0, paddr);
@@ -279,7 +283,7 @@ mod publisher {
         publisher::{BindCfg, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
-        subscriber::{Event, Subscriber, Value, UpdatesFlags},
+        subscriber::{Event, Subscriber, UpdatesFlags, Value},
     };
     use futures::{channel::mpsc, channel::oneshot, prelude::*};
     use std::{
@@ -431,13 +435,13 @@ mod resolver_store {
             let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
             let addr = addr.parse::<SocketAddr>().unwrap();
             for path in parsed.clone() {
-                store.publish(path.clone(), addr, false);
-                if !store.resolve(&path).contains(&(addr, Bytes::new())) {
+                store.publish(path.clone(), addr, false, None);
+                if !store.resolve(&path).1.contains(&(addr, Bytes::new())) {
                     panic!()
                 }
                 if rand::thread_rng().gen_bool(0.5) {
                     // check that this is idempotent
-                    store.publish(path.clone(), addr, false);
+                    store.publish(path.clone(), addr, false, None);
                 }
             }
         }
@@ -490,7 +494,7 @@ mod resolver_store {
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
         for path in parsed.clone() {
             store.unpublish(path.clone(), addr);
-            if store.resolve(&path).contains(&(addr, Bytes::new())) {
+            if store.resolve(&path).1.contains(&(addr, Bytes::new())) {
                 panic!()
             }
             if rand::thread_rng().gen_bool(0.5) {
@@ -533,7 +537,7 @@ mod resolver_store {
             let addr = addr.parse::<SocketAddr>().unwrap();
             for path in parsed.clone() {
                 store.unpublish(path.clone(), addr);
-                if store.resolve(&path).contains(&(addr, Bytes::new())) {
+                if store.resolve(&path).1.contains(&(addr, Bytes::new())) {
                     panic!()
                 }
             }
