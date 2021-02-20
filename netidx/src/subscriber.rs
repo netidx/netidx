@@ -359,6 +359,38 @@ impl Dval {
         }
     }
 
+    /// Wait until the `Dval` is subscribed and then return. This is
+    /// not a guarantee that the `Dval` will stay subscribed for any
+    /// length of time, just that at the moment this method returns
+    /// the `Dval` is subscribed. If the `Dval` is subscribed when
+    /// this method is called, it will return immediatly without
+    /// allocating any resources.
+    pub async fn wait_subscribed(&self) -> Result<()> {
+        match &self.0.lock().sub {
+            DvState::Subscribed(_) => return Ok(()),
+            DvState::Dead(_) => ()
+        }
+        let (tx, mut rx) = mpsc::channel(2);
+        self.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
+        loop {
+            match rx.next().await {
+                None => bail!("unexpected resub error"),
+                Some(mut batch) => {
+                    let mut subed = false;
+                    for (_, ev) in batch.drain(..) {
+                        match ev {
+                            Event::Unsubscribed => { subed = false; },
+                            Event::Update(_) => { subed = true; }
+                        }
+                    }
+                    if subed {
+                        break Ok(())
+                    }
+                }
+            }
+        }
+    }
+
     /// Write a value back to the publisher, see `Val::write`. If we
     /// aren't currently subscribed the write will be queued and sent
     /// when we are. The return value will be `true` if the write was

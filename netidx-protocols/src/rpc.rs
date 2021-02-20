@@ -225,6 +225,7 @@ pub mod client {
                 match self.args.get(name.borrow()) {
                     None => bail!("no such argument {}", name.borrow()),
                     Some(dv) => {
+                        dv.wait_subscribed().await?;
                         dv.write(val);
                     }
                 }
@@ -271,8 +272,10 @@ mod test {
                     .collect(),
                 Arc::new(|addr, args| {
                     Box::pin(async move {
-                        dbg!(addr);
-                        dbg!(args);
+                        dbg!(&addr);
+                        dbg!(&*args);
+                        assert_eq!(args.len(), 1);
+                        assert_eq!(args["arg1"], Value::from("hello rpc"));
                         Value::U32(42)
                     })
                 }),
