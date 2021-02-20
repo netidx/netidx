@@ -1,5 +1,4 @@
 use anyhow::Result;
-use log::info;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, BoxFuture},
@@ -7,6 +6,7 @@ use futures::{
     select_biased, stream,
 };
 use fxhash::FxBuildHasher;
+use log::info;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -86,7 +86,10 @@ pub mod server {
                                 let handler = self.handler.clone();
                                 let call = self.call.clone();
                                 task::spawn(async move {
-                                    let r: Value = handler(req.addr, args).await;
+                                    let r = match task::spawn(handler(req.addr, args)).await {
+                                        Ok(v) => v,
+                                        Err(e) => Value::Error(Chars::from(format!("{}", e)))
+                                    };
                                     match req.send_result {
                                         None => call.update_subscriber(&req.addr, r),
                                         Some(result) => result.send(r)
@@ -284,11 +287,17 @@ mod test {
             .unwrap();
             let proc: client::Proc =
                 client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
-            let res = proc
-                .call(vec![("arg1", Value::from("hello rpc"))].into_iter())
-                .await
-                .unwrap();
-            assert_eq!(res, Value::U32(42))
+            let args = vec![("arg1", Value::from("hello rpc"))];
+            let res = proc.call(args.into_iter()).await.unwrap();
+            assert_eq!(res, Value::U32(42));
+            let args: Vec<(Arc<str>, Value)> = vec![];
+            let res = proc.call(args.into_iter()).await.unwrap();
+            assert!(match res {
+                Value::Error(_) => true,
+                _ => false,
+            });
+            let args = vec![("arg2", Value::from("hello rpc"))];
+            assert!(proc.call(args.into_iter()).await.is_err());
         })
     }
 }
