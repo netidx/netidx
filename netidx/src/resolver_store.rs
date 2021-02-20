@@ -434,7 +434,7 @@ impl Store {
                         &[
                             &secret.to_be_bytes(),
                             &now.to_be_bytes(),
-                            &perm.bits().to_be_bytes(),
+                            &(perm.bits() as u32).to_be_bytes(),
                             path.as_bytes(),
                         ],
                     ),
