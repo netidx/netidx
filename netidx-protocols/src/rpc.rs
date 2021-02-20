@@ -51,6 +51,7 @@ pub mod server {
     }
 
     struct ProcInner {
+        publisher: Publisher,
         call: Val,
         _doc: Val,
         args: HashMap<Id, Arg, FxBuildHasher>,
@@ -85,6 +86,7 @@ pub mod server {
                                     .unwrap_or_else(|| ARGS.take());
                                 let handler = self.handler.clone();
                                 let call = self.call.clone();
+                                let publisher = self.publisher.clone();
                                 task::spawn(async move {
                                     let r = match task::spawn(handler(req.addr, args)).await {
                                         Ok(v) => v,
@@ -94,6 +96,7 @@ pub mod server {
                                         None => call.update_subscriber(&req.addr, r),
                                         Some(result) => result.send(r)
                                     }
+                                    publisher.flush(None).await
                                 });
                             } else {
                                 let mut gc = false;
@@ -169,6 +172,7 @@ pub mod server {
                 })
                 .collect::<Result<HashMap<Id, Arg, FxBuildHasher>>>()?;
             let inner = ProcInner {
+                publisher: publisher.clone(),
                 call,
                 _doc,
                 args,
