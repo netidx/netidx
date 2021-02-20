@@ -17,6 +17,7 @@ use netidx::{
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
 };
 
@@ -471,10 +472,7 @@ struct ValidTypIter<'a, I> {
 
 impl<'a, I: Iterator<Item = &'a Value>> ValidTypIter<'a, I> {
     fn new(i: I) -> Self {
-        ValidTypIter {
-            last_valid: None,
-            inner: i
-        }
+        ValidTypIter { last_valid: None, inner: i }
     }
 }
 
@@ -488,9 +486,9 @@ impl<'a, I: Iterator<Item = &'a Value>> Iterator for ValidTypIter<'a, I> {
                 Some(v) => {
                     if valid_typ(v) {
                         self.last_valid = Some(v);
-                        break Some(v)
+                        break Some(v);
                     } else if let Some(v) = self.last_valid {
-                        break Some(v)
+                        break Some(v);
                     }
                 }
             }
@@ -559,7 +557,11 @@ impl LinePlot {
             @strong y_max,
             @strong keep_points,
             @strong series => move |_, context| {
-            let res = LinePlot::draw(
+                // CR estokes: there is a bug in plotters that causes
+                // it to somtimes panic in draw it probably isn't
+                // strictly unwind safe, but whatever happens it's a
+                // lot better than crashing the entire browser.
+            let res = catch_unwind(AssertUnwindSafe(|| LinePlot::draw(
                 &spec,
                 &allocated_width,
                 &allocated_height,
@@ -569,10 +571,11 @@ impl LinePlot {
                 &y_max,
                 &series,
                 context
-            );
+            )));
             match res {
-                Ok(()) => (),
-                Err(e) => warn!("failed to draw lineplot {}", e),
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => warn!("failed to draw lineplot {}", e),
+                Err(_) => warn!("failed to draw lineplot, draw paniced"),
             }
             gtk::Inhibit(true)
         }));
