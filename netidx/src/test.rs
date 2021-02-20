@@ -1,5 +1,9 @@
 use crate::config;
 
+pub fn load_test_cfg<P: AsRef<FsPath>>(file: P) -> anyhow::Result<Config> {
+    config::Config::load(file)
+}
+
 mod resolver {
     use super::*;
     use crate::{

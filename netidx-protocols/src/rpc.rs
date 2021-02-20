@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::info;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, BoxFuture},
@@ -15,12 +16,12 @@ use netidx::{
     subscriber::{Dval, Subscriber},
 };
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     iter,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
-    borrow::Borrow,
 };
 use tokio::task;
 
@@ -174,7 +175,10 @@ pub mod server {
                 stop: rx_stop.fuse(),
                 last_gc: Instant::now(),
             };
-            task::spawn(async move { inner.run() });
+            task::spawn(async move {
+                inner.run().await;
+                info!("rpc proc {} shutdown", name);
+            });
             publisher.flush(None).await;
             Ok(Proc(tx_stop))
         }
@@ -231,5 +235,57 @@ pub mod client {
                 .await
                 .map_err(|_| anyhow!("call cancelled before a reply was received"))?)
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use netidx::{config, resolver::Auth, resolver_server::Server};
+    use tokio::runtime::Runtime;
+
+    #[test]
+    fn call_proc() {
+        Runtime::new().unwrap().block_on(async move {
+            let mut cfg =
+                config::Config::load("../cfg/simple.json").expect("load simple config");
+            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
+                .await
+                .expect("start resolver server");
+            cfg.addrs[0] = *server.local_addr();
+            let publisher = Publisher::new(
+                cfg.clone(),
+                Auth::Anonymous,
+                "127.0.0.1/32".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
+            let proc_name = Path::from("/rpc/procedure");
+            let _server_proc: server::Proc = server::Proc::new(
+                &publisher,
+                proc_name.clone(),
+                Value::from("test rpc procedure"),
+                vec![(Arc::from("arg1"), (Value::Null, Value::from("arg1 doc")))]
+                    .into_iter()
+                    .collect(),
+                Arc::new(|addr, args| {
+                    Box::pin(async move {
+                        dbg!(addr);
+                        dbg!(args);
+                        Value::U32(42)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+            let proc: client::Proc =
+                client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
+            let res = proc
+                .call(vec![("arg1", Value::from("hello rpc"))].into_iter())
+                .await
+                .unwrap();
+            assert_eq!(res, Value::U32(42))
+        })
     }
 }

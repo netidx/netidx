@@ -200,9 +200,6 @@ impl Config {
         }
         for addr in &cfg.addrs {
             utils::check_addr(addr.ip(), &[])?;
-            if cfg!(not(test)) && addr.port() == 0 {
-                bail!("You must specify a non zero port {:?}", addr);
-            }
         }
         let addrs = cfg.addrs;
         let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
