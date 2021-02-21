@@ -104,7 +104,7 @@ struct CtxInner {
     view_path: Option<Path>,
     rx_view: Option<mpsc::Receiver<RawBatch>>,
     dv_view: Option<Dval>,
-    rpcs: HashMap<Path, (Instant, rpc::Proc)>,
+    rpcs: HashMap<Path, (Instant, mpsc::UnboundedSender<Vec<(Chars, Value)>>)>,
     changed: Pooled<Vec<(SubId, Value)>>,
     refreshing: bool,
 }
@@ -353,30 +353,67 @@ impl CtxInner {
         self.refresh()
     }
 
-    async fn try_call_rpc(
+    fn get_rpc_proc(
         &mut self,
-        name: Path,
-        args: Vec<(Chars, Value)>,
-    ) -> Result<Value> {
-        let proc = match self.rpcs.get_mut(&name) {
-            Some((ref mut last, ref mut proc)) => {
+        name: &Path,
+    ) -> mpsc::UnboundedSender<Vec<(Chars, Value)>> {
+        async fn rpc_task(
+            to_gui: glib::Sender<ToGui>,
+            subscriber: Subscriber,
+            name: Path,
+            mut rx: mpsc::UnboundedReceiver<Vec<(Chars, Value)>>,
+        ) -> Result<()> {
+            let proc = rpc::Proc::new(&subscriber, name.clone()).await?;
+            while let Some(args) = rx.next().await {
+                let res = proc.call(args).await?;
+                to_gui.send(ToGui::UpdateRpc(name.clone(), res))?
+            }
+            Ok(())
+        }
+        match self.rpcs.get_mut(name) {
+            Some((ref mut last, ref proc)) => {
                 *last = Instant::now();
-                proc
+                proc.clone()
             }
             None => {
-                let p = rpc::Proc::new(&self.subscriber, name.clone()).await?;
-                self.rpcs.insert(name.clone(), (Instant::now(), p));
-                &self.rpcs.get(&name).unwrap().1
+                let (tx, rx) = mpsc::unbounded();
+                task::spawn({
+                    let to_gui = self.to_gui.clone();
+                    let sub = self.subscriber.clone();
+                    let name = name.clone();
+                    async move {
+                        match rpc_task(to_gui.clone(), sub, name.clone(), rx).await {
+                            Ok(()) => (),
+                            Err(e) => {
+                                let e = Value::Error(Chars::from(format!(
+                                    "rpc task died {}",
+                                    e
+                                )));
+                                let _ = to_gui.send(ToGui::UpdateRpc(name, e));
+                            }
+                        }
+                    }
+                });
+                self.rpcs.insert(name.clone(), (Instant::now(), tx.clone()));
+                tx
             }
-        };
-        Ok(proc.call(args).await?)
+        }
     }
 
-    async fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>) -> Result<()> {
-        let result = self.try_call_rpc(name.clone(), args).await.unwrap_or_else(|e| {
-            Value::Error(Chars::from(format!("failed to call rpc: {}, {}", name, e)))
-        });
-        Ok(self.to_gui.send(ToGui::UpdateRpc(name, result))?)
+    fn call_rpc(&mut self, name: Path, mut args: Vec<(Chars, Value)>) -> Result<()> {
+        for _ in 1..3 {
+            let proc = self.get_rpc_proc(&name);
+            match proc.unbounded_send(mem::replace(&mut args, vec![])) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    self.rpcs.remove(&name);
+                    args = e.into_inner();
+                }
+            }
+        }
+        let e = Value::Error(Chars::from("failed to call rpc"));
+        self.to_gui.send(ToGui::UpdateRpc(name, e))?;
+        Ok(())
     }
 
     fn gc_rpcs(&mut self) {
@@ -426,7 +463,7 @@ impl CtxInner {
                     Some(FromGui::Navigate(ViewLoc::File(file))) =>
                         break_err!(self.navigate_file(file).await),
                     Some(FromGui::CallRpc(path, args)) =>
-                        break_err!(self.call_rpc(path, args).await),
+                        break_err!(self.call_rpc(path, args)),
                 },
                 b = self.updates.next() => if let Some(batch) = b {
                     break_err!(self.process_updates(batch))
