@@ -17,6 +17,7 @@ use anyhow::Result;
 use editor::Editor;
 use formula::Target;
 use futures::channel::oneshot;
+use fxhash::FxBuildHasher;
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
@@ -29,10 +30,10 @@ use netidx::{
     resolver::Auth,
     subscriber::{Event, SubId, Value},
 };
-use netidx_protocols::view as protocol_view;
+use netidx_protocols::view::{self as protocol_view, ExprId};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt, mem,
     ops::Deref,
     path::PathBuf,
@@ -134,16 +135,75 @@ enum FromGui {
     Terminate,
 }
 
-#[derive(Debug)]
+struct DbgCtx {
+    events: VecDeque<(ExprId, Value)>,
+    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Value)>>, FxBuildHasher>,
+    current: HashMap<ExprId, Value, FxBuildHasher>,
+}
+
+impl DbgCtx {
+    fn new() -> Self {
+        DbgCtx {
+            events: VecDeque::new(),
+            watch: HashMap::with_hasher(FxBuildHasher::default()),
+            current: HashMap::with_hasher(FxBuildHasher::default()),
+        }
+    }
+
+    fn add_watch(&mut self, id: ExprId, watch: &Rc<dyn Fn(&Value)>) {
+        let watches = self.watch.entry(id).or_insert(vec![]);
+        if let Some(v) = self.current.get(&id) {
+            watch(v);
+        }
+        watches.push(Rc::downgrade(watch));
+    }
+
+    fn add_event(&mut self, id: ExprId, value: Value) {
+        const MAX: usize = 1000;
+        self.events.push_back((id, value.clone()));
+        self.current.insert(id, value.clone());
+        if self.events.len() > MAX {
+            self.events.pop_front();
+            if self.watch.len() > MAX {
+                self.watch.retain(|_, vs| {
+                    vs.retain(|v| Weak::upgrade(v).is_some());
+                    !vs.is_empty()
+                });
+            }
+        }
+        if let Some(watch) = self.watch.get_mut(&id) {
+            let mut i = 0;
+            while i < watch.len() {
+                match Weak::upgrade(&watch[i]) {
+                    None => {
+                        watch.remove(i);
+                    }
+                    Some(f) => {
+                        f(&value);
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.events.clear();
+        self.current.clear();
+        self.watch.clear();
+    }
+}
+
 struct WidgetCtxInner {
     backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
+    dbg_ctx: RefCell<DbgCtx>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WidgetCtx(Rc<WidgetCtxInner>);
 
 impl glib::clone::Downgrade for WidgetCtx {
@@ -276,7 +336,7 @@ impl Widget {
                 }
                 view::WidgetKind::GridRow(_) => {
                     let s = Value::String(Chars::from("orphaned grid row"));
-                    let spec = view::Expr::Constant(s);
+                    let spec = view::ExprKind::Constant(s).to_expr();
                     Widget::Label(widgets::Label::new(
                         ctx.clone(),
                         variables,
@@ -643,7 +703,6 @@ lazy_static! {
 
 fn update_single(
     current: &Rc<RefCell<Option<View>>>,
-    editor: &Rc<RefCell<Option<Editor>>>,
     target: Target,
     value: &Value,
 ) {
@@ -651,9 +710,6 @@ fn update_single(
         let mut waits = Vec::new();
         root.update(&mut waits, target, &value);
         assert!(waits.is_empty());
-    }
-    if let Some(editor) = &*editor.borrow() {
-        editor.update(target, &value);
     }
 }
 
@@ -788,22 +844,18 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::UpdateVar(name, value) => {
-            update_single(&current, &editor, Target::Variable(&name), &value);
+            update_single(&current, Target::Variable(&name), &value);
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
-            update_single(&current, &editor, Target::Rpc(path.as_ref()), &value);
+            update_single(&current, Target::Rpc(path.as_ref()), &value);
             Continue(true)
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = WAITS.take();
-                let ed = editor.borrow();
                 for (id, value) in batch.drain(..) {
                     root.update(&mut *waits, Target::Netidx(id), &value);
-                    if let Some(editor) = &*ed {
-                        editor.update(Target::Netidx(id), &value)
-                    }
                 }
                 if waits.len() == 0 {
                     ctx.backend.updated()
@@ -852,6 +904,7 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             }
             variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
+            ctx.dbg_ctx.borrow_mut().clear();
             let cur =
                 View::new((*ctx).clone(), &variables, &*current_loc.borrow(), raeified);
             ctx.window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
@@ -963,6 +1016,7 @@ fn main() {
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
+                dbg_ctx: RefCell::new(DbgCtx::new()),
             }));
             run_gui(ctx, app, rx_to_gui);
         }

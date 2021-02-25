@@ -1,4 +1,4 @@
-use super::super::{util::err_modal, Target, Vars, WidgetCtx};
+use super::super::{util::err_modal, Vars, WidgetCtx};
 use super::{
     expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
@@ -394,12 +394,6 @@ impl Action {
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.expr.borrow() {
-            si.update(tgt, value);
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -441,12 +435,6 @@ impl Label {
 
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.expr.borrow() {
-            si.update(tgt, value);
-        }
     }
 }
 
@@ -511,18 +499,6 @@ impl Button {
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.label_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.on_click_expr.borrow() {
-            si.update(tgt, value);
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -585,18 +561,6 @@ impl Toggle {
 
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.value_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.on_change_expr.borrow() {
-            si.update(tgt, value);
-        }
     }
 }
 
@@ -672,21 +636,6 @@ impl Selector {
 
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.choices_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.selected_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.on_change_expr.borrow() {
-            si.update(tgt, value);
-        }
     }
 }
 
@@ -782,24 +731,6 @@ impl Entry {
 
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, si)) = &*self.enabled_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.visible_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.text_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.on_change_expr.borrow() {
-            si.update(tgt, value);
-        }
-        if let Some((_, si)) = &*self.on_activate_expr.borrow() {
-            si.update(tgt, value);
-        }
     }
 }
 
@@ -1146,15 +1077,20 @@ impl LinePlot {
             build_series(view::Series {
                 title: String::from("Series"),
                 line_color: view::RGB { r: 0., g: 0., b: 0. },
-                x: view::Expr::Apply {
-
-                    args: vec![view::Expr::Constant(Value::from("/somewhere/in/netidx/x"))],
+                x: view::ExprKind::Apply {
+                    args: vec![
+                        view::ExprKind::Constant(Value::from("/somewhere/in/netidx/x"))
+                            .to_expr()
+                    ],
                     function: "load".into()
-                },
-                y: view::Expr::Apply {
-                    args: vec![view::Expr::Constant(Value::from("/somewhere/in/netidx/y"))],
+                }.to_expr(),
+                y: view::ExprKind::Apply {
+                    args: vec![
+                        view::ExprKind::Constant(Value::from("/somewhere/in/netidx/y"))
+                            .to_expr()
+                    ],
                     function: "load".into()
-                },
+                }.to_expr(),
             })
         }));
         for s in spec.borrow().series.iter() {
@@ -1169,32 +1105,6 @@ impl LinePlot {
 
     pub(super) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some((_, s)) = &*self.x_min.borrow() {
-            s.update(tgt, value);
-        }
-        if let Some((_, s)) = &*self.x_max.borrow() {
-            s.update(tgt, value);
-        }
-        if let Some((_, s)) = &*self.y_min.borrow() {
-            s.update(tgt, value);
-        }
-        if let Some((_, s)) = &*self.y_max.borrow() {
-            s.update(tgt, value);
-        }
-        if let Some((_, s)) = &*self.keep_points.borrow() {
-            s.update(tgt, value);
-        }
-        for s in self.series.borrow().values() {
-            if let Some((_, s)) = &*s.x.borrow() {
-                s.update(tgt, value);
-            }
-            if let Some((_, s)) = &*s.y.borrow() {
-                s.update(tgt, value);
-            }
-        }
     }
 }
 

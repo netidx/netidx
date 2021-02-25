@@ -2,31 +2,40 @@ use crate::parser;
 use base64;
 use netidx::{path::Path, publisher::Value, utils};
 use regex::Regex;
-use std::{boxed, collections::HashMap, fmt, result, str::FromStr};
+use serde::{
+    de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
+use std::{
+    boxed,
+    cmp::{Ordering, PartialEq, PartialOrd},
+    collections::HashMap,
+    fmt, result,
+    str::FromStr,
+};
 
 lazy_static! {
     pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]+$").unwrap();
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq)]
-pub enum Expr {
+atomic_id!(ExprId);
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub enum ExprKind {
     Constant(Value),
     Apply { args: Vec<Expr>, function: String },
 }
 
-impl Expr {
-    fn is_fn(&self) -> bool {
-        match self {
-            Expr::Constant(Value::String(c)) => VNAME.is_match(&*c),
-            Expr::Constant(_) | Expr::Apply { .. } => false,
-        }
+impl ExprKind {
+    pub fn to_expr(self) -> Expr {
+        Expr { id: ExprId::new(), kind: self }
     }
 }
 
-impl fmt::Display for Expr {
+impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Expr::Constant(v) => match v {
+            ExprKind::Constant(v) => match v {
                 Value::U32(v) => write!(f, "u32:{}", v),
                 Value::V32(v) => write!(f, "v32:{}", v),
                 Value::I32(v) => write!(f, "i32:{}", v),
@@ -74,13 +83,13 @@ impl fmt::Display for Expr {
                     )
                 }
             },
-            Expr::Apply { args, function } => {
+            ExprKind::Apply { args, function } => {
                 if function == "string_concat" && args.len() > 0 {
                     // interpolation
                     write!(f, "\"")?;
                     for s in args {
-                        match s {
-                            Expr::Constant(Value::String(s)) if s.len() > 0 => {
+                        match &s.kind {
+                            ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
                                 write!(
                                     f,
                                     "{}",
@@ -95,8 +104,8 @@ impl fmt::Display for Expr {
                     write!(f, "\"")
                 } else if function == "load_var" && args.len() == 1 && args[0].is_fn() {
                     // constant variable load
-                    match &args[0] {
-                        Expr::Constant(Value::String(c)) => write!(f, "{}", c),
+                    match &args[0].kind {
+                        ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
                 } else {
@@ -112,6 +121,89 @@ impl fmt::Display for Expr {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub id: ExprId,
+    pub kind: ExprKind,
+}
+
+impl PartialOrd for Expr {
+    fn partial_cmp(&self, rhs: &Expr) -> Option<Ordering> {
+        self.kind.partial_cmp(&rhs.kind)
+    }
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, rhs: &Expr) -> bool {
+        self.kind.eq(&rhs.kind)
+    }
+}
+
+impl Serialize for Expr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExprVisitor;
+
+impl<'de> Visitor<'de> for ExprVisitor {
+    type Value = Expr;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "expected expression")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Expr::from_str(s).map_err(de::Error::custom)
+    }
+
+    fn visit_borrowed_str<E>(self, s: &'de str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Expr::from_str(s).map_err(de::Error::custom)
+    }
+
+    fn visit_string<E>(self, s: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Expr::from_str(&s).map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for Expr {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        de.deserialize_str(ExprVisitor)
+    }
+}
+
+impl Expr {
+    fn is_fn(&self) -> bool {
+        match &self.kind {
+            ExprKind::Constant(Value::String(c)) => VNAME.is_match(&*c),
+            ExprKind::Constant(_) | ExprKind::Apply { .. } => false,
+        }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.kind)
     }
 }
 
@@ -416,10 +508,11 @@ mod tests {
     }
 
     fn expr() -> impl Strategy<Value = Expr> {
-        let leaf = value().prop_map(Expr::Constant);
+        let leaf = value().prop_map(|v| ExprKind::Constant(v).to_expr());
         leaf.prop_recursive(100, 1000000, 10, |inner| {
-            prop_oneof![(collection::vec(inner, (0, 10)), fname())
-                .prop_map(|(s, f)| { Expr::Apply { function: f, args: s } })]
+            prop_oneof![(collection::vec(inner, (0, 10)), fname()).prop_map(|(s, f)| {
+                ExprKind::Apply { function: f, args: s }.to_expr()
+            })]
         })
     }
 
@@ -427,11 +520,11 @@ mod tests {
         let mut v: Vec<Expr> = Vec::new();
         for s in args {
             let s = s.clone();
-            match s {
-                Expr::Constant(Value::String(ref c1)) => match v.last_mut() {
+            match s.kind {
+                ExprKind::Constant(Value::String(ref c1)) => match v.last_mut() {
                     None => v.push(s),
-                    Some(e0) => match e0 {
-                        Expr::Constant(Value::String(c0))
+                    Some(e0) => match &mut e0.kind {
+                        ExprKind::Constant(Value::String(c0))
                             if c1.len() > 0 && c0.len() > 0 =>
                         {
                             let mut st = String::new();
@@ -449,8 +542,8 @@ mod tests {
     }
 
     fn check(s0: &Expr, s1: &Expr) -> bool {
-        match (s0, s1) {
-            (Expr::Constant(v0), Expr::Constant(v1)) => match (v0, v1) {
+        match (&s0.kind, &s1.kind) {
+            (ExprKind::Constant(v0), ExprKind::Constant(v1)) => match (v0, v1) {
                 (Value::Duration(d0), Value::Duration(d1)) => {
                     let f0 = d0.as_secs_f64();
                     let f1 = d1.as_secs_f64();
@@ -461,22 +554,22 @@ mod tests {
                 (v0, v1) => dbg!(dbg!(v0) == dbg!(v1)),
             },
             (
-                Expr::Apply { args: srs0, function: fn0 },
-                Expr::Constant(Value::String(c1)),
+                ExprKind::Apply { args: srs0, function: fn0 },
+                ExprKind::Constant(Value::String(c1)),
             ) if fn0 == "string_concat" => match &acc_strings(srs0)[..] {
-                [Expr::Constant(Value::String(c0))] => c0 == c1,
+                [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => c0 == c1,
                 _ => false,
             },
             (
-                Expr::Apply { args: srs0, function: fn0 },
-                Expr::Apply { args: srs1, function: fn1 },
+                ExprKind::Apply { args: srs0, function: fn0 },
+                ExprKind::Apply { args: srs1, function: fn1 },
             ) if fn0 == fn1 && fn0.as_str() == "string_concat" => {
                 let srs0 = acc_strings(srs0);
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }
             (
-                Expr::Apply { args: srs0, function: f0 },
-                Expr::Apply { args: srs1, function: f1 },
+                ExprKind::Apply { args: srs0, function: f0 },
+                ExprKind::Apply { args: srs1, function: f1 },
             ) if f0 == f1 && srs0.len() == srs1.len() => {
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }

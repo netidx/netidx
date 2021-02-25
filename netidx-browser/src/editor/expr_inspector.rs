@@ -1,7 +1,4 @@
-use super::super::{
-    formula::{self, Expr, Target},
-    Vars, WidgetCtx,
-};
+use super::super::{formula, Vars, WidgetCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
@@ -17,17 +14,17 @@ use std::{
 
 fn set_dbg_expr(
     ctx: &WidgetCtx,
-    variables: &Vars,
     store: &gtk::TreeStore,
     iter: &gtk::TreeIter,
     spec: view::Expr,
 ) -> view::Expr {
-    let expr = Expr::new(ctx, true, variables.clone(), spec.clone());
-    match expr.current() {
-        None => store.set_value(&iter, 1, &None::<&str>.to_value()),
-        Some(v) => store.set_value(&iter, 1, &format!("{}", v).to_value()),
-    }
-    store.set_value(&iter, 3, &ExprWrap(expr).to_value());
+    let watch: Rc<dyn Fn(&Value)> = {
+        let store = store.clone();
+        let iter = iter.clone();
+        Rc::new(move |v: &Value| store.set_value(&iter, 1, &format!("{}", v).to_value()))
+    };
+    ctx.dbg_ctx.borrow_mut().add_watch(spec.id, &watch);
+    store.set_value(&iter, 3, &ExprWrap(watch).to_value());
     spec
 }
 
@@ -51,35 +48,36 @@ static TYPES: [Typ; 14] = [
 #[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,
-    spec: Rc<RefCell<Value>>,
+    spec: Rc<RefCell<view::Expr>>,
 }
 
 impl Constant {
     fn insert(
         ctx: &WidgetCtx,
-        variables: &Vars,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: Value,
+        spec: view::Expr,
     ) {
         let spec = Rc::new(RefCell::new(spec));
-        let mut root = TwoColGrid::new();
+        let root = TwoColGrid::new();
+        let mut t = Constant { root, spec: spec.clone() };
+        let val = t.get_val();
         let typlbl = gtk::Label::new(Some("Type: "));
         let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
         let errlbl = gtk::Label::new(None);
         errlbl.set_use_markup(true);
-        root.add((typlbl.clone(), typsel.clone()));
-        root.add((vallbl.clone(), valent.clone()));
-        root.attach(&errlbl, 0, 2, 1);
+        t.root.add((typlbl.clone(), typsel.clone()));
+        t.root.add((vallbl.clone(), valent.clone()));
+        t.root.attach(&errlbl, 0, 2, 1);
         for typ in &TYPES {
             let name = typ.name();
             typsel.append(Some(name), name);
         }
-        typsel.set_active_id(Typ::get(&*spec.borrow()).map(|t| t.name()));
-        valent.set_text(&format!("{}", &*spec.borrow()));
+        typsel.set_active_id(Typ::get(&val).map(|t| t.name()));
+        valent.set_text(&format!("{}", &val));
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
@@ -90,7 +88,7 @@ impl Constant {
                 match typ.parse(&*valent.get_text()) {
                     Ok(value) => {
                         errlbl.set_markup("");
-                        *spec.borrow_mut() = value;
+                        *spec.borrow_mut() = view::ExprKind::Constant(value).to_expr();
                         on_change()
                     },
                     Err(e) => {
@@ -103,13 +101,19 @@ impl Constant {
         typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
         store.set_value(iter, 0, &"constant".to_value());
-        let t = Constant { root, spec };
-        set_dbg_expr(ctx, variables, store, iter, t.spec());
+        set_dbg_expr(ctx, store, iter, t.spec());
         store.set_value(iter, 2, &Properties::Constant(t).to_value());
     }
 
+    fn get_val(&self) -> Value {
+        match self.spec.borrow().clone() {
+            view::Expr { kind: view::ExprKind::Constant(v), .. } => v,
+            view::Expr { kind: view::ExprKind::Apply { .. }, .. } => unreachable!(),
+        }
+    }
+
     fn spec(&self) -> view::Expr {
-        view::Expr::Constant(self.spec.borrow().clone())
+        self.spec.borrow().clone()
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -120,43 +124,54 @@ impl Constant {
 #[derive(Clone, Debug)]
 struct Apply {
     root: gtk::Box,
-    spec: Rc<RefCell<String>>,
+    spec: Rc<RefCell<view::Expr>>,
 }
 
 impl Apply {
     fn insert(
         ctx: &WidgetCtx,
-        variables: &Vars,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: String,
-        args: Vec<view::Expr>,
+        spec: view::Expr,
     ) {
+        let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let t = Apply { root, spec: spec.clone() };
+        let fname = t.get_fn();
         let lblfun = gtk::Label::new(Some("Function:"));
         let cbfun = gtk::ComboBoxText::new();
-        root.pack_start(&lblfun, false, false, 0);
-        root.pack_start(&cbfun, true, true, 0);
+        t.root.pack_start(&lblfun, false, false, 0);
+        t.root.pack_start(&cbfun, true, true, 0);
         for name in &formula::FORMULAS {
             cbfun.append(Some(name), name);
         }
-        cbfun.set_active_id(Some(spec.as_str()));
-        let spec = Rc::new(RefCell::new(spec));
+        cbfun.set_active_id(Some(&fname));
         cbfun.connect_changed(clone!(@strong on_change, @strong spec  => move |c| {
             if let Some(id) = c.get_active_id() {
-                *spec.borrow_mut() = String::from(&*id);
+                *spec.borrow_mut() = view::ExprKind::Apply {
+                    function: String::from(id),
+                    args: vec![]
+                }.to_expr();
                 on_change()
             }
         }));
-        store.set_value(iter, 0, &spec.borrow().to_value());
-        let s = view::Expr::Apply { function: spec.borrow().clone(), args };
-        set_dbg_expr(ctx, variables, store, iter, s);
-        store.set_value(iter, 2, &Properties::Apply(Apply { root, spec }).to_value());
+        store.set_value(iter, 0, &fname.to_value());
+        set_dbg_expr(ctx, store, iter, t.spec());
+        store.set_value(iter, 2, &Properties::Apply(t).to_value());
+    }
+
+    fn get_fn(&self) -> String {
+        match &*self.spec.borrow() {
+            view::Expr { kind: view::ExprKind::Constant(_), .. } => unreachable!(),
+            view::Expr { kind: view::ExprKind::Apply { function, .. }, .. } => {
+                function.clone()
+            }
+        }
     }
 
     fn spec(&self) -> view::Expr {
-        view::Expr::Apply { function: self.spec.borrow().clone(), args: vec![] }
+        self.spec.borrow().clone()
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -174,18 +189,17 @@ enum Properties {
 impl Properties {
     fn insert(
         ctx: &WidgetCtx,
-        variables: &Vars,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
         spec: view::Expr,
     ) {
-        match spec {
-            view::Expr::Constant(v) => {
-                Constant::insert(ctx, variables, on_change, store, iter, v)
+        match &spec.kind {
+            view::ExprKind::Constant(_) => {
+                Constant::insert(ctx, on_change, store, iter, spec)
             }
-            view::Expr::Apply { function, args } => {
-                Apply::insert(ctx, variables, on_change, store, iter, function, args)
+            view::ExprKind::Apply { .. } => {
+                Apply::insert(ctx, on_change, store, iter, spec)
             }
         }
     }
@@ -205,18 +219,18 @@ impl Properties {
     }
 }
 
-#[derive(Clone, Debug, GBoxed)]
+#[derive(Clone, GBoxed)]
 #[gboxed(type_name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Expr);
+struct ExprWrap(Rc<dyn Fn(&Value)>);
 
 static KINDS: [&'static str; 2] = ["constant", "function"];
 
 fn default_expr(id: Option<&str>) -> view::Expr {
     match id {
-        Some("constant") | None => view::Expr::Constant(Value::U64(42)),
+        Some("constant") | None => view::ExprKind::Constant(Value::U64(42)).to_expr(),
         Some("function") => {
-            let args = vec![view::Expr::Constant(Value::U64(42))];
-            view::Expr::Apply { function: "any".into(), args }
+            let args = vec![view::ExprKind::Constant(Value::U64(42)).to_expr()];
+            view::ExprKind::Apply { function: "any".into(), args }.to_expr()
         }
         e => unreachable!("{:?}", e),
     }
@@ -224,19 +238,18 @@ fn default_expr(id: Option<&str>) -> view::Expr {
 
 fn build_tree(
     ctx: &WidgetCtx,
-    variables: &Vars,
     on_change: &OnChange,
     store: &gtk::TreeStore,
     parent: Option<&gtk::TreeIter>,
     s: &view::Expr,
 ) {
     let iter = store.insert_before(parent, None);
-    Properties::insert(ctx, variables, on_change.clone(), store, &iter, s.clone());
+    Properties::insert(ctx, on_change.clone(), store, &iter, s.clone());
     match s {
-        view::Expr::Constant(_) => (),
-        view::Expr::Apply { args, function: _ } => {
+        view::Expr { kind: view::ExprKind::Constant(_), .. } => (),
+        view::Expr { kind: view::ExprKind::Apply { args, function: _ }, .. } => {
             for s in args {
-                build_tree(ctx, variables, on_change, store, Some(&iter), s)
+                build_tree(ctx, on_change, store, Some(&iter), s)
             }
         }
     }
@@ -252,24 +265,27 @@ fn build_expr(
     match v.get::<&Properties>() {
         Err(e) => {
             let v = Value::String(Chars::from(format!("tree error: {}", e)));
-            set_dbg_expr(ctx, variables, store, root, view::Expr::Constant(v))
+            let e = view::ExprKind::Constant(v).to_expr();
+            set_dbg_expr(ctx, store, root, e)
         }
         Ok(None) => {
             let v = Value::String(Chars::from("tree error: missing widget"));
-            set_dbg_expr(ctx, variables, store, root, view::Expr::Constant(v))
+            let e = view::ExprKind::Constant(v).to_expr();
+            set_dbg_expr(ctx, store, root, e)
         }
         Ok(Some(p)) => match p.spec() {
-            v @ view::Expr::Constant(_) => set_dbg_expr(ctx, variables, store, root, v),
-            view::Expr::Apply { mut args, function } => {
+            v @ view::Expr { kind: view::ExprKind::Constant(_), .. } => {
+                set_dbg_expr(ctx, store, root, v)
+            }
+            view::Expr { kind: view::ExprKind::Apply { mut args, function }, id } => {
                 args.clear();
                 store.set_value(root, 0, &function.to_value());
                 match store.iter_children(Some(root)) {
                     None => set_dbg_expr(
                         ctx,
-                        variables,
                         store,
                         root,
-                        view::Expr::Apply { args, function },
+                        view::Expr { id, kind: view::ExprKind::Apply { args, function } },
                     ),
                     Some(iter) => {
                         loop {
@@ -280,10 +296,12 @@ fn build_expr(
                         }
                         set_dbg_expr(
                             ctx,
-                            variables,
                             store,
                             root,
-                            view::Expr::Apply { args, function },
+                            view::Expr {
+                                id,
+                                kind: view::ExprKind::Apply { args, function },
+                            },
                         )
                     }
                 }
@@ -402,7 +420,7 @@ impl ExprInspector {
                 }
             }
         });
-        build_tree(&ctx, &variables, &on_change, &store, None, &init);
+        build_tree(&ctx, &on_change, &store, None, &init);
         kind.connect_changed(clone!(
         @strong variables,
         @strong ctx,
@@ -421,7 +439,6 @@ impl ExprInspector {
                     let expr = default_expr(id.as_ref().map(|s| &**s));
                     Properties::insert(
                         &ctx,
-                        &variables,
                         on_change.clone(),
                         &store,
                         &iter,
@@ -487,7 +504,7 @@ impl ExprInspector {
             if let Some(iter) = &*selected.borrow() {
                 let expr = build_expr(&ctx, &variables, &store, iter);
                 let parent = store.iter_parent(iter);
-                build_tree(&ctx, &variables, &on_change, &store, parent.as_ref(), &expr);
+                build_tree(&ctx, &on_change, &store, parent.as_ref(), &expr);
                 on_change()
             }
         }));
@@ -501,7 +518,7 @@ impl ExprInspector {
             @strong selected => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let expr = default_expr(Some("constant"));
-            Properties::insert(&ctx, &variables, on_change.clone(), &store, &iter, expr);
+            Properties::insert(&ctx, on_change.clone(), &store, &iter, expr);
             on_change();
         }));
         new_sib.connect_activate(clone!(@strong add => move |_| add()));
@@ -514,7 +531,7 @@ impl ExprInspector {
             @strong selected => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let expr = default_expr(Some("constant"));
-            Properties::insert(&ctx, &variables, on_change.clone(), &store, &iter, expr);
+            Properties::insert(&ctx, on_change.clone(), &store, &iter, expr);
             on_change();
         }));
         new_child.connect_activate(clone!(@strong addch => move |_| addch()));
@@ -548,21 +565,6 @@ impl ExprInspector {
             on_change();
         }));
         ExprInspector { root, store }
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        self.store.foreach(|store, _, iter| {
-            let v = store.get_value(iter, 3);
-            match v.get::<&ExprWrap>() {
-                Err(_) | Ok(None) => false,
-                Ok(Some(ExprWrap(source))) => {
-                    if let Some(v) = source.update(tgt, value) {
-                        self.store.set_value(iter, 1, &format!("{}", v).to_value());
-                    }
-                    false
-                }
-            }
-        })
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {

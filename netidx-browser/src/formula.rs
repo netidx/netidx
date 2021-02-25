@@ -587,23 +587,21 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct Eval {
     ctx: WidgetCtx,
     cached: CachedVals,
     current: RefCell<Result<Expr, Value>>,
     variables: Vars,
-    debug: bool,
 }
 
 impl Eval {
-    fn new(ctx: &WidgetCtx, debug: bool, variables: &Vars, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, variables: &Vars, from: &[Expr]) -> Self {
         let t = Eval {
             ctx: ctx.clone(),
             cached: CachedVals::new(from),
             current: RefCell::new(Err(Value::Null)),
             variables: variables.clone(),
-            debug,
         };
         t.compile();
         t
@@ -621,9 +619,7 @@ impl Eval {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<view::Expr>() {
-                    Ok(spec) => {
-                        Ok(Expr::new(&self.ctx, self.debug, self.variables.clone(), spec))
-                    }
+                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -682,16 +678,14 @@ fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct StoreInner {
     queued: RefCell<Vec<Value>>,
     ctx: WidgetCtx,
     dv: RefCell<Option<(Path, Dval)>>,
     invalid: Cell<bool>,
-    debug: Option<RefCell<Value>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Store(Rc<StoreInner>);
 
 impl Deref for Store {
@@ -703,15 +697,12 @@ impl Deref for Store {
 }
 
 impl Store {
-    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
-        let debug =
-            if debug { Some(RefCell::new(Value::from("never set"))) } else { None };
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
         let t = Store(Rc::new(StoreInner {
             queued: RefCell::new(Vec::new()),
             ctx: ctx.clone(),
             dv: RefCell::new(None),
             invalid: Cell::new(false),
-            debug,
         }));
         match from {
             [to, val] => t.set(to.current(), val.current()),
@@ -721,22 +712,11 @@ impl Store {
     }
 
     fn queue(&self, v: Value) {
-        match &self.debug {
-            None => self.queued.borrow_mut().push(v),
-            Some(d) => {
-                *d.borrow_mut() = Value::from(format!("queued: {}", v));
-                self.queued.borrow_mut().push(v);
-            }
-        }
+        self.queued.borrow_mut().push(v)
     }
 
     fn write(&self, dv: &Dval, v: Value) {
-        match &self.debug {
-            None => {
-                dv.write(v);
-            }
-            Some(d) => *d.borrow_mut() = Value::from(format!("would write: {}", v)),
-        }
+        dv.write(v);
     }
 
     fn set(&self, to: Option<Value>, val: Option<Value>) {
@@ -769,8 +749,6 @@ impl Store {
             Some(Value::Error(Chars::from(
                 "store(tgt: absolute path, val): expected 2 arguments",
             )))
-        } else if let Some(d) = &self.debug {
-            Some(d.borrow().clone())
         } else {
             None
         }
@@ -817,14 +795,12 @@ impl Store {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct StoreVarInner {
     queued: RefCell<Vec<Value>>,
     ctx: WidgetCtx,
     name: RefCell<Option<Chars>>,
     variables: Vars,
     invalid: Cell<bool>,
-    debug: Option<RefCell<Value>>,
 }
 
 fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
@@ -846,7 +822,7 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct StoreVar(Rc<StoreVarInner>);
 
 impl Deref for StoreVar {
@@ -858,16 +834,13 @@ impl Deref for StoreVar {
 }
 
 impl StoreVar {
-    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr], variables: &Vars) -> Self {
-        let debug =
-            if debug { Some(RefCell::new(Value::from("never set"))) } else { None };
+    fn new(ctx: &WidgetCtx, from: &[Expr], variables: &Vars) -> Self {
         let t = StoreVar(Rc::new(StoreVarInner {
             queued: RefCell::new(Vec::new()),
             ctx: ctx.clone(),
             name: RefCell::new(None),
             variables: variables.clone(),
             invalid: Cell::new(false),
-            debug,
         }));
         match from {
             [name, value] => t.set(name.current(), value.current()),
@@ -877,26 +850,13 @@ impl StoreVar {
     }
 
     fn set_var(&self, name: Chars, v: Value) {
-        match &self.debug {
-            None => {
-                self.variables.borrow_mut().insert(name.clone(), v.clone());
-                let _: Result<_, _> =
-                    self.ctx.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
-            }
-            Some(d) => {
-                *d.borrow_mut() = Value::from(format!("set var: {} to: {}", name, v));
-            }
-        }
+        self.variables.borrow_mut().insert(name.clone(), v.clone());
+        let _: Result<_, _> =
+            self.ctx.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
     }
 
     fn queue_set(&self, v: Value) {
-        match &self.debug {
-            None => self.queued.borrow_mut().push(v),
-            Some(d) => {
-                *d.borrow_mut() = Value::from(format!("queued: {}", v));
-                self.queued.borrow_mut().push(v)
-            }
-        }
+        self.queued.borrow_mut().push(v)
     }
 
     fn set(&self, name: Option<Value>, value: Option<Value>) {
@@ -919,8 +879,6 @@ impl StoreVar {
             Some(Value::Error(Chars::from(
                 "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
             )))
-        } else if let Some(d) = &self.debug {
-            Some(d.borrow().clone())
         } else {
             None
         }
@@ -967,14 +925,13 @@ impl StoreVar {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct LoadInner {
     cur: RefCell<Option<Dval>>,
     ctx: WidgetCtx,
     invalid: Cell<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Load(Rc<LoadInner>);
 
 impl Deref for Load {
@@ -1060,14 +1017,13 @@ impl Load {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct LoadVarInner {
     name: RefCell<Option<Chars>>,
     variables: Vars,
     invalid: Cell<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct LoadVar(Rc<LoadVarInner>);
 
 impl Deref for LoadVar {
@@ -1156,21 +1112,18 @@ impl LoadVar {
     }
 }
 
-#[derive(Debug)]
 enum ConfirmState {
     Empty,
     Invalid,
     Ready { message: Option<Value>, value: Value },
 }
 
-#[derive(Debug)]
 pub(crate) struct ConfirmInner {
     ctx: WidgetCtx,
     state: RefCell<ConfirmState>,
-    debug: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Confirm(Rc<ConfirmInner>);
 
 impl Deref for Confirm {
@@ -1182,11 +1135,10 @@ impl Deref for Confirm {
 }
 
 impl Confirm {
-    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
         let t = Confirm(Rc::new(ConfirmInner {
             ctx: ctx.clone(),
             state: RefCell::new(ConfirmState::Empty),
-            debug,
         }));
         match from {
             [msg, val] => {
@@ -1212,11 +1164,9 @@ impl Confirm {
     }
 
     fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
-        self.debug || {
-            let default = Value::from("proceed with");
-            let msg = msg.unwrap_or(&default);
-            ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
-        }
+        let default = Value::from("proceed with");
+        let msg = msg.unwrap_or(&default);
+        ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
     }
 
     fn eval(&self) -> Option<Value> {
@@ -1259,27 +1209,21 @@ impl Confirm {
     }
 }
 
-#[derive(Debug)]
 enum NavState {
     Normal,
     Invalid,
-    Debug(Value),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Navigate {
     ctx: WidgetCtx,
     state: Rc<RefCell<NavState>>,
-    debug: bool,
 }
 
 impl Navigate {
-    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
-        let t = Navigate {
-            ctx: ctx.clone(),
-            state: Rc::new(RefCell::new(NavState::Normal)),
-            debug,
-        };
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
+        let t =
+            Navigate { ctx: ctx.clone(), state: Rc::new(RefCell::new(NavState::Normal)) };
         match from {
             [new_window, to] => t.navigate(new_window.current(), to.current()),
             [to] => t.navigate(None, to.current()),
@@ -1298,31 +1242,19 @@ impl Navigate {
                     Err(()) => *self.state.borrow_mut() = NavState::Invalid,
                     Ok(loc) => {
                         if new_window {
-                            if self.debug {
-                                *self.state.borrow_mut() = NavState::Debug(Value::from(
-                                    format!("would navigate in window to: {}", loc),
-                                ));
-                            } else {
-                                let _: Result<_, _> = self
-                                    .ctx
-                                    .backend
-                                    .to_gui
-                                    .send(ToGui::NavigateInWindow(loc));
-                            }
+                            let _: Result<_, _> = self
+                                .ctx
+                                .backend
+                                .to_gui
+                                .send(ToGui::NavigateInWindow(loc));
                         } else {
-                            if self.debug {
-                                *self.state.borrow_mut() = NavState::Debug(Value::from(
-                                    format!("would navigate in window to: {}", loc),
-                                ));
-                            } else {
-                                if self.ctx.view_saved.get()
-                                    || ask_modal(
-                                        &self.ctx.window,
-                                        "Unsaved view will be lost.",
-                                    )
-                                {
-                                    self.ctx.backend.navigate(loc);
-                                }
+                            if self.ctx.view_saved.get()
+                                || ask_modal(
+                                    &self.ctx.window,
+                                    "Unsaved view will be lost.",
+                                )
+                            {
+                                self.ctx.backend.navigate(loc);
                             }
                         }
                     }
@@ -1339,7 +1271,6 @@ impl Navigate {
         match &*self.state.borrow() {
             NavState::Normal => None,
             NavState::Invalid => Navigate::usage(),
-            NavState::Debug(v) => Some(v.clone()),
         }
     }
 
@@ -1376,7 +1307,7 @@ impl Navigate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Uniq(Rc<RefCell<Option<Value>>>);
 
 impl Uniq {
@@ -1424,15 +1355,13 @@ impl Uniq {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct RpcCallInner {
     args: CachedVals,
     invalid: Cell<bool>,
     ctx: WidgetCtx,
-    debug: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct RpcCall(Rc<RpcCallInner>);
 
 impl Deref for RpcCall {
@@ -1444,12 +1373,11 @@ impl Deref for RpcCall {
 }
 
 impl RpcCall {
-    fn new(ctx: &WidgetCtx, debug: bool, from: &[Expr]) -> Self {
+    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
         let t = RpcCall(Rc::new(RpcCallInner {
             args: CachedVals::new(from),
             invalid: Cell::new(true),
             ctx: ctx.clone(),
-            debug,
         }));
         t.maybe_call();
         t
@@ -1510,9 +1438,7 @@ impl RpcCall {
 
     fn maybe_call(&self) {
         if let Some((name, args)) = self.get_args() {
-            if !self.debug {
-                self.ctx.backend.call_rpc(Path::from(name), args);
-            }
+            self.ctx.backend.call_rpc(Path::from(name), args);
         }
     }
 
@@ -1522,23 +1448,7 @@ impl RpcCall {
                 "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
             )))
         } else {
-            if !self.debug {
-                None
-            } else if let Some((path, args)) = self.get_args() {
-                let mut call = format!("{}(", path);
-                let mut first = true;
-                for (name, value) in args {
-                    if !first {
-                        call.push_str(", ");
-                    }
-                    first = false;
-                    call.push_str(&format!("{}: {}", name, value));
-                }
-                call.push(')');
-                Some(Value::from(call))
-            } else {
-                Some(Value::from("One or more args missing, no call made"))
-            }
+            None
         }
     }
 
@@ -1573,7 +1483,7 @@ impl RpcCall {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum Formula {
     Any(Rc<RefCell<Option<Value>>>),
     All(All),
@@ -1644,7 +1554,6 @@ pub(crate) static FORMULAS: [&'static str; 30] = [
 impl Formula {
     pub(super) fn new(
         ctx: &WidgetCtx,
-        debug: bool,
         variables: &Vars,
         name: &str,
         from: &[Expr],
@@ -1668,7 +1577,7 @@ impl Formula {
             "filter" => Formula::Filter(CachedVals::new(from)),
             "cast" => Formula::Cast(CachedVals::new(from)),
             "isa" => Formula::IsA(CachedVals::new(from)),
-            "eval" => Formula::Eval(Eval::new(ctx, debug, variables, from)),
+            "eval" => Formula::Eval(Eval::new(ctx, variables, from)),
             "count" => Formula::Count(Count::new(from)),
             "sample" => Formula::Sample(Sample::new(from)),
             "uniq" => Formula::Uniq(Uniq::new(from)),
@@ -1677,11 +1586,11 @@ impl Formula {
             "event" => Formula::Event(Event::new(from)),
             "load" => Formula::Load(Load::new(ctx, from)),
             "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
-            "store" => Formula::Store(Store::new(ctx, debug, from)),
-            "store_var" => Formula::StoreVar(StoreVar::new(ctx, debug, from, variables)),
-            "confirm" => Formula::Confirm(Confirm::new(ctx, debug, from)),
-            "navigate" => Formula::Navigate(Navigate::new(ctx, debug, from)),
-            "call" => Formula::RpcCall(RpcCall::new(ctx, debug, from)),
+            "store" => Formula::Store(Store::new(ctx, from)),
+            "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
+            "confirm" => Formula::Confirm(Confirm::new(ctx, from)),
+            "navigate" => Formula::Navigate(Navigate::new(ctx, from)),
+            "call" => Formula::RpcCall(RpcCall::new(ctx, from)),
             _ => Formula::Unknown(String::from(name)),
         }
     }
@@ -1782,10 +1691,10 @@ impl Formula {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum Expr {
     Constant(view::Expr, Value),
-    Apply { spec: view::Expr, args: Vec<Expr>, function: Box<Formula> },
+    Apply { spec: view::Expr, ctx: WidgetCtx, args: Vec<Expr>, function: Box<Formula> },
 }
 
 impl fmt::Display for Expr {
@@ -1799,22 +1708,22 @@ impl fmt::Display for Expr {
 }
 
 impl Expr {
-    pub(crate) fn new(
-        ctx: &WidgetCtx,
-        debug: bool,
-        variables: Vars,
-        spec: view::Expr,
-    ) -> Self {
+    pub(crate) fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
         match &spec {
-            view::Expr::Constant(v) => Expr::Constant(spec.clone(), v.clone()),
-            view::Expr::Apply { args, function } => {
+            view::Expr { kind: view::ExprKind::Constant(v), .. } => {
+                Expr::Constant(spec.clone(), v.clone())
+            }
+            view::Expr { kind: view::ExprKind::Apply { args, function }, .. } => {
                 let args: Vec<Expr> = args
                     .iter()
-                    .map(|spec| Expr::new(ctx, debug, variables.clone(), spec.clone()))
+                    .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
                     .collect();
                 let function =
-                    Box::new(Formula::new(&*ctx, debug, &variables, function, &*args));
-                Expr::Apply { spec, args, function }
+                    Box::new(Formula::new(&*ctx, &variables, function, &*args));
+                if let Some(v) = function.current() {
+                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
+                }
+                Expr::Apply { spec, ctx: ctx.clone(), args, function }
             }
         }
     }
@@ -1822,14 +1731,20 @@ impl Expr {
     pub(crate) fn current(&self) -> Option<Value> {
         match self {
             Expr::Constant(_, v) => Some(v.clone()),
-            Expr::Apply { spec: _, args: _, function } => function.current(),
+            Expr::Apply { function, .. } => function.current(),
         }
     }
 
     pub(crate) fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
             Expr::Constant(_, _) => None,
-            Expr::Apply { spec: _, args, function } => function.update(args, tgt, value),
+            Expr::Apply { spec, ctx, args, function } => {
+                let res = function.update(args, tgt, value);
+                if let Some(v) = &res {
+                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v.clone());
+                }
+                res
+            }
         }
     }
 }

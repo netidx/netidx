@@ -1,4 +1,4 @@
-use crate::view::Expr;
+use crate::view::{Expr, ExprId, ExprKind};
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -137,7 +137,9 @@ where
     impl Intp {
         fn to_expr(self) -> Expr {
             match self {
-                Intp::Lit(s) => Expr::Constant(Value::from(s)),
+                Intp::Lit(s) => {
+                    Expr { id: ExprId::new(), kind: ExprKind::Constant(Value::from(s)) }
+                }
                 Intp::Expr(s) => s,
             }
         }
@@ -164,21 +166,35 @@ where
                 .fold(None, |src, tok| -> Option<Expr> {
                     match (src, tok) {
                         (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                        (None, Intp::Expr(s)) => Some(Expr::Apply {
-                            args: vec![s],
-                            function: "string_concat".into(),
-                        }),
-                        (Some(src @ Expr::Constant(_)), s) => Some(Expr::Apply {
-                            args: vec![src, s.to_expr()],
-                            function: "string_concat".into(),
-                        }),
-                        (Some(Expr::Apply { mut args, function }), s) => {
+                        (None, Intp::Expr(s)) => Some(
+                            ExprKind::Apply {
+                                args: vec![s],
+                                function: "string_concat".into(),
+                            }
+                            .to_expr(),
+                        ),
+                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
+                            Some(
+                                ExprKind::Apply {
+                                    args: vec![src, s.to_expr()],
+                                    function: "string_concat".into(),
+                                }
+                                .to_expr(),
+                            )
+                        }
+                        (
+                            Some(Expr {
+                                kind: ExprKind::Apply { mut args, function },
+                                ..
+                            }),
+                            s,
+                        ) => {
                             args.push(s.to_expr());
-                            Some(Expr::Apply { args, function })
+                            Some(ExprKind::Apply { args, function }.to_expr())
                         }
                     }
                 })
-                .unwrap_or(Expr::Constant(Value::from("")))
+                .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
         })
 }
 
@@ -207,72 +223,90 @@ where
 {
     spaces().with(choice((
         attempt(interpolated()),
-        attempt(from_str(flt()).map(|v| Expr::Constant(Value::F64(v)))),
-        attempt(from_str(int()).map(|v| Expr::Constant(Value::I64(v)))),
+        attempt(from_str(flt()).map(|v| ExprKind::Constant(Value::F64(v)).to_expr())),
+        attempt(from_str(int()).map(|v| ExprKind::Constant(Value::I64(v)).to_expr())),
         attempt(
             string("true")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Expr::Constant(Value::True)),
+                .map(|_| ExprKind::Constant(Value::True).to_expr()),
         ),
         attempt(
             string("false")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Expr::Constant(Value::False)),
+                .map(|_| ExprKind::Constant(Value::False).to_expr()),
         ),
         attempt(
             string("null")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Expr::Constant(Value::Null)),
+                .map(|_| ExprKind::Constant(Value::Null).to_expr()),
         ),
         attempt(
-            constant("u32").with(from_str(uint())).map(|v| Expr::Constant(Value::U32(v))),
+            constant("u32")
+                .with(from_str(uint()))
+                .map(|v| ExprKind::Constant(Value::U32(v)).to_expr()),
         ),
         attempt(
-            constant("v32").with(from_str(uint())).map(|v| Expr::Constant(Value::V32(v))),
+            constant("v32")
+                .with(from_str(uint()))
+                .map(|v| ExprKind::Constant(Value::V32(v)).to_expr()),
         ),
         attempt(
-            constant("i32").with(from_str(int())).map(|v| Expr::Constant(Value::I32(v))),
+            constant("i32")
+                .with(from_str(int()))
+                .map(|v| ExprKind::Constant(Value::I32(v)).to_expr()),
         ),
         attempt(
-            constant("z32").with(from_str(int())).map(|v| Expr::Constant(Value::Z32(v))),
+            constant("z32")
+                .with(from_str(int()))
+                .map(|v| ExprKind::Constant(Value::Z32(v)).to_expr()),
         ),
         attempt(
-            constant("u64").with(from_str(uint())).map(|v| Expr::Constant(Value::U64(v))),
+            constant("u64")
+                .with(from_str(uint()))
+                .map(|v| ExprKind::Constant(Value::U64(v)).to_expr()),
         ),
         attempt(
-            constant("v64").with(from_str(uint())).map(|v| Expr::Constant(Value::V64(v))),
+            constant("v64")
+                .with(from_str(uint()))
+                .map(|v| ExprKind::Constant(Value::V64(v)).to_expr()),
         ),
         attempt(
-            constant("i64").with(from_str(int())).map(|v| Expr::Constant(Value::I64(v))),
+            constant("i64")
+                .with(from_str(int()))
+                .map(|v| ExprKind::Constant(Value::I64(v)).to_expr()),
         ),
         attempt(
-            constant("z64").with(from_str(int())).map(|v| Expr::Constant(Value::Z64(v))),
+            constant("z64")
+                .with(from_str(int()))
+                .map(|v| ExprKind::Constant(Value::Z64(v)).to_expr()),
         ),
         attempt(
-            constant("f32").with(from_str(flt())).map(|v| Expr::Constant(Value::F32(v))),
+            constant("f32")
+                .with(from_str(flt()))
+                .map(|v| ExprKind::Constant(Value::F32(v)).to_expr()),
         ),
         attempt(
-            constant("f64").with(from_str(flt())).map(|v| Expr::Constant(Value::F64(v))),
+            constant("f64")
+                .with(from_str(flt()))
+                .map(|v| ExprKind::Constant(Value::F64(v)).to_expr()),
         ),
-        attempt(
-            constant("bytes")
-                .with(from_str(base64str()))
-                .map(|Base64Encoded(v)| Expr::Constant(Value::Bytes(Bytes::from(v)))),
-        ),
+        attempt(constant("bytes").with(from_str(base64str())).map(|Base64Encoded(v)| {
+            ExprKind::Constant(Value::Bytes(Bytes::from(v))).to_expr()
+        })),
         attempt(
             string("ok")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Expr::Constant(Value::Ok)),
+                .map(|_| ExprKind::Constant(Value::Ok).to_expr()),
         ),
         attempt(
             constant("error")
                 .with(quoted())
-                .map(|s| Expr::Constant(Value::Error(Chars::from(s)))),
+                .map(|s| ExprKind::Constant(Value::Error(Chars::from(s))).to_expr()),
         ),
         attempt(
             constant("datetime")
                 .with(from_str(quoted()))
-                .map(|d| Expr::Constant(Value::DateTime(d))),
+                .map(|d| ExprKind::Constant(Value::DateTime(d)).to_expr()),
         ),
         attempt(
             constant("duration")
@@ -290,7 +324,7 @@ where
                         "s" => Duration::from_secs_f64(n),
                         _ => unreachable!(),
                     };
-                    Expr::Constant(Value::Duration(d))
+                    ExprKind::Constant(Value::Duration(d)).to_expr()
                 }),
         ),
         attempt(
@@ -302,11 +336,14 @@ where
                     spaces().with(sep_by(expr(), spaces().with(token(',')))),
                 ),
             )
-                .map(|(function, args)| Expr::Apply { function, args }),
+                .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
         ),
-        fname().skip(not_followed_by(none_of(" ),]".chars()))).map(|var| Expr::Apply {
-            function: "load_var".into(),
-            args: vec![Expr::Constant(Value::String(Chars::from(var)))],
+        fname().skip(not_followed_by(none_of(" ),]".chars()))).map(|var| {
+            ExprKind::Apply {
+                function: "load_var".into(),
+                args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],
+            }
+            .to_expr()
         }),
     )))
 }
@@ -332,56 +369,140 @@ mod tests {
 
     #[test]
     fn const_expr_parse() {
-        assert_eq!(Expr::Constant(Value::U32(23)), parse_expr("u32:23").unwrap());
-        assert_eq!(Expr::Constant(Value::V32(42)), parse_expr("v32:42").unwrap());
-        assert_eq!(Expr::Constant(Value::I32(-10)), parse_expr("i32:-10").unwrap());
-        assert_eq!(Expr::Constant(Value::I32(12321)), parse_expr("i32:12321").unwrap());
-        assert_eq!(Expr::Constant(Value::Z32(-99)), parse_expr("z32:-99").unwrap());
-        assert_eq!(Expr::Constant(Value::U64(100)), parse_expr("u64:100").unwrap());
-        assert_eq!(Expr::Constant(Value::V64(100)), parse_expr("v64:100").unwrap());
-        assert_eq!(Expr::Constant(Value::I64(-100)), parse_expr("i64:-100").unwrap());
-        assert_eq!(Expr::Constant(Value::I64(-100)), parse_expr("-100").unwrap());
-        assert_eq!(Expr::Constant(Value::I64(100)), parse_expr("i64:100").unwrap());
-        assert_eq!(Expr::Constant(Value::I64(100)), parse_expr("100").unwrap());
-        assert_eq!(Expr::Constant(Value::Z64(-100)), parse_expr("z64:-100").unwrap());
-        assert_eq!(Expr::Constant(Value::Z64(100)), parse_expr("z64:100").unwrap());
-        assert_eq!(Expr::Constant(Value::F32(3.1415)), parse_expr("f32:3.1415").unwrap());
-        assert_eq!(Expr::Constant(Value::F32(675.6)), parse_expr("f32:675.6").unwrap());
         assert_eq!(
-            Expr::Constant(Value::F32(42.3435)),
+            ExprKind::Constant(Value::U32(23)).to_expr(),
+            parse_expr("u32:23").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::V32(42)).to_expr(),
+            parse_expr("v32:42").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I32(-10)).to_expr(),
+            parse_expr("i32:-10").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I32(12321)).to_expr(),
+            parse_expr("i32:12321").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::Z32(-99)).to_expr(),
+            parse_expr("z32:-99").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::U64(100)).to_expr(),
+            parse_expr("u64:100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::V64(100)).to_expr(),
+            parse_expr("v64:100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I64(-100)).to_expr(),
+            parse_expr("i64:-100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I64(-100)).to_expr(),
+            parse_expr("-100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I64(100)).to_expr(),
+            parse_expr("i64:100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::I64(100)).to_expr(),
+            parse_expr("100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::Z64(-100)).to_expr(),
+            parse_expr("z64:-100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::Z64(100)).to_expr(),
+            parse_expr("z64:100").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F32(3.1415)).to_expr(),
+            parse_expr("f32:3.1415").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F32(675.6)).to_expr(),
+            parse_expr("f32:675.6").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F32(42.3435)).to_expr(),
             parse_expr("f32:42.3435").unwrap()
         );
         assert_eq!(
-            Expr::Constant(Value::F32(1.123e9)),
+            ExprKind::Constant(Value::F32(1.123e9)).to_expr(),
             parse_expr("f32:1.123e9").unwrap()
         );
-        assert_eq!(Expr::Constant(Value::F32(1e9)), parse_expr("f32:1e9").unwrap());
         assert_eq!(
-            Expr::Constant(Value::F32(21.2443e-6)),
+            ExprKind::Constant(Value::F32(1e9)).to_expr(),
+            parse_expr("f32:1e9").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F32(21.2443e-6)).to_expr(),
             parse_expr("f32:21.2443e-6").unwrap()
         );
-        assert_eq!(Expr::Constant(Value::F32(3.)), parse_expr("f32:3.").unwrap());
-        assert_eq!(Expr::Constant(Value::F64(3.1415)), parse_expr("f64:3.1415").unwrap());
-        assert_eq!(Expr::Constant(Value::F64(3.1415)), parse_expr("3.1415").unwrap());
-        assert_eq!(Expr::Constant(Value::F64(1.123e9)), parse_expr("1.123e9").unwrap());
-        assert_eq!(Expr::Constant(Value::F64(1e9)), parse_expr("1e9").unwrap());
         assert_eq!(
-            Expr::Constant(Value::F64(21.2443e-6)),
+            ExprKind::Constant(Value::F32(3.)).to_expr(),
+            parse_expr("f32:3.").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(3.1415)).to_expr(),
+            parse_expr("f64:3.1415").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(3.1415)).to_expr(),
+            parse_expr("3.1415").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(1.123e9)).to_expr(),
+            parse_expr("1.123e9").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(1e9)).to_expr(),
+            parse_expr("1e9").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(21.2443e-6)).to_expr(),
             parse_expr("21.2443e-6").unwrap()
         );
-        assert_eq!(Expr::Constant(Value::F64(3.)), parse_expr("f64:3.").unwrap());
-        assert_eq!(Expr::Constant(Value::F64(3.)), parse_expr("3.").unwrap());
+        assert_eq!(
+            ExprKind::Constant(Value::F64(3.)).to_expr(),
+            parse_expr("f64:3.").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::F64(3.)).to_expr(),
+            parse_expr("3.").unwrap()
+        );
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
         let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
-        assert_eq!(Expr::Constant(Value::String(c)), parse_expr(s).unwrap());
-        let c = Chars::new();
-        assert_eq!(Expr::Constant(Value::String(c)), parse_expr(r#""""#).unwrap());
-        assert_eq!(Expr::Constant(Value::True), parse_expr("true").unwrap());
-        assert_eq!(Expr::Constant(Value::False), parse_expr("false").unwrap());
-        assert_eq!(Expr::Constant(Value::Null), parse_expr("null").unwrap());
-        assert_eq!(Expr::Constant(Value::Ok), parse_expr("ok").unwrap());
         assert_eq!(
-            Expr::Constant(Value::Error(Chars::from("error"))),
+            ExprKind::Constant(Value::String(c)).to_expr(),
+            parse_expr(s).unwrap()
+        );
+        let c = Chars::new();
+        assert_eq!(
+            ExprKind::Constant(Value::String(c)).to_expr(),
+            parse_expr(r#""""#).unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::True).to_expr(),
+            parse_expr("true").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::False).to_expr(),
+            parse_expr("false").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Constant(Value::Null).to_expr(),
+            parse_expr("null").unwrap()
+        );
+        assert_eq!(ExprKind::Constant(Value::Ok).to_expr(), parse_expr("ok").unwrap());
+        assert_eq!(
+            ExprKind::Constant(Value::Error(Chars::from("error"))).to_expr(),
             parse_expr(r#"error:"error""#).unwrap()
         );
     }
@@ -391,60 +512,74 @@ mod tests {
         let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
         let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(
-            Expr::Apply {
+            ExprKind::Apply {
                 function: "load".into(),
-                args: vec![Expr::Constant(Value::String(p))]
-            },
+                args: vec![ExprKind::Constant(Value::String(p)).to_expr()]
+            }
+            .to_expr(),
             parse_expr(s).unwrap()
         );
-        let p = Expr::Apply {
+        let p = ExprKind::Apply {
             function: "load".into(),
-            args: vec![Expr::Apply {
+            args: vec![ExprKind::Apply {
                 args: vec![
-                    Expr::Constant(Value::from("/foo/")),
-                    Expr::Apply {
+                    ExprKind::Constant(Value::from("/foo/")).to_expr(),
+                    ExprKind::Apply {
                         function: "load_var".into(),
-                        args: vec![Expr::Apply {
+                        args: vec![ExprKind::Apply {
                             args: vec![
-                                Expr::Apply {
+                                ExprKind::Apply {
                                     function: "load_var".into(),
-                                    args: vec![Expr::Constant(Value::from("sid"))],
-                                },
-                                Expr::Constant(Value::from("_var")),
+                                    args: vec![
+                                        ExprKind::Constant(Value::from("sid")).to_expr()
+                                    ],
+                                }
+                                .to_expr(),
+                                ExprKind::Constant(Value::from("_var")).to_expr(),
                             ],
                             function: "string_concat".into(),
-                        }],
-                    },
-                    Expr::Constant(Value::from("/baz")),
+                        }
+                        .to_expr()],
+                    }
+                    .to_expr(),
+                    ExprKind::Constant(Value::from("/baz")).to_expr(),
                 ],
                 function: "string_concat".into(),
-            }],
-        };
+            }
+            .to_expr()],
+        }
+        .to_expr();
         let s = r#"load("/foo/[load_var("[sid]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#""[true]""#;
-        let p = Expr::Apply {
-            args: vec![Expr::Constant(Value::True)],
+        let p = ExprKind::Apply {
+            args: vec![ExprKind::Constant(Value::True).to_expr()],
             function: "string_concat".into(),
-        };
+        }
+        .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"a(a(a(load_var("[true]"))))"#;
-        let p = Expr::Apply {
-            args: vec![Expr::Apply {
-                args: vec![Expr::Apply {
-                    args: vec![Expr::Apply {
-                        args: vec![Expr::Apply {
-                            args: vec![Expr::Constant(Value::True)],
+        let p = ExprKind::Apply {
+            args: vec![ExprKind::Apply {
+                args: vec![ExprKind::Apply {
+                    args: vec![ExprKind::Apply {
+                        args: vec![ExprKind::Apply {
+                            args: vec![ExprKind::Constant(Value::True).to_expr()],
                             function: "string_concat".into(),
-                        }],
+                        }
+                        .to_expr()],
                         function: "load_var".into(),
-                    }],
+                    }
+                    .to_expr()],
                     function: "a".into(),
-                }],
+                }
+                .to_expr()],
                 function: "a".into(),
-            }],
+            }
+            .to_expr()],
             function: "a".into(),
-        };
+        }
+        .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
     }
 
@@ -452,52 +587,70 @@ mod tests {
     fn expr_parse() {
         let s = r#"load(concat_path("foo", "bar", baz)))"#;
         assert_eq!(
-            Expr::Apply {
-                args: vec![Expr::Apply {
+            ExprKind::Apply {
+                args: vec![ExprKind::Apply {
                     args: vec![
-                        Expr::Constant(Value::String(Chars::from("foo"))),
-                        Expr::Constant(Value::String(Chars::from("bar"))),
-                        Expr::Apply {
-                            args: vec![Expr::Constant(Value::String(Chars::from("baz")))],
+                        ExprKind::Constant(Value::String(Chars::from("foo"))).to_expr(),
+                        ExprKind::Constant(Value::String(Chars::from("bar"))).to_expr(),
+                        ExprKind::Apply {
+                            args: vec![ExprKind::Constant(Value::String(Chars::from(
+                                "baz"
+                            )))
+                            .to_expr()],
                             function: "load_var".into(),
                         }
+                        .to_expr()
                     ],
                     function: String::from("concat_path"),
-                }],
+                }
+                .to_expr()],
                 function: "load".into(),
-            },
+            }
+            .to_expr(),
             parse_expr(s).unwrap()
         );
         assert_eq!(
-            Expr::Apply {
+            ExprKind::Apply {
                 function: "load_var".into(),
-                args: vec![Expr::Constant(Value::String(Chars::from("sum")))]
-            },
+                args: vec![
+                    ExprKind::Constant(Value::String(Chars::from("sum"))).to_expr()
+                ]
+            }
+            .to_expr(),
             parse_expr("sum").unwrap()
         );
-        let src = Expr::Apply {
+        let src = ExprKind::Apply {
             args: vec![
-                Expr::Constant(Value::F32(1.)),
-                Expr::Apply {
-                    args: vec![Expr::Constant(Value::String(Chars::from("/foo/bar")))],
+                ExprKind::Constant(Value::F32(1.)).to_expr(),
+                ExprKind::Apply {
+                    args: vec![ExprKind::Constant(Value::String(Chars::from(
+                        "/foo/bar",
+                    )))
+                    .to_expr()],
                     function: "load".into(),
-                },
-                Expr::Apply {
+                }
+                .to_expr(),
+                ExprKind::Apply {
                     args: vec![
-                        Expr::Constant(Value::F32(675.6)),
-                        Expr::Apply {
-                            args: vec![Expr::Constant(Value::String(Chars::from(
+                        ExprKind::Constant(Value::F32(675.6)).to_expr(),
+                        ExprKind::Apply {
+                            args: vec![ExprKind::Constant(Value::String(Chars::from(
                                 "/foo/baz",
-                            )))],
+                            )))
+                            .to_expr()],
                             function: "load".into(),
-                        },
+                        }
+                        .to_expr(),
                     ],
                     function: String::from("max"),
-                },
-                Expr::Apply { args: vec![], function: String::from("rand") },
+                }
+                .to_expr(),
+                ExprKind::Apply { args: vec![], function: String::from("rand") }
+                    .to_expr(),
             ],
             function: String::from("sum"),
-        };
+        }
+        .to_expr();
         let chs =
             r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
         assert_eq!(src, parse_expr(chs).unwrap());

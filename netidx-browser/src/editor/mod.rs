@@ -1,7 +1,7 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{Target, WidgetCtx, WidgetPath, DEFAULT_PROPS, Vars};
+use super::{Vars, WidgetCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -373,9 +373,9 @@ impl Widget {
                 default_sort_column: None,
                 columns: view::ColumnSpec::Auto,
             })),
-            Some("Action") => {
-                widget(view::WidgetKind::Action(view::Expr::Constant(Value::U64(42))))
-            }
+            Some("Action") => widget(view::WidgetKind::Action(
+                view::ExprKind::Constant(Value::U64(42)).to_expr(),
+            )),
             Some("Table") => widget(view::WidgetKind::Table(view::Table {
                 path: Path::from("/"),
                 default_sort_column: None,
@@ -383,79 +383,102 @@ impl Widget {
             })),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
-                widget(view::WidgetKind::Label(view::Expr::Constant(s)))
+                widget(view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()))
             }
             Some("Button") => {
                 let l = Chars::from("click me!");
                 widget(view::WidgetKind::Button(view::Button {
-                    enabled: view::Expr::Constant(Value::True),
-                    label: view::Expr::Constant(Value::String(l)),
-                    on_click: view::Expr::Apply {
+                    enabled: view::ExprKind::Constant(Value::True).to_expr(),
+                    label: view::ExprKind::Constant(Value::String(l)).to_expr(),
+                    on_click: view::ExprKind::Apply {
                         args: vec![
-                            view::Expr::Constant(Value::from("/somewhere/in/netidx")),
-                            view::Expr::Apply { args: vec![], function: "event".into() },
+                            view::ExprKind::Constant(Value::from("/somewhere/in/netidx"))
+                                .to_expr(),
+                            view::ExprKind::Apply {
+                                args: vec![],
+                                function: "event".into(),
+                            }
+                            .to_expr(),
                         ],
                         function: "store".into(),
-                    },
+                    }
+                    .to_expr(),
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
-                enabled: view::Expr::Constant(Value::True),
-                value: view::Expr::Apply {
-                    args: vec![view::Expr::Constant(Value::from("/somewhere"))],
-                    function: "load".into(),
-                },
-                on_change: view::Expr::Apply {
+                enabled: view::ExprKind::Constant(Value::True).to_expr(),
+                value: view::ExprKind::Apply {
                     args: vec![
-                        view::Expr::Constant(Value::from("/somewhere")),
-                        view::Expr::Apply { args: vec![], function: "event".into() },
+                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
+                    ],
+                    function: "load".into(),
+                }
+                .to_expr(),
+                on_change: view::ExprKind::Apply {
+                    args: vec![
+                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                            .to_expr(),
                     ],
                     function: "store".into(),
-                },
+                }
+                .to_expr(),
             })),
             Some("Selector") => {
                 let choices =
                     Chars::from(r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#);
                 widget(view::WidgetKind::Selector(view::Selector {
-                    enabled: view::Expr::Constant(Value::True),
-                    choices: view::Expr::Constant(Value::String(choices)),
-                    selected: view::Expr::Apply {
-                        args: vec![view::Expr::Constant(Value::from("/somewhere"))],
-                        function: "load".into(),
-                    },
-                    on_change: view::Expr::Apply {
+                    enabled: view::ExprKind::Constant(Value::True).to_expr(),
+                    choices: view::ExprKind::Constant(Value::String(choices)).to_expr(),
+                    selected: view::ExprKind::Apply {
                         args: vec![
-                            view::Expr::Constant(Value::from("/somewhere")),
-                            view::Expr::Apply { args: vec![], function: "event".into() },
+                            view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
+                        ],
+                        function: "load".into(),
+                    }
+                    .to_expr(),
+                    on_change: view::ExprKind::Apply {
+                        args: vec![
+                            view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                            view::ExprKind::Apply {
+                                args: vec![],
+                                function: "event".into(),
+                            }
+                            .to_expr(),
                         ],
                         function: "store".into(),
-                    },
+                    }
+                    .to_expr(),
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
-                enabled: view::Expr::Constant(Value::True),
-                visible: view::Expr::Constant(Value::True),
-                text: view::Expr::Apply {
-                    args: vec![view::Expr::Constant(Value::from("/somewhere"))],
-                    function: "load".into(),
-                },
-                on_change: view::Expr::Apply {
+                enabled: view::ExprKind::Constant(Value::True).to_expr(),
+                visible: view::ExprKind::Constant(Value::True).to_expr(),
+                text: view::ExprKind::Apply {
                     args: vec![
-                        view::Expr::Apply {
-                            args: vec![],
-                            function: "event".into()
-                        },
-                        view::Expr::Constant(Value::True)
+                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
                     ],
-                    function: "sample".into()
-                },
-                on_activate: view::Expr::Apply {
+                    function: "load".into(),
+                }
+                .to_expr(),
+                on_change: view::ExprKind::Apply {
                     args: vec![
-                        view::Expr::Constant(Value::from("/somewhere")),
-                        view::Expr::Apply { args: vec![], function: "event".into() },
+                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                            .to_expr(),
+                        view::ExprKind::Constant(Value::True).to_expr(),
+                    ],
+                    function: "sample".into(),
+                }
+                .to_expr(),
+                on_activate: view::ExprKind::Apply {
+                    args: vec![
+                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                            .to_expr(),
                     ],
                     function: "store".into(),
-                },
+                }
+                .to_expr(),
             })),
             Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
                 title: String::from("Line Plot"),
@@ -468,11 +491,11 @@ impl Widget {
                 fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
                 margin: 3,
                 label_area: 50,
-                x_min: view::Expr::Constant(Value::Null),
-                x_max: view::Expr::Constant(Value::Null),
-                y_min: view::Expr::Constant(Value::Null),
-                y_max: view::Expr::Constant(Value::Null),
-                keep_points: view::Expr::Constant(Value::U64(256)),
+                x_min: view::ExprKind::Constant(Value::Null).to_expr(),
+                x_max: view::ExprKind::Constant(Value::Null).to_expr(),
+                y_min: view::ExprKind::Constant(Value::Null).to_expr(),
+                y_max: view::ExprKind::Constant(Value::Null).to_expr(),
+                keep_points: view::ExprKind::Constant(Value::U64(256)).to_expr(),
                 series: Vec::new(),
             })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
@@ -484,7 +507,7 @@ impl Widget {
             Some("BoxChild") => {
                 let s = Value::String(Chars::from("empty box child"));
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::Expr::Constant(s)),
+                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
                     props: None,
                 };
                 widget(view::WidgetKind::BoxChild(view::BoxChild {
@@ -503,7 +526,7 @@ impl Widget {
             Some("GridChild") => {
                 let s = Value::String(Chars::from("empty grid child"));
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::Expr::Constant(s)),
+                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
                     props: None,
                 };
                 widget(view::WidgetKind::GridChild(view::GridChild {
@@ -540,29 +563,6 @@ impl Widget {
             | WidgetKind::GridRow => (),
         }
     }
-
-    fn update(&self, tgt: Target, value: &Value) {
-        match &self.kind {
-            WidgetKind::Action(w) => w.update(tgt, value),
-            WidgetKind::Table(_) => (),
-            WidgetKind::Label(w) => w.update(tgt, value),
-            WidgetKind::Button(w) => w.update(tgt, value),
-            WidgetKind::Toggle(w) => w.update(tgt, value),
-            WidgetKind::Selector(w) => w.update(tgt, value),
-            WidgetKind::Entry(w) => w.update(tgt, value),
-            WidgetKind::LinePlot(w) => w.update(tgt, value),
-            WidgetKind::Box(_)
-            | WidgetKind::BoxChild(_)
-            | WidgetKind::Grid(_)
-            | WidgetKind::GridChild(_)
-            | WidgetKind::GridRow => (),
-        }
-    }
-}
-
-pub(super) struct Editor {
-    root: gtk::Paned,
-    store: gtk::TreeStore,
 }
 
 static KINDS: [&'static str; 13] = [
@@ -580,6 +580,10 @@ static KINDS: [&'static str; 13] = [
     "GridChild",
     "GridRow",
 ];
+
+pub(super) struct Editor {
+    root: gtk::Paned,
+}
 
 impl Editor {
     pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::View) -> Editor {
@@ -932,7 +936,7 @@ impl Editor {
             }));
             on_change();
         }));
-        Editor { root, store }
+        Editor { root }
     }
 
     fn build_tree(
@@ -994,14 +998,14 @@ impl Editor {
             Err(e) => {
                 let s = Value::from(format!("tree error: {}", e));
                 view::Widget {
-                    kind: view::WidgetKind::Label(view::Expr::Constant(s)),
+                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
                     props: None,
                 }
             }
             Ok(None) => {
                 let s = Value::from("tree error: missing widget");
                 view::Widget {
-                    kind: view::WidgetKind::Label(view::Expr::Constant(s)),
+                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
                     props: None,
                 }
             }
@@ -1156,19 +1160,6 @@ impl Editor {
                 }
             }
         };
-    }
-
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        self.store.foreach(|store, _, iter| {
-            let v = store.get_value(iter, 1);
-            match v.get::<&Widget>() {
-                Err(_) | Ok(None) => false,
-                Ok(Some(w)) => {
-                    w.update(tgt, value);
-                    false
-                }
-            }
-        })
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {

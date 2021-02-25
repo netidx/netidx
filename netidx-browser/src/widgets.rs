@@ -36,9 +36,9 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Expr::new(&ctx, false, variables.clone(), spec.enabled.clone());
-        let label = Expr::new(&ctx, false, variables.clone(), spec.label.clone());
-        let on_click = Expr::new(&ctx, false, variables.clone(), spec.on_click.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let label = Expr::new(&ctx, variables.clone(), spec.label.clone());
+        let on_click = Expr::new(&ctx, variables.clone(), spec.on_click.clone());
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -88,7 +88,7 @@ impl Label {
         spec: view::Expr,
         selected_path: gtk::Label,
     ) -> Label {
-        let text = Expr::new(&ctx, false, variables.clone(), spec.clone());
+        let text = Expr::new(&ctx, variables.clone(), spec.clone());
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
@@ -126,7 +126,7 @@ pub(super) struct Action {
 
 impl Action {
     pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::Expr) -> Self {
-        let action = Expr::new(&ctx, false, variables.clone(), spec.clone());
+        let action = Expr::new(&ctx, variables.clone(), spec.clone());
         action.update(Target::Event, &Value::Null);
         Action { action }
     }
@@ -170,10 +170,10 @@ impl Selector {
                 Inhibit(false)
             }),
         );
-        let enabled = Expr::new(&ctx, false, variables.clone(), spec.enabled.clone());
-        let choices = Expr::new(&ctx, false, variables.clone(), spec.choices.clone());
-        let selected = Expr::new(&ctx, false, variables.clone(), spec.selected.clone());
-        let on_change = Expr::new(&ctx, false, variables.clone(), spec.on_change.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let choices = Expr::new(&ctx, variables.clone(), spec.choices.clone());
+        let selected = Expr::new(&ctx, variables.clone(), spec.selected.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
@@ -282,9 +282,9 @@ impl Toggle {
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Expr::new(&ctx, false, variables.clone(), spec.enabled.clone());
-        let value = Expr::new(&ctx, false, variables.clone(), spec.value.clone());
-        let on_change = Expr::new(&ctx, false, variables.clone(), spec.on_change.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let value = Expr::new(&ctx, variables.clone(), spec.value.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
@@ -369,12 +369,11 @@ impl Entry {
         selected_path: gtk::Label,
     ) -> Self {
         let we_changed = Rc::new(Cell::new(false));
-        let enabled = Expr::new(&ctx, false, variables.clone(), spec.enabled.clone());
-        let visible = Expr::new(&ctx, false, variables.clone(), spec.visible.clone());
-        let text = Expr::new(&ctx, false, variables.clone(), spec.text.clone());
-        let on_change = Expr::new(&ctx, false, variables.clone(), spec.on_change.clone());
-        let on_activate =
-            Expr::new(&ctx, false, variables.clone(), spec.on_activate.clone());
+        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
+        let visible = Expr::new(&ctx, variables.clone(), spec.visible.clone());
+        let text = Expr::new(&ctx, variables.clone(), spec.text.clone());
+        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
+        let on_activate = Expr::new(&ctx, variables.clone(), spec.on_activate.clone());
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -524,23 +523,19 @@ impl LinePlot {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min =
-            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_min.clone()));
-        let x_max =
-            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.x_max.clone()));
-        let y_min =
-            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_min.clone()));
-        let y_max =
-            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.y_max.clone()));
+        let x_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_min.clone()));
+        let x_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_max.clone()));
+        let y_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_min.clone()));
+        let y_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_max.clone()));
         let keep_points =
-            Rc::new(Expr::new(&ctx, false, variables.clone(), spec.keep_points.clone()));
+            Rc::new(Expr::new(&ctx, variables.clone(), spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
                     line_color: series.line_color,
-                    x: Expr::new(&ctx, false, variables.clone(), series.x.clone()),
-                    y: Expr::new(&ctx, false, variables.clone(), series.y.clone()),
+                    x: Expr::new(&ctx, variables.clone(), series.x.clone()),
+                    y: Expr::new(&ctx, variables.clone(), series.y.clone()),
                     x_data: VecDeque::new(),
                     y_data: VecDeque::new(),
                 })
