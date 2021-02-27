@@ -1710,7 +1710,8 @@ impl fmt::Display for Expr {
 impl Expr {
     pub(crate) fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
         match &spec {
-            view::Expr { kind: view::ExprKind::Constant(v), .. } => {
+            view::Expr { kind: view::ExprKind::Constant(v), id } => {
+                ctx.dbg_ctx.borrow_mut().add_event(*id, v.clone());
                 Expr::Constant(spec.clone(), v.clone())
             }
             view::Expr { kind: view::ExprKind::Apply { args, function }, .. } => {
