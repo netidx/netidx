@@ -30,8 +30,8 @@ mapr = "0.8"
 regex = "1"
 fxhash = "0.2"
 lazy_static = "1"
-packed_struct = "0.4"
-packed_struct_codegen = "0.4"
+packed_struct = "0.5"
+packed_struct_codegen = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 parking_lot = "0.11"
@@ -41,4 +41,4 @@ futures = "0.3"
 uuid = { version = "0.8", features = ["v4"] }
 
 [dev-dependencies]
-proptest = "0.10"
+proptest = "1"
