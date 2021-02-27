@@ -481,7 +481,7 @@ impl Button {
         let (l, e, on_click_expr) = expr(
             ctx,
             variables,
-            "Source:",
+            "On Click:",
             &spec.borrow().on_click,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_click = s;

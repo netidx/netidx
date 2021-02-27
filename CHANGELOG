@@ -8,7 +8,7 @@
     random publisher address. Use this flag to handle multiple
     publishers of the same rpc, and the control interface in the
     recorder. This protocol change requires the resolver server to be
-    updated, and is backwards compatible with older clients.
+    updated, but is backwards compatible with older clients.
 
 * 0.6.1 netidx netidx-tools netidx-core:
   - small semantic change in subscriber, writes to a dval now queue
