@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.6.1"
+version = "0.7.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -23,8 +23,8 @@ libgssapi = { version = "0.4", path = "../../libgssapi/libgssapi", default_featu
 winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi", "ntsecapi"] }
 
 [dependencies]
-netidx-core = { version = "0.6", path = "../netidx-core" }
-netidx-netproto = { version = "0.6", path = "../netidx-netproto" }
+netidx-core = { version = "0.7", path = "../netidx-core" }
+netidx-netproto = { version = "0.7", path = "../netidx-netproto" }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"

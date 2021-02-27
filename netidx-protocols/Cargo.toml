@@ -1,6 +1,6 @@
 [package]
 name = "netidx-protocols"
-version = "0.6.2"
+version = "0.7.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -16,8 +16,8 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx-core = { path = "../netidx-core", version = "0.6" }
-netidx = { path = "../netidx", version = "0.6", default_features = false }
+netidx-core = { path = "../netidx-core", version = "0.7" }
+netidx = { path = "../netidx", version = "0.7", default_features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
 serde = "1"
 serde_derive = "1"

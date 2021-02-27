@@ -242,7 +242,7 @@ pub enum ColumnSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
-    pub path: Path,
+    pub path: Expr,
     pub default_sort_column: Option<(String, SortDir)>,
     pub columns: ColumnSpec,
 }
