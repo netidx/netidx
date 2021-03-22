@@ -42,36 +42,41 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 Ok(len) if len == 0 => break Err::<(), anyhow::Error>(anyhow!("EOF")),
                 Ok(_) => (),
             }
-            let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
-            let path = tryc!(
-                "missing path",
-                m.next().ok_or_else(|| anyhow!("missing path"))
-            );
-            let typ_or_null = tryc!(
-                "missing type",
-                m.next().ok_or_else(|| anyhow!("missing type"))
-            );
-            let val = if typ_or_null == "null" {
-                Value::Null
+            if buf.starts_with("DROP|") {
+                let path = buf.trim_start_matches("DROP|");
+                published.remove(path);
             } else {
-                let typ = tryc!("invalid type", typ_or_null.parse::<Typ>());
-                let v = tryc!(
-                    "missing value",
-                    m.next().ok_or_else(|| anyhow!("malformed data"))
+                let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
+                let path = tryc!(
+                    "missing path",
+                    m.next().ok_or_else(|| anyhow!("missing path"))
                 );
-                tryc!("parse val", typ.parse(v))
-            };
-            match published.get(path) {
-                Some(p) => {
-                    p.update(val);
-                }
-                None => {
-                    let path = Path::from(String::from(path));
-                    let publ = tryc!(
-                        "failed to publish",
-                        publisher.publish(path.clone(), val)
+                let typ_or_null = tryc!(
+                    "missing type",
+                    m.next().ok_or_else(|| anyhow!("missing type"))
+                );
+                let val = if typ_or_null == "null" {
+                    Value::Null
+                } else {
+                    let typ = tryc!("invalid type", typ_or_null.parse::<Typ>());
+                    let v = tryc!(
+                        "missing value",
+                        m.next().ok_or_else(|| anyhow!("malformed data"))
                     );
-                    published.insert(path, publ);
+                    tryc!("parse val", typ.parse(v))
+                };
+                match published.get(path) {
+                    Some(p) => {
+                        p.update(val);
+                    }
+                    None => {
+                        let path = Path::from(String::from(path));
+                        let publ = tryc!(
+                            "failed to publish",
+                            publisher.publish(path.clone(), val)
+                        );
+                        published.insert(path, publ);
+                    }
                 }
             }
             publisher.flush(timeout).await

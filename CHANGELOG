@@ -1,3 +1,8 @@
+* 0.7.1 netidx-tools:
+  - Add the DROP command to the command line publisher to stop
+    publishing a path
+  - Add oneshot mode to the subscriber
+  
 * 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
   - major update to the filter language syntax and semantics
   - add netidx rpc to protocols, use it in the recorder, implement it

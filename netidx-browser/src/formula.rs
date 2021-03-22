@@ -456,6 +456,7 @@ fn with_typ_prefix(
     }
 }
 
+// CR estokes: Remove this, it's the same as if with no third argument
 fn eval_filter(from: &CachedVals) -> Option<Value> {
     match &**from.0.borrow() {
         [pred, s] => match pred {
