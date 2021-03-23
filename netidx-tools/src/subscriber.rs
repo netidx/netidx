@@ -6,6 +6,7 @@ use futures::{
     select_biased,
     stream::{self, FusedStream},
 };
+use indexmap::IndexSet;
 use netidx::{
     config::Config,
     path::Path,
@@ -17,11 +18,10 @@ use netidx::{
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    str::FromStr,
     mem,
+    str::FromStr,
     sync::Arc,
 };
-use indexmap::IndexSet;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
@@ -139,11 +139,7 @@ impl Ctx {
                     Ok(p)
                 });
                 if no_stdin {
-                    if oneshot {
-                        Box::new(Batched::new(init, 1000))
-                    } else {
-                        Box::new(Batched::new(init.chain(stream::pending()), 1000))
-                    }
+                    Box::new(Batched::new(init, 1000))
                 } else {
                     let stdin = Box::pin({
                         let mut stdin = BufReader::new(io::stdin()).lines();
@@ -157,10 +153,7 @@ impl Ctx {
                             }
                         }
                     });
-                    Box::new(Batched::new(
-                        init.chain(stdin).chain(stream::pending()),
-                        1000,
-                    ))
+                    Box::new(Batched::new(init.chain(stdin), 1000))
                 }
             },
             updates: Batched::new(updates, 100_000),
@@ -185,15 +178,17 @@ impl Ctx {
             let s = subscriber.durable_subscribe(path.clone());
             paths.insert(s.id(), path.clone());
             s.updates(
-                UpdatesFlags::BEGIN_WITH_LAST
-                    | UpdatesFlags::STOP_COLLECTING_LAST,
+                UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::STOP_COLLECTING_LAST,
                 sender_updates,
             );
             s
         });
     }
 
-    async fn process_request(&mut self, r: Option<BatchItem<Result<String>>>) -> Result<()> {
+    async fn process_request(
+        &mut self,
+        r: Option<BatchItem<Result<String>>>,
+    ) -> Result<()> {
         match r {
             None | Some(BatchItem::InBatch(Err(_))) => {
                 // This handles the case the user did something like
@@ -249,8 +244,12 @@ impl Ctx {
                             &self.subscriptions[p.as_str()]
                         }
                     };
-                    if ! dv.write(v.into()) {
-                        eprintln!("WARNING: {} queued writes to {}", dv.queued_writes(), p)
+                    if !dv.write(v.into()) {
+                        eprintln!(
+                            "WARNING: {} queued writes to {}",
+                            dv.queued_writes(),
+                            p
+                        )
                     }
                 }
                 mem::swap(&mut self.write, &mut write);
