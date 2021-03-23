@@ -100,7 +100,7 @@ enum Sub {
         #[structopt(
             short = "o",
             long = "oneshot",
-            help = "quit after one value for each subscription"
+            help = "unsubscribe after printing one value for each subscription"
         )]
         oneshot: bool,
         #[structopt(

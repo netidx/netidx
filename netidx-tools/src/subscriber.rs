@@ -6,7 +6,6 @@ use futures::{
     select_biased,
     stream::{self, FusedStream},
 };
-use indexmap::IndexSet;
 use netidx::{
     config::Config,
     path::Path,
@@ -15,13 +14,7 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    io::Write,
-    mem,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, io::Write, str::FromStr, sync::Arc};
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
@@ -107,15 +100,12 @@ struct Ctx {
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
     subscriber: Subscriber,
-    requests: Box<dyn FusedStream<Item = BatchItem<Result<String>>> + Unpin>,
+    requests: Box<dyn FusedStream<Item = Result<String>> + Unpin>,
     updates: Batched<Receiver<Pooled<Vec<(SubId, Event)>>>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
     to_stderr: BytesMut,
-    add: IndexSet<String>,
-    drop: HashSet<String>,
-    write: Vec<(String, Value)>,
     oneshot: bool,
     requests_finished: bool,
 }
@@ -138,8 +128,8 @@ impl Ctx {
                     p.insert_str(0, "ADD|");
                     Ok(p)
                 });
-                if no_stdin {
-                    Box::new(Batched::new(init, 1000))
+                if dbg!(no_stdin) {
+                    Box::new(init.fuse())
                 } else {
                     let stdin = Box::pin({
                         let mut stdin = BufReader::new(io::stdin()).lines();
@@ -153,7 +143,7 @@ impl Ctx {
                             }
                         }
                     });
-                    Box::new(Batched::new(init.chain(stdin), 1000))
+                    Box::new(init.chain(stdin))
                 }
             },
             updates: Batched::new(updates, 100_000),
@@ -161,9 +151,6 @@ impl Ctx {
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
             to_stderr: BytesMut::new(),
-            add: IndexSet::new(),
-            drop: HashSet::new(),
-            write: Vec::new(),
             oneshot,
             requests_finished: false,
         }
@@ -185,16 +172,14 @@ impl Ctx {
         });
     }
 
-    async fn process_request(
-        &mut self,
-        r: Option<BatchItem<Result<String>>>,
-    ) -> Result<()> {
-        match r {
-            None | Some(BatchItem::InBatch(Err(_))) => {
+    async fn process_request(&mut self, r: Option<Result<String>>) -> Result<()> {
+        match dbg!(r) {
+            None | Some(Err(_)) => {
                 // This handles the case the user did something like
                 // call us with stdin redirected from a file and we
                 // read EOF, or a hereis doc, or input is piped into
                 // us. We don't want to die in any of these cases.
+                dbg!(());
                 self.requests = Box::new(stream::pending());
                 self.requests_finished = true;
                 if self.oneshot && self.paths.len() == 0 {
@@ -204,55 +189,36 @@ impl Ctx {
                     Ok(())
                 }
             }
-            Some(BatchItem::InBatch(Ok(l))) => {
+            Some(Ok(l)) => {
                 if !l.trim().is_empty() {
                     match l.parse::<In>() {
                         Err(e) => eprintln!("parse error: {}", e),
-                        Ok(In::Add(p)) => {
-                            if !self.drop.remove(&p) {
-                                self.add.insert(p);
-                            }
-                        }
+                        Ok(In::Add(p)) => self.add_subscription(Path::from(p)),
                         Ok(In::Drop(p)) => {
-                            if !self.add.remove(&p) {
-                                self.drop.insert(p);
+                            if let Some(sub) = self.subscriptions.remove(&*p) {
+                                self.paths.remove(&sub.id());
                             }
                         }
                         Ok(In::Write(p, v)) => {
-                            self.write.push((p, v));
+                            let dv = match self.subscriptions.get(p.as_str()) {
+                                Some(dv) => dv,
+                                None => {
+                                    self.add_subscription(Path::from(Arc::from(
+                                        p.as_str(),
+                                    )));
+                                    &self.subscriptions[p.as_str()]
+                                }
+                            };
+                            if !dv.write(v.into()) {
+                                eprintln!(
+                                    "WARNING: {} queued writes to {}",
+                                    dv.queued_writes(),
+                                    p
+                                )
+                            }
                         }
                     }
                 }
-                Ok(())
-            }
-            Some(BatchItem::EndBatch) => {
-                for p in self.drop.drain() {
-                    if let Some(sub) = self.subscriptions.remove(&*p) {
-                        self.paths.remove(&sub.id());
-                    }
-                }
-                while let Some(p) = self.add.pop() {
-                    self.add_subscription(Path::from(p))
-                }
-                self.subscriber.flush().await;
-                let mut write = mem::replace(&mut self.write, Vec::new());
-                for (p, v) in write.drain(..) {
-                    let dv = match self.subscriptions.get(p.as_str()) {
-                        Some(dv) => dv,
-                        None => {
-                            self.add_subscription(Path::from(Arc::from(p.as_str())));
-                            &self.subscriptions[p.as_str()]
-                        }
-                    };
-                    if !dv.write(v.into()) {
-                        eprintln!(
-                            "WARNING: {} queued writes to {}",
-                            dv.queued_writes(),
-                            p
-                        )
-                    }
-                }
-                mem::swap(&mut self.write, &mut write);
                 Ok(())
             }
         }
@@ -285,7 +251,8 @@ impl Ctx {
                             if let Some(path) = self.paths.remove(&id) {
                                 self.subscriptions.remove(&path);
                             }
-                            if self.paths.len() == 0 && self.requests_finished {
+                            if dbg!(self.paths.len()) == 0 && dbg!(self.requests_finished)
+                            {
                                 self.flush().await?;
                                 bail!("oneshot finished")
                             }
