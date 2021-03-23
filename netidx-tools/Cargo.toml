@@ -45,3 +45,4 @@ fs3 = "0.5"
 mapr = "0.8"
 uuid = { version = "0.8", features = ["v4", "serde"] }
 fxhash = "0.2"
+indexmap = "1"

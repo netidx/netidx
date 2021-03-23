@@ -97,6 +97,18 @@ enum Sub {
     },
     #[structopt(name = "subscriber", about = "subscribe to values")]
     Subscriber {
+        #[structopt(
+            short = "o",
+            long = "oneshot",
+            help = "quit after one value for each subscription"
+        )]
+        oneshot: bool,
+        #[structopt(
+            short = "n",
+            long = "no-stdin",
+            help = "don't read commands from stdin"
+        )]
+        no_stdin: bool,
         #[structopt(name = "paths")]
         paths: Vec<String>,
     },
@@ -291,9 +303,9 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
             publisher::run(cfg, bind, timeout, auth)
         }
-        Sub::Subscriber { paths } => {
+        Sub::Subscriber { no_stdin, oneshot, paths } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
-            subscriber::run(cfg, paths, auth)
+            subscriber::run(cfg, no_stdin, oneshot, paths, auth)
         }
         Sub::Record {
             foreground,

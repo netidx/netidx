@@ -18,7 +18,10 @@ use std::{
     collections::{HashMap, HashSet},
     io::Write,
     str::FromStr,
+    mem,
+    sync::Arc,
 };
+use indexmap::IndexSet;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
@@ -110,13 +113,20 @@ struct Ctx {
     stderr: io::Stderr,
     to_stdout: BytesMut,
     to_stderr: BytesMut,
-    add: HashSet<String>,
+    add: IndexSet<String>,
     drop: HashSet<String>,
     write: Vec<(String, Value)>,
+    oneshot: bool,
+    requests_finished: bool,
 }
 
 impl Ctx {
-    fn new(subscriber: Subscriber, paths: Vec<String>) -> Self {
+    fn new(
+        subscriber: Subscriber,
+        no_stdin: bool,
+        oneshot: bool,
+        paths: Vec<String>,
+    ) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
         Ctx {
             sender_updates,
@@ -124,40 +134,66 @@ impl Ctx {
             subscriber,
             subscriptions: HashMap::new(),
             requests: {
-                let stdin = Box::pin({
-                    let mut stdin = BufReader::new(io::stdin()).lines();
-                    async_stream::stream! {
-                        loop {
-                            match stdin.next_line().await {
-                                Ok(None) => break,
-                                Ok(Some(line)) => yield Ok(line),
-                                Err(e) => yield Err(Error::from(e)),
+                let init = stream::iter(paths).map(|mut p| {
+                    p.insert_str(0, "ADD|");
+                    Ok(p)
+                });
+                if no_stdin {
+                    if oneshot {
+                        Box::new(Batched::new(init, 1000))
+                    } else {
+                        Box::new(Batched::new(init.chain(stream::pending()), 1000))
+                    }
+                } else {
+                    let stdin = Box::pin({
+                        let mut stdin = BufReader::new(io::stdin()).lines();
+                        async_stream::stream! {
+                            loop {
+                                match stdin.next_line().await {
+                                    Ok(None) => break,
+                                    Ok(Some(line)) => yield Ok(line),
+                                    Err(e) => yield Err(Error::from(e)),
+                                }
                             }
                         }
-                    }
-                });
-                Box::new(Batched::new(
-                    stream::iter(paths)
-                        .map(|mut p| {
-                            p.insert_str(0, "ADD|");
-                            Ok(p)
-                        })
-                        .chain(stdin),
-                    1000,
-                ))
+                    });
+                    Box::new(Batched::new(
+                        init.chain(stdin).chain(stream::pending()),
+                        1000,
+                    ))
+                }
             },
             updates: Batched::new(updates, 100_000),
             stdout: io::stdout(),
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
             to_stderr: BytesMut::new(),
-            add: HashSet::new(),
+            add: IndexSet::new(),
             drop: HashSet::new(),
             write: Vec::new(),
+            oneshot,
+            requests_finished: false,
         }
     }
 
-    async fn process_request(&mut self, r: Option<BatchItem<Result<String>>>) {
+    fn add_subscription(&mut self, path: Path) {
+        let subscriptions = &mut self.subscriptions;
+        let paths = &mut self.paths;
+        let subscriber = &self.subscriber;
+        let sender_updates = self.sender_updates.clone();
+        subscriptions.entry(path.clone()).or_insert_with(|| {
+            let s = subscriber.durable_subscribe(path.clone());
+            paths.insert(s.id(), path.clone());
+            s.updates(
+                UpdatesFlags::BEGIN_WITH_LAST
+                    | UpdatesFlags::STOP_COLLECTING_LAST,
+                sender_updates,
+            );
+            s
+        });
+    }
+
+    async fn process_request(&mut self, r: Option<BatchItem<Result<String>>>) -> Result<()> {
         match r {
             None | Some(BatchItem::InBatch(Err(_))) => {
                 // This handles the case the user did something like
@@ -165,6 +201,13 @@ impl Ctx {
                 // read EOF, or a hereis doc, or input is piped into
                 // us. We don't want to die in any of these cases.
                 self.requests = Box::new(stream::pending());
+                self.requests_finished = true;
+                if self.oneshot && self.paths.len() == 0 {
+                    self.flush().await?;
+                    bail!("finished")
+                } else {
+                    Ok(())
+                }
             }
             Some(BatchItem::InBatch(Ok(l))) => {
                 if !l.trim().is_empty() {
@@ -185,6 +228,7 @@ impl Ctx {
                         }
                     }
                 }
+                Ok(())
             }
             Some(BatchItem::EndBatch) => {
                 for p in self.drop.drain() {
@@ -192,41 +236,39 @@ impl Ctx {
                         self.paths.remove(&sub.id());
                     }
                 }
-                for p in self.add.drain() {
-                    let p = Path::from(p);
-                    let subscriptions = &mut self.subscriptions;
-                    let paths = &mut self.paths;
-                    let subscriber = &self.subscriber;
-                    let sender_updates = self.sender_updates.clone();
-                    subscriptions.entry(p.clone()).or_insert_with(|| {
-                        let s = subscriber.durable_subscribe(p.clone());
-                        paths.insert(s.id(), p.clone());
-                        s.updates(
-                            UpdatesFlags::BEGIN_WITH_LAST
-                                | UpdatesFlags::STOP_COLLECTING_LAST,
-                            sender_updates,
-                        );
-                        s
-                    });
+                while let Some(p) = self.add.pop() {
+                    self.add_subscription(Path::from(p))
                 }
                 self.subscriber.flush().await;
-                for (p, v) in self.write.drain(..) {
-                    match self.subscriptions.get(p.as_str()) {
+                let mut write = mem::replace(&mut self.write, Vec::new());
+                for (p, v) in write.drain(..) {
+                    let dv = match self.subscriptions.get(p.as_str()) {
+                        Some(dv) => dv,
                         None => {
-                            eprintln!("write to unknown path {}, subscribe first?", p)
+                            self.add_subscription(Path::from(Arc::from(p.as_str())));
+                            &self.subscriptions[p.as_str()]
                         }
-                        Some(dv) => {
-                            if !dv.write(v.into()) {
-                                eprintln!(
-                                    "write to failed subscription {} ignored retry later?",
-                                    p
-                                )
-                            }
-                        }
+                    };
+                    if ! dv.write(v.into()) {
+                        eprintln!("WARNING: {} queued writes to {}", dv.queued_writes(), p)
                     }
                 }
+                mem::swap(&mut self.write, &mut write);
+                Ok(())
             }
         }
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        if self.to_stdout.len() > 0 {
+            let to_write = self.to_stdout.split().freeze();
+            self.stdout.write_all(&*to_write).await?;
+        }
+        if self.to_stderr.len() > 0 {
+            let to_write = self.to_stderr.split().freeze();
+            self.stderr.write_all(&*to_write).await?;
+        }
+        Ok(())
     }
 
     async fn process_update(
@@ -235,20 +277,20 @@ impl Ctx {
     ) -> Result<()> {
         Ok(match u {
             None => unreachable!(), // channel will never close
-            Some(BatchItem::EndBatch) => {
-                if self.to_stdout.len() > 0 {
-                    let to_write = self.to_stdout.split().freeze();
-                    self.stdout.write_all(&*to_write).await?;
-                }
-                if self.to_stderr.len() > 0 {
-                    let to_write = self.to_stderr.split().freeze();
-                    self.stderr.write_all(&*to_write).await?;
-                }
-            }
+            Some(BatchItem::EndBatch) => self.flush().await?,
             Some(BatchItem::InBatch(mut batch)) => {
                 for (id, value) in batch.drain(..) {
                     if let Some(path) = self.paths.get(&id) {
                         Out { path: &**path, value }.write(&mut self.to_stdout);
+                        if self.oneshot {
+                            if let Some(path) = self.paths.remove(&id) {
+                                self.subscriptions.remove(&path);
+                            }
+                            if self.paths.len() == 0 && self.requests_finished {
+                                self.flush().await?;
+                                bail!("oneshot finished")
+                            }
+                        }
                     }
                 }
             }
@@ -256,23 +298,36 @@ impl Ctx {
     }
 }
 
-async fn subscribe(cfg: Config, paths: Vec<String>, auth: Auth) {
+async fn subscribe(
+    cfg: Config,
+    no_stdin: bool,
+    oneshot: bool,
+    paths: Vec<String>,
+    auth: Auth,
+) {
     let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
-    let mut ctx = Ctx::new(subscriber, paths);
+    let mut ctx = Ctx::new(subscriber, no_stdin, oneshot, paths);
     loop {
         select_biased! {
-            u = ctx.updates.next() => {
-                match ctx.process_update(u).await {
-                    Ok(()) => (),
-                    Err(_) => break,
-                }
+            u = ctx.updates.next() => match ctx.process_update(u).await {
+                Ok(()) => (),
+                Err(_) => break,
             },
-            r = ctx.requests.next() => ctx.process_request(r).await
+            r = ctx.requests.next() => match ctx.process_request(r).await {
+                Ok(()) => (),
+                Err(_) => break,
+            },
         }
     }
 }
 
-pub(crate) fn run(cfg: Config, paths: Vec<String>, auth: Auth) {
+pub(crate) fn run(
+    cfg: Config,
+    no_stdin: bool,
+    oneshot: bool,
+    paths: Vec<String>,
+    auth: Auth,
+) {
     let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(subscribe(cfg, paths, auth));
+    rt.block_on(subscribe(cfg, no_stdin, oneshot, paths, auth));
 }
