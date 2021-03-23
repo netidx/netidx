@@ -2,7 +2,11 @@
   - Add the DROP command to the command line publisher to stop
     publishing a path
   - Add oneshot mode to the subscriber
-  
+  - Add no-stdin mode to subscriber
+  - Subscriber will now automatically subscribe when you write, and if
+    a write is queued it will tell you how many writes are in the
+    queue for a given path
+
 * 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
   - major update to the filter language syntax and semantics
   - add netidx rpc to protocols, use it in the recorder, implement it
