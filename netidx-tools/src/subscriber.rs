@@ -256,24 +256,17 @@ impl Ctx {
     }
 
     async fn check_timeouts(&mut self, timeout: Duration) -> Result<()> {
-        let mut succeeded = Vec::new();
         let mut failed = Vec::new();
         for (path, started) in &self.subscribe_ts {
-            match &self.subscriptions[path].last() {
-                Event::Update(_) => {
-                    succeeded.push(path.clone());
-                }
-                Event::Unsubscribed => {
-                    if started.elapsed() > timeout {
-                        failed.push(path.clone())
-                    }
-                }
+            if started.elapsed() > timeout {
+                failed.push(path.clone())
             }
         }
-        for path in succeeded {
-            self.subscribe_ts.remove(&path);
-        }
         for path in failed {
+            eprintln!(
+                "WARNING: subscription to {} did not succeed before timeout and will be canceled",
+                &path
+            );
             self.remove_subscription(&path)
         }
         if self.oneshot && self.paths.len() == 0 && self.requests_finished {
@@ -293,6 +286,9 @@ impl Ctx {
             Some(BatchItem::InBatch(mut batch)) => {
                 for (id, value) in batch.drain(..) {
                     if let Some(path) = self.paths.get(&id) {
+                        if self.subscribe_timeout.is_some() {
+                            self.subscribe_ts.remove(path);
+                        }
                         Out { path: &**path, value }.write(&mut self.to_stdout);
                         if self.oneshot {
                             if let Some(path) = self.paths.get(&id).cloned() {
