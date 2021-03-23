@@ -109,6 +109,12 @@ enum Sub {
             help = "don't read commands from stdin"
         )]
         no_stdin: bool,
+        #[structopt(
+            short = "t",
+            long = "subscribe-timeout",
+            help = "cancel subscription unless it succeeds within timeout"
+        )]
+        subscribe_timeout: Option<u64>,
         #[structopt(name = "paths")]
         paths: Vec<String>,
     },
@@ -303,9 +309,9 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, spn);
             publisher::run(cfg, bind, timeout, auth)
         }
-        Sub::Subscriber { no_stdin, oneshot, paths } => {
+        Sub::Subscriber { no_stdin, oneshot, subscribe_timeout, paths } => {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
-            subscriber::run(cfg, no_stdin, oneshot, paths, auth)
+            subscriber::run(cfg, no_stdin, oneshot, subscribe_timeout, paths, auth)
         }
         Sub::Record {
             foreground,

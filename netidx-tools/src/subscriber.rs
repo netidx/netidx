@@ -14,10 +14,17 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
 };
-use std::{collections::HashMap, io::Write, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::Write,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
+    time,
 };
 
 #[derive(Debug, Clone)]
@@ -99,6 +106,7 @@ struct Ctx {
     sender_updates: Sender<Pooled<Vec<(SubId, Event)>>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
+    subscribe_ts: HashMap<Path, Instant>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = Result<String>> + Unpin>,
     updates: Batched<Receiver<Pooled<Vec<(SubId, Event)>>>>,
@@ -108,6 +116,7 @@ struct Ctx {
     to_stderr: BytesMut,
     oneshot: bool,
     requests_finished: bool,
+    subscribe_timeout: Option<Duration>,
 }
 
 impl Ctx {
@@ -115,6 +124,7 @@ impl Ctx {
         subscriber: Subscriber,
         no_stdin: bool,
         oneshot: bool,
+        subscribe_timeout: Option<u64>,
         paths: Vec<String>,
     ) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
@@ -123,6 +133,8 @@ impl Ctx {
             paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
+            subscribe_ts: HashMap::new(),
+            subscribe_timeout: subscribe_timeout.map(Duration::from_secs),
             requests: {
                 let init = stream::iter(paths).map(|mut p| {
                     p.insert_str(0, "ADD|");
@@ -156,8 +168,17 @@ impl Ctx {
         }
     }
 
+    fn remove_subscription(&mut self, path: &str) {
+        if let Some(dv) = self.subscriptions.remove(path) {
+            self.subscribe_ts.remove(path);
+            self.paths.remove(&dv.id());
+        }
+    }
+
     fn add_subscription(&mut self, path: Path) {
         let subscriptions = &mut self.subscriptions;
+        let subscribe_ts = &mut self.subscribe_ts;
+        let subscribe_timeout = self.subscribe_timeout.is_some();
         let paths = &mut self.paths;
         let subscriber = &self.subscriber;
         let sender_updates = self.sender_updates.clone();
@@ -168,6 +189,9 @@ impl Ctx {
                 UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::STOP_COLLECTING_LAST,
                 sender_updates,
             );
+            if subscribe_timeout {
+                subscribe_ts.insert(path.clone(), Instant::now());
+            }
             s
         });
     }
@@ -193,11 +217,7 @@ impl Ctx {
                     match l.parse::<In>() {
                         Err(e) => eprintln!("parse error: {}", e),
                         Ok(In::Add(p)) => self.add_subscription(Path::from(p)),
-                        Ok(In::Drop(p)) => {
-                            if let Some(sub) = self.subscriptions.remove(&*p) {
-                                self.paths.remove(&sub.id());
-                            }
-                        }
+                        Ok(In::Drop(p)) => self.remove_subscription(&*p),
                         Ok(In::Write(p, v)) => {
                             let dv = match self.subscriptions.get(p.as_str()) {
                                 Some(dv) => dv,
@@ -235,6 +255,34 @@ impl Ctx {
         Ok(())
     }
 
+    async fn check_timeouts(&mut self, timeout: Duration) -> Result<()> {
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+        for (path, started) in &self.subscribe_ts {
+            match &self.subscriptions[path].last() {
+                Event::Update(_) => {
+                    succeeded.push(path.clone());
+                }
+                Event::Unsubscribed => {
+                    if started.elapsed() > timeout {
+                        failed.push(path.clone())
+                    }
+                }
+            }
+        }
+        for path in succeeded {
+            self.subscribe_ts.remove(&path);
+        }
+        for path in failed {
+            self.remove_subscription(&path)
+        }
+        if self.oneshot && self.paths.len() == 0 && self.requests_finished {
+            self.flush().await?;
+            bail!("oneshot done")
+        }
+        Ok(())
+    }
+
     async fn process_update(
         &mut self,
         u: Option<BatchItem<Pooled<Vec<(SubId, Event)>>>>,
@@ -247,8 +295,8 @@ impl Ctx {
                     if let Some(path) = self.paths.get(&id) {
                         Out { path: &**path, value }.write(&mut self.to_stdout);
                         if self.oneshot {
-                            if let Some(path) = self.paths.remove(&id) {
-                                self.subscriptions.remove(&path);
+                            if let Some(path) = self.paths.get(&id).cloned() {
+                                self.remove_subscription(&path);
                             }
                             if self.paths.len() == 0 && self.requests_finished {
                                 self.flush().await?;
@@ -266,13 +314,21 @@ async fn subscribe(
     cfg: Config,
     no_stdin: bool,
     oneshot: bool,
+    subscribe_timeout: Option<u64>,
     paths: Vec<String>,
     auth: Auth,
 ) {
     let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
-    let mut ctx = Ctx::new(subscriber, no_stdin, oneshot, paths);
+    let mut ctx = Ctx::new(subscriber, no_stdin, oneshot, subscribe_timeout, paths);
+    let mut tick = time::interval(Duration::from_secs(1));
     loop {
         select_biased! {
+            _ = tick.tick().fuse() => if let Some(timeout) = ctx.subscribe_timeout {
+                match ctx.check_timeouts(timeout).await {
+                    Ok(()) => (),
+                    Err(_) => break,
+                }
+            },
             u = ctx.updates.next() => match ctx.process_update(u).await {
                 Ok(()) => (),
                 Err(_) => break,
@@ -289,9 +345,10 @@ pub(crate) fn run(
     cfg: Config,
     no_stdin: bool,
     oneshot: bool,
+    subscribe_timeout: Option<u64>,
     paths: Vec<String>,
     auth: Auth,
 ) {
     let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(subscribe(cfg, no_stdin, oneshot, paths, auth));
+    rt.block_on(subscribe(cfg, no_stdin, oneshot, subscribe_timeout, paths, auth));
 }
