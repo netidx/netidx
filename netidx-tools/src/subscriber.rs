@@ -128,7 +128,7 @@ impl Ctx {
                     p.insert_str(0, "ADD|");
                     Ok(p)
                 });
-                if dbg!(no_stdin) {
+                if no_stdin {
                     Box::new(init.fuse())
                 } else {
                     let stdin = Box::pin({
@@ -173,13 +173,12 @@ impl Ctx {
     }
 
     async fn process_request(&mut self, r: Option<Result<String>>) -> Result<()> {
-        match dbg!(r) {
+        match r {
             None | Some(Err(_)) => {
                 // This handles the case the user did something like
                 // call us with stdin redirected from a file and we
                 // read EOF, or a hereis doc, or input is piped into
                 // us. We don't want to die in any of these cases.
-                dbg!(());
                 self.requests = Box::new(stream::pending());
                 self.requests_finished = true;
                 if self.oneshot && self.paths.len() == 0 {
@@ -251,8 +250,7 @@ impl Ctx {
                             if let Some(path) = self.paths.remove(&id) {
                                 self.subscriptions.remove(&path);
                             }
-                            if dbg!(self.paths.len()) == 0 && dbg!(self.requests_finished)
-                            {
+                            if self.paths.len() == 0 && self.requests_finished {
                                 self.flush().await?;
                                 bail!("oneshot finished")
                             }
