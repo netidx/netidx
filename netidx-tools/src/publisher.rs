@@ -43,7 +43,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 Ok(_) => (),
             }
             if buf.starts_with("DROP|") {
-                let path = buf.trim_start_matches("DROP|");
+                let path = dbg!(buf.trim_start_matches("DROP|")).trim();
                 published.remove(path);
             } else {
                 let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');

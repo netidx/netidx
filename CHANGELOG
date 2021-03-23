@@ -3,6 +3,8 @@
     publishing a path
   - Add oneshot mode to the subscriber
   - Add no-stdin mode to subscriber
+  - Add a subscriber option to abandon a subscription if it doesn't
+    succeed before a passed in timeout
   - Subscriber will now automatically subscribe when you write, and if
     a write is queued it will tell you how many writes are in the
     queue for a given path
