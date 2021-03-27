@@ -1,3 +1,7 @@
+* 0.7.2 netidx-tools:
+  - Make the recorder more robust to transient resolver server
+    failures.
+
 * 0.7.1 netidx-tools:
   - Add the DROP command to the command line publisher to stop
     publishing a path
