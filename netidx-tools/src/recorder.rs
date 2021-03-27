@@ -1038,10 +1038,19 @@ mod record {
         let mut cts = CTS::new(&spec);
         let spec = GlobSet::new(true, spec)?;
         while let Some(reply) = rx.next().await {
-            if cts.changed(&resolver).await? {
-                let _ = reply.send(Some(resolver.list_matching(&spec).await?));
-            } else {
-                let _ = reply.send(None);
+            match cts.changed(&resolver).await {
+                Ok(true) => match resolver.list_matching(&spec).await {
+                    Ok(lst) => { let _ = reply.send(Some(lst)); }
+                    Err(e) => {
+                        warn!("list_task: list_matching failed {}, will retry", e);
+                        let _ = reply.send(None);
+                    }
+                }
+                Ok(false) => { let _ = reply.send(None); }
+                Err(e) => {
+                    warn!("list_task: check_changed failed {}, will retry", e);
+                    let _ = reply.send(None);
+                }
             }
         }
         Ok(())
