@@ -810,7 +810,7 @@ mod publish {
 
     async fn start_session(
         session_id: Uuid,
-        session_token: Option<Session>,
+        session_token: Session,
         bcast: &broadcast::Sender<BCastMsg>,
         resolver: &Config,
         desired_auth: &Auth,
@@ -905,8 +905,9 @@ mod publish {
                     }
                 })
             }),
-        ).await?;
-        let mut cluster = Cluster::<Uuid>::new(
+        )
+        .await?;
+        let mut cluster = Cluster::<(SocketAddr, Uuid)>::new(
             &session_publisher,
             subscriber.clone(),
             publish_base.append("cluster"),
@@ -923,23 +924,38 @@ mod publish {
                     Ok(BCastMsg::Stop) => break Ok(()),
                 },
                 _ = poll_members.tick().fuse() => {
-                    cluster.poll_members().await?;
+                    if let Err(e) = cluster.poll_members().await {
+                        warn!("failed to poll cluster members, will retry {}", e)
+                    }
                 },
-                cmds = cluster.wait_cmds().fuse() => {
-                    for session_id in cmds? {
-                        start_session(
-                            session_id,
-                            None,
-                            &bcast,
-                            &resolver,
-                            &desired_auth,
-                            &bind_cfg,
-                            &subscriber,
-                            &archive,
-                            shards,
-                            &publish_base,
-                            None
-                        ).await?
+                cmds = cluster.wait_cmds().fuse() => match cmds {
+                    Err(e) => {
+                        error!("received unparsable cluster commands {}", e)
+                    }
+                    Ok(cmds) => for (client, session_id) in cmds {
+                        match sessions.add_session(client) {
+                            None => {
+                                error!("can't start session requested by cluster member, too many sessions")
+                            },
+                            Some(session_token) => {
+                                let r = start_session(
+                                    session_id,
+                                    session_token,
+                                    &bcast,
+                                    &resolver,
+                                    &desired_auth,
+                                    &bind_cfg,
+                                    &subscriber,
+                                    &archive,
+                                    shards,
+                                    &publish_base,
+                                    None
+                                ).await;
+                                if let Err(e) = r {
+                                    warn!("failed to start session {}, {}", session_id, e)
+                                }
+                            }
+                        }
                     }
                 },
                 m = control_rx.next() => match m {
@@ -952,10 +968,11 @@ mod publish {
                             },
                             Some(session_token) => {
                                 let session_id = Uuid::new_v4();
+                                let client = cfg.client;
                                 info!("start session {}", session_id);
-                                start_session(
+                                let r = start_session(
                                     session_id,
-                                    Some(session_token),
+                                    session_token,
                                     &bcast,
                                     &resolver,
                                     &desired_auth,
@@ -965,9 +982,18 @@ mod publish {
                                     shards,
                                     &publish_base,
                                     Some(cfg)
-                                ).await?;
-                                cluster.send_cmd(&session_id);
-                                let _ = reply.send(Value::from(uuid_string(session_id)));
+                                ).await;
+                                match r {
+                                    Err(e) => {
+                                        let e = Chars::from(format!("{}", e));
+                                        warn!("failed to start session {}, {}", session_id, e);
+                                        let _ = reply.send(Value::Error(e));
+                                    }
+                                    Ok(()) => {
+                                        cluster.send_cmd(&(client, session_id));
+                                        let _ = reply.send(Value::from(uuid_string(session_id)));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1040,13 +1066,17 @@ mod record {
         while let Some(reply) = rx.next().await {
             match cts.changed(&resolver).await {
                 Ok(true) => match resolver.list_matching(&spec).await {
-                    Ok(lst) => { let _ = reply.send(Some(lst)); }
+                    Ok(lst) => {
+                        let _ = reply.send(Some(lst));
+                    }
                     Err(e) => {
                         warn!("list_task: list_matching failed {}, will retry", e);
                         let _ = reply.send(None);
                     }
+                },
+                Ok(false) => {
+                    let _ = reply.send(None);
                 }
-                Ok(false) => { let _ = reply.send(None); }
                 Err(e) => {
                     warn!("list_task: check_changed failed {}, will retry", e);
                     let _ = reply.send(None);

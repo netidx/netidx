@@ -1,3 +1,6 @@
+* 0.7.3 netidx-tools:
+  - Additional error handling fixes in the recorder.
+
 * 0.7.2 netidx-tools:
   - Make the recorder more robust to transient resolver server
     failures.
