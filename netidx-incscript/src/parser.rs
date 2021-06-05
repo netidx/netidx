@@ -1,4 +1,4 @@
-use crate::view::{Expr, ExprId, ExprKind};
+use crate::expr::{Expr, ExprId, ExprKind};
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -14,7 +14,8 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, publisher::Value, utils};
+use netidx_core::{chars::Chars, utils};
+use netidx_netproto::value::Value;
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 pub(crate) static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];
