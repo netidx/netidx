@@ -14,7 +14,7 @@ license = "MIT"
 
 [dependencies]
 netidx-core = { path = "../netidx-core", version = "0.7" }
-netidx-netproto = { path = "../netidx-netproto", version = "0.7" }
+netidx = { path = "../netidx", version = "0.7" }
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 lazy_static = "1"
@@ -23,6 +23,7 @@ anyhow = "1"
 bytes = "1"
 base64 = "0.13"
 combine = "4"
+fxhash = "0.2"
 
 [dev-dependencies]
 proptest = "1"

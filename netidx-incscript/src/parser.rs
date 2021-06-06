@@ -14,8 +14,7 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx_core::{chars::Chars, utils};
-use netidx_netproto::value::Value;
+use netidx::{chars::Chars, utils, publisher::Value};
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 pub(crate) static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];

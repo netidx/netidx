@@ -1721,7 +1721,7 @@ impl Expr {
                     .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
                     .collect();
                 let function =
-                    Box::new(Formula::new(&*ctx, &variables, function, &*args));
+                    Box::new(Formula::new(ctx, &variables, function, &*args));
                 if let Some(v) = function.current() {
                     ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
                 }
