@@ -1,4 +1,7 @@
-use crate::vm::{Apply, ExecCtx, InitFn, Node, Register, Target};
+use crate::{
+    expr::Expr,
+    vm::{Apply, ExecCtx, InitFn, Node, Register, Target},
+};
 use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
@@ -616,3 +619,64 @@ impl CachedCurEval for StringConcatEv {
 
 pub type StringConcat = CachedCur<StringConcatEv>;
 
+pub(super) struct Eval<C: Clone + 'static> {
+    ctx: C,
+    cached: CachedVals,
+    current: RefCell<Result<Node<C>, Value>>,
+}
+
+impl Eval {
+    fn compile(&self) {
+        *self.current.borrow_mut() = match &**self.cached.0.borrow() {
+            [None] => Err(Value::Null),
+            [Some(v)] => match v {
+                Value::String(s) => match s.parse::<Expr>() {
+                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
+                    Err(e) => {
+                        let e = format!("eval(src), error parsing formula {}, {}", s, e);
+                        Err(Value::Error(Chars::from(e)))
+                    }
+                },
+                v => {
+                    let e = format!("eval(src) expected 1 string argument, not {}", v);
+                    Err(Value::Error(Chars::from(e)))
+                }
+            },
+            _ => Err(Value::Error(Chars::from("eval(src) expected 1 argument"))),
+        }
+    }
+}
+
+impl<C: Clone + 'static> Register<C> for Eval<C> {
+    fn register(ctx: &ExecCtx<C>) {
+        let f: InitFn<C> = Box::new(|ctx, from| {
+            let t = Eval {
+                ctx: ctx.clone(),
+                cached: CachedVals::new(from),
+                current: RefCell::new(Err(Value::Null)),
+            };
+            t.compile();
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("eval".into(), f);
+    }
+}
+
+impl<C: Clone + 'static> Apply<C> for Eval {
+    fn current(&self) -> Option<Value> {
+        match &*self.current.borrow() {
+            Ok(s) => s.current(),
+            Err(v) => Some(v.clone()),
+        }
+    }
+
+    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
+        if self.cached.update(from, tgt, value) {
+            self.compile();
+        }
+        match &*self.current.borrow() {
+            Ok(s) => s.update(tgt, value),
+            Err(v) => Some(v.clone()),
+        }
+    }
+}
