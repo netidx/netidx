@@ -1,5 +1,8 @@
 use crate::vm::{Apply, ExecCtx, InitFn, Node, Register, Target};
-use netidx::subscriber::Value;
+use netidx::{
+    chars::Chars,
+    subscriber::{Typ, Value},
+};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
@@ -156,3 +159,460 @@ impl CachedCurEval for SumEv {
 }
 
 pub type Sum = CachedCur<SumEv>;
+
+pub struct ProductEv;
+
+fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (Some(l), Some(r)) => Some(l * r),
+    }
+}
+
+impl CachedCurEval for ProductEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0.borrow().iter().fold(None, |res, v| match res {
+            res @ Some(Value::Error(_)) => res,
+            res => prod_vals(res, v.clone()),
+        })
+    }
+
+    fn name() -> &'static str {
+        "product"
+    }
+}
+
+pub type Product = CachedCur<ProductEv>;
+
+pub struct DivideEv;
+
+fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (Some(l), Some(r)) => Some(l / r),
+    }
+}
+
+impl CachedCurEval for DivideEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0.borrow().iter().fold(None, |res, v| match res {
+            res @ Some(Value::Error(_)) => res,
+            res => div_vals(res, v.clone()),
+        })
+    }
+
+    fn name() -> &'static str {
+        "divide"
+    }
+}
+
+pub type Divide = CachedCur<DivideEv>;
+
+pub struct MinEv;
+
+impl CachedCurEval for MinEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
+            None => Some(v),
+            Some(v0) => {
+                if v < v0 {
+                    Some(v)
+                } else {
+                    Some(v0)
+                }
+            }
+        })
+    }
+
+    fn name() -> &'static str {
+        "min"
+    }
+}
+
+pub type Min = CachedCur<MinEv>;
+
+pub struct MaxEv;
+
+impl CachedCurEv for MaxEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
+            None => Some(v),
+            Some(v0) => {
+                if v > v0 {
+                    Some(v)
+                } else {
+                    Some(v0)
+                }
+            }
+        })
+    }
+
+    fn name() -> &'static str {
+        "max"
+    }
+}
+
+pub type Max = CachedCur<MaxEv>;
+
+pub struct AndEv;
+
+impl CachedCurEval for AndEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        let res = from.0.borrow().iter().all(|v| match v {
+            Some(Value::True) => true,
+            _ => false,
+        });
+        if res {
+            Some(Value::True)
+        } else {
+            Some(Value::False)
+        }
+    }
+
+    fn name() -> &'static str {
+        "and"
+    }
+}
+
+pub type And = CachedCur<AndEv>;
+
+pub struct OrEv;
+
+impl CachedCurEval for OrEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        let res = from.0.borrow().iter().any(|v| match v {
+            Some(Value::True) => true,
+            _ => false,
+        });
+        if res {
+            Some(Value::True)
+        } else {
+            Some(Value::False)
+        }
+    }
+
+    fn name() -> &'static str {
+        "or"
+    }
+}
+
+pub type Or = CachedCur<OrEv>;
+
+pub struct NotEv;
+
+impl CachedCurEval for NotEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [v] => v.as_ref().map(|v| !(v.clone())),
+            _ => Some(Value::Error(Chars::from("not expected 1 argument"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "not"
+    }
+}
+
+pub type Not = CachedCur<NotEv>;
+
+pub struct CmpEv;
+
+fn eval_op<T: PartialEq + PartialOrd>(op: &str, v0: T, v1: T) -> Value {
+    match op {
+        "eq" => {
+            if v0 == v1 {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        "lt" => {
+            if v0 < v1 {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        "gt" => {
+            if v0 > v1 {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        "lte" => {
+            if v0 <= v1 {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        "gte" => {
+            if v0 >= v1 {
+                Value::True
+            } else {
+                Value::False
+            }
+        }
+        op => Value::Error(Chars::from(format!(
+            "invalid op {}, expected eq, lt, gt, lte, or gte",
+            op
+        ))),
+    }
+}
+
+impl CachedCurEval for CmpEv {
+    fn name() -> &'static str {
+        "cmp"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [op, v0, v1] => match op {
+                None => None,
+                Some(Value::String(op)) => match (v0, v1) {
+                    (None, None) => Some(Value::False),
+                    (_, None) => Some(Value::False),
+                    (None, _) => Some(Value::False),
+                    (Some(v0), Some(v1)) => match (v0, v1) {
+                        (Value::U32(v0), Value::U32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::U32(v0), Value::V32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::V32(v0), Value::V32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::V32(v0), Value::U32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::I32(v0), Value::I32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::I32(v0), Value::Z32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::Z32(v0), Value::Z32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::Z32(v0), Value::I32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::U64(v0), Value::U64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::U64(v0), Value::V64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::V64(v0), Value::V64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::V64(v0), Value::U64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::I64(v0), Value::I64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::I64(v0), Value::Z64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::Z64(v0), Value::Z64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::Z64(v0), Value::I64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::F32(v0), Value::F32(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::F64(v0), Value::F64(v1)) => Some(eval_op(&*op, v0, v1)),
+                        (Value::String(v0), Value::String(v1)) => {
+                            Some(eval_op(&*op, v0, v1))
+                        }
+                        (Value::Bytes(v0), Value::Bytes(v1)) => {
+                            Some(eval_op(&*op, v0, v1))
+                        }
+                        (Value::True, Value::True) => Some(eval_op(&*op, true, true)),
+                        (Value::True, Value::False) => Some(eval_op(&*op, true, false)),
+                        (Value::False, Value::True) => Some(eval_op(&*op, false, true)),
+                        (Value::False, Value::False) => Some(eval_op(&*op, false, false)),
+                        (Value::Ok, Value::Ok) => Some(eval_op(&*op, true, true)),
+                        (Value::Error(v0), Value::Error(v1)) => {
+                            Some(eval_op(&*op, v0, v1))
+                        }
+                        (Value::Null, Value::Null) => Some(Value::True),
+                        (_, _) => Some(Value::False),
+                    },
+                },
+                Some(_) => Some(Value::Error(Chars::from(
+                    "cmp(op, v0, v1): expected op to be a string",
+                ))),
+            },
+            _ => Some(Value::Error(Chars::from("cmp(op, v0, v1): expected 3 arguments"))),
+        }
+    }
+}
+
+pub type Cmp = CachedCur<CmpEv>;
+
+pub struct IfEv;
+
+impl CachedCurEval for IfEv {
+    fn name() -> &'static str {
+        "if"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [cond, b1] => match cond {
+                None => None,
+                Some(Value::True) => b1.clone(),
+                Some(Value::False) => None,
+                _ => Some(Value::Error(Chars::from(
+                    "if(predicate, caseIf, [caseElse]): expected boolean condition",
+                ))),
+            },
+            [cond, b1, b2] => match cond {
+                None => None,
+                Some(Value::True) => b1.clone(),
+                Some(Value::False) => b2.clone(),
+                _ => Some(Value::Error(Chars::from(
+                    "if(predicate, caseIf, [caseElse]): expected boolean condition",
+                ))),
+            },
+            _ => Some(Value::Error(Chars::from(
+                "if(predicate, caseIf, [caseElse]): expected at least 2 arguments",
+            ))),
+        }
+    }
+}
+
+pub type If = CachedCur<IfEv>;
+
+pub struct FilterEv;
+
+impl CachedCurEval for FilterEv {
+    fn name() -> &'static str {
+        "filter"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [pred, s] => match pred {
+                None => None,
+                Some(Value::True) => s.clone(),
+                Some(Value::False) => None,
+                _ => Some(Value::Error(Chars::from(
+                    "filter(predicate, source) expected boolean predicate",
+                ))),
+            },
+            _ => Some(Value::Error(Chars::from(
+                "filter(predicate, source): expected 2 arguments",
+            ))),
+        }
+    }
+}
+
+pub type Filter = CachedCur<FilterEv>;
+
+pub struct CastEv;
+
+fn with_typ_prefix(
+    from: &CachedVals,
+    name: &'static str,
+    f: impl Fn(Typ, &Option<Value>) -> Option<Value>,
+) -> Option<Value> {
+    match &**from.0.borrow() {
+        [typ, src] => match typ {
+            None => None,
+            Some(Value::String(s)) => match s.parse::<Typ>() {
+                Ok(typ) => f(typ, src),
+                Err(e) => Some(Value::Error(Chars::from(format!(
+                    "{}: invalid type {}, {}",
+                    name, s, e
+                )))),
+            },
+            _ => Some(Value::Error(Chars::from(format!(
+                "{} expected typ as string",
+                name
+            )))),
+        },
+        _ => Some(Value::Error(Chars::from(format!("{} expected 2 arguments", name)))),
+    }
+}
+
+impl CachedCurEval for CastEv {
+    fn name() -> &'static str {
+        "cast"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        with_typ_prefix(from, "cast(typ, src)", |typ, v| match v {
+            None => None,
+            Some(v) => v.clone().cast(typ),
+        })
+    }
+}
+
+pub type Cast = CachedCur<CastEv>;
+
+pub struct IsaEv;
+
+impl CachedCurEval for IsaEv {
+    fn name() -> &'static str {
+        "isa"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        with_typ_prefix(from, "isa(typ, src)", |typ, v| match (typ, v) {
+            (_, None) => None,
+            (Typ::U32, Some(Value::U32(_))) => Some(Value::True),
+            (Typ::V32, Some(Value::V32(_))) => Some(Value::True),
+            (Typ::I32, Some(Value::I32(_))) => Some(Value::True),
+            (Typ::Z32, Some(Value::Z32(_))) => Some(Value::True),
+            (Typ::U64, Some(Value::U64(_))) => Some(Value::True),
+            (Typ::V64, Some(Value::V64(_))) => Some(Value::True),
+            (Typ::I64, Some(Value::I64(_))) => Some(Value::True),
+            (Typ::Z64, Some(Value::Z64(_))) => Some(Value::True),
+            (Typ::F32, Some(Value::F32(_))) => Some(Value::True),
+            (Typ::F64, Some(Value::F64(_))) => Some(Value::True),
+            (Typ::Bool, Some(Value::True)) => Some(Value::True),
+            (Typ::Bool, Some(Value::False)) => Some(Value::True),
+            (Typ::String, Some(Value::String(_))) => Some(Value::True),
+            (Typ::Bytes, Some(Value::Bytes(_))) => Some(Value::True),
+            (Typ::Result, Some(Value::Ok)) => Some(Value::True),
+            (Typ::Result, Some(Value::Error(_))) => Some(Value::True),
+            (_, Some(_)) => Some(Value::False),
+        })
+    }
+}
+
+pub type Isa = CachedCur<IsaEv>;
+
+pub struct StringJoinEv;
+
+impl CachedCurEval for StringJoinEv {
+    fn name() -> &'static str {
+        "string_join"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        use bytes::BytesMut;
+        let vals = from.0.borrow();
+        let mut parts = vals
+            .iter()
+            .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
+        match parts.next() {
+            None => None,
+            Some(sep) => {
+                let mut res = BytesMut::new();
+                for p in parts {
+                    if res.is_empty() {
+                        res.extend_from_slice(p.bytes());
+                    } else {
+                        res.extend_from_slice(sep.bytes());
+                        res.extend_from_slice(p.bytes());
+                    }
+                }
+                Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
+            }
+        }
+    }
+}
+
+pub type StringJoin = CachedCur<StringJoinEv>;
+
+pub struct StringConcatEv;
+
+impl CachedCurEval for StringConcatEv {
+    fn name() -> &'static str {
+        "string_concat"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        use bytes::BytesMut;
+        let vals = from.0.borrow();
+        let parts = vals
+            .iter()
+            .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
+        let mut res = BytesMut::new();
+        for p in parts {
+            res.extend_from_slice(p.bytes());
+        }
+        Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
+    }
+}
+
+pub type StringConcat = CachedCur<StringConcatEv>;
+
