@@ -1,5 +1,5 @@
 use crate::parser;
-use netidx::{utils, subscriber::{Value, SubId}};
+use netidx::{subscriber::Value, utils};
 use regex::Regex;
 use serde::{
     de::{self, Visitor},

@@ -1,19 +1,10 @@
-use crate::{
-    expr::{Expr, ExprId, ExprKind},
-    vm::{Apply, ExecCtx, InitFn, Node, Target},
-};
-use anyhow::{bail, Result};
-use fxhash::FxBuildHasher;
-use netidx::{
-    chars::Chars,
-    subscriber::{SubId, Value},
-};
+use crate::vm::{Apply, ExecCtx, InitFn, Node, Register, Target};
+use netidx::subscriber::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    fmt,
-    ops::Deref,
-    rc::{Rc, Weak},
+    marker::PhantomData,
+    rc::Rc,
 };
 
 #[derive(Debug, Clone)]
@@ -45,8 +36,8 @@ impl CachedVals {
 
 pub struct Any(Rc<RefCell<Option<Value>>>);
 
-impl Any {
-    pub fn register<C: 'static>(ctx: &ExecCtx<C>) {
+impl<C: 'static> Register<C> for Any {
+    fn register(ctx: &ExecCtx<C>) {
         let f: InitFn<C> = Box::new(|_ctx, from| {
             Box::new(Any(Rc::new(RefCell::new(from.iter().find_map(|s| s.current())))))
         });
@@ -71,3 +62,97 @@ impl<C: 'static> Apply<C> for Any {
         res
     }
 }
+
+pub trait CachedCurEval {
+    fn eval(from: &CachedVals) -> Option<Value>;
+    fn name() -> &'static str;
+}
+
+pub struct CachedCur<T: CachedCurEval + 'static> {
+    cached: CachedVals,
+    current: RefCell<Option<Value>>,
+    t: PhantomData<T>,
+}
+
+impl<C: 'static, T: CachedCurEval + 'static> Register<C> for CachedCur<T> {
+    fn register(ctx: &ExecCtx<C>) {
+        let f: InitFn<C> = Box::new(|_ctx, from| {
+            let cached = CachedVals::new(from);
+            let current = RefCell::new(T::eval(&cached));
+            Box::new(CachedCur::<T> { cached, current, t: PhantomData })
+        });
+        ctx.functions.borrow_mut().insert(T::name().into(), f);
+    }
+}
+
+impl<C: 'static, T: CachedCurEval + 'static> Apply<C> for CachedCur<T> {
+    fn current(&self) -> Option<Value> {
+        self.current.borrow().clone()
+    }
+
+    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
+        if !self.cached.update(from, tgt, value) {
+            None
+        } else {
+            let cur = T::eval(&self.cached);
+            if cur == *self.current.borrow() {
+                None
+            } else {
+                *self.current.borrow_mut() = cur.clone();
+                cur
+            }
+        }
+    }
+}
+
+pub struct AllEv;
+
+impl CachedCurEval for AllEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &**from.0.borrow() {
+            [] => None,
+            [hd, tl @ ..] => match hd {
+                None => None,
+                v @ Some(_) => {
+                    if tl.into_iter().all(|v1| v1 == v) {
+                        v.clone()
+                    } else {
+                        None
+                    }
+                }
+            },
+        }
+    }
+
+    fn name() -> &'static str {
+        "all"
+    }
+}
+
+pub type All = CachedCur<AllEv>;
+
+fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (None, r @ Some(_)) => r,
+        (r @ Some(_), None) => r,
+        (Some(l), Some(r)) => Some(l + r),
+    }
+}
+
+pub struct SumEv;
+
+impl CachedCurEval for SumEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0.borrow().iter().fold(None, |res, v| match res {
+            res @ Some(Value::Error(_)) => res,
+            res => add_vals(res, v.clone()),
+        })
+    }
+
+    fn name() -> &'static str {
+        "sum"
+    }
+}
+
+pub type Sum = CachedCur<SumEv>;

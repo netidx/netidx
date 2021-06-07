@@ -74,6 +74,10 @@ impl DbgCtx {
 
 pub type InitFn<C> = Box<dyn Fn(&ExecCtx<C>, &[Node<C>]) -> Box<dyn Apply<C>> + 'static>;
 
+pub trait Register<C> {
+    fn register(ctx: &ExecCtx<C>);
+}
+
 pub struct ExecCtxInner<C> {
     pub functions: RefCell<HashMap<String, InitFn<C>>>,
     pub variables: RefCell<HashMap<Chars, Value>>,
