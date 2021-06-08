@@ -1,5 +1,4 @@
 use crate::expr::{Expr, ExprId, ExprKind};
-use anyhow::{bail, Result};
 use fxhash::FxBuildHasher;
 use netidx::{
     chars::Chars,
@@ -127,17 +126,18 @@ pub trait Apply<C> {
 }
 
 pub enum Node<C> {
+    Error(Expr, Value),
     Constant(Expr, Value),
     Apply { spec: Expr, ctx: ExecCtx<C>, args: Vec<Node<C>>, function: Box<dyn Apply<C>> },
 }
 
 impl<C> fmt::Display for Node<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = match self {
-            Node::Constant(s, _) => s,
-            Node::Apply { spec, .. } => spec,
-        };
-        write!(f, "{}", s.to_string())
+        match self {
+            Node::Error(s, _) | Node::Constant(s, _) | Node::Apply { spec: s, .. } => {
+                write!(f, "{}", s)
+            }
+        }
     }
 }
 
@@ -145,30 +145,40 @@ impl<C> Node<C>
 where
     C: 'static,
 {
-    pub fn compile(ctx: &ExecCtx<C>, spec: Expr) -> Result<Self> {
+    pub fn compile(ctx: &ExecCtx<C>, spec: Expr) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
                 ctx.dbg_ctx.borrow_mut().add_event(*id, v.clone());
-                Ok(Node::Constant(spec.clone(), v.clone()))
+                Node::Constant(spec.clone(), v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, .. } => {
-                let args: Result<Vec<Node<C>>> =
-                    args.iter().map(|spec| Node::compile(ctx, spec.clone())).collect();
-                let args = args?;
-                let function = match ctx.functions.borrow().get(function) {
-                    None => bail!("no such function {}", function),
-                    Some(init) => init(ctx, &args),
-                };
-                if let Some(v) = function.current() {
-                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
+                match ctx.functions.borrow().get(function) {
+                    None => Node::Error(
+                        spec.clone(),
+                        Value::Error(Chars::from(format!(
+                            "unknown function {}",
+                            function
+                        ))),
+                    ),
+                    Some(init) => {
+                        let args: Vec<Node<C>> = args
+                            .iter()
+                            .map(|spec| Node::compile(ctx, spec.clone()))
+                            .collect();
+                        let function = init(ctx, &args);
+                        if let Some(v) = function.current() {
+                            ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
+                        }
+                        Node::Apply { spec, ctx: ctx.clone(), args, function }
+                    }
                 }
-                Ok(Node::Apply { spec, ctx: ctx.clone(), args, function })
             }
         }
     }
 
     pub fn current(&self) -> Option<Value> {
         match self {
+            Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, v) => Some(v.clone()),
             Node::Apply { function, .. } => function.current(),
         }
@@ -176,6 +186,7 @@ where
 
     pub fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
         match self {
+            Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,
             Node::Apply { spec, ctx, args, function } => {
                 let res = function.update(&args, tgt, value);

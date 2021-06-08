@@ -8,7 +8,6 @@ use netidx::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
     marker::PhantomData,
     rc::Rc,
 };
@@ -240,7 +239,7 @@ pub type Min = CachedCur<MinEv>;
 
 pub struct MaxEv;
 
-impl CachedCurEv for MaxEv {
+impl CachedCurEval for MaxEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         from.0.borrow().iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
             None => Some(v),
@@ -619,19 +618,19 @@ impl CachedCurEval for StringConcatEv {
 
 pub type StringConcat = CachedCur<StringConcatEv>;
 
-pub(super) struct Eval<C: Clone + 'static> {
-    ctx: C,
+pub struct Eval<C: Clone + 'static> {
+    ctx: ExecCtx<C>,
     cached: CachedVals,
     current: RefCell<Result<Node<C>, Value>>,
 }
 
-impl Eval {
+impl<C: Clone + 'static> Eval<C> {
     fn compile(&self) {
         *self.current.borrow_mut() = match &**self.cached.0.borrow() {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<Expr>() {
-                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
+                    Ok(spec) => Ok(Node::compile(&self.ctx, spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -662,7 +661,7 @@ impl<C: Clone + 'static> Register<C> for Eval<C> {
     }
 }
 
-impl<C: Clone + 'static> Apply<C> for Eval {
+impl<C: Clone + 'static> Apply<C> for Eval<C> {
     fn current(&self) -> Option<Value> {
         match &*self.current.borrow() {
             Ok(s) => s.current(),
@@ -677,6 +676,89 @@ impl<C: Clone + 'static> Apply<C> for Eval {
         match &*self.current.borrow() {
             Ok(s) => s.update(tgt, value),
             Err(v) => Some(v.clone()),
+        }
+    }
+}
+
+pub struct Count {
+    from: CachedVals,
+    count: Cell<u64>,
+}
+
+impl<C: 'static> Register<C> for Count {
+    fn register(ctx: &ExecCtx<C>) {
+        let f: InitFn<C> = Box::new(|_, from| {
+            Box::new(Count { from: CachedVals::new(from), count: Cell::new(0) })
+        });
+        ctx.functions.borrow_mut().insert("count".into(), f);
+    }
+}
+
+impl<C: 'static> Apply<C> for Count {
+    fn current(&self) -> Option<Value> {
+        match &**self.from.0.borrow() {
+            [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
+            [_] => Some(Value::U64(self.count.get())),
+            _ => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
+        }
+    }
+
+    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
+        if self.from.update(from, tgt, value) {
+            self.count.set(self.count.get() + 1);
+            Apply::<C>::current(self)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Sample {
+    current: RefCell<Option<Value>>,
+}
+
+impl<C: 'static> Register<C> for Sample {
+    fn register(ctx: &ExecCtx<C>) {
+        let f: InitFn<C> = Box::new(|_, from| {
+            let v = match from {
+                [trigger, source] => match trigger.current() {
+                    None => None,
+                    Some(_) => source.current(),
+                },
+                _ => Some(Value::Error(Chars::from(
+                    "sample(trigger, source): expected 2 arguments",
+                ))),
+            };
+            Box::new(Sample { current: RefCell::new(v) })
+        });
+        ctx.functions.borrow_mut().insert("sample".into(), f);
+    }
+}
+
+impl<C: 'static> Apply<C> for Sample {
+    fn current(&self) -> Option<Value> {
+        self.current.borrow().clone()
+    }
+
+    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
+        match from {
+            [trigger, source] => {
+                source.update(tgt, value);
+                if trigger.update(tgt, value).is_none() {
+                    None
+                } else {
+                    let v = source.current();
+                    *self.current.borrow_mut() = v.clone();
+                    v
+                }
+            }
+            _ => {
+                let v = Some(Value::Error(Chars::from(
+                    "sample(trigger, source): expected 2 arguments",
+                )));
+                *self.current.borrow_mut() = v.clone();
+                v
+            }
         }
     }
 }
