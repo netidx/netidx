@@ -1,6 +1,6 @@
 use crate::{
     expr::Expr,
-    vm::{Apply, ExecCtx, InitFn, Node, Register, Target},
+    vm::{Apply, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
     chars::Chars,
@@ -16,19 +16,14 @@ use std::{
 pub struct CachedVals(pub Rc<RefCell<Vec<Option<Value>>>>);
 
 impl CachedVals {
-    pub fn new<C: 'static>(from: &[Node<C>]) -> CachedVals {
+    pub fn new<C, E>(from: &[Node<C, E>]) -> CachedVals {
         CachedVals(Rc::new(RefCell::new(from.into_iter().map(|s| s.current()).collect())))
     }
 
-    pub fn update<C: 'static>(
-        &self,
-        from: &[Node<C>],
-        tgt: Target,
-        value: &Value,
-    ) -> bool {
+    pub fn update<C, E>(&self, from: &[Node<C, E>], event: &E) -> bool {
         let mut vals = self.0.borrow_mut();
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
-            match src.update(tgt, value) {
+            match src.update(event) {
                 None => res,
                 v @ Some(_) => {
                     vals[i] = v;
@@ -41,28 +36,28 @@ impl CachedVals {
 
 pub struct Any(Rc<RefCell<Option<Value>>>);
 
-impl<C: 'static> Register<C> for Any {
-    fn register(ctx: &ExecCtx<C>) {
-        let f: InitFn<C> = Box::new(|_ctx, from| {
+impl<C, E> Register<C, E> for Any {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|_ctx, from| {
             Box::new(Any(Rc::new(RefCell::new(from.iter().find_map(|s| s.current())))))
         });
         ctx.functions.borrow_mut().insert("any".into(), f);
     }
 }
 
-impl<C: 'static> Apply<C> for Any {
+impl<C, E> Apply<C, E> for Any {
     fn current(&self) -> Option<Value> {
         self.0.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
-        let res =
-            from.into_iter().filter_map(|s| s.update(tgt, value)).fold(None, |res, v| {
-                match res {
-                    None => Some(v),
-                    Some(_) => res,
-                }
-            });
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+        let res = from.into_iter().filter_map(|s| s.update(event)).fold(
+            None,
+            |res, v| match res {
+                None => Some(v),
+                Some(_) => res,
+            },
+        );
         *self.0.borrow_mut() = res.clone();
         res
     }
@@ -73,15 +68,15 @@ pub trait CachedCurEval {
     fn name() -> &'static str;
 }
 
-pub struct CachedCur<T: CachedCurEval + 'static> {
+pub struct CachedCur<T: CachedCurEval> {
     cached: CachedVals,
     current: RefCell<Option<Value>>,
     t: PhantomData<T>,
 }
 
-impl<C: 'static, T: CachedCurEval + 'static> Register<C> for CachedCur<T> {
-    fn register(ctx: &ExecCtx<C>) {
-        let f: InitFn<C> = Box::new(|_ctx, from| {
+impl<C, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|_ctx, from| {
             let cached = CachedVals::new(from);
             let current = RefCell::new(T::eval(&cached));
             Box::new(CachedCur::<T> { cached, current, t: PhantomData })
@@ -90,13 +85,13 @@ impl<C: 'static, T: CachedCurEval + 'static> Register<C> for CachedCur<T> {
     }
 }
 
-impl<C: 'static, T: CachedCurEval + 'static> Apply<C> for CachedCur<T> {
+impl<C, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
     fn current(&self) -> Option<Value> {
         self.current.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
-        if !self.cached.update(from, tgt, value) {
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+        if !self.cached.update(from, event) {
             None
         } else {
             let cur = T::eval(&self.cached);
@@ -618,13 +613,13 @@ impl CachedCurEval for StringConcatEv {
 
 pub type StringConcat = CachedCur<StringConcatEv>;
 
-pub struct Eval<C: Clone + 'static> {
-    ctx: ExecCtx<C>,
+pub struct Eval<C: Clone + 'static, E: 'static> {
+    ctx: ExecCtx<C, E>,
     cached: CachedVals,
-    current: RefCell<Result<Node<C>, Value>>,
+    current: RefCell<Result<Node<C, E>, Value>>,
 }
 
-impl<C: Clone + 'static> Eval<C> {
+impl<C: Clone, E> Eval<C, E> {
     fn compile(&self) {
         *self.current.borrow_mut() = match &**self.cached.0.borrow() {
             [None] => Err(Value::Null),
@@ -646,9 +641,9 @@ impl<C: Clone + 'static> Eval<C> {
     }
 }
 
-impl<C: Clone + 'static> Register<C> for Eval<C> {
-    fn register(ctx: &ExecCtx<C>) {
-        let f: InitFn<C> = Box::new(|ctx, from| {
+impl<C: Clone, E> Register<C, E> for Eval<C, E> {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
             let t = Eval {
                 ctx: ctx.clone(),
                 cached: CachedVals::new(from),
@@ -661,7 +656,7 @@ impl<C: Clone + 'static> Register<C> for Eval<C> {
     }
 }
 
-impl<C: Clone + 'static> Apply<C> for Eval<C> {
+impl<C: Clone, E> Apply<C, E> for Eval<C, E> {
     fn current(&self) -> Option<Value> {
         match &*self.current.borrow() {
             Ok(s) => s.current(),
@@ -669,12 +664,12 @@ impl<C: Clone + 'static> Apply<C> for Eval<C> {
         }
     }
 
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
-        if self.cached.update(from, tgt, value) {
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+        if self.cached.update(from, event) {
             self.compile();
         }
         match &*self.current.borrow() {
-            Ok(s) => s.update(tgt, value),
+            Ok(s) => s.update(event),
             Err(v) => Some(v.clone()),
         }
     }
@@ -685,16 +680,16 @@ pub struct Count {
     count: Cell<u64>,
 }
 
-impl<C: 'static> Register<C> for Count {
-    fn register(ctx: &ExecCtx<C>) {
-        let f: InitFn<C> = Box::new(|_, from| {
+impl<C, E> Register<C, E> for Count {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|_, from| {
             Box::new(Count { from: CachedVals::new(from), count: Cell::new(0) })
         });
         ctx.functions.borrow_mut().insert("count".into(), f);
     }
 }
 
-impl<C: 'static> Apply<C> for Count {
+impl<C, E> Apply<C, E> for Count {
     fn current(&self) -> Option<Value> {
         match &**self.from.0.borrow() {
             [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
@@ -703,10 +698,10 @@ impl<C: 'static> Apply<C> for Count {
         }
     }
 
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
-        if self.from.update(from, tgt, value) {
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+        if self.from.update(from, event) {
             self.count.set(self.count.get() + 1);
-            Apply::<C>::current(self)
+            Apply::<C, E>::current(self)
         } else {
             None
         }
@@ -717,9 +712,9 @@ pub struct Sample {
     current: RefCell<Option<Value>>,
 }
 
-impl<C: 'static> Register<C> for Sample {
-    fn register(ctx: &ExecCtx<C>) {
-        let f: InitFn<C> = Box::new(|_, from| {
+impl<C, E> Register<C, E> for Sample {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|_, from| {
             let v = match from {
                 [trigger, source] => match trigger.current() {
                     None => None,
@@ -735,16 +730,16 @@ impl<C: 'static> Register<C> for Sample {
     }
 }
 
-impl<C: 'static> Apply<C> for Sample {
+impl<C, E> Apply<C, E> for Sample {
     fn current(&self) -> Option<Value> {
         self.current.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
         match from {
             [trigger, source] => {
-                source.update(tgt, value);
-                if trigger.update(tgt, value).is_none() {
+                source.update(event);
+                if trigger.update(event).is_none() {
                     None
                 } else {
                     let v = source.current();

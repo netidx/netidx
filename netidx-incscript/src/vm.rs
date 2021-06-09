@@ -1,9 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind};
 use fxhash::FxBuildHasher;
-use netidx::{
-    chars::Chars,
-    subscriber::{SubId, Value},
-};
+use netidx::{chars::Chars, subscriber::Value};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -71,36 +68,42 @@ impl DbgCtx {
     }
 }
 
-pub type InitFn<C> = Box<dyn Fn(&ExecCtx<C>, &[Node<C>]) -> Box<dyn Apply<C>> + 'static>;
+pub type InitFn<C, E> =
+    Box<dyn Fn(&ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
 
-pub trait Register<C> {
-    fn register(ctx: &ExecCtx<C>);
+pub trait Register<C, E> {
+    fn register(ctx: &ExecCtx<C, E>);
 }
 
-pub struct ExecCtxInner<C> {
-    pub functions: RefCell<HashMap<String, InitFn<C>>>,
+pub trait Apply<C, E> {
+    fn current(&self) -> Option<Value>;
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value>;
+}
+
+pub struct ExecCtxInner<C: 'static, E: 'static> {
+    pub functions: RefCell<HashMap<String, InitFn<C, E>>>,
     pub variables: RefCell<HashMap<Chars, Value>>,
     pub dbg_ctx: RefCell<DbgCtx>,
     pub user: C,
 }
 
-pub struct ExecCtx<C>(Rc<ExecCtxInner<C>>);
+pub struct ExecCtx<C: 'static, E: 'static>(Rc<ExecCtxInner<C, E>>);
 
-impl<C> Clone for ExecCtx<C> {
+impl<C, E> Clone for ExecCtx<C, E> {
     fn clone(&self) -> Self {
         ExecCtx(Rc::clone(&self.0))
     }
 }
 
-impl<C> Deref for ExecCtx<C> {
-    type Target = ExecCtxInner<C>;
+impl<C, E> Deref for ExecCtx<C, E> {
+    type Target = ExecCtxInner<C, E>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<C> ExecCtx<C> {
+impl<C, E> ExecCtx<C, E> {
     pub fn new(user: C) -> Self {
         let inner = ExecCtxInner {
             functions: RefCell::new(HashMap::new()),
@@ -112,26 +115,18 @@ impl<C> ExecCtx<C> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Target<'a> {
-    Event,
-    Variable(&'a str),
-    Netidx(SubId),
-    Rpc(&'a str),
-}
-
-pub trait Apply<C> {
-    fn current(&self) -> Option<Value>;
-    fn update(&self, from: &[Node<C>], tgt: Target, value: &Value) -> Option<Value>;
-}
-
-pub enum Node<C> {
+pub enum Node<C: 'static, E: 'static> {
     Error(Expr, Value),
     Constant(Expr, Value),
-    Apply { spec: Expr, ctx: ExecCtx<C>, args: Vec<Node<C>>, function: Box<dyn Apply<C>> },
+    Apply {
+        spec: Expr,
+        ctx: ExecCtx<C, E>,
+        args: Vec<Node<C, E>>,
+        function: Box<dyn Apply<C, E>>,
+    },
 }
 
-impl<C> fmt::Display for Node<C> {
+impl<C, E> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Node::Error(s, _) | Node::Constant(s, _) | Node::Apply { spec: s, .. } => {
@@ -141,11 +136,8 @@ impl<C> fmt::Display for Node<C> {
     }
 }
 
-impl<C> Node<C>
-where
-    C: 'static,
-{
-    pub fn compile(ctx: &ExecCtx<C>, spec: Expr) -> Self {
+impl<C, E> Node<C, E> {
+    pub fn compile(ctx: &ExecCtx<C, E>, spec: Expr) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
                 ctx.dbg_ctx.borrow_mut().add_event(*id, v.clone());
@@ -161,7 +153,7 @@ where
                         ))),
                     ),
                     Some(init) => {
-                        let args: Vec<Node<C>> = args
+                        let args: Vec<Node<C, E>> = args
                             .iter()
                             .map(|spec| Node::compile(ctx, spec.clone()))
                             .collect();
@@ -184,12 +176,12 @@ where
         }
     }
 
-    pub fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
+    pub fn update(&self, event: &E) -> Option<Value> {
         match self {
             Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,
             Node::Apply { spec, ctx, args, function } => {
-                let res = function.update(&args, tgt, value);
+                let res = function.update(&args, event);
                 if let Some(v) = &res {
                     ctx.dbg_ctx.borrow_mut().add_event(spec.id, v.clone());
                 }
