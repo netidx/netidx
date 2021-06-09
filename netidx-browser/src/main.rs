@@ -7,7 +7,7 @@ extern crate lazy_static;
 mod backend;
 mod containers;
 mod editor;
-mod formula;
+mod bscript;
 mod table;
 mod util;
 mod view;

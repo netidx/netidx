@@ -14,13 +14,16 @@ use std::{
     result::Result,
 };
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Target<'a> {
+#[derive(Debug, Clone)]
+pub(crate) enum Target {
     Event,
-    Variable(&'a str),
+    Variable(String),
     Netidx(SubId),
-    Rpc(&'a str),
+    Rpc(String),
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct Event(Target, Value);
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedVals(Rc<RefCell<Vec<Option<Value>>>>);

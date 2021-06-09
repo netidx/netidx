@@ -1,5 +1,5 @@
 use netidx::{path::Path, publisher::Value};
-use netidx_incscript::expr::Expr;
+use netidx_bscript::expr::Expr;
 use std::{
     boxed,
     cmp::{PartialEq, PartialOrd},

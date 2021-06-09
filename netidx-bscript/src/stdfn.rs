@@ -757,3 +757,54 @@ impl<C, E> Apply<C, E> for Sample {
         }
     }
 }
+
+pub struct Mean {
+    from: CachedVals,
+    total: Cell<f64>,
+    samples: Cell<usize>,
+}
+
+impl<C, E> Register<C, E> for Mean {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|_, from| {
+            Box::new(Mean {
+                from: CachedVals::new(from),
+                total: Cell::new(0.),
+                samples: Cell::new(0),
+            })
+        });
+        ctx.functions.borrow_mut().insert("mean".into(), f);
+    }
+}
+
+impl<C, E> Apply<C, E> for Mean {
+    fn current(&self) -> Option<Value> {
+        match &**self.from.0.borrow() {
+            [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
+            [_] => {
+                if self.samples.get() > 0 {
+                    Some(Value::F64(self.total.get() / (self.samples.get() as f64)))
+                } else {
+                    None
+                }
+            }
+            _ => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
+        }
+    }
+
+    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+        if self.from.update(from, event) {
+            for v in &*self.from.0.borrow() {
+                if let Some(v) = v {
+                    if let Ok(v) = v.clone().cast_to::<f64>() {
+                        self.total.set(self.total.get() + v);
+                        self.samples.set(self.samples.get() + 1);
+                    }
+                }
+            }
+            Apply::<C, E>::current(self)
+        } else {
+            None
+        }
+    }
+}
