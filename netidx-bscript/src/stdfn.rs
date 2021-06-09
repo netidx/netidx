@@ -20,10 +20,15 @@ impl CachedVals {
         CachedVals(Rc::new(RefCell::new(from.into_iter().map(|s| s.current()).collect())))
     }
 
-    pub fn update<C, E>(&self, from: &[Node<C, E>], event: &E) -> bool {
+    pub fn update<C, E>(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> bool {
         let mut vals = self.0.borrow_mut();
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
-            match src.update(event) {
+            match src.update(ctx, event) {
                 None => res,
                 v @ Some(_) => {
                     vals[i] = v;
@@ -50,14 +55,19 @@ impl<C, E> Apply<C, E> for Any {
         self.0.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
-        let res = from.into_iter().filter_map(|s| s.update(event)).fold(
-            None,
-            |res, v| match res {
-                None => Some(v),
-                Some(_) => res,
-            },
-        );
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        let res =
+            from.into_iter().filter_map(|s| s.update(ctx, event)).fold(None, |res, v| {
+                match res {
+                    None => Some(v),
+                    Some(_) => res,
+                }
+            });
         *self.0.borrow_mut() = res.clone();
         res
     }
@@ -90,8 +100,13 @@ impl<C, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
         self.current.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
-        if !self.cached.update(from, event) {
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        if !self.cached.update(ctx, from, event) {
             None
         } else {
             let cur = T::eval(&self.cached);
@@ -664,12 +679,17 @@ impl<C: Clone, E> Apply<C, E> for Eval<C, E> {
         }
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
-        if self.cached.update(from, event) {
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        if self.cached.update(ctx, from, event) {
             self.compile();
         }
         match &*self.current.borrow() {
-            Ok(s) => s.update(event),
+            Ok(s) => s.update(ctx, event),
             Err(v) => Some(v.clone()),
         }
     }
@@ -698,8 +718,13 @@ impl<C, E> Apply<C, E> for Count {
         }
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
-        if self.from.update(from, event) {
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        if self.from.update(ctx, from, event) {
             self.count.set(self.count.get() + 1);
             Apply::<C, E>::current(self)
         } else {
@@ -735,11 +760,16 @@ impl<C, E> Apply<C, E> for Sample {
         self.current.borrow().clone()
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
         match from {
             [trigger, source] => {
-                source.update(event);
-                if trigger.update(event).is_none() {
+                source.update(ctx, event);
+                if trigger.update(ctx, event).is_none() {
                     None
                 } else {
                     let v = source.current();
@@ -792,8 +822,13 @@ impl<C, E> Apply<C, E> for Mean {
         }
     }
 
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value> {
-        if self.from.update(from, event) {
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        if self.from.update(ctx, from, event) {
             for v in &*self.from.0.borrow() {
                 if let Some(v) = v {
                     if let Ok(v) = v.clone().cast_to::<f64>() {

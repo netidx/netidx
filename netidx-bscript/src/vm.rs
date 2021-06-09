@@ -77,7 +77,12 @@ pub trait Register<C, E> {
 
 pub trait Apply<C, E> {
     fn current(&self) -> Option<Value>;
-    fn update(&self, from: &[Node<C, E>], event: &E) -> Option<Value>;
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value>;
 }
 
 pub struct ExecCtxInner<C: 'static, E: 'static> {
@@ -118,12 +123,7 @@ impl<C, E> ExecCtx<C, E> {
 pub enum Node<C: 'static, E: 'static> {
     Error(Expr, Value),
     Constant(Expr, Value),
-    Apply {
-        spec: Expr,
-        ctx: ExecCtx<C, E>,
-        args: Vec<Node<C, E>>,
-        function: Box<dyn Apply<C, E>>,
-    },
+    Apply { spec: Expr, args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E>> },
 }
 
 impl<C, E> fmt::Display for Node<C, E> {
@@ -161,7 +161,7 @@ impl<C, E> Node<C, E> {
                         if let Some(v) = function.current() {
                             ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
                         }
-                        Node::Apply { spec, ctx: ctx.clone(), args, function }
+                        Node::Apply { spec, args, function }
                     }
                 }
             }
@@ -176,12 +176,12 @@ impl<C, E> Node<C, E> {
         }
     }
 
-    pub fn update(&self, event: &E) -> Option<Value> {
+    pub fn update(&self, ctx: &ExecCtx<C, E>, event: &E) -> Option<Value> {
         match self {
             Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,
-            Node::Apply { spec, ctx, args, function } => {
-                let res = function.update(&args, event);
+            Node::Apply { spec, args, function } => {
+                let res = function.update(ctx, &args, event);
                 if let Some(v) = &res {
                     ctx.dbg_ctx.borrow_mut().add_event(spec.id, v.clone());
                 }
