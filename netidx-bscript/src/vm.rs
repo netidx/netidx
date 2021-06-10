@@ -142,6 +142,7 @@ impl<C, E> ExecCtx<C, E> {
         stdfn::Count::register(&t);
         stdfn::Sample::register(&t);
         stdfn::Mean::register(&t);
+        stdfn::Uniq::register(&t);
         t
     }
 }

@@ -841,3 +841,62 @@ impl<C, E> Apply<C, E> for Mean {
         }
     }
 }
+
+pub(crate) struct Uniq(RefCell<Option<Value>>);
+
+impl<C, E> Register<C, E> for Uniq {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = Uniq(RefCell::new(None));
+            match from {
+                [e] => *t.0.borrow_mut() = e.current(),
+                _ => *t.0.borrow_mut() = Uniq::usage(),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("uniq".into(), f);
+    }
+}
+
+impl<C, E> Apply<C, E> for Uniq {
+    fn current(&self) -> Option<Value> {
+        self.0.borrow().as_ref().cloned()
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        match from {
+            [e] => e.update(ctx, event).and_then(|v| {
+                let cur = &mut *self.0.borrow_mut();
+                if Some(&v) != cur.as_ref() {
+                    *cur = Some(v.clone());
+                    Some(v)
+                } else {
+                    None
+                }
+            }),
+            exprs => {
+                let mut up = false;
+                for e in exprs {
+                    up = e.update(ctx, event).is_some() || up;
+                }
+                *self.0.borrow_mut() = Uniq::usage();
+                if up {
+                    Apply::<C, E>::current(self)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Uniq {
+    fn usage() -> Option<Value> {
+        Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
+    }
+}
