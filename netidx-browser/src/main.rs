@@ -30,7 +30,10 @@ use netidx::{
     resolver::Auth,
     subscriber::{Event, SubId, Value},
 };
-use netidx_bscript::vm::{ExecCtx, Node};
+use netidx_bscript::{
+    expr::ExprKind,
+    vm::{ExecCtx, Node},
+};
 use netidx_protocols::view::{self as protocol_view, ExprId};
 use std::{
     cell::{Cell, RefCell},
@@ -217,75 +220,53 @@ enum Widget {
 }
 
 impl Widget {
-    fn new(ctx: BSCtx, spec: view::Widget, selected_path: gtk::Label) -> Widget {
-        let w =
-            match spec.kind {
-                view::WidgetKind::Action(spec) => {
-                    Widget::Action(widgets::Action::new(ctx.clone(), variables, spec))
-                }
-                view::WidgetKind::Table(base_path, spec) => {
-                    let tbl =
-                        table::Table::new(ctx.clone(), base_path, spec, selected_path);
-                    // force the initial update/subscribe
-                    tbl.start_update_task(None);
-                    Widget::Table(tbl)
-                }
-                view::WidgetKind::Label(spec) => Widget::Label(widgets::Label::new(
-                    ctx.clone(),
-                    variables,
-                    spec,
-                    selected_path,
-                )),
-                view::WidgetKind::Button(spec) => Widget::Button(widgets::Button::new(
-                    ctx.clone(),
-                    variables,
-                    spec,
-                    selected_path,
-                )),
-                view::WidgetKind::Toggle(spec) => Widget::Toggle(widgets::Toggle::new(
-                    ctx.clone(),
-                    variables,
-                    spec,
-                    selected_path,
-                )),
-                view::WidgetKind::Selector(spec) => Widget::Selector(
-                    widgets::Selector::new(ctx.clone(), variables, spec, selected_path),
-                ),
-                view::WidgetKind::Entry(spec) => Widget::Entry(widgets::Entry::new(
-                    ctx.clone(),
-                    variables,
-                    spec,
-                    selected_path,
-                )),
-                view::WidgetKind::Box(s) => {
-                    Widget::Box(containers::Box::new(ctx, variables, s, selected_path))
-                }
-                view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
-                    Widget::new(ctx, variables, (&*widget).clone(), selected_path)
-                }
-                view::WidgetKind::Grid(spec) => Widget::Grid(containers::Grid::new(
-                    ctx,
-                    variables,
-                    spec,
-                    selected_path,
-                )),
-                view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
-                    Widget::new(ctx, variables, (&*widget).clone(), selected_path)
-                }
-                view::WidgetKind::GridRow(_) => {
-                    let s = Value::String(Chars::from("orphaned grid row"));
-                    let spec = view::ExprKind::Constant(s).to_expr();
-                    Widget::Label(widgets::Label::new(
-                        ctx.clone(),
-                        variables,
-                        spec,
-                        selected_path,
-                    ))
-                }
-                view::WidgetKind::LinePlot(spec) => Widget::LinePlot(
-                    widgets::LinePlot::new(ctx, variables, spec, selected_path),
-                ),
-            };
+    fn new(ctx: &BSCtx, spec: view::Widget, selected_path: gtk::Label) -> Widget {
+        let w = match spec.kind {
+            view::WidgetKind::Action(spec) => {
+                Widget::Action(widgets::Action::new(ctx, spec))
+            }
+            view::WidgetKind::Table(base_path, spec) => {
+                let tbl = table::Table::new(ctx, base_path, spec, selected_path);
+                // force the initial update/subscribe
+                tbl.start_update_task(None);
+                Widget::Table(tbl)
+            }
+            view::WidgetKind::Label(spec) => {
+                Widget::Label(widgets::Label::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::Button(spec) => {
+                Widget::Button(widgets::Button::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::Toggle(spec) => {
+                Widget::Toggle(widgets::Toggle::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::Selector(spec) => {
+                Widget::Selector(widgets::Selector::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::Entry(spec) => {
+                Widget::Entry(widgets::Entry::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::Box(s) => {
+                Widget::Box(containers::Box::new(ctx, s, selected_path))
+            }
+            view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
+                Widget::new(ctx, (&*widget).clone(), selected_path)
+            }
+            view::WidgetKind::Grid(spec) => {
+                Widget::Grid(containers::Grid::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
+                Widget::new(ctx, (&*widget).clone(), selected_path)
+            }
+            view::WidgetKind::GridRow(_) => {
+                let s = Value::String(Chars::from("orphaned grid row"));
+                let spec = ExprKind::Constant(s).to_expr();
+                Widget::Label(widgets::Label::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::LinePlot(spec) => {
+                Widget::LinePlot(widgets::LinePlot::new(ctx, spec, selected_path))
+            }
+        };
         if let Some(r) = w.root() {
             set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
         }
@@ -307,23 +288,23 @@ impl Widget {
         }
     }
 
-    fn update<'a, 'b: 'a>(
-        &'a self,
+    fn update(
+        &self,
+        ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        tgt: Target,
-        value: &Value,
+        event: &Target,
     ) {
         match self {
-            Widget::Action(t) => t.update(tgt, value),
-            Widget::Table(t) => t.update(waits, tgt, value),
-            Widget::Label(t) => t.update(tgt, value),
-            Widget::Button(t) => t.update(tgt, value),
-            Widget::Toggle(t) => t.update(tgt, value),
-            Widget::Selector(t) => t.update(tgt, value),
-            Widget::Entry(t) => t.update(tgt, value),
-            Widget::Box(t) => t.update(waits, tgt, value),
-            Widget::Grid(t) => t.update(waits, tgt, value),
-            Widget::LinePlot(t) => t.update(tgt, value),
+            Widget::Action(t) => t.update(ctx, event),
+            Widget::Table(t) => t.update(ctx, waits, event),
+            Widget::Label(t) => t.update(ctx, event),
+            Widget::Button(t) => t.update(ctx, event),
+            Widget::Toggle(t) => t.update(ctx, event),
+            Widget::Selector(t) => t.update(ctx, event),
+            Widget::Entry(t) => t.update(ctx, event),
+            Widget::Box(t) => t.update(ctx, waits, event),
+            Widget::Grid(t) => t.update(ctx, waits, event),
+            Widget::LinePlot(t) => t.update(ctx, event),
         }
     }
 

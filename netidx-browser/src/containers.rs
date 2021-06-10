@@ -1,4 +1,6 @@
-use super::{set_common_props, Target, Vars, Widget, WidgetCtx, DEFAULT_PROPS};
+use super::{
+    set_common_props, BSCtx, BSNode, Target, Vars, Widget, WidgetCtx, DEFAULT_PROPS,
+};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
@@ -12,12 +14,7 @@ pub(super) struct Box {
 }
 
 impl Box {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Box,
-        selected_path: gtk::Label,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, spec: view::Box, selected_path: gtk::Label) -> Self {
         fn is_fill(a: view::Align) -> bool {
             match a {
                 view::Align::Fill | view::Align::Baseline => true,
@@ -35,12 +32,7 @@ impl Box {
         for s in spec.children.iter() {
             match &s.kind {
                 view::WidgetKind::BoxChild(view::BoxChild { pack, padding, widget }) => {
-                    let w = Widget::new(
-                        ctx.clone(),
-                        variables,
-                        (&**widget).clone(),
-                        selected_path.clone(),
-                    );
+                    let w = Widget::new(ctx, (&**widget).clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         let props = s.props.unwrap_or(DEFAULT_PROPS);
                         let (expand, fill) = match spec.direction {
@@ -64,12 +56,7 @@ impl Box {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(
-                        ctx.clone(),
-                        variables,
-                        s.clone(),
-                        selected_path.clone(),
-                    );
+                    let w = Widget::new(ctx, s.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.add(r);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -83,12 +70,12 @@ impl Box {
 
     pub(super) fn update(
         &self,
+        ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        tgt: Target,
-        value: &Value,
+        event: &Target,
     ) {
         for c in &self.children {
-            c.update(waits, tgt, value);
+            c.update(ctx, waits, event);
         }
     }
 
@@ -103,12 +90,7 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Grid,
-        selected_path: gtk::Label,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, spec: view::Grid, selected_path: gtk::Label) -> Self {
         let root = gtk::Grid::new();
         let attach_child = |props: view::WidgetProps,
                             spec: view::GridChild,
@@ -118,12 +100,7 @@ impl Grid {
          -> Widget {
             let height = spec.height as i32;
             let width = spec.width as i32;
-            let w = Widget::new(
-                ctx.clone(),
-                variables,
-                (&*spec.widget).clone(),
-                selected_path.clone(),
-            );
+            let w = Widget::new(ctx, (&*spec.widget).clone(), selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, width, height);
                 set_common_props(props, r);
@@ -133,8 +110,7 @@ impl Grid {
             w
         };
         let attach_normal = |spec: view::Widget, i: &mut i32, j: i32| -> Widget {
-            let w =
-                Widget::new(ctx.clone(), variables, spec.clone(), selected_path.clone());
+            let w = Widget::new(ctx, spec.clone(), selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, 1, 1);
                 set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
@@ -188,13 +164,13 @@ impl Grid {
 
     pub(super) fn update(
         &self,
+        ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        tgt: Target,
-        value: &Value,
+        event: &Target,
     ) {
         for row in &self.children {
             for child in row {
-                child.update(waits, tgt, value);
+                child.update(ctx, waits, event);
             }
         }
     }

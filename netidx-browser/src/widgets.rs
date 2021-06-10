@@ -27,7 +27,11 @@ pub(super) struct Button {
 }
 
 impl Button {
-    pub(super) fn new(ctx: BSCtx, spec: view::Button, selected_path: gtk::Label) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Button,
+        selected_path: gtk::Label,
+    ) -> Self {
         let button = gtk::Button::new();
         let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
         let label = Rc::new(BSNode::compile(&ctx, spec.label.clone()));
