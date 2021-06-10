@@ -637,47 +637,98 @@ enum NavState {
     Invalid,
 }
 
-#[derive(Clone)]
-pub(crate) struct Navigate {
-    ctx: WidgetCtx,
-    state: Rc<RefCell<NavState>>,
+pub(crate) struct Navigate(RefCell<NavState>);
+
+impl Register<WidgetCtx, Target> for Navigate {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = Navigate(RefCell::new(NavState::Normal));
+            match from {
+                [new_window, to] => t.navigate(ctx, new_window.current(), to.current()),
+                [to] => t.navigate(ctx, None, to.current()),
+                _ => *t.0.borrow_mut() = NavState::Invalid,
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("navigate".into(), f);
+    }
+}
+
+impl Apply<WidgetCtx, Target> for Navigate {
+    fn current(&self) -> Option<Value> {
+        match &*self.0.borrow() {
+            NavState::Normal => None,
+            NavState::Invalid => Navigate::usage(),
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
+        let up = match from {
+            [new_window, to] => {
+                let new_window =
+                    new_window.update(ctx, event).or_else(|| new_window.current());
+                let target = to.update(ctx, event);
+                let up = target.is_some();
+                self.navigate(ctx, new_window, target);
+                up
+            }
+            [to] => {
+                let target = to.update(ctx, event);
+                let up = target.is_some();
+                self.navigate(ctx, None, target);
+                up
+            }
+            exprs => {
+                let mut up = false;
+                for e in exprs {
+                    up = e.update(ctx, event).is_some() || up;
+                }
+                *self.0.borrow_mut() = NavState::Invalid;
+                up
+            }
+        };
+        if up {
+            self.current()
+        } else {
+            None
+        }
+    }
 }
 
 impl Navigate {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
-        let t =
-            Navigate { ctx: ctx.clone(), state: Rc::new(RefCell::new(NavState::Normal)) };
-        match from {
-            [new_window, to] => t.navigate(new_window.current(), to.current()),
-            [to] => t.navigate(None, to.current()),
-            _ => *t.state.borrow_mut() = NavState::Invalid,
-        }
-        t
-    }
-
-    fn navigate(&self, new_window: Option<Value>, to: Option<Value>) {
+    fn navigate(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        new_window: Option<Value>,
+        to: Option<Value>,
+    ) {
         if let Some(to) = to {
             let new_window =
                 new_window.and_then(|v| v.cast_to::<bool>().ok()).unwrap_or(false);
             match to.cast_to::<Chars>() {
-                Err(_) => *self.state.borrow_mut() = NavState::Invalid,
+                Err(_) => *self.0.borrow_mut() = NavState::Invalid,
                 Ok(s) => match s.parse::<ViewLoc>() {
-                    Err(()) => *self.state.borrow_mut() = NavState::Invalid,
+                    Err(()) => *self.0.borrow_mut() = NavState::Invalid,
                     Ok(loc) => {
                         if new_window {
-                            let _: Result<_, _> = self
-                                .ctx
+                            let _: Result<_, _> = ctx
+                                .user
                                 .backend
                                 .to_gui
                                 .send(ToGui::NavigateInWindow(loc));
                         } else {
-                            if self.ctx.view_saved.get()
+                            if ctx.user.view_saved.get()
                                 || ask_modal(
-                                    &self.ctx.window,
+                                    &ctx.user.window,
                                     "Unsaved view will be lost.",
                                 )
                             {
-                                self.ctx.backend.navigate(loc);
+                                ctx.user.backend.navigate(loc);
                             }
                         }
                     }
@@ -688,45 +739,6 @@ impl Navigate {
 
     fn usage() -> Option<Value> {
         Some(Value::from("navigate([new_window], to): expected 1 or two arguments where to is e.g. /foo/bar, or netidx:/foo/bar, or, file:/path/to/view"))
-    }
-
-    fn eval(&self) -> Option<Value> {
-        match &*self.state.borrow() {
-            NavState::Normal => None,
-            NavState::Invalid => Navigate::usage(),
-        }
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        let up = match from {
-            [new_window, to] => {
-                let new_window =
-                    new_window.update(tgt, value).or_else(|| new_window.current());
-                let target = to.update(tgt, value);
-                let up = target.is_some();
-                self.navigate(new_window, target);
-                up
-            }
-            [to] => {
-                let target = to.update(tgt, value);
-                let up = target.is_some();
-                self.navigate(None, target);
-                up
-            }
-            exprs => {
-                let mut up = false;
-                for e in exprs {
-                    up = e.update(tgt, value).is_some() || up;
-                }
-                *self.state.borrow_mut() = NavState::Invalid;
-                up
-            }
-        };
-        if up {
-            self.eval()
-        } else {
-            None
-        }
     }
 }
 
