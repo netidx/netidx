@@ -541,58 +541,41 @@ enum ConfirmState {
     Ready { message: Option<Value>, value: Value },
 }
 
-pub(crate) struct ConfirmInner {
-    ctx: WidgetCtx,
+pub(crate) struct Confirm {
+    ctx: ExecCtx<WidgetCtx, Target>,
     state: RefCell<ConfirmState>,
 }
 
-#[derive(Clone)]
-pub(crate) struct Confirm(Rc<ConfirmInner>);
-
-impl Deref for Confirm {
-    type Target = ConfirmInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Register<WidgetCtx, Target> for Confirm {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t =
+                Confirm { ctx: ctx.clone(), state: RefCell::new(ConfirmState::Empty) };
+            match from {
+                [msg, val] => {
+                    if let Some(value) = val.current() {
+                        *t.state.borrow_mut() =
+                            ConfirmState::Ready { message: msg.current(), value };
+                    }
+                }
+                [val] => {
+                    if let Some(value) = val.current() {
+                        *t.state.borrow_mut() =
+                            ConfirmState::Ready { message: None, value };
+                    }
+                }
+                _ => {
+                    *t.state.borrow_mut() = ConfirmState::Invalid;
+                }
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("confirm".into(), f);
     }
 }
 
-impl Confirm {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
-        let t = Confirm(Rc::new(ConfirmInner {
-            ctx: ctx.clone(),
-            state: RefCell::new(ConfirmState::Empty),
-        }));
-        match from {
-            [msg, val] => {
-                if let Some(value) = val.current() {
-                    *t.state.borrow_mut() =
-                        ConfirmState::Ready { message: msg.current(), value };
-                }
-            }
-            [val] => {
-                if let Some(value) = val.current() {
-                    *t.state.borrow_mut() = ConfirmState::Ready { message: None, value };
-                }
-            }
-            _ => {
-                *t.state.borrow_mut() = ConfirmState::Invalid;
-            }
-        }
-        t
-    }
-
-    fn usage() -> Option<Value> {
-        Some(Value::Error(Chars::from("confirm([msg], val): expected 1 or 2 arguments")))
-    }
-
-    fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
-        let default = Value::from("proceed with");
-        let msg = msg.unwrap_or(&default);
-        ask_modal(&self.ctx.window, &format!("{} {}?", msg, val))
-    }
-
-    fn eval(&self) -> Option<Value> {
+impl Apply<WidgetCtx, Target> for Confirm {
+    fn current(&self) -> Option<Value> {
         match mem::replace(&mut *self.state.borrow_mut(), ConfirmState::Empty) {
             ConfirmState::Empty => None,
             ConfirmState::Invalid => Confirm::usage(),
@@ -606,21 +589,26 @@ impl Confirm {
         }
     }
 
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
         match from {
             [msg, val] => {
-                let m = msg.update(tgt, value).or_else(|| msg.current());
-                let v = val.update(tgt, value);
+                let m = msg.update(ctx, event).or_else(|| msg.current());
+                let v = val.update(ctx, event);
                 v.and_then(|v| if self.ask(m.as_ref(), &v) { Some(v) } else { None })
             }
             [val] => {
-                let v = val.update(tgt, value);
+                let v = val.update(ctx, event);
                 v.and_then(|v| if self.ask(None, &v) { Some(v) } else { None })
             }
             exprs => {
                 let mut up = false;
                 for expr in exprs {
-                    up = expr.update(tgt, value).is_some() || up;
+                    up = expr.update(ctx, event).is_some() || up;
                 }
                 if up {
                     Confirm::usage()
@@ -629,6 +617,18 @@ impl Confirm {
                 }
             }
         }
+    }
+}
+
+impl Confirm {
+    fn usage() -> Option<Value> {
+        Some(Value::Error(Chars::from("confirm([msg], val): expected 1 or 2 arguments")))
+    }
+
+    fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
+        let default = Value::from("proceed with");
+        let msg = msg.unwrap_or(&default);
+        ask_modal(&self.ctx.user.window, &format!("{} {}?", msg, val))
     }
 }
 
