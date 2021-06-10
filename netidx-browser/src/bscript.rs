@@ -1,4 +1,4 @@
-use super::{util::ask_modal, ToGui, Vars, ViewLoc, WidgetCtx};
+use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -6,14 +6,12 @@ use netidx::{
 };
 use netidx_bscript::{
     expr,
+    stdfn::CachedVals,
     vm::{Apply, ExecCtx, InitFn, Node, Register},
 };
-use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
-    fmt, mem,
-    ops::Deref,
-    rc::Rc,
+    mem,
     result::Result,
 };
 
@@ -742,82 +740,73 @@ impl Navigate {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct Uniq(Rc<RefCell<Option<Value>>>);
+pub(crate) struct RpcCall {
+    args: CachedVals,
+    invalid: Cell<bool>,
+}
 
-impl Uniq {
-    fn new(from: &[Expr]) -> Self {
-        let t = Uniq(Rc::new(RefCell::new(None)));
-        match from {
-            [e] => *t.0.borrow_mut() = e.current(),
-            _ => *t.0.borrow_mut() = Uniq::usage(),
+impl Register<WidgetCtx, Target> for RpcCall {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = RpcCall { args: CachedVals::new(from), invalid: Cell::new(true) };
+            t.maybe_call(ctx);
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("call".into(), f);
+    }
+}
+
+impl Apply<WidgetCtx, Target> for RpcCall {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
+            )))
+        } else {
+            None
         }
-        t
     }
 
-    fn usage() -> Option<Value> {
-        Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
-    }
-
-    fn eval(&self) -> Option<Value> {
-        self.0.borrow().as_ref().cloned()
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        match from {
-            [e] => e.update(tgt, value).and_then(|v| {
-                let cur = &mut *self.0.borrow_mut();
-                if Some(&v) != cur.as_ref() {
-                    *cur = Some(v.clone());
-                    Some(v)
-                } else {
-                    None
-                }
-            }),
-            exprs => {
-                let mut up = false;
-                for e in exprs {
-                    up = e.update(tgt, value).is_some() || up;
-                }
-                *self.0.borrow_mut() = Uniq::usage();
-                if up {
-                    self.eval()
-                } else {
-                    None
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
+        if self.args.update(ctx, from, event) {
+            self.maybe_call(ctx);
+            self.current()
+        } else {
+            match event {
+                Target::Netidx(_, _) | Target::Variable(_, _) | Target::Event(_) => None,
+                Target::Rpc(name, v) => {
+                    // CR estokes: How to deal with this race? the
+                    // function being called could change before the
+                    // return value is delivered.
+                    let args = self.args.0.borrow();
+                    if args.len() == 0 {
+                        self.invalid.set(true);
+                        self.current()
+                    } else {
+                        match args[0]
+                            .as_ref()
+                            .and_then(|v| v.clone().cast_to::<Chars>().ok())
+                        {
+                            Some(fname) if &*fname == name => Some(v.clone()),
+                            Some(_) => None,
+                            None => {
+                                self.invalid.set(true);
+                                self.current()
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-pub(crate) struct RpcCallInner {
-    args: CachedVals,
-    invalid: Cell<bool>,
-    ctx: WidgetCtx,
-}
-
-#[derive(Clone)]
-pub(crate) struct RpcCall(Rc<RpcCallInner>);
-
-impl Deref for RpcCall {
-    type Target = RpcCallInner;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
 impl RpcCall {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
-        let t = RpcCall(Rc::new(RpcCallInner {
-            args: CachedVals::new(from),
-            invalid: Cell::new(true),
-            ctx: ctx.clone(),
-        }));
-        t.maybe_call();
-        t
-    }
-
     fn get_args(&self) -> Option<(Path, Vec<(Chars, Value)>)> {
         self.invalid.set(false);
         let len = self.args.0.borrow().len();
@@ -871,86 +860,11 @@ impl RpcCall {
         }
     }
 
-    fn maybe_call(&self) {
+    fn maybe_call(&self, ctx: &ExecCtx<WidgetCtx, Target>) {
         if let Some((name, args)) = self.get_args() {
-            self.ctx.backend.call_rpc(Path::from(name), args);
+            ctx.user.backend.call_rpc(Path::from(name), args);
         }
     }
-
-    fn eval(&self) -> Option<Value> {
-        if self.invalid.get() {
-            Some(Value::Error(Chars::from(
-                "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
-            )))
-        } else {
-            None
-        }
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        if self.args.update(from, tgt, value) {
-            self.maybe_call();
-            self.eval()
-        } else {
-            match tgt {
-                Target::Netidx(_) | Target::Variable(_) | Target::Event => None,
-                Target::Rpc(name) => {
-                    let args = self.args.0.borrow();
-                    if args.len() == 0 {
-                        self.invalid.set(true);
-                        self.eval()
-                    } else {
-                        match args[0]
-                            .as_ref()
-                            .and_then(|v| v.clone().cast_to::<Chars>().ok())
-                        {
-                            Some(fname) if &*fname == name => Some(value.clone()),
-                            Some(_) => None,
-                            None => {
-                                self.invalid.set(true);
-                                self.eval()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum Formula {
-    Any(Rc<RefCell<Option<Value>>>),
-    All(All),
-    Sum(CachedVals),
-    Product(CachedVals),
-    Divide(CachedVals),
-    Mean(Mean),
-    Min(CachedVals),
-    Max(CachedVals),
-    And(CachedVals),
-    Or(CachedVals),
-    Not(CachedVals),
-    Cmp(CachedVals),
-    If(CachedVals),
-    Filter(CachedVals),
-    Cast(CachedVals),
-    IsA(CachedVals),
-    Eval(Eval),
-    Count(Count),
-    Sample(Sample),
-    Uniq(Uniq),
-    StringJoin(CachedVals),
-    StringConcat(CachedVals),
-    Event(Event),
-    Load(Load),
-    LoadVar(LoadVar),
-    Store(Store),
-    StoreVar(StoreVar),
-    Confirm(Confirm),
-    Navigate(Navigate),
-    RpcCall(RpcCall),
-    Unknown(String),
 }
 
 pub(crate) static FORMULAS: [&'static str; 30] = [
@@ -986,200 +900,15 @@ pub(crate) static FORMULAS: [&'static str; 30] = [
     "call",
 ];
 
-impl Formula {
-    pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
-        name: &str,
-        from: &[Expr],
-    ) -> Formula {
-        match name {
-            "any" => {
-                Formula::Any(Rc::new(RefCell::new(from.iter().find_map(|s| s.current()))))
-            }
-            "all" => Formula::All(All::new(from)),
-            "sum" => Formula::Sum(CachedVals::new(from)),
-            "product" => Formula::Product(CachedVals::new(from)),
-            "divide" => Formula::Divide(CachedVals::new(from)),
-            "mean" => Formula::Mean(Mean::new(from)),
-            "min" => Formula::Min(CachedVals::new(from)),
-            "max" => Formula::Max(CachedVals::new(from)),
-            "and" => Formula::And(CachedVals::new(from)),
-            "or" => Formula::Or(CachedVals::new(from)),
-            "not" => Formula::Not(CachedVals::new(from)),
-            "cmp" => Formula::Cmp(CachedVals::new(from)),
-            "if" => Formula::If(CachedVals::new(from)),
-            "filter" => Formula::Filter(CachedVals::new(from)),
-            "cast" => Formula::Cast(CachedVals::new(from)),
-            "isa" => Formula::IsA(CachedVals::new(from)),
-            "eval" => Formula::Eval(Eval::new(ctx, variables, from)),
-            "count" => Formula::Count(Count::new(from)),
-            "sample" => Formula::Sample(Sample::new(from)),
-            "uniq" => Formula::Uniq(Uniq::new(from)),
-            "string_join" => Formula::StringJoin(CachedVals::new(from)),
-            "string_concat" => Formula::StringConcat(CachedVals::new(from)),
-            "event" => Formula::Event(Event::new(from)),
-            "load" => Formula::Load(Load::new(ctx, from)),
-            "load_var" => Formula::LoadVar(LoadVar::new(from, variables)),
-            "store" => Formula::Store(Store::new(ctx, from)),
-            "store_var" => Formula::StoreVar(StoreVar::new(ctx, from, variables)),
-            "confirm" => Formula::Confirm(Confirm::new(ctx, from)),
-            "navigate" => Formula::Navigate(Navigate::new(ctx, from)),
-            "call" => Formula::RpcCall(RpcCall::new(ctx, from)),
-            _ => Formula::Unknown(String::from(name)),
-        }
-    }
-
-    pub(super) fn current(&self) -> Option<Value> {
-        match self {
-            Formula::Any(c) => c.borrow().clone(),
-            Formula::All(c) => c.eval(),
-            Formula::Sum(c) => eval_sum(c),
-            Formula::Product(c) => eval_product(c),
-            Formula::Divide(c) => eval_divide(c),
-            Formula::Mean(m) => m.eval(),
-            Formula::Min(c) => eval_min(c),
-            Formula::Max(c) => eval_max(c),
-            Formula::And(c) => eval_and(c),
-            Formula::Or(c) => eval_or(c),
-            Formula::Not(c) => eval_not(c),
-            Formula::Cmp(c) => eval_cmp(c),
-            Formula::If(c) => eval_if(c),
-            Formula::Filter(c) => eval_filter(c),
-            Formula::Cast(c) => eval_cast(c),
-            Formula::IsA(c) => eval_isa(c),
-            Formula::Eval(e) => e.eval(),
-            Formula::Count(c) => c.eval(),
-            Formula::Sample(c) => c.eval(),
-            Formula::Uniq(c) => c.eval(),
-            Formula::StringJoin(c) => eval_string_join(c),
-            Formula::StringConcat(c) => eval_string_concat(c),
-            Formula::Event(s) => s.eval(),
-            Formula::Load(s) => s.eval(),
-            Formula::LoadVar(s) => s.eval(),
-            Formula::Store(s) => s.eval(),
-            Formula::StoreVar(s) => s.eval(),
-            Formula::Confirm(s) => s.eval(),
-            Formula::Navigate(s) => s.eval(),
-            Formula::RpcCall(s) => s.eval(),
-            Formula::Unknown(s) => {
-                Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
-            }
-        }
-    }
-
-    pub(super) fn update(
-        &self,
-        from: &[Expr],
-        tgt: Target,
-        value: &Value,
-    ) -> Option<Value> {
-        match self {
-            Formula::Any(c) => {
-                let res = from.into_iter().filter_map(|s| s.update(tgt, value)).fold(
-                    None,
-                    |res, v| match res {
-                        None => Some(v),
-                        Some(_) => res,
-                    },
-                );
-                *c.borrow_mut() = res.clone();
-                res
-            }
-            Formula::All(c) => c.update(from, tgt, value),
-            Formula::Sum(c) => update_cached(eval_sum, c, from, tgt, value),
-            Formula::Product(c) => update_cached(eval_product, c, from, tgt, value),
-            Formula::Divide(c) => update_cached(eval_divide, c, from, tgt, value),
-            Formula::Mean(m) => m.update(from, tgt, value),
-            Formula::Min(c) => update_cached(eval_min, c, from, tgt, value),
-            Formula::Max(c) => update_cached(eval_max, c, from, tgt, value),
-            Formula::And(c) => update_cached(eval_and, c, from, tgt, value),
-            Formula::Or(c) => update_cached(eval_or, c, from, tgt, value),
-            Formula::Not(c) => update_cached(eval_not, c, from, tgt, value),
-            Formula::Cmp(c) => update_cached(eval_cmp, c, from, tgt, value),
-            Formula::If(c) => update_cached(eval_if, c, from, tgt, value),
-            Formula::Filter(c) => update_cached(eval_filter, c, from, tgt, value),
-            Formula::Cast(c) => update_cached(eval_cast, c, from, tgt, value),
-            Formula::IsA(c) => update_cached(eval_isa, c, from, tgt, value),
-            Formula::Eval(e) => e.update(from, tgt, value),
-            Formula::Count(c) => c.update(from, tgt, value),
-            Formula::Sample(c) => c.update(from, tgt, value),
-            Formula::Uniq(c) => c.update(from, tgt, value),
-            Formula::StringJoin(c) => {
-                update_cached(eval_string_join, c, from, tgt, value)
-            }
-            Formula::StringConcat(c) => {
-                update_cached(eval_string_concat, c, from, tgt, value)
-            }
-            Formula::Event(s) => s.update(from, tgt, value),
-            Formula::Load(s) => s.update(from, tgt, value),
-            Formula::LoadVar(s) => s.update(from, tgt, value),
-            Formula::Store(s) => s.update(from, tgt, value),
-            Formula::StoreVar(s) => s.update(from, tgt, value),
-            Formula::Confirm(s) => s.update(from, tgt, value),
-            Formula::Navigate(s) => s.update(from, tgt, value),
-            Formula::RpcCall(s) => s.update(from, tgt, value),
-            Formula::Unknown(s) => {
-                Some(Value::Error(Chars::from(format!("unknown formula {}", s))))
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum Expr {
-    Constant(view::Expr, Value),
-    Apply { spec: view::Expr, ctx: WidgetCtx, args: Vec<Expr>, function: Box<Formula> },
-}
-
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = match self {
-            Expr::Constant(s, _) => s,
-            Expr::Apply { spec, .. } => spec,
-        };
-        write!(f, "{}", s.to_string())
-    }
-}
-
-impl Expr {
-    pub(crate) fn new(ctx: &WidgetCtx, variables: Vars, spec: view::Expr) -> Self {
-        match &spec {
-            view::Expr { kind: view::ExprKind::Constant(v), id } => {
-                ctx.dbg_ctx.borrow_mut().add_event(*id, v.clone());
-                Expr::Constant(spec.clone(), v.clone())
-            }
-            view::Expr { kind: view::ExprKind::Apply { args, function }, .. } => {
-                let args: Vec<Expr> = args
-                    .iter()
-                    .map(|spec| Expr::new(ctx, variables.clone(), spec.clone()))
-                    .collect();
-                let function = Box::new(Formula::new(ctx, &variables, function, &*args));
-                if let Some(v) = function.current() {
-                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
-                }
-                Expr::Apply { spec, ctx: ctx.clone(), args, function }
-            }
-        }
-    }
-
-    pub(crate) fn current(&self) -> Option<Value> {
-        match self {
-            Expr::Constant(_, v) => Some(v.clone()),
-            Expr::Apply { function, .. } => function.current(),
-        }
-    }
-
-    pub(crate) fn update(&self, tgt: Target, value: &Value) -> Option<Value> {
-        match self {
-            Expr::Constant(_, _) => None,
-            Expr::Apply { spec, ctx, args, function } => {
-                let res = function.update(args, tgt, value);
-                if let Some(v) = &res {
-                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v.clone());
-                }
-                res
-            }
-        }
-    }
+pub(crate) fn create_ctx(ctx: WidgetCtx) -> ExecCtx<WidgetCtx, Target> {
+    let t = ExecCtx::new(ctx);
+    Event::register(&t);
+    Store::register(&t);
+    StoreVar::register(&t);
+    Load::register(&t);
+    LoadVar::register(&t);
+    Confirm::register(&t);
+    Navigate::register(&t);
+    RpcCall::register(&t);
+    t
 }
