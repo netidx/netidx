@@ -438,89 +438,77 @@ impl Load {
     }
 }
 
-pub(crate) struct LoadVarInner {
+pub(crate) struct LoadVar {
     name: RefCell<Option<Chars>>,
-    variables: Vars,
+    ctx: ExecCtx<WidgetCtx, Target>,
     invalid: Cell<bool>,
 }
 
-#[derive(Clone)]
-pub(crate) struct LoadVar(Rc<LoadVarInner>);
-
-impl Deref for LoadVar {
-    type Target = LoadVarInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Register<WidgetCtx, Target> for LoadVar {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = LoadVar {
+                name: RefCell::new(None),
+                ctx: ctx.clone(),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [name] => t.subscribe(name.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("load_var".into(), f);
     }
 }
 
-impl LoadVar {
-    fn new(from: &[Expr], variables: &Vars) -> Self {
-        let t = LoadVar(Rc::new(LoadVarInner {
-            name: RefCell::new(None),
-            variables: variables.clone(),
-            invalid: Cell::new(false),
-        }));
-        match from {
-            [name] => t.subscribe(name.current()),
-            _ => t.invalid.set(true),
-        }
-        t
-    }
-
-    fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from(
-            "load_var(expr: variable name): expected 1 variable name as argument",
-        )))
-    }
-
-    fn eval(&self) -> Option<Value> {
+impl Apply<WidgetCtx, Target> for LoadVar {
+    fn current(&self) -> Option<Value> {
         if self.invalid.get() {
             LoadVar::err()
         } else {
             self.name
                 .borrow()
                 .as_ref()
-                .and_then(|n| self.variables.borrow().get(n).cloned())
+                .and_then(|n| self.ctx.variables.borrow().get(n).cloned())
         }
     }
 
-    fn subscribe(&self, name: Option<Value>) {
-        if let Some(name) = varname(&self.invalid, name) {
-            *self.name.borrow_mut() = Some(name);
-        }
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
         match from {
             [name] => {
-                let target = name.update(tgt, value);
-                let up = target.is_some();
-                self.subscribe(target);
+                let target = name.update(ctx, event);
                 if self.invalid.get() {
-                    if up {
+                    if target.is_some() {
                         LoadVar::err()
                     } else {
                         None
                     }
                 } else {
-                    match (self.name.borrow().as_ref(), tgt) {
+                    if let Some(target) = target {
+                        self.subscribe(Some(target));
+                    }
+                    match (self.name.borrow().as_ref(), event) {
                         (None, _)
-                        | (Some(_), Target::Netidx(_))
-                        | (Some(_), Target::Event)
-                        | (Some(_), Target::Rpc(_)) => None,
-                        (Some(vn), Target::Variable(tn)) if &**vn == tn => {
-                            Some(value.clone())
+                        | (Some(_), Target::Netidx(_, _))
+                        | (Some(_), Target::Event(_))
+                        | (Some(_), Target::Rpc(_, _)) => None,
+                        (Some(vn), Target::Variable(tn, v)) if &**vn == tn => {
+                            Some(v.clone())
                         }
-                        (Some(_), Target::Variable(_)) => None,
+                        (Some(_), Target::Variable(_, _)) => None,
                     }
                 }
             }
             exprs => {
                 let mut up = false;
                 for e in exprs {
-                    up = e.update(tgt, value).is_some() || up;
+                    up = e.update(ctx, event).is_some() || up;
                 }
                 self.invalid.set(true);
                 if up {
@@ -529,6 +517,20 @@ impl LoadVar {
                     None
                 }
             }
+        }
+    }
+}
+
+impl LoadVar {
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load_var(expr: variable name): expected 1 variable name as argument",
+        )))
+    }
+
+    fn subscribe(&self, name: Option<Value>) {
+        if let Some(name) = varname(&self.invalid, name) {
+            *self.name.borrow_mut() = Some(name);
         }
     }
 }
