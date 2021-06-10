@@ -113,6 +113,7 @@ impl Register<WidgetCtx, Target> for Store {
             }
             Box::new(t)
         });
+        ctx.functions.borrow_mut().insert("store".into(), f);
     }
 }
 
@@ -345,52 +346,27 @@ impl StoreVar {
     }
 }
 
-pub(crate) struct LoadInner {
+pub(crate) struct Load {
     cur: RefCell<Option<Dval>>,
-    ctx: WidgetCtx,
     invalid: Cell<bool>,
 }
 
-#[derive(Clone)]
-pub(crate) struct Load(Rc<LoadInner>);
-
-impl Deref for Load {
-    type Target = LoadInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Register<WidgetCtx, Target> for Load {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = Load { cur: RefCell::new(None), invalid: Cell::new(false) };
+            match from {
+                [path] => t.subscribe(ctx, path.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("load".into(), f);
     }
 }
 
-impl Load {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
-        let t = Load(Rc::new(LoadInner {
-            cur: RefCell::new(None),
-            ctx: ctx.clone(),
-            invalid: Cell::new(false),
-        }));
-        match from {
-            [path] => t.subscribe(path.current()),
-            _ => t.invalid.set(true),
-        }
-        t
-    }
-
-    fn subscribe(&self, name: Option<Value>) {
-        if let Some(path) = pathname(&self.invalid, name) {
-            let dv = self.ctx.backend.subscriber.durable_subscribe(path);
-            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.ctx.backend.updates.clone());
-            *self.cur.borrow_mut() = Some(dv);
-        }
-    }
-
-    fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from(
-            "load(expr: path) expected 1 absolute path as argument",
-        )))
-    }
-
-    fn eval(&self) -> Option<Value> {
+impl Apply<WidgetCtx, Target> for Load {
+    fn current(&self) -> Option<Value> {
         if self.invalid.get() {
             Load::err()
         } else {
@@ -401,12 +377,17 @@ impl Load {
         }
     }
 
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
         match from {
             [name] => {
-                let target = name.update(tgt, value);
+                let target = name.update(ctx, event);
                 let up = target.is_some();
-                self.subscribe(target);
+                self.subscribe(ctx, target);
                 if self.invalid.get() {
                     if up {
                         Load::err()
@@ -414,17 +395,21 @@ impl Load {
                         None
                     }
                 } else {
-                    self.cur.borrow().as_ref().and_then(|dv| match tgt {
-                        Target::Variable(_) | Target::Rpc(_) | Target::Event => None,
-                        Target::Netidx(id) if dv.id() == id => Some(value.clone()),
-                        Target::Netidx(_) => None,
+                    self.cur.borrow().as_ref().and_then(|dv| match event {
+                        Target::Variable(_, _) | Target::Rpc(_, _) | Target::Event(_) => {
+                            None
+                        }
+                        Target::Netidx(id, value) if dv.id() == *id => {
+                            Some(value.clone())
+                        }
+                        Target::Netidx(_, _) => None,
                     })
                 }
             }
             exprs => {
                 let mut up = false;
                 for e in exprs {
-                    up = e.update(tgt, value).is_some() || up;
+                    up = e.update(ctx, event).is_some() || up;
                 }
                 self.invalid.set(true);
                 if up {
@@ -434,6 +419,22 @@ impl Load {
                 }
             }
         }
+    }
+}
+
+impl Load {
+    fn subscribe(&self, ctx: &ExecCtx<WidgetCtx, Target>, name: Option<Value>) {
+        if let Some(path) = pathname(&self.invalid, name) {
+            let dv = ctx.user.backend.subscriber.durable_subscribe(path);
+            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, ctx.user.backend.updates.clone());
+            *self.cur.borrow_mut() = Some(dv);
+        }
+    }
+
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load(expr: path) expected 1 absolute path as argument",
+        )))
     }
 }
 
