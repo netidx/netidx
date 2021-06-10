@@ -340,26 +340,21 @@ impl Toggle {
 pub(super) struct Entry {
     entry: gtk::Entry,
     we_changed: Rc<Cell<bool>>,
-    enabled: Expr,
-    visible: Expr,
-    text: Expr,
-    on_change: Expr,
-    on_activate: Expr,
+    enabled: Rc<BSNode>,
+    visible: Rc<BSNode>,
+    text: Rc<BSNode>,
+    on_change: Rc<BSNode>,
+    on_activate: Rc<BSNode>,
 }
 
 impl Entry {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Entry,
-        selected_path: gtk::Label,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, spec: view::Entry, selected_path: gtk::Label) -> Self {
         let we_changed = Rc::new(Cell::new(false));
-        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
-        let visible = Expr::new(&ctx, variables.clone(), spec.visible.clone());
-        let text = Expr::new(&ctx, variables.clone(), spec.text.clone());
-        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
-        let on_activate = Expr::new(&ctx, variables.clone(), spec.on_activate.clone());
+        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
+        let visible = Rc::new(BSNode::compile(&ctx, spec.visible.clone()));
+        let text = Rc::new(BSNode::compile(&ctx, spec.text.clone()));
+        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
+        let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate.clone()));
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -374,13 +369,14 @@ impl Entry {
         }
         entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
         entry.connect_activate(clone!(
+        @strong ctx,
         @strong we_changed,
         @strong text,
         @strong on_activate => move |entry| {
             entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
             on_activate.update(
-                Target::Event,
-                &Value::String(Chars::from(String::from(entry.get_text()))),
+                &ctx,
+                &Target::Event(Value::String(Chars::from(String::from(entry.get_text())))),
             );
             idle_add_local(clone!(
                 @strong we_changed, @strong text, @strong entry => move || {
@@ -394,11 +390,16 @@ impl Entry {
                     Continue(false)
                 }));
         }));
-        entry.connect_changed(clone!(@strong we_changed, @strong on_change => move |e| {
+        entry.connect_changed(clone!(
+        @strong ctx,
+        @strong we_changed,
+        @strong on_change => move |e| {
             if !we_changed.get() {
                 let v = on_change.update(
-                    Target::Event,
-                    &Value::String(Chars::from(String::from(e.get_text())))
+                    &ctx,
+                    &Target::Event(
+                        Value::String(Chars::from(String::from(e.get_text())))
+                    ),
                 );
                 if let Some(v) = v {
                     if let Some(set) = v.cast_to::<bool>().ok() {
@@ -426,14 +427,14 @@ impl Entry {
         self.entry.upcast_ref()
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some(new) = self.enabled.update(tgt, value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+        if let Some(new) = self.enabled.update(ctx, event) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.visible.update(tgt, value) {
+        if let Some(new) = self.visible.update(ctx, event) {
             self.entry.set_visibility(val_to_bool(&new));
         }
-        if let Some(new) = self.text.update(tgt, value) {
+        if let Some(new) = self.text.update(ctx, event) {
             self.we_changed.set(true);
             match new {
                 Value::String(s) => self.entry.set_text(&*s),
@@ -441,8 +442,8 @@ impl Entry {
             }
             self.we_changed.set(false);
         }
-        self.on_change.update(tgt, value);
-        self.on_activate.update(tgt, value);
+        self.on_change.update(ctx, event);
+        self.on_activate.update(ctx, event);
     }
 }
 
@@ -483,45 +484,43 @@ impl<'a, I: Iterator<Item = &'a Value>> Iterator for ValidTypIter<'a, I> {
 
 struct Series {
     line_color: view::RGB,
-    x: Expr,
-    y: Expr,
+    x: BSNode,
+    y: BSNode,
     x_data: VecDeque<Value>,
     y_data: VecDeque<Value>,
 }
 
 pub(super) struct LinePlot {
     root: gtk::Box,
-    x_min: Rc<Expr>,
-    x_max: Rc<Expr>,
-    y_min: Rc<Expr>,
-    y_max: Rc<Expr>,
-    keep_points: Rc<Expr>,
+    x_min: Rc<BSNode>,
+    x_max: Rc<BSNode>,
+    y_min: Rc<BSNode>,
+    y_max: Rc<BSNode>,
+    keep_points: Rc<BSNode>,
     series: Rc<RefCell<Vec<Series>>>,
 }
 
 impl LinePlot {
     pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         spec: view::LinePlot,
         _selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_min.clone()));
-        let x_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.x_max.clone()));
-        let y_min = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_min.clone()));
-        let y_max = Rc::new(Expr::new(&ctx, variables.clone(), spec.y_max.clone()));
-        let keep_points =
-            Rc::new(Expr::new(&ctx, variables.clone(), spec.keep_points.clone()));
+        let x_min = Rc::new(BSNode::compile(&ctx, spec.x_min.clone()));
+        let x_max = Rc::new(BSNode::compile(&ctx, spec.x_max.clone()));
+        let y_min = Rc::new(BSNode::compile(&ctx, spec.y_min.clone()));
+        let y_max = Rc::new(BSNode::compile(&ctx, spec.y_max.clone()));
+        let keep_points = Rc::new(BSNode::compile(&ctx, spec.keep_points.clone()));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
                     line_color: series.line_color,
-                    x: Expr::new(&ctx, variables.clone(), series.x.clone()),
-                    y: Expr::new(&ctx, variables.clone(), series.y.clone()),
+                    x: BSNode::compile(&ctx, series.x.clone()),
+                    y: BSNode::compile(&ctx, series.y.clone()),
                     x_data: VecDeque::new(),
                     y_data: VecDeque::new(),
                 })
@@ -573,10 +572,10 @@ impl LinePlot {
         spec: &view::LinePlot,
         width: &Rc<Cell<u32>>,
         height: &Rc<Cell<u32>>,
-        x_min: &Rc<Expr>,
-        x_max: &Rc<Expr>,
-        y_min: &Rc<Expr>,
-        y_max: &Rc<Expr>,
+        x_min: &Rc<BSNode>,
+        x_max: &Rc<BSNode>,
+        y_min: &Rc<BSNode>,
+        y_max: &Rc<BSNode>,
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
@@ -796,29 +795,29 @@ impl LinePlot {
         self.root.upcast_ref()
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
         let mut queue_draw = false;
-        if self.x_min.update(tgt, value).is_some() {
+        if self.x_min.update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.x_max.update(tgt, value).is_some() {
+        if self.x_max.update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.y_min.update(tgt, value).is_some() {
+        if self.y_min.update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.y_max.update(tgt, value).is_some() {
+        if self.y_max.update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.keep_points.update(tgt, value).is_some() {
+        if self.keep_points.update(ctx, event).is_some() {
             queue_draw = true;
         }
         for s in self.series.borrow_mut().iter_mut() {
-            if let Some(v) = s.x.update(tgt, value) {
+            if let Some(v) = s.x.update(ctx, event) {
                 s.x_data.push_back(v);
                 queue_draw = true;
             }
-            if let Some(v) = s.y.update(tgt, value) {
+            if let Some(v) = s.y.update(ctx, event) {
                 s.y_data.push_back(v);
                 queue_draw = true;
             }
