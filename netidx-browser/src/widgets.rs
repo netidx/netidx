@@ -1,8 +1,5 @@
-use super::{val_to_bool, Vars, WidgetCtx};
-use crate::{
-    formula::{Expr, Target},
-    view,
-};
+use super::{val_to_bool, BSCtx, BSNode, Vars, WidgetCtx};
+use crate::{bscript::Target, view};
 use anyhow::{anyhow, Result};
 use cairo;
 use chrono::prelude::*;
@@ -14,6 +11,7 @@ use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
 };
+use netidx_bscript::expr::Expr;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -22,23 +20,18 @@ use std::{
 };
 
 pub(super) struct Button {
-    enabled: Expr,
-    label: Expr,
-    on_click: Expr,
+    enabled: Rc<BSNode>,
+    label: Rc<BSNode>,
+    on_click: Rc<BSNode>,
     button: gtk::Button,
 }
 
 impl Button {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Button,
-        selected_path: gtk::Label,
-    ) -> Self {
+    pub(super) fn new(ctx: BSCtx, spec: view::Button, selected_path: gtk::Label) -> Self {
         let button = gtk::Button::new();
-        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
-        let label = Expr::new(&ctx, variables.clone(), spec.label.clone());
-        let on_click = Expr::new(&ctx, variables.clone(), spec.on_click.clone());
+        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
+        let label = Rc::new(BSNode::compile(&ctx, spec.label.clone()));
+        let on_click = Rc::new(BSNode::compile(&ctx, spec.on_click.clone()));
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -46,7 +39,7 @@ impl Button {
             button.set_label(&format!("{}", v));
         }
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
-            on_click.update(Target::Event, &Value::Null);
+            on_click.update(&ctx, &Target::Event(Value::Null));
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("on_click: {}", spec.on_click));
@@ -65,30 +58,25 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some(new) = self.enabled.update(tgt, value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+        if let Some(new) = self.enabled.update(ctx, event) {
             self.button.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.label.update(tgt, value) {
+        if let Some(new) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", new));
         }
-        self.on_click.update(tgt, value);
+        self.on_click.update(ctx, event);
     }
 }
 
 pub(super) struct Label {
     label: gtk::Label,
-    text: Expr,
+    text: Rc<BSNode>,
 }
 
 impl Label {
-    pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Expr,
-        selected_path: gtk::Label,
-    ) -> Label {
-        let text = Expr::new(&ctx, variables.clone(), spec.clone());
+    pub(super) fn new(ctx: &BSCtx, spec: Expr, selected_path: gtk::Label) -> Label {
+        let text = Rc::new(BSNode::compile(&ctx, spec.clone()));
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
@@ -113,43 +101,42 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some(new) = self.text.update(tgt, value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+        if let Some(new) = self.text.update(ctx, event) {
             self.label.set_label(&format!("{}", new));
         }
     }
 }
 
 pub(super) struct Action {
-    action: Expr,
+    action: Rc<BSNode>,
 }
 
 impl Action {
-    pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::Expr) -> Self {
-        let action = Expr::new(&ctx, variables.clone(), spec.clone());
-        action.update(Target::Event, &Value::Null);
+    pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
+        let action = Rc::new(BSNode::compile(&ctx, spec.clone()));
+        action.update(ctx, &Target::Event(Value::Null));
         Action { action }
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        self.action.update(tgt, value);
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+        self.action.update(ctx, event);
     }
 }
 
 pub(super) struct Selector {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
-    enabled: Expr,
-    choices: Expr,
-    selected: Expr,
-    on_change: Expr,
+    enabled: Rc<BSNode>,
+    choices: Rc<BSNode>,
+    selected: Rc<BSNode>,
+    on_change: Rc<BSNode>,
     we_set: Rc<Cell<bool>>,
 }
 
 impl Selector {
     pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         spec: view::Selector,
         selected_path: gtk::Label,
     ) -> Self {
@@ -170,10 +157,10 @@ impl Selector {
                 Inhibit(false)
             }),
         );
-        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
-        let choices = Expr::new(&ctx, variables.clone(), spec.choices.clone());
-        let selected = Expr::new(&ctx, variables.clone(), spec.selected.clone());
-        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
+        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
+        let choices = Rc::new(BSNode::compile(&ctx, spec.choices.clone()));
+        let selected = Rc::new(BSNode::compile(&ctx, spec.selected.clone()));
+        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
@@ -192,7 +179,7 @@ impl Selector {
             if !we_set.get() {
                 if let Some(id) = combo.get_active_id() {
                     if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                        on_change.update(Target::Event, &idv);
+                        on_change.update(&ctx, &Target::Event(idv));
                     }
                 }
                 idle_add_local(clone!(
@@ -248,14 +235,14 @@ impl Selector {
         Selector::update_active(combo, source)
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
         self.we_set.set(true);
-        self.on_change.update(tgt, value);
-        if let Some(new) = self.enabled.update(tgt, value) {
+        self.on_change.update(ctx, event);
+        if let Some(new) = self.enabled.update(ctx, event) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        Selector::update_active(&self.combo, &self.selected.update(tgt, value));
-        if let Some(new) = self.choices.update(tgt, value) {
+        Selector::update_active(&self.combo, &self.selected.update(ctx, event));
+        if let Some(new) = self.choices.update(ctx, event) {
             Selector::update_choices(&self.combo, &new, &self.selected.current());
         }
         self.we_set.set(false);
@@ -267,24 +254,23 @@ impl Selector {
 }
 
 pub(super) struct Toggle {
-    enabled: Expr,
-    value: Expr,
-    on_change: Expr,
+    enabled: Rc<BSNode>,
+    value: Rc<BSNode>,
+    on_change: Rc<BSNode>,
     we_set: Rc<Cell<bool>>,
     switch: gtk::Switch,
 }
 
 impl Toggle {
     pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         spec: view::Toggle,
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Expr::new(&ctx, variables.clone(), spec.enabled.clone());
-        let value = Expr::new(&ctx, variables.clone(), spec.value.clone());
-        let on_change = Expr::new(&ctx, variables.clone(), spec.on_change.clone());
+        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
+        let value = Rc::new(BSNode::compile(&ctx, spec.value.clone()));
+        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
@@ -299,8 +285,8 @@ impl Toggle {
         move |switch, state| {
             if !we_set.get() {
                 on_change.update(
-                    Target::Event,
-                    &if state { Value::True } else { Value::False }
+                    &ctx,
+                    &Target::Event(if state { Value::True } else { Value::False }),
                 );
                 idle_add_local(
                     clone!(@strong value, @strong switch, @strong we_set => move || {
@@ -337,17 +323,17 @@ impl Toggle {
         self.switch.upcast_ref()
     }
 
-    pub(super) fn update(&self, tgt: Target, value: &Value) {
-        if let Some(new) = self.enabled.update(tgt, value) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+        if let Some(new) = self.enabled.update(ctx, event) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.value.update(tgt, value) {
+        if let Some(new) = self.value.update(ctx, event) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
             self.switch.set_state(val_to_bool(&new));
             self.we_set.set(false);
         }
-        self.on_change.update(tgt, value);
+        self.on_change.update(ctx, event);
     }
 }
 

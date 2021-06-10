@@ -5,17 +5,17 @@ extern crate glib;
 extern crate lazy_static;
 
 mod backend;
+mod bscript;
 mod containers;
 mod editor;
-mod bscript;
 mod table;
 mod util;
 mod view;
 mod widgets;
 
 use anyhow::Result;
+use bscript::Target;
 use editor::Editor;
-use formula::Target;
 use futures::channel::oneshot;
 use fxhash::FxBuildHasher;
 use gdk::{self, prelude::*};
@@ -30,6 +30,7 @@ use netidx::{
     resolver::Auth,
     subscriber::{Event, SubId, Value},
 };
+use netidx_bscript::vm::{ExecCtx, Node};
 use netidx_protocols::view::{self as protocol_view, ExprId};
 use std::{
     cell::{Cell, RefCell},
@@ -47,6 +48,8 @@ use std::{
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
 
+type BSNode = Node<WidgetCtx, Target>;
+type BSCtx = ExecCtx<WidgetCtx, Target>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 type Vars = Rc<RefCell<HashMap<Chars, Value>>>;
@@ -135,72 +138,12 @@ enum FromGui {
     Terminate,
 }
 
-struct DbgCtx {
-    events: VecDeque<(ExprId, Value)>,
-    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Value)>>, FxBuildHasher>,
-    current: HashMap<ExprId, Value, FxBuildHasher>,
-}
-
-impl DbgCtx {
-    fn new() -> Self {
-        DbgCtx {
-            events: VecDeque::new(),
-            watch: HashMap::with_hasher(FxBuildHasher::default()),
-            current: HashMap::with_hasher(FxBuildHasher::default()),
-        }
-    }
-
-    fn add_watch(&mut self, id: ExprId, watch: &Rc<dyn Fn(&Value)>) {
-        let watches = self.watch.entry(id).or_insert(vec![]);
-        if let Some(v) = self.current.get(&id) {
-            watch(v);
-        }
-        watches.push(Rc::downgrade(watch));
-    }
-
-    fn add_event(&mut self, id: ExprId, value: Value) {
-        const MAX: usize = 1000;
-        self.events.push_back((id, value.clone()));
-        self.current.insert(id, value.clone());
-        if self.events.len() > MAX {
-            self.events.pop_front();
-            if self.watch.len() > MAX {
-                self.watch.retain(|_, vs| {
-                    vs.retain(|v| Weak::upgrade(v).is_some());
-                    !vs.is_empty()
-                });
-            }
-        }
-        if let Some(watch) = self.watch.get_mut(&id) {
-            let mut i = 0;
-            while i < watch.len() {
-                match Weak::upgrade(&watch[i]) {
-                    None => {
-                        watch.remove(i);
-                    }
-                    Some(f) => {
-                        f(&value);
-                        i += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.events.clear();
-        self.current.clear();
-        self.watch.clear();
-    }
-}
-
 struct WidgetCtxInner {
     backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
-    dbg_ctx: RefCell<DbgCtx>,
 }
 
 #[derive(Clone)]
@@ -274,12 +217,7 @@ enum Widget {
 }
 
 impl Widget {
-    fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        spec: view::Widget,
-        selected_path: gtk::Label,
-    ) -> Widget {
+    fn new(ctx: BSCtx, spec: view::Widget, selected_path: gtk::Label) -> Widget {
         let w =
             match spec.kind {
                 view::WidgetKind::Action(spec) => {
@@ -701,11 +639,7 @@ lazy_static! {
     static ref WAITS: Pool<Vec<oneshot::Receiver<()>>> = Pool::new(10, 100);
 }
 
-fn update_single(
-    current: &Rc<RefCell<Option<View>>>,
-    target: Target,
-    value: &Value,
-) {
+fn update_single(current: &Rc<RefCell<Option<View>>>, target: Target, value: &Value) {
     if let Some(root) = &mut *current.borrow_mut() {
         let mut waits = Vec::new();
         root.update(&mut waits, target, &value);
