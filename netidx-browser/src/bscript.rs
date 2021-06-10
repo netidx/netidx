@@ -2,9 +2,12 @@ use super::{util::ask_modal, ToGui, Vars, ViewLoc, WidgetCtx};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{self, Dval, SubId, Typ, UpdatesFlags, Value},
+    subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
-use netidx_bscript::vm::{Apply, Register};
+use netidx_bscript::{
+    expr,
+    vm::{Apply, ExecCtx, InitFn, Node, Register},
+};
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
@@ -16,45 +19,31 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub(crate) enum Target {
-    Event,
-    Variable(String),
-    Netidx(SubId),
-    Rpc(String),
+    Event(Value),
+    Variable(String, Value),
+    Netidx(SubId, Value),
+    Rpc(String, Value),
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct Event(Target, Value);
-
-#[derive(Debug)]
-pub(crate) struct EventInner {
+pub(crate) struct Event {
     cur: RefCell<Option<Value>>,
     invalid: Cell<bool>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct Event(Rc<EventInner>);
-
-impl Deref for Event {
-    type Target = EventInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Register<WidgetCtx, Target> for Event {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|_, from| {
+            Box::new(Event {
+                cur: RefCell::new(None),
+                invalid: Cell::new(from.len() > 0),
+            })
+        });
+        ctx.functions.borrow_mut().insert("event".into(), f);
     }
 }
 
-impl Event {
-    fn new(from: &[Expr]) -> Self {
-        Event(Rc::new(EventInner {
-            cur: RefCell::new(None),
-            invalid: Cell::new(from.len() > 0),
-        }))
-    }
-
-    fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from("event(): expected 0 arguments")))
-    }
-
-    fn eval(&self) -> Option<Value> {
+impl Apply<WidgetCtx, Target> for Event {
+    fn current(&self) -> Option<Value> {
         if self.invalid.get() {
             Event::err()
         } else {
@@ -62,87 +51,26 @@ impl Event {
         }
     }
 
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
         self.invalid.set(from.len() > 0);
-        match tgt {
-            Target::Variable(_) | Target::Netidx(_) | Target::Rpc(_) => None,
-            Target::Event => {
+        match event {
+            Target::Variable(_, _) | Target::Netidx(_, _) | Target::Rpc(_, _) => None,
+            Target::Event(value) => {
                 *self.cur.borrow_mut() = Some(value.clone());
-                self.eval()
+                self.current()
             }
         }
     }
 }
 
-#[derive(Clone)]
-pub(super) struct Eval {
-    ctx: WidgetCtx,
-    cached: CachedVals,
-    current: RefCell<Result<Expr, Value>>,
-    variables: Vars,
-}
-
-impl Eval {
-    fn new(ctx: &WidgetCtx, variables: &Vars, from: &[Expr]) -> Self {
-        let t = Eval {
-            ctx: ctx.clone(),
-            cached: CachedVals::new(from),
-            current: RefCell::new(Err(Value::Null)),
-            variables: variables.clone(),
-        };
-        t.compile();
-        t
-    }
-
-    fn eval(&self) -> Option<Value> {
-        match &*self.current.borrow() {
-            Ok(s) => s.current(),
-            Err(v) => Some(v.clone()),
-        }
-    }
-
-    fn compile(&self) {
-        *self.current.borrow_mut() = match &**self.cached.0.borrow() {
-            [None] => Err(Value::Null),
-            [Some(v)] => match v {
-                Value::String(s) => match s.parse::<view::Expr>() {
-                    Ok(spec) => Ok(Expr::new(&self.ctx, self.variables.clone(), spec)),
-                    Err(e) => {
-                        let e = format!("eval(src), error parsing formula {}, {}", s, e);
-                        Err(Value::Error(Chars::from(e)))
-                    }
-                },
-                v => {
-                    let e = format!("eval(src) expected 1 string argument, not {}", v);
-                    Err(Value::Error(Chars::from(e)))
-                }
-            },
-            _ => Err(Value::Error(Chars::from("eval(src) expected 1 argument"))),
-        }
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        if self.cached.update(from, tgt, value) {
-            self.compile();
-        }
-        match &*self.current.borrow() {
-            Ok(s) => s.update(tgt, value),
-            Err(v) => Some(v.clone()),
-        }
-    }
-}
-
-fn update_cached(
-    eval: impl Fn(&CachedVals) -> Option<Value>,
-    cached: &CachedVals,
-    from: &[Expr],
-    tgt: Target,
-    value: &Value,
-) -> Option<Value> {
-    if cached.update(from, tgt, value) {
-        eval(cached)
-    } else {
-        None
+impl Event {
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from("event(): expected 0 arguments")))
     }
 }
 
@@ -165,39 +93,80 @@ fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
     }
 }
 
-pub(crate) struct StoreInner {
+pub(crate) struct Store {
     queued: RefCell<Vec<Value>>,
-    ctx: WidgetCtx,
     dv: RefCell<Option<(Path, Dval)>>,
     invalid: Cell<bool>,
 }
 
-#[derive(Clone)]
-pub(crate) struct Store(Rc<StoreInner>);
+impl Register<WidgetCtx, Target> for Store {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = Store {
+                queued: RefCell::new(Vec::new()),
+                dv: RefCell::new(None),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [to, val] => t.set(ctx, to.current(), val.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+    }
+}
 
-impl Deref for Store {
-    type Target = StoreInner;
+impl Apply<WidgetCtx, Target> for Store {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "store(tgt: absolute path, val): expected 2 arguments",
+            )))
+        } else {
+            None
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
+        match from {
+            [path, val] => {
+                let path = path.update(ctx, event);
+                let value = val.update(ctx, event);
+                let value = if path.is_some() && !self.same_path(&path) {
+                    value.or_else(|| val.current())
+                } else {
+                    value
+                };
+                let up = value.is_some();
+                self.set(ctx, path, value);
+                if up {
+                    self.current()
+                } else {
+                    None
+                }
+            }
+            exprs => {
+                let mut up = false;
+                for expr in exprs {
+                    up = expr.update(ctx, event).is_some() || up;
+                }
+                self.invalid.set(true);
+                if up {
+                    self.current()
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
 impl Store {
-    fn new(ctx: &WidgetCtx, from: &[Expr]) -> Self {
-        let t = Store(Rc::new(StoreInner {
-            queued: RefCell::new(Vec::new()),
-            ctx: ctx.clone(),
-            dv: RefCell::new(None),
-            invalid: Cell::new(false),
-        }));
-        match from {
-            [to, val] => t.set(to.current(), val.current()),
-            _ => t.invalid.set(true),
-        }
-        t
-    }
-
     fn queue(&self, v: Value) {
         self.queued.borrow_mut().push(v)
     }
@@ -206,7 +175,12 @@ impl Store {
         dv.write(v);
     }
 
-    fn set(&self, to: Option<Value>, val: Option<Value>) {
+    fn set(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        to: Option<Value>,
+        val: Option<Value>,
+    ) {
         match (pathname(&self.invalid, to), val) {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
@@ -215,10 +189,10 @@ impl Store {
             },
             (Some(p), val) => {
                 let path = Path::from(p);
-                let dv = self.ctx.backend.subscriber.durable_subscribe(path.clone());
+                let dv = ctx.user.backend.subscriber.durable_subscribe(path.clone());
                 dv.updates(
                     UpdatesFlags::BEGIN_WITH_LAST,
-                    self.ctx.backend.updates.clone(),
+                    ctx.user.backend.updates.clone(),
                 );
                 if let Some(v) = val {
                     self.queue(v)
@@ -231,62 +205,17 @@ impl Store {
         }
     }
 
-    fn eval(&self) -> Option<Value> {
-        if self.invalid.get() {
-            Some(Value::Error(Chars::from(
-                "store(tgt: absolute path, val): expected 2 arguments",
-            )))
-        } else {
-            None
-        }
-    }
-
     fn same_path(&self, new_path: &Option<Value>) -> bool {
         match (new_path.as_ref(), self.dv.borrow().as_ref()) {
             (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
             _ => false,
         }
     }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
-        match from {
-            [path, val] => {
-                let path = path.update(tgt, value);
-                let value = val.update(tgt, value);
-                let value = if path.is_some() && !self.same_path(&path) {
-                    value.or_else(|| val.current())
-                } else {
-                    value
-                };
-                let up = value.is_some();
-                self.set(path, value);
-                if up {
-                    self.eval()
-                } else {
-                    None
-                }
-            }
-            exprs => {
-                let mut up = false;
-                for expr in exprs {
-                    up = expr.update(tgt, value).is_some() || up;
-                }
-                self.invalid.set(true);
-                if up {
-                    self.eval()
-                } else {
-                    None
-                }
-            }
-        }
-    }
 }
 
-pub(crate) struct StoreVarInner {
+pub(crate) struct StoreVar {
     queued: RefCell<Vec<Value>>,
-    ctx: WidgetCtx,
     name: RefCell<Option<Chars>>,
-    variables: Vars,
     invalid: Cell<bool>,
 }
 
@@ -299,7 +228,7 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
             None
         }
         Some(Ok(n)) => {
-            if view::VNAME.is_match(&n) {
+            if expr::VNAME.is_match(&n) {
                 Some(n)
             } else {
                 invalid.set(true);
@@ -309,59 +238,26 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct StoreVar(Rc<StoreVarInner>);
-
-impl Deref for StoreVar {
-    type Target = StoreVarInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Register<WidgetCtx, Target> for StoreVar {
+    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
+        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
+            let t = StoreVar {
+                queued: RefCell::new(Vec::new()),
+                name: RefCell::new(None),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [name, value] => t.set(ctx, name.current(), value.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("store_var".into(), f);
     }
 }
 
-impl StoreVar {
-    fn new(ctx: &WidgetCtx, from: &[Expr], variables: &Vars) -> Self {
-        let t = StoreVar(Rc::new(StoreVarInner {
-            queued: RefCell::new(Vec::new()),
-            ctx: ctx.clone(),
-            name: RefCell::new(None),
-            variables: variables.clone(),
-            invalid: Cell::new(false),
-        }));
-        match from {
-            [name, value] => t.set(name.current(), value.current()),
-            _ => t.invalid.set(true),
-        }
-        t
-    }
-
-    fn set_var(&self, name: Chars, v: Value) {
-        self.variables.borrow_mut().insert(name.clone(), v.clone());
-        let _: Result<_, _> =
-            self.ctx.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
-    }
-
-    fn queue_set(&self, v: Value) {
-        self.queued.borrow_mut().push(v)
-    }
-
-    fn set(&self, name: Option<Value>, value: Option<Value>) {
-        if let Some(name) = varname(&self.invalid, name) {
-            for v in self.queued.borrow_mut().drain(..) {
-                self.set_var(name.clone(), v)
-            }
-            *self.name.borrow_mut() = Some(name);
-        }
-        if let Some(value) = value {
-            match self.name.borrow().as_ref() {
-                None => self.queue_set(value),
-                Some(name) => self.set_var(name.clone(), value),
-            }
-        }
-    }
-
-    fn eval(&self) -> Option<Value> {
+impl Apply<WidgetCtx, Target> for StoreVar {
+    fn current(&self) -> Option<Value> {
         if self.invalid.get() {
             Some(Value::Error(Chars::from(
                 "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
@@ -371,27 +267,25 @@ impl StoreVar {
         }
     }
 
-    fn same_name(&self, new_name: &Option<Value>) -> bool {
-        match (new_name, self.name.borrow().as_ref()) {
-            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
-            _ => false,
-        }
-    }
-
-    fn update(&self, from: &[Expr], tgt: Target, value: &Value) -> Option<Value> {
+    fn update(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        from: &[Node<WidgetCtx, Target>],
+        event: &Target,
+    ) -> Option<Value> {
         match from {
             [name, val] => {
-                let name = name.update(tgt, value);
-                let value = val.update(tgt, value);
+                let name = name.update(ctx, event);
+                let value = val.update(ctx, event);
                 let value = if name.is_some() && !self.same_name(&name) {
                     value.or_else(|| val.current())
                 } else {
                     value
                 };
                 let up = value.is_some();
-                self.set(name, value);
+                self.set(ctx, name, value);
                 if up {
-                    self.eval()
+                    self.current()
                 } else {
                     None
                 }
@@ -399,15 +293,54 @@ impl StoreVar {
             exprs => {
                 let mut up = false;
                 for expr in exprs {
-                    up = expr.update(tgt, value).is_some() || up;
+                    up = expr.update(ctx, event).is_some() || up;
                 }
                 self.invalid.set(true);
                 if up {
-                    self.eval()
+                    self.current()
                 } else {
                     None
                 }
             }
+        }
+    }
+}
+
+impl StoreVar {
+    fn set_var(&self, ctx: &ExecCtx<WidgetCtx, Target>, name: Chars, v: Value) {
+        ctx.variables.borrow_mut().insert(name.clone(), v.clone());
+        let _: Result<_, _> =
+            ctx.user.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
+    }
+
+    fn queue_set(&self, v: Value) {
+        self.queued.borrow_mut().push(v)
+    }
+
+    fn set(
+        &self,
+        ctx: &ExecCtx<WidgetCtx, Target>,
+        name: Option<Value>,
+        value: Option<Value>,
+    ) {
+        if let Some(name) = varname(&self.invalid, name) {
+            for v in self.queued.borrow_mut().drain(..) {
+                self.set_var(ctx, name.clone(), v)
+            }
+            *self.name.borrow_mut() = Some(name);
+        }
+        if let Some(value) = value {
+            match self.name.borrow().as_ref() {
+                None => self.queue_set(value),
+                Some(name) => self.set_var(ctx, name.clone(), value),
+            }
+        }
+    }
+
+    fn same_name(&self, new_name: &Option<Value>) -> bool {
+        match (new_name, self.name.borrow().as_ref()) {
+            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
+            _ => false,
         }
     }
 }

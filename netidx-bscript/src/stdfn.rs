@@ -628,19 +628,18 @@ impl CachedCurEval for StringConcatEv {
 
 pub type StringConcat = CachedCur<StringConcatEv>;
 
-pub struct Eval<C: Clone + 'static, E: 'static> {
-    ctx: ExecCtx<C, E>,
+pub struct Eval<C: 'static, E: 'static> {
     cached: CachedVals,
     current: RefCell<Result<Node<C, E>, Value>>,
 }
 
-impl<C: Clone, E> Eval<C, E> {
-    fn compile(&self) {
+impl<C, E> Eval<C, E> {
+    fn compile(&self, ctx: &ExecCtx<C, E>) {
         *self.current.borrow_mut() = match &**self.cached.0.borrow() {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<Expr>() {
-                    Ok(spec) => Ok(Node::compile(&self.ctx, spec)),
+                    Ok(spec) => Ok(Node::compile(ctx, spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -656,22 +655,21 @@ impl<C: Clone, E> Eval<C, E> {
     }
 }
 
-impl<C: Clone, E> Register<C, E> for Eval<C, E> {
+impl<C, E> Register<C, E> for Eval<C, E> {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|ctx, from| {
             let t = Eval {
-                ctx: ctx.clone(),
                 cached: CachedVals::new(from),
                 current: RefCell::new(Err(Value::Null)),
             };
-            t.compile();
+            t.compile(ctx);
             Box::new(t)
         });
         ctx.functions.borrow_mut().insert("eval".into(), f);
     }
 }
 
-impl<C: Clone, E> Apply<C, E> for Eval<C, E> {
+impl<C, E> Apply<C, E> for Eval<C, E> {
     fn current(&self) -> Option<Value> {
         match &*self.current.borrow() {
             Ok(s) => s.current(),
@@ -686,7 +684,7 @@ impl<C: Clone, E> Apply<C, E> for Eval<C, E> {
         event: &E,
     ) -> Option<Value> {
         if self.cached.update(ctx, from, event) {
-            self.compile();
+            self.compile(ctx);
         }
         match &*self.current.borrow() {
             Ok(s) => s.update(ctx, event),

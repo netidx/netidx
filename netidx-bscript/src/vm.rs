@@ -1,4 +1,4 @@
-use crate::expr::{Expr, ExprId, ExprKind};
+use crate::{expr::{Expr, ExprId, ExprKind}, stdfn};
 use fxhash::FxBuildHasher;
 use netidx::{chars::Chars, subscriber::Value};
 use std::{
@@ -109,7 +109,7 @@ impl<C, E> Deref for ExecCtx<C, E> {
 }
 
 impl<C, E> ExecCtx<C, E> {
-    pub fn new(user: C) -> Self {
+    pub fn no_std(user: C) -> Self {
         let inner = ExecCtxInner {
             functions: RefCell::new(HashMap::new()),
             variables: RefCell::new(HashMap::new()),
@@ -117,6 +117,32 @@ impl<C, E> ExecCtx<C, E> {
             user,
         };
         ExecCtx(Rc::new(inner))
+    }
+
+    pub fn new(user: C) -> Self {
+        let t = ExecCtx::no_std(user);
+        stdfn::Any::register(&t);
+        stdfn::All::register(&t);
+        stdfn::Sum::register(&t);
+        stdfn::Product::register(&t);
+        stdfn::Divide::register(&t);
+        stdfn::Min::register(&t);
+        stdfn::Max::register(&t);
+        stdfn::And::register(&t);
+        stdfn::Or::register(&t);
+        stdfn::Not::register(&t);
+        stdfn::Cmp::register(&t);
+        stdfn::If::register(&t);
+        stdfn::Filter::register(&t);
+        stdfn::Cast::register(&t);
+        stdfn::Isa::register(&t);
+        stdfn::StringJoin::register(&t);
+        stdfn::StringConcat::register(&t);
+        stdfn::Eval::register(&t);
+        stdfn::Count::register(&t);
+        stdfn::Sample::register(&t);
+        stdfn::Mean::register(&t);
+        t
     }
 }
 
