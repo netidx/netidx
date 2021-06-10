@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    Target, ViewLoc, WidgetCtx,
+    Target, ViewLoc, WidgetCtx, BSCtx
 };
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
@@ -630,14 +630,14 @@ impl Table {
 
     pub(super) fn update(
         &self,
+        ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        tgt: Target,
-        value: &Value,
+        event: &Target,
     ) {
-        match tgt {
-            Target::Event | Target::Variable(_) | Target::Rpc(_) => (),
-            Target::Netidx(id) => {
-                self.0.update.borrow_mut().insert(id, value.clone());
+        match event {
+            Target::Event(_) | Target::Variable(_, _) | Target::Rpc(_, _) => (),
+            Target::Netidx(id, value) => {
+                self.0.update.borrow_mut().insert(*id, value.clone());
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();
                     waits.push(rx);
