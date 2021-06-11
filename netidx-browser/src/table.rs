@@ -37,7 +37,7 @@ struct Subscription {
 }
 
 struct TableInner {
-    ctx: WidgetCtx,
+    ctx: BSCtx,
     root: ScrolledWindow,
     view: TreeView,
     style: StyleContext,
@@ -140,7 +140,7 @@ fn apply_spec(spec: &view::Table, descr: &mut resolver::Table) {
 
 impl Table {
     pub(super) fn new(
-        ctx: WidgetCtx,
+        ctx: BSCtx,
         spec: view::Table,
         mut descriptor: resolver::Table,
         selected_path: Label,
@@ -253,7 +253,7 @@ impl Table {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
                     let path = t.0.spec.path.append(row_name);
-                    t.0.ctx.backend.navigate(ViewLoc::Netidx(path));
+                    t.0.ctx.user.backend.navigate(ViewLoc::Netidx(path));
                 }
             }
         }));

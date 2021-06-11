@@ -1,4 +1,4 @@
-use super::super::{formula, Vars, WidgetCtx};
+use super::super::{bscript, BSCtx, WidgetCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
@@ -6,6 +6,7 @@ use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
 };
+use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
@@ -13,11 +14,11 @@ use std::{
 };
 
 fn set_dbg_expr(
-    ctx: &WidgetCtx,
+    ctx: &BSCtx,
     store: &gtk::TreeStore,
     iter: &gtk::TreeIter,
-    spec: view::Expr,
-) -> view::Expr {
+    spec: expr::Expr,
+) -> expr::Expr {
     let watch: Rc<dyn Fn(&Value)> = {
         let store = store.clone();
         let iter = iter.clone();
@@ -48,16 +49,16 @@ static TYPES: [Typ; 14] = [
 #[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,
-    spec: Rc<RefCell<view::Expr>>,
+    spec: Rc<RefCell<expr::Expr>>,
 }
 
 impl Constant {
     fn insert(
-        ctx: &WidgetCtx,
+        ctx: &BSCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: view::Expr,
+        spec: expr::Expr,
     ) {
         let spec = Rc::new(RefCell::new(spec));
         let root = TwoColGrid::new();
@@ -88,7 +89,7 @@ impl Constant {
                 match typ.parse(&*valent.get_text()) {
                     Ok(value) => {
                         errlbl.set_markup("");
-                        *spec.borrow_mut() = view::ExprKind::Constant(value).to_expr();
+                        *spec.borrow_mut() = expr::ExprKind::Constant(value).to_expr();
                         on_change()
                     },
                     Err(e) => {
@@ -107,12 +108,12 @@ impl Constant {
 
     fn get_val(&self) -> Value {
         match self.spec.borrow().clone() {
-            view::Expr { kind: view::ExprKind::Constant(v), .. } => v,
-            view::Expr { kind: view::ExprKind::Apply { .. }, .. } => unreachable!(),
+            expr::Expr { kind: expr::ExprKind::Constant(v), .. } => v,
+            expr::Expr { kind: expr::ExprKind::Apply { .. }, .. } => unreachable!(),
         }
     }
 
-    fn spec(&self) -> view::Expr {
+    fn spec(&self) -> expr::Expr {
         self.spec.borrow().clone()
     }
 
@@ -124,16 +125,16 @@ impl Constant {
 #[derive(Clone, Debug)]
 struct Apply {
     root: gtk::Box,
-    spec: Rc<RefCell<view::Expr>>,
+    spec: Rc<RefCell<expr::Expr>>,
 }
 
 impl Apply {
     fn insert(
-        ctx: &WidgetCtx,
+        ctx: &BSCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: view::Expr,
+        spec: expr::Expr,
     ) {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -143,13 +144,13 @@ impl Apply {
         let cbfun = gtk::ComboBoxText::new();
         t.root.pack_start(&lblfun, false, false, 0);
         t.root.pack_start(&cbfun, true, true, 0);
-        for name in &formula::FORMULAS {
+        for name in &bscript::FORMULAS {
             cbfun.append(Some(name), name);
         }
         cbfun.set_active_id(Some(&fname));
         cbfun.connect_changed(clone!(@strong on_change, @strong spec  => move |c| {
             if let Some(id) = c.get_active_id() {
-                *spec.borrow_mut() = view::ExprKind::Apply {
+                *spec.borrow_mut() = expr::ExprKind::Apply {
                     function: String::from(id),
                     args: vec![]
                 }.to_expr();
@@ -163,14 +164,14 @@ impl Apply {
 
     fn get_fn(&self) -> String {
         match &*self.spec.borrow() {
-            view::Expr { kind: view::ExprKind::Constant(_), .. } => unreachable!(),
-            view::Expr { kind: view::ExprKind::Apply { function, .. }, .. } => {
+            expr::Expr { kind: expr::ExprKind::Constant(_), .. } => unreachable!(),
+            expr::Expr { kind: expr::ExprKind::Apply { function, .. }, .. } => {
                 function.clone()
             }
         }
     }
 
-    fn spec(&self) -> view::Expr {
+    fn spec(&self) -> expr::Expr {
         self.spec.borrow().clone()
     }
 
@@ -188,23 +189,23 @@ enum Properties {
 
 impl Properties {
     fn insert(
-        ctx: &WidgetCtx,
+        ctx: &BSCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: view::Expr,
+        spec: expr::Expr,
     ) {
         match &spec.kind {
-            view::ExprKind::Constant(_) => {
+            expr::ExprKind::Constant(_) => {
                 Constant::insert(ctx, on_change, store, iter, spec)
             }
-            view::ExprKind::Apply { .. } => {
+            expr::ExprKind::Apply { .. } => {
                 Apply::insert(ctx, on_change, store, iter, spec)
             }
         }
     }
 
-    fn spec(&self) -> view::Expr {
+    fn spec(&self) -> expr::Expr {
         match self {
             Properties::Constant(w) => w.spec(),
             Properties::Apply(w) => w.spec(),
@@ -225,29 +226,29 @@ struct ExprWrap(Rc<dyn Fn(&Value)>);
 
 static KINDS: [&'static str; 2] = ["constant", "function"];
 
-fn default_expr(id: Option<&str>) -> view::Expr {
+fn default_expr(id: Option<&str>) -> expr::Expr {
     match id {
-        Some("constant") | None => view::ExprKind::Constant(Value::U64(42)).to_expr(),
+        Some("constant") | None => expr::ExprKind::Constant(Value::U64(42)).to_expr(),
         Some("function") => {
-            let args = vec![view::ExprKind::Constant(Value::U64(42)).to_expr()];
-            view::ExprKind::Apply { function: "any".into(), args }.to_expr()
+            let args = vec![expr::ExprKind::Constant(Value::U64(42)).to_expr()];
+            expr::ExprKind::Apply { function: "any".into(), args }.to_expr()
         }
         e => unreachable!("{:?}", e),
     }
 }
 
 fn build_tree(
-    ctx: &WidgetCtx,
+    ctx: &BSCtx,
     on_change: &OnChange,
     store: &gtk::TreeStore,
     parent: Option<&gtk::TreeIter>,
-    s: &view::Expr,
+    s: &expr::Expr,
 ) {
     let iter = store.insert_before(parent, None);
     Properties::insert(ctx, on_change.clone(), store, &iter, s.clone());
     match s {
-        view::Expr { kind: view::ExprKind::Constant(_), .. } => (),
-        view::Expr { kind: view::ExprKind::Apply { args, function: _ }, .. } => {
+        expr::Expr { kind: expr::ExprKind::Constant(_), .. } => (),
+        expr::Expr { kind: expr::ExprKind::Apply { args, function: _ }, .. } => {
             for s in args {
                 build_tree(ctx, on_change, store, Some(&iter), s)
             }
@@ -255,29 +256,24 @@ fn build_tree(
     }
 }
 
-fn build_expr(
-    ctx: &WidgetCtx,
-    variables: &Vars,
-    store: &gtk::TreeStore,
-    root: &gtk::TreeIter,
-) -> view::Expr {
+fn build_expr(ctx: &BSCtx, store: &gtk::TreeStore, root: &gtk::TreeIter) -> expr::Expr {
     let v = store.get_value(root, 2);
     match v.get::<&Properties>() {
         Err(e) => {
             let v = Value::String(Chars::from(format!("tree error: {}", e)));
-            let e = view::ExprKind::Constant(v).to_expr();
+            let e = expr::ExprKind::Constant(v).to_expr();
             set_dbg_expr(ctx, store, root, e)
         }
         Ok(None) => {
             let v = Value::String(Chars::from("tree error: missing widget"));
-            let e = view::ExprKind::Constant(v).to_expr();
+            let e = expr::ExprKind::Constant(v).to_expr();
             set_dbg_expr(ctx, store, root, e)
         }
         Ok(Some(p)) => match p.spec() {
-            v @ view::Expr { kind: view::ExprKind::Constant(_), .. } => {
+            v @ expr::Expr { kind: expr::ExprKind::Constant(_), .. } => {
                 set_dbg_expr(ctx, store, root, v)
             }
-            view::Expr { kind: view::ExprKind::Apply { mut args, function }, id } => {
+            expr::Expr { kind: expr::ExprKind::Apply { mut args, function }, id } => {
                 args.clear();
                 store.set_value(root, 0, &function.to_value());
                 match store.iter_children(Some(root)) {
@@ -285,11 +281,11 @@ fn build_expr(
                         ctx,
                         store,
                         root,
-                        view::Expr { id, kind: view::ExprKind::Apply { args, function } },
+                        expr::Expr { id, kind: expr::ExprKind::Apply { args, function } },
                     ),
                     Some(iter) => {
                         loop {
-                            args.push(build_expr(ctx, variables, store, &iter));
+                            args.push(build_expr(ctx, store, &iter));
                             if !store.iter_next(&iter) {
                                 break;
                             }
@@ -298,9 +294,9 @@ fn build_expr(
                             ctx,
                             store,
                             root,
-                            view::Expr {
+                            expr::Expr {
                                 id,
-                                kind: view::ExprKind::Apply { args, function },
+                                kind: expr::ExprKind::Apply { args, function },
                             },
                         )
                     }
@@ -318,10 +314,9 @@ pub(super) struct ExprInspector {
 
 impl ExprInspector {
     pub(super) fn new(
-        ctx: WidgetCtx,
-        variables: &Vars,
-        on_change: impl Fn(view::Expr) + 'static,
-        init: view::Expr,
+        ctx: BSCtx,
+        on_change: impl Fn(expr::Expr) + 'static,
+        init: expr::Expr,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let store = gtk::TreeStore::new(&[
@@ -398,19 +393,17 @@ impl ExprInspector {
             let inhibit = inhibit.clone();
             let scheduled = Rc::new(Cell::new(false));
             let on_change = Rc::new(on_change);
-            let variables = variables.clone();
             move || {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
-                        @strong variables,
                         @strong ctx,
                         @strong store,
                         @strong inhibit,
                         @strong scheduled,
                         @strong on_change => move || {
                             if let Some(root) = store.get_iter_first() {
-                                let expr = build_expr(&ctx, &variables, &store, &root);
+                                let expr = build_expr(&ctx, &store, &root);
                                 on_change(expr)
                             }
                             scheduled.set(false);
@@ -422,7 +415,6 @@ impl ExprInspector {
         });
         build_tree(&ctx, &on_change, &store, None, &init);
         kind.connect_changed(clone!(
-        @strong variables,
         @strong ctx,
         @strong on_change,
         @strong store,
@@ -496,13 +488,12 @@ impl ExprInspector {
         menu.append(&new_child);
         menu.append(&delete);
         let dup = Rc::new(clone!(
-            @strong variables,
             @strong ctx,
             @strong on_change,
             @weak store,
             @strong selected => move || {
             if let Some(iter) = &*selected.borrow() {
-                let expr = build_expr(&ctx, &variables, &store, iter);
+                let expr = build_expr(&ctx, &store, iter);
                 let parent = store.iter_parent(iter);
                 build_tree(&ctx, &on_change, &store, parent.as_ref(), &expr);
                 on_change()
@@ -511,7 +502,6 @@ impl ExprInspector {
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let add = Rc::new(clone!(
-            @strong variables,
             @strong ctx,
             @strong on_change,
             @weak store,
@@ -524,7 +514,6 @@ impl ExprInspector {
         new_sib.connect_activate(clone!(@strong add => move |_| add()));
         addbtn.connect_clicked(clone!(@strong add => move |_| add()));
         let addch = Rc::new(clone!(
-            @strong variables,
             @strong ctx,
             @strong on_change,
             @weak store,

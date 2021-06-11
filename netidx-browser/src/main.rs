@@ -17,7 +17,6 @@ use anyhow::Result;
 use bscript::Target;
 use editor::Editor;
 use futures::channel::oneshot;
-use fxhash::FxBuildHasher;
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
@@ -34,14 +33,13 @@ use netidx_bscript::{
     expr::ExprKind,
     vm::{ExecCtx, Node},
 };
-use netidx_protocols::view::{self as protocol_view, ExprId};
+use netidx_protocols::view::{self as protocol_view};
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fmt, mem,
-    ops::Deref,
     path::PathBuf,
-    rc::{Rc, Weak},
+    rc::Rc,
     result, str,
     sync::{
         atomic::{AtomicBool, Ordering},

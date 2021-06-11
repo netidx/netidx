@@ -1,4 +1,4 @@
-use super::super::{util::err_modal, Vars, WidgetCtx};
+use super::super::{util::err_modal, BSCtx, Vars};
 use super::{
     expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
@@ -8,6 +8,7 @@ use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use netidx::subscriber::Value;
+use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
@@ -255,11 +256,10 @@ impl Table {
 type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 
 fn expr(
-    ctx: &WidgetCtx,
-    variables: &Vars,
+    ctx: &BSCtx,
     txt: &str,
-    init: &view::Expr,
-    on_change: impl Fn(view::Expr) + 'static,
+    init: &expr::Expr,
+    on_change: impl Fn(expr::Expr) + 'static,
 ) -> (gtk::Label, gtk::Box, DbgExpr) {
     let on_change = Rc::new(on_change);
     let source = Rc::new(RefCell::new(init.clone()));
@@ -287,7 +287,7 @@ fn expr(
     entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
-        match e.get_text().parse::<view::Expr>() {
+        match e.get_text().parse::<expr::Expr>() {
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
                 e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
@@ -297,7 +297,6 @@ fn expr(
         }
     }));
     inspect.connect_toggled(clone!(
-        @strong variables,
         @strong ctx,
         @strong on_change,
         @strong inspector,
@@ -312,14 +311,13 @@ fn expr(
             w.set_default_size(640, 480);
             let on_change = {
                 let entry = entry.clone();
-                move |s: view::Expr| {
+                move |s: expr::Expr| {
                     entry.set_text(&s.to_string());
                     entry.emit_activate();
                 }
             };
             let si = ExprInspector::new(
-                ctx.clone(),
-                &variables,
+                ctx,
                 on_change,
                 source.borrow().clone()
             );
@@ -340,19 +338,18 @@ fn expr(
 #[derive(Clone, Debug)]
 pub(super) struct Action {
     root: TwoColGrid,
-    spec: Rc<RefCell<view::Expr>>,
+    spec: Rc<RefCell<expr::Expr>>,
     expr: DbgExpr,
     iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
 impl Action {
     pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        spec: view::Expr,
+        spec: expr::Expr,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
@@ -370,7 +367,6 @@ impl Action {
         update_desc();
         let (l, e, expr) = expr(
             ctx,
-            variables,
             "Action:",
             &*spec.borrow(),
             clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
@@ -399,16 +395,15 @@ impl Action {
 #[derive(Clone, Debug)]
 pub(super) struct Label {
     root: gtk::Box,
-    spec: Rc<RefCell<view::Expr>>,
+    spec: Rc<RefCell<expr::Expr>>,
     expr: DbgExpr,
 }
 
 impl Label {
     pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: OnChange,
-        spec: view::Expr,
+        spec: expr::Expr,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -416,7 +411,6 @@ impl Label {
         root.pack_start(&pathbox, false, false, 0);
         let (l, e, expr) = expr(
             ctx,
-            variables,
             "Expr:",
             &*spec.borrow(),
             clone!(@strong spec => move |s| {
@@ -449,8 +443,7 @@ pub(super) struct Button {
 
 impl Button {
     pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: OnChange,
         spec: view::Button,
     ) -> Self {
@@ -458,7 +451,6 @@ impl Button {
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(
             ctx,
-            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -469,7 +461,6 @@ impl Button {
         root.add((l, e));
         let (l, e, label_expr) = expr(
             ctx,
-            variables,
             "Label:",
             &spec.borrow().label,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -480,7 +471,6 @@ impl Button {
         root.add((l, e));
         let (l, e, on_click_expr) = expr(
             ctx,
-            variables,
             "On Click:",
             &spec.borrow().on_click,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -512,8 +502,7 @@ pub(super) struct Toggle {
 
 impl Toggle {
     pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: OnChange,
         spec: view::Toggle,
     ) -> Self {
@@ -521,7 +510,6 @@ impl Toggle {
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(
             ctx,
-            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -532,7 +520,6 @@ impl Toggle {
         root.add((l, e));
         let (l, e, value_expr) = expr(
             ctx,
-            variables,
             "Value:",
             &spec.borrow().value,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -543,7 +530,6 @@ impl Toggle {
         root.add((l, e));
         let (l, e, on_change_expr) = expr(
             ctx,
-            variables,
             "On Change:",
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -575,17 +561,11 @@ pub(super) struct Selector {
 }
 
 impl Selector {
-    pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
-        on_change: OnChange,
-        spec: view::Selector,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Selector) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(
             ctx,
-            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -596,7 +576,6 @@ impl Selector {
         root.add((l, e));
         let (l, e, choices_expr) = expr(
             ctx,
-            variables,
             "Choices:",
             &spec.borrow().choices,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -607,7 +586,6 @@ impl Selector {
         root.add((l, e));
         let (l, e, selected_expr) = expr(
             ctx,
-            variables,
             "Selected:",
             &spec.borrow().selected,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -618,7 +596,6 @@ impl Selector {
         root.add((l, e));
         let (l, e, on_change_expr) = expr(
             ctx,
-            variables,
             "On Change:",
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -651,17 +628,11 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
-        on_change: OnChange,
-        spec: view::Entry,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Entry) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(
             ctx,
-            variables,
             "Enabled:",
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -672,7 +643,6 @@ impl Entry {
         root.add((l, e));
         let (l, e, visible_expr) = expr(
             ctx,
-            variables,
             "Visible:",
             &spec.borrow().visible,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -683,7 +653,6 @@ impl Entry {
         root.add((l, e));
         let (l, e, text_expr) = expr(
             ctx,
-            variables,
             "Text:",
             &spec.borrow().text,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -694,7 +663,6 @@ impl Entry {
         root.add((l, e));
         let (l, e, on_change_expr) = expr(
             ctx,
-            variables,
             "On Change:",
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -705,7 +673,6 @@ impl Entry {
         root.add((l, e));
         let (l, e, on_activate_expr) = expr(
             ctx,
-            variables,
             "On Activate:",
             &spec.borrow().on_activate,
             clone!(@strong on_change, @strong spec => move |s| {
@@ -754,20 +721,14 @@ pub(super) struct LinePlot {
 }
 
 impl LinePlot {
-    pub(super) fn new(
-        ctx: &WidgetCtx,
-        variables: &Vars,
-        on_change: OnChange,
-        spec: view::LinePlot,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::LinePlot) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         LinePlot::build_chart_style_editor(&root, &on_change, &spec);
         LinePlot::build_axis_style_editor(&root, &on_change, &spec);
         let (x_min, x_max, y_min, y_max, keep_points) =
-            LinePlot::build_axis_range_editor(ctx, variables, &root, &on_change, &spec);
-        let series =
-            LinePlot::build_series_editor(ctx, variables, &root, &on_change, &spec);
+            LinePlot::build_axis_range_editor(ctx, &root, &on_change, &spec);
+        let series = LinePlot::build_series_editor(ctx, &root, &on_change, &spec);
         LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
@@ -830,8 +791,7 @@ impl LinePlot {
     }
 
     fn build_axis_range_editor(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
@@ -843,7 +803,6 @@ impl LinePlot {
         range_exp.add(range.root());
         let (l, e, x_min) = expr(
             ctx,
-            variables,
             "x min:",
             &spec.borrow().x_min,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -854,7 +813,6 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, x_max) = expr(
             ctx,
-            variables,
             "x max:",
             &spec.borrow().x_max,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -865,7 +823,6 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, y_min) = expr(
             ctx,
-            variables,
             "y min:",
             &spec.borrow().y_min,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -876,7 +833,6 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, y_max) = expr(
             ctx,
-            variables,
             "y max:",
             &spec.borrow().y_max,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -887,7 +843,6 @@ impl LinePlot {
         range.add((l, e));
         let (l, e, keep_points) = expr(
             ctx,
-            variables,
             "Keep Points:",
             &spec.borrow().keep_points,
             clone!(@strong spec, @strong on_change => move |s| {
@@ -975,8 +930,7 @@ impl LinePlot {
     }
 
     fn build_series_editor(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
         spec: &Rc<RefCell<view::LinePlot>>,
@@ -1000,7 +954,6 @@ impl LinePlot {
         seriesbox.pack_start(&addbtn, false, false, 0);
         let build_series = Rc::new(clone!(
             @weak seriesbox,
-            @strong variables,
             @strong ctx,
             @strong on_change,
             @strong series => move |spec: view::Series| {
@@ -1031,7 +984,6 @@ impl LinePlot {
                 grid.add((lbl_line_color, line_color));
                 let (l, e, x) = expr(
                     &ctx,
-                    &variables,
                     "X:",
                     &spec.borrow().x,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -1042,7 +994,6 @@ impl LinePlot {
                 grid.add((l, e));
                 let (l, e, y) = expr(
                     &ctx,
-                    &variables,
                     "Y:",
                     &spec.borrow().y,
                     clone!(@strong spec, @strong on_change => move |s| {
@@ -1077,16 +1028,16 @@ impl LinePlot {
             build_series(view::Series {
                 title: String::from("Series"),
                 line_color: view::RGB { r: 0., g: 0., b: 0. },
-                x: view::ExprKind::Apply {
+                x: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere/in/netidx/x"))
+                        expr::ExprKind::Constant(Value::from("/somewhere/in/netidx/x"))
                             .to_expr()
                     ],
                     function: "load".into()
                 }.to_expr(),
-                y: view::ExprKind::Apply {
+                y: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere/in/netidx/y"))
+                        expr::ExprKind::Constant(Value::from("/somewhere/in/netidx/y"))
                             .to_expr()
                     ],
                     function: "load".into()

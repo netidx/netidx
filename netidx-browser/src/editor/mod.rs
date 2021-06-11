@@ -1,10 +1,11 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{Vars, WidgetCtx, WidgetPath, DEFAULT_PROPS};
+use super::{BSCtx, Vars, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
+use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
     boxed,
@@ -219,8 +220,7 @@ struct Widget {
 
 impl Widget {
     fn insert(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
@@ -231,7 +231,6 @@ impl Widget {
                 "Action",
                 WidgetKind::Action(widgets::Action::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     store,
                     iter,
@@ -248,7 +247,6 @@ impl Widget {
                 "Label",
                 WidgetKind::Label(widgets::Label::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -258,7 +256,6 @@ impl Widget {
                 "Button",
                 WidgetKind::Button(widgets::Button::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -268,7 +265,6 @@ impl Widget {
                 "Toggle",
                 WidgetKind::Toggle(widgets::Toggle::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -278,7 +274,6 @@ impl Widget {
                 "Selector",
                 WidgetKind::Selector(widgets::Selector::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -288,7 +283,6 @@ impl Widget {
                 "Entry",
                 WidgetKind::Entry(widgets::Entry::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -298,7 +292,6 @@ impl Widget {
                 "LinePlot",
                 WidgetKind::LinePlot(widgets::LinePlot::new(
                     ctx,
-                    variables,
                     on_change.clone(),
                     s,
                 )),
@@ -374,7 +367,7 @@ impl Widget {
                 columns: view::ColumnSpec::Auto,
             })),
             Some("Action") => widget(view::WidgetKind::Action(
-                view::ExprKind::Constant(Value::U64(42)).to_expr(),
+                expr::ExprKind::Constant(Value::U64(42)).to_expr(),
             )),
             Some("Table") => widget(view::WidgetKind::Table(view::Table {
                 path: Path::from("/"),
@@ -383,18 +376,18 @@ impl Widget {
             })),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
-                widget(view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()))
+                widget(view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()))
             }
             Some("Button") => {
                 let l = Chars::from("click me!");
                 widget(view::WidgetKind::Button(view::Button {
-                    enabled: view::ExprKind::Constant(Value::True).to_expr(),
-                    label: view::ExprKind::Constant(Value::String(l)).to_expr(),
-                    on_click: view::ExprKind::Apply {
+                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
+                    on_click: expr::ExprKind::Apply {
                         args: vec![
-                            view::ExprKind::Constant(Value::from("/somewhere/in/netidx"))
+                            expr::ExprKind::Constant(Value::from("/somewhere/in/netidx"))
                                 .to_expr(),
-                            view::ExprKind::Apply {
+                            expr::ExprKind::Apply {
                                 args: vec![],
                                 function: "event".into(),
                             }
@@ -406,18 +399,18 @@ impl Widget {
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
-                enabled: view::ExprKind::Constant(Value::True).to_expr(),
-                value: view::ExprKind::Apply {
+                enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+                value: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
+                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
                     ],
                     function: "load".into(),
                 }
                 .to_expr(),
-                on_change: view::ExprKind::Apply {
+                on_change: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
-                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
                     ],
                     function: "store".into(),
@@ -428,19 +421,19 @@ impl Widget {
                 let choices =
                     Chars::from(r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#);
                 widget(view::WidgetKind::Selector(view::Selector {
-                    enabled: view::ExprKind::Constant(Value::True).to_expr(),
-                    choices: view::ExprKind::Constant(Value::String(choices)).to_expr(),
-                    selected: view::ExprKind::Apply {
+                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+                    choices: expr::ExprKind::Constant(Value::String(choices)).to_expr(),
+                    selected: expr::ExprKind::Apply {
                         args: vec![
-                            view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
+                            expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
                         ],
                         function: "load".into(),
                     }
                     .to_expr(),
-                    on_change: view::ExprKind::Apply {
+                    on_change: expr::ExprKind::Apply {
                         args: vec![
-                            view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
-                            view::ExprKind::Apply {
+                            expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                            expr::ExprKind::Apply {
                                 args: vec![],
                                 function: "event".into(),
                             }
@@ -452,28 +445,28 @@ impl Widget {
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
-                enabled: view::ExprKind::Constant(Value::True).to_expr(),
-                visible: view::ExprKind::Constant(Value::True).to_expr(),
-                text: view::ExprKind::Apply {
+                enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+                visible: expr::ExprKind::Constant(Value::True).to_expr(),
+                text: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr()
+                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
                     ],
                     function: "load".into(),
                 }
                 .to_expr(),
-                on_change: view::ExprKind::Apply {
+                on_change: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                        expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
-                        view::ExprKind::Constant(Value::True).to_expr(),
+                        expr::ExprKind::Constant(Value::True).to_expr(),
                     ],
                     function: "sample".into(),
                 }
                 .to_expr(),
-                on_activate: view::ExprKind::Apply {
+                on_activate: expr::ExprKind::Apply {
                     args: vec![
-                        view::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
-                        view::ExprKind::Apply { args: vec![], function: "event".into() }
+                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
                     ],
                     function: "store".into(),
@@ -491,11 +484,11 @@ impl Widget {
                 fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
                 margin: 3,
                 label_area: 50,
-                x_min: view::ExprKind::Constant(Value::Null).to_expr(),
-                x_max: view::ExprKind::Constant(Value::Null).to_expr(),
-                y_min: view::ExprKind::Constant(Value::Null).to_expr(),
-                y_max: view::ExprKind::Constant(Value::Null).to_expr(),
-                keep_points: view::ExprKind::Constant(Value::U64(256)).to_expr(),
+                x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
                 series: Vec::new(),
             })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
@@ -507,7 +500,7 @@ impl Widget {
             Some("BoxChild") => {
                 let s = Value::String(Chars::from("empty box child"));
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
                     props: None,
                 };
                 widget(view::WidgetKind::BoxChild(view::BoxChild {
@@ -526,7 +519,7 @@ impl Widget {
             Some("GridChild") => {
                 let s = Value::String(Chars::from("empty grid child"));
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
                     props: None,
                 };
                 widget(view::WidgetKind::GridChild(view::GridChild {
@@ -586,7 +579,7 @@ pub(super) struct Editor {
 }
 
 impl Editor {
-    pub(super) fn new(ctx: WidgetCtx, variables: &Vars, spec: view::View) -> Editor {
+    pub(super) fn new(ctx: BSCtx, variables: &Vars, spec: view::View) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -693,7 +686,7 @@ impl Editor {
                                 undo_stack.borrow_mut().push(spec.borrow().clone());
                             }
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            ctx.backend.render(spec.borrow().clone());
+                            ctx.user.backend.render(spec.borrow().clone());
                         }
                         scheduled.set(false);
                         glib::Continue(false)
@@ -703,7 +696,6 @@ impl Editor {
         });
         Editor::build_tree(
             &ctx,
-            &variables,
             &on_change,
             &store,
             None,
@@ -739,7 +731,6 @@ impl Editor {
                     let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
                     Widget::insert(
                         &ctx,
-                        &variables,
                         on_change.clone(),
                         &store,
                         &iter,
@@ -784,14 +775,14 @@ impl Editor {
             match s.get_selected() {
                 None => {
                     *selected.borrow_mut() = None;
-                    ctx.backend.highlight(vec![]);
+                    ctx.user.backend.highlight(vec![]);
                     reveal_properties.set_reveal_child(false);
                 }
                 Some((_, iter)) => {
                     *selected.borrow_mut() = Some(iter.clone());
                     let mut path = Vec::new();
                     Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
-                    ctx.backend.highlight(path);
+                    ctx.user.backend.highlight(path);
                     let v = store.get_value(&iter, 0);
                     if let Ok(Some(id)) = v.get::<&str>() {
                         inhibit_change.set(true);
@@ -831,7 +822,6 @@ impl Editor {
                 let parent = store.iter_parent(iter);
                 Editor::build_tree(
                     &ctx,
-                    &variables,
                     &on_change,
                     &store,
                     parent.as_ref(),
@@ -850,7 +840,7 @@ impl Editor {
             @strong ctx => move || {
             let iter = store.insert_after(None, selected.borrow().as_ref());
             let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, &variables, on_change.clone(), &store, &iter, spec);
+            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
@@ -863,7 +853,7 @@ impl Editor {
             @strong ctx => move || {
             let iter = store.insert_after(selected.borrow().as_ref(), None);
             let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, &variables, on_change.clone(), &store, &iter, spec);
+            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
             on_change();
         }));
         new_child.connect_activate(clone!(@strong newch => move |_| newch()));
@@ -899,7 +889,6 @@ impl Editor {
                     *spec.borrow_mut() = s.clone();
                     Editor::build_tree(
                         &ctx,
-                        &variables,
                         &on_change,
                         &store,
                         None,
@@ -940,24 +929,22 @@ impl Editor {
     }
 
     fn build_tree(
-        ctx: &WidgetCtx,
-        variables: &Vars,
+        ctx: &BSCtx,
         on_change: &OnChange,
         store: &gtk::TreeStore,
         parent: Option<&gtk::TreeIter>,
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(ctx, variables, on_change.clone(), store, &iter, w.clone());
+        Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
         match &w.kind {
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
-                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
             view::WidgetKind::BoxChild(b) => Editor::build_tree(
                 ctx,
-                variables,
                 on_change,
                 store,
                 Some(&iter),
@@ -965,12 +952,11 @@ impl Editor {
             ),
             view::WidgetKind::Grid(g) => {
                 for w in &g.rows {
-                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
             view::WidgetKind::GridChild(g) => Editor::build_tree(
                 ctx,
-                variables,
                 on_change,
                 store,
                 Some(&iter),
@@ -978,7 +964,7 @@ impl Editor {
             ),
             view::WidgetKind::GridRow(g) => {
                 for w in &g.columns {
-                    Editor::build_tree(ctx, variables, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
             view::WidgetKind::Action(_)
@@ -998,14 +984,14 @@ impl Editor {
             Err(e) => {
                 let s = Value::from(format!("tree error: {}", e));
                 view::Widget {
-                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
                     props: None,
                 }
             }
             Ok(None) => {
                 let s = Value::from("tree error: missing widget");
                 view::Widget {
-                    kind: view::WidgetKind::Label(view::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
                     props: None,
                 }
             }
