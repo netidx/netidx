@@ -736,46 +736,47 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::UpdateVar(name, value) => {
-            update_single(&current, Target::Variable(name, value));
+            update_single(&current, &ctx, &Target::Variable(name, value));
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
-            update_single(&current, Target::Rpc(path.as_ref()), &value);
+            let name = Chars::from(&*path);
+            update_single(&current, &ctx, &Target::Rpc(name, value));
             Continue(true)
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = WAITS.take();
                 for (id, value) in batch.drain(..) {
-                    root.update(&mut *waits, Target::Netidx(id), &value);
+                    root.update(&ctx, &mut *waits, &Target::Netidx(id, value));
                 }
                 if waits.len() == 0 {
-                    ctx.backend.updated()
+                    ctx.user.backend.updated()
                 } else {
                     let ctx = ctx.clone();
                     glib::MainContext::default().spawn_local(async move {
                         for r in waits.drain(..) {
                             let _: result::Result<_, _> = r.await;
                         }
-                        ctx.backend.updated();
+                        ctx.user.backend.updated();
                     });
                 }
             }
             Continue(true)
         }
         ToGui::NavigateInWindow(loc) => {
-            *ctx.new_window_loc.borrow_mut() = loc;
+            *ctx.user.new_window_loc.borrow_mut() = loc;
             app.activate();
             Continue(true)
         }
         ToGui::View { loc, original, raeified, generated } => {
             match loc {
                 None => {
-                    ctx.view_saved.set(false);
+                    ctx.user.view_saved.set(false);
                     save_button.set_sensitive(true);
                 }
                 Some(loc) => {
-                    ctx.view_saved.set(true);
+                    ctx.user.view_saved.set(true);
                     save_button.set_sensitive(false);
                     if !generated {
                         *save_loc.borrow_mut() = Some(match loc.clone() {
@@ -797,9 +798,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
             ctx.dbg_ctx.borrow_mut().clear();
-            let cur =
-                View::new((*ctx).clone(), &variables, &*current_loc.borrow(), raeified);
-            ctx.window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
+            let cur = View::new(&ctx, &*current_loc.borrow(), raeified);
+            ctx.user
+                .window
+                .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
             mainbox.show_all();
             let hl = highlight.borrow();
@@ -817,11 +819,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::ShowError(s) => {
-            err_modal(&ctx.window, &s);
+            err_modal(&ctx.user.window, &s);
             Continue(true)
         }
         ToGui::SaveError(s) => {
-            err_modal(&ctx.window, &s);
+            err_modal(&ctx.user.window, &s);
             idle_add_local(clone!(
                 @weak ctx,
                 @strong save_loc,
@@ -902,13 +904,13 @@ fn main() {
                 default_loc.clone(),
             )));
             let window = ApplicationWindow::new(&app);
-            let ctx = bscript::create_ctx(WidgetCtx(Rc::new(WidgetCtxInner {
+            let ctx = bscript::create_ctx(WidgetCtx {
                 backend,
                 raw_view,
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
-            })));
+            });
             run_gui(ctx, app, rx_to_gui);
         }
     });
