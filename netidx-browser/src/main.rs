@@ -141,41 +141,12 @@ enum FromGui {
     Terminate,
 }
 
-struct WidgetCtxInner {
+struct WidgetCtx {
     backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
-}
-
-#[derive(Clone)]
-struct WidgetCtx(Rc<WidgetCtxInner>);
-
-impl glib::clone::Downgrade for WidgetCtx {
-    type Weak = WidgetCtxWeak;
-
-    fn downgrade(&self) -> Self::Weak {
-        WidgetCtxWeak(Rc::downgrade(&self.0))
-    }
-}
-
-impl Deref for WidgetCtx {
-    type Target = WidgetCtxInner;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
-struct WidgetCtxWeak(Weak<WidgetCtxInner>);
-
-impl glib::clone::Upgrade for WidgetCtxWeak {
-    type Strong = WidgetCtx;
-
-    fn upgrade(&self) -> Option<Self::Strong> {
-        Weak::upgrade(&self.0).map(WidgetCtx)
-    }
 }
 
 fn val_to_bool(v: &Value) -> bool {
@@ -357,11 +328,11 @@ impl Widget {
     }
 }
 
-fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
+fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let ask_saved =
         Rc::new(clone!(@weak ctx, @weak root => @default-return true, move || {
-            if !ctx.view_saved.get() {
+            if !ctx.user.view_saved.get() {
                 ask_modal(&root, "Unsaved view will be lost.")
             } else {
                 true
@@ -392,7 +363,9 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.backend.navigate(ViewLoc::Netidx(Path::from(String::from(uri))));
+                    ctx.user.backend.navigate(
+                        ViewLoc::Netidx(Path::from(String::from(uri)))
+                    );
                     Inhibit(false)
                 }));
             }
@@ -408,7 +381,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.backend.navigate(ViewLoc::Netidx(Path::from("/")));
+                    ctx.user.backend.navigate(ViewLoc::Netidx(Path::from("/")));
                     Inhibit(false)
             }));
             let sep = gtk::Label::new(Some(" > "));
@@ -424,7 +397,7 @@ fn make_crumbs(ctx: &WidgetCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.backend.navigate(ViewLoc::File(name.clone()));
+                    ctx.user.backend.navigate(ViewLoc::File(name.clone()));
                     Inhibit(false)
             }));
         }
@@ -438,7 +411,7 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: WidgetCtx, variables: &Vars, path: &ViewLoc, spec: view::View) -> View {
+    fn new(ctx: &BSCtx, path: &ViewLoc, spec: view::View) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -449,11 +422,10 @@ impl View {
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
-        let widget =
-            Widget::new(ctx.clone(), variables, spec.root.clone(), selected_path.clone());
+        let widget = Widget::new(ctx, spec.root.clone(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_property_margin(2);
-        root.add(&make_crumbs(&ctx, path));
+        root.add(&make_crumbs(ctx, path));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.add(wroot);
@@ -469,8 +441,13 @@ impl View {
         self.root.upcast_ref()
     }
 
-    fn update(&self, waits: &mut Vec<oneshot::Receiver<()>>, tgt: Target, value: &Value) {
-        self.widget.update(waits, tgt, value);
+    fn update(
+        &self,
+        ctx: &BSCtx,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &Target,
+    ) {
+        self.widget.update(ctx, waits, event);
     }
 }
 
@@ -570,7 +547,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
 }
 
 fn save_view(
-    ctx: &Rc<WidgetCtx>,
+    ctx: &BSCtx,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
     current_spec: &Rc<RefCell<protocol_view::View>>,
     save_button: &gtk::ToolButton,
@@ -583,10 +560,10 @@ fn save_view(
             let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
             async move {
-                match ctx.backend.save(loc.clone(), spec).await {
+                match ctx.user.backend.save(loc.clone(), spec).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
-                            ctx.backend.to_gui.send(ToGui::SaveError(format!(
+                            ctx.user.backend.to_gui.send(ToGui::SaveError(format!(
                                 "error saving to: {:?}, {}",
                                 &*save_loc.borrow(),
                                 e
@@ -594,12 +571,12 @@ fn save_view(
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(()) => {
-                        ctx.view_saved.set(true);
+                        ctx.user.view_saved.set(true);
                         save_button.set_sensitive(false);
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
                             *sl = Some(loc.clone());
-                            ctx.backend.navigate(loc.clone());
+                            ctx.user.backend.navigate(loc.clone());
                         }
                     }
                 }
@@ -609,7 +586,7 @@ fn save_view(
     let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
-        _ => match choose_location(&ctx.window, true) {
+        _ => match choose_location(&ctx.user.window, true) {
             None => (),
             Some(loc) => do_save(loc),
         },
@@ -620,17 +597,17 @@ lazy_static! {
     static ref WAITS: Pool<Vec<oneshot::Receiver<()>>> = Pool::new(10, 100);
 }
 
-fn update_single(current: &Rc<RefCell<Option<View>>>, target: Target, value: &Value) {
+fn update_single(current: &Rc<RefCell<Option<View>>>, ctx: &BSCtx, event: &Target) {
     if let Some(root) = &mut *current.borrow_mut() {
         let mut waits = Vec::new();
-        root.update(&mut waits, target, &value);
+        root.update(ctx, &mut waits, event);
         assert!(waits.is_empty());
     }
 }
 
-fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
+fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
-    group.add_window(&ctx.window);
+    group.add_window(&ctx.user.window);
     let headerbar = gtk::HeaderBar::new();
     let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
@@ -658,15 +635,14 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     headerbar.pack_start(&design_mode);
     headerbar.pack_start(&save_button);
     headerbar.pack_end(&prefs_button);
-    ctx.window.set_titlebar(Some(&headerbar));
-    ctx.window.set_title("Netidx browser");
-    ctx.window.set_default_size(800, 600);
-    ctx.window.add(&mainbox);
-    ctx.window.show_all();
-    if let Some(screen) = ctx.window.get_screen() {
+    ctx.user.window.set_titlebar(Some(&headerbar));
+    ctx.user.window.set_title("Netidx browser");
+    ctx.user.window.set_default_size(800, 600);
+    ctx.user.window.add(&mainbox);
+    ctx.user.window.show_all();
+    if let Some(screen) = ctx.user.window.get_screen() {
         setup_css(&screen);
     }
-    let ctx = Rc::new(ctx);
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> =
         Rc::new(RefCell::new(ViewLoc::Netidx(Path::from("/"))));
@@ -676,10 +652,10 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     let variables: Vars = Rc::new(RefCell::new(HashMap::new()));
-    ctx.window.connect_delete_event(clone!(
+    ctx.user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
-            if ctx.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
-                ctx.backend.terminate();
+            if ctx.user.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
+                ctx.user.backend.terminate();
                 Inhibit(false)
             } else {
                 Inhibit(true)
@@ -721,16 +697,17 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
-    ctx.window.add_action(&go_act);
+    ctx.user.window.add_action(&go_act);
     go_act.connect_activate(clone!(@weak ctx, @weak design_mode => move |_, _| {
-        if ctx.view_saved.get() || ask_modal(&ctx.window, "Unsaved view will be lost.") {
-            if let Some(loc) = choose_location(&ctx.window, false) {
-                ctx.backend.navigate(loc);
+        if ctx.user.view_saved.get()
+            || ask_modal(&ctx.user.window, "Unsaved view will be lost.") {
+            if let Some(loc) = choose_location(&ctx.user.window, false) {
+                ctx.user.backend.navigate(loc);
             }
         }
     }));
     let save_as_act = gio::SimpleAction::new("save_as", None);
-    ctx.window.add_action(&save_as_act);
+    ctx.user.window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
         @strong save_loc,
         @strong current_spec,
@@ -741,25 +718,25 @@ fn run_gui(ctx: WidgetCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ));
     let raw_view_act =
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
-    ctx.window.add_action(&raw_view_act);
+    ctx.user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
         if let Some(v) = a.get_state() {
             let new_v = !v.get::<bool>().expect("invalid state");
             let m = "Unsaved view will be lost.";
-            if !new_v || ctx.view_saved.get() || ask_modal(&ctx.window, m) {
-                ctx.raw_view.store(new_v, Ordering::Relaxed);
+            if !new_v || ctx.user.view_saved.get() || ask_modal(&ctx.user.window, m) {
+                ctx.user.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
-                ctx.backend.navigate(current_loc.borrow().clone());
+                ctx.user.backend.navigate(current_loc.borrow().clone());
             }
         }
     }));
     let new_window_act = gio::SimpleAction::new("new_window", None);
-    ctx.window.add_action(&new_window_act);
+    ctx.user.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::UpdateVar(name, value) => {
-            update_single(&current, Target::Variable(&name), &value);
+            update_single(&current, Target::Variable(name, value));
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
@@ -925,14 +902,13 @@ fn main() {
                 default_loc.clone(),
             )));
             let window = ApplicationWindow::new(&app);
-            let ctx = WidgetCtx(Rc::new(WidgetCtxInner {
+            let ctx = bscript::create_ctx(WidgetCtx(Rc::new(WidgetCtxInner {
                 backend,
                 raw_view,
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
-                dbg_ctx: RefCell::new(DbgCtx::new()),
-            }));
+            })));
             run_gui(ctx, app, rx_to_gui);
         }
     });

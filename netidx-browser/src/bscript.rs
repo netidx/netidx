@@ -18,9 +18,9 @@ use std::{
 #[derive(Debug, Clone)]
 pub(crate) enum Target {
     Event(Value),
-    Variable(String, Value),
+    Variable(Chars, Value),
     Netidx(SubId, Value),
-    Rpc(String, Value),
+    Rpc(Chars, Value),
 }
 
 pub(crate) struct Event {

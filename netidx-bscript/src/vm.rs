@@ -94,6 +94,14 @@ pub struct ExecCtxInner<C: 'static, E: 'static> {
 
 pub struct ExecCtx<C: 'static, E: 'static>(Rc<ExecCtxInner<C, E>>);
 
+impl<C: 'static, E: 'static> glib::clone::Downgrade for ExecCtx<C, E> {
+    type Weak = ExecCtxWeak<C, E>;
+
+    fn downgrade(&self) -> Self::Weak {
+        ExecCtxWeak(Rc::downgrade(&self.0))
+    }
+}
+
 impl<C, E> Clone for ExecCtx<C, E> {
     fn clone(&self) -> Self {
         ExecCtx(Rc::clone(&self.0))
@@ -144,6 +152,16 @@ impl<C, E> ExecCtx<C, E> {
         stdfn::Mean::register(&t);
         stdfn::Uniq::register(&t);
         t
+    }
+}
+
+pub struct ExecCtxWeak<C: 'static, E: 'static>(Weak<ExecCtxInner<C, E>>);
+
+impl<C: 'static, E: 'static> glib::clone::Upgrade for ExecCtxWeak<C, E> {
+    type Strong = ExecCtx<C, E>;
+
+    fn upgrade(&self) -> Option<Self::Strong> {
+        Weak::upgrade(&self.0).map(ExecCtx)
     }
 }
 

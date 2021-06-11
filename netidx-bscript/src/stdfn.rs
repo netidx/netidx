@@ -846,7 +846,7 @@ pub(crate) struct Uniq(RefCell<Option<Value>>);
 
 impl<C, E> Register<C, E> for Uniq {
     fn register(ctx: &ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Box::new(|ctx, from| {
+        let f: InitFn<C, E> = Box::new(|_, from| {
             let t = Uniq(RefCell::new(None));
             match from {
                 [e] => *t.0.borrow_mut() = e.current(),
