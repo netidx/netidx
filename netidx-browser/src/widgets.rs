@@ -1,4 +1,4 @@
-use super::{val_to_bool, BSCtx, BSNode, Vars, WidgetCtx};
+use super::{val_to_bool, BSCtx, BSNode};
 use crate::{bscript::Target, view};
 use anyhow::{anyhow, Result};
 use cairo;
@@ -539,7 +539,6 @@ impl LinePlot {
             @strong x_max,
             @strong y_min,
             @strong y_max,
-            @strong keep_points,
             @strong series => move |_, context| {
                 // CR estokes: there is a bug in plotters that causes
                 // it to somtimes panic in draw it probably isn't

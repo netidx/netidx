@@ -1,7 +1,7 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{BSCtx, Vars, WidgetPath, DEFAULT_PROPS};
+use super::{BSCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
@@ -579,7 +579,7 @@ pub(super) struct Editor {
 }
 
 impl Editor {
-    pub(super) fn new(ctx: BSCtx, variables: &Vars, spec: view::View) -> Editor {
+    pub(super) fn new(ctx: BSCtx, spec: view::View) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -712,7 +712,6 @@ impl Editor {
             kind.append(Some(k), k);
         }
         kind.connect_changed(clone!(
-            @strong variables,
             @strong on_change,
             @strong store,
             @strong selected,
@@ -812,7 +811,6 @@ impl Editor {
         menu.append(&delete);
         menu.append(&undo);
         let dup = Rc::new(clone!(
-            @strong variables,
             @strong on_change,
             @weak store,
             @strong selected,
@@ -833,7 +831,6 @@ impl Editor {
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let newsib = Rc::new(clone!(
-            @strong variables,
             @strong on_change,
             @weak store,
             @strong selected,
@@ -846,7 +843,6 @@ impl Editor {
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         let newch = Rc::new(clone!(
-            @strong variables,
             @strong on_change,
             @weak store,
             @strong selected,
@@ -871,7 +867,6 @@ impl Editor {
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
         let und = Rc::new(clone!(
             @weak store,
-            @strong variables,
             @strong undo_stack,
             @strong spec,
             @strong selected,

@@ -1,11 +1,8 @@
-use super::{
-    set_common_props, BSCtx, BSNode, Target, Vars, Widget, WidgetCtx, DEFAULT_PROPS,
-};
+use super::{set_common_props, BSCtx, Target, Widget, DEFAULT_PROPS};
 use crate::view;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
-use netidx::subscriber::Value;
 use std::cmp::max;
 
 pub(super) struct Box {

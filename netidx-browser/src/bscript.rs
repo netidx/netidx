@@ -51,7 +51,7 @@ impl Apply<WidgetCtx, Target> for Event {
 
     fn update(
         &self,
-        ctx: &ExecCtx<WidgetCtx, Target>,
+        _ctx: &ExecCtx<WidgetCtx, Target>,
         from: &[Node<WidgetCtx, Target>],
         event: &Target,
     ) -> Option<Value> {
@@ -496,7 +496,7 @@ impl Apply<WidgetCtx, Target> for LoadVar {
                         | (Some(_), Target::Netidx(_, _))
                         | (Some(_), Target::Event(_))
                         | (Some(_), Target::Rpc(_, _)) => None,
-                        (Some(vn), Target::Variable(tn, v)) if &**vn == tn => {
+                        (Some(vn), Target::Variable(tn, v)) if vn == tn => {
                             Some(v.clone())
                         }
                         (Some(_), Target::Variable(_, _)) => None,
@@ -792,7 +792,7 @@ impl Apply<WidgetCtx, Target> for RpcCall {
                             .as_ref()
                             .and_then(|v| v.clone().cast_to::<Chars>().ok())
                         {
-                            Some(fname) if &*fname == name => Some(v.clone()),
+                            Some(fname) if &fname == name => Some(v.clone()),
                             Some(_) => None,
                             None => {
                                 self.invalid.set(true);

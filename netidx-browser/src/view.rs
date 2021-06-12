@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures::{future::join_all, prelude::Future};
+use netidx_bscript::expr;
 use netidx::{
     resolver::{self, ResolverRead},
     subscriber::Value,
@@ -65,9 +66,9 @@ pub(super) struct Grid {
 
 #[derive(Debug, Clone)]
 pub(super) enum WidgetKind {
-    Action(view::Expr),
+    Action(expr::Expr),
     Table(view::Table, resolver::Table),
-    Label(view::Expr),
+    Label(expr::Expr),
     Button(view::Button),
     Toggle(view::Toggle),
     Selector(view::Selector),

@@ -33,7 +33,7 @@ use netidx_bscript::{
     expr::ExprKind,
     vm::{ExecCtx, Node},
 };
-use netidx_protocols::view::{self as protocol_view};
+use netidx_protocols::view as protocol_view;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -53,7 +53,6 @@ type BSNode = Node<WidgetCtx, Target>;
 type BSCtx = ExecCtx<WidgetCtx, Target>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
-type Vars = Rc<RefCell<HashMap<Chars, Value>>>;
 
 fn default_view(path: Path) -> protocol_view::View {
     protocol_view::View {
@@ -195,7 +194,7 @@ impl Widget {
                 Widget::Action(widgets::Action::new(ctx, spec))
             }
             view::WidgetKind::Table(base_path, spec) => {
-                let tbl = table::Table::new(ctx, base_path, spec, selected_path);
+                let tbl = table::Table::new(ctx.clone(), base_path, spec, selected_path);
                 // force the initial update/subscribe
                 tbl.start_update_task(None);
                 Widget::Table(tbl)
@@ -356,8 +355,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                 lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
                 lbl.connect_activate_link(clone!(
                 @weak ctx,
-                @strong ask_saved,
-                @weak root => @default-return Inhibit(false), move |_, uri| {
+                @strong ask_saved => @default-return Inhibit(false), move |_, uri| {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
@@ -649,7 +647,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
-    let variables: Vars = Rc::new(RefCell::new(HashMap::new()));
     ctx.user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
             if ctx.user.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
@@ -661,7 +658,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     }));
     design_mode.connect_toggled(clone!(
     @weak mainbox,
-    @strong variables,
     @strong editor,
     @strong highlight,
     @strong current,
@@ -672,7 +668,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 mainbox.remove(editor.root());
             }
             let s = current_spec.borrow().clone();
-            let e = Editor::new(WidgetCtx::clone(&*ctx), &variables, s);
+            let e = Editor::new(ctx, s);
             mainbox.add1(e.root());
             mainbox.show_all();
             *editor.borrow_mut() = Some(e);
@@ -696,7 +692,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ));
     let go_act = gio::SimpleAction::new("go", None);
     ctx.user.window.add_action(&go_act);
-    go_act.connect_activate(clone!(@weak ctx, @weak design_mode => move |_, _| {
+    go_act.connect_activate(clone!(@weak ctx => move |_, _| {
         if ctx.user.view_saved.get()
             || ask_modal(&ctx.user.window, "Unsaved view will be lost.") {
             if let Some(loc) = choose_location(&ctx.user.window, false) {
@@ -738,7 +734,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
-            let name = Chars::from(&*path);
+            let name = Chars::from(String::from(&*path));
             update_single(&current, &ctx, &Target::Rpc(name, value));
             Continue(true)
         }
@@ -793,7 +789,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            variables.borrow_mut().clear();
+            ctx.variables.borrow_mut().clear();
             *current_spec.borrow_mut() = original.clone();
             ctx.dbg_ctx.borrow_mut().clear();
             let cur = View::new(&ctx, &*current_loc.borrow(), raeified);

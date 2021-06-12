@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    Target, ViewLoc, WidgetCtx, BSCtx
+    BSCtx, Target, ViewLoc,
 };
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
@@ -335,7 +335,7 @@ impl Table {
         } else {
             let path = Path::from(Arc::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
-            let dv = self.0.ctx.backend.subscriber.durable_subscribe(path);
+            let dv = self.0.ctx.user.backend.subscriber.durable_subscribe(path);
             let val = Rc::new(RefCell::new(match dv.last() {
                 Event::Unsubscribed => Some(Value::Null),
                 Event::Update(v) => Some(v),
@@ -528,10 +528,10 @@ impl Table {
                 } else {
                     p.append(&self.0.descriptor.cols[(id - 1) as usize].0)
                 };
-                let s = self.0.ctx.backend.subscriber.durable_subscribe(p);
+                let s = self.0.ctx.user.backend.subscriber.durable_subscribe(p);
                 s.updates(
                     UpdatesFlags::BEGIN_WITH_LAST,
-                    self.0.ctx.backend.updates.clone(),
+                    self.0.ctx.user.backend.updates.clone(),
                 );
                 self.0.by_id.borrow_mut().insert(
                     s.id(),
@@ -630,7 +630,7 @@ impl Table {
 
     pub(super) fn update(
         &self,
-        ctx: &BSCtx,
+        _ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &Target,
     ) {

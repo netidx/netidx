@@ -1,4 +1,4 @@
-use super::super::{util::err_modal, BSCtx, Vars};
+use super::super::{util::err_modal, BSCtx};
 use super::{
     expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
@@ -286,7 +286,7 @@ fn expr(
     });
     entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(clone!(
-        @strong on_change, @strong source, @weak inspect, @weak ibox => move |e| {
+        @strong on_change, @strong source, @weak ibox => move |e| {
         match e.get_text().parse::<expr::Expr>() {
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
@@ -298,7 +298,6 @@ fn expr(
     }));
     inspect.connect_toggled(clone!(
         @strong ctx,
-        @strong on_change,
         @strong inspector,
         @strong source,
         @weak entry => move |b| {
@@ -317,7 +316,7 @@ fn expr(
                 }
             };
             let si = ExprInspector::new(
-                ctx,
+                ctx.clone(),
                 on_change,
                 source.borrow().clone()
             );

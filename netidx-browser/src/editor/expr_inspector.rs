@@ -1,4 +1,4 @@
-use super::super::{bscript, BSCtx, WidgetCtx};
+use super::super::{bscript, BSCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
@@ -7,7 +7,6 @@ use netidx::{
     subscriber::{Typ, Value},
 };
 use netidx_bscript::expr;
-use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -390,7 +389,6 @@ impl ExprInspector {
         let on_change: Rc<dyn Fn()> = Rc::new({
             let ctx = ctx.clone();
             let store = store.clone();
-            let inhibit = inhibit.clone();
             let scheduled = Rc::new(Cell::new(false));
             let on_change = Rc::new(on_change);
             move || {
@@ -399,7 +397,6 @@ impl ExprInspector {
                     idle_add_local(clone!(
                         @strong ctx,
                         @strong store,
-                        @strong inhibit,
                         @strong scheduled,
                         @strong on_change => move || {
                             if let Some(root) = store.get_iter_first() {
