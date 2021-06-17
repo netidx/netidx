@@ -1248,3 +1248,100 @@ impl Load {
         )))
     }
 }
+
+pub struct LoadVar<C, E> {
+    name: RefCell<Option<Chars>>,
+    ctx: ExecCtx<C, E>,
+    invalid: Cell<bool>,
+}
+
+impl<C: Ctx, E> Register<C, E> for LoadVar<C, E> {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = LoadVar {
+                name: RefCell::new(None),
+                ctx: ctx.clone(),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [name] => t.subscribe(name.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("load_var".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for LoadVar<C, E> {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            LoadVar::err()
+        } else {
+            self.name
+                .borrow()
+                .as_ref()
+                .and_then(|n| self.ctx.variables.borrow().get(n).cloned())
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [name] => {
+                let target = name.update(ctx, event);
+                if self.invalid.get() {
+                    if target.is_some() {
+                        LoadVar::err()
+                    } else {
+                        None
+                    }
+                } else {
+                    if let Some(target) = target {
+                        self.subscribe(Some(target));
+                    }
+                    match (self.name.borrow().as_ref(), event) {
+                        (None, _)
+                        | (Some(_), Event::Netidx(_, _))
+                        | (Some(_), Event::User(_))
+                        | (Some(_), Event::Rpc(_, _)) => None,
+                        (Some(vn), Event::Variable(tn, v)) if vn == tn => {
+                            Some(v.clone())
+                        }
+                        (Some(_), Event::Variable(_, _)) => None,
+                    }
+                }
+            }
+            exprs => {
+                let mut up = false;
+                for e in exprs {
+                    up = e.update(ctx, event).is_some() || up;
+                }
+                self.invalid.set(true);
+                if up {
+                    LoadVar::err()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl<C: Ctx, E> LoadVar<C, E> {
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load_var(expr: variable name): expected 1 variable name as argument",
+        )))
+    }
+
+    fn subscribe(&self, name: Option<Value>) {
+        if let Some(name) = varname(&self.invalid, name) {
+            *self.name.borrow_mut() = Some(name);
+        }
+    }
+}

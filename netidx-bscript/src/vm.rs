@@ -171,6 +171,9 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Mean::register(&t);
         stdfn::Uniq::register(&t);
         stdfn::Store::register(&t);
+        stdfn::StoreVar::register(&t);
+        stdfn::Load::register(&t);
+        stdfn::LoadVar::register(&t);
         t
     }
 }
