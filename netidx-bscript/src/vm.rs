@@ -101,7 +101,12 @@ pub trait Apply<C: Ctx, E> {
 
 pub trait Ctx {
     fn durable_subscribe(&self, path: Path) -> Dval;
-    fn set_var(&self, name: Chars, value: Value);
+    fn set_var(
+        &self,
+        variables: &RefCell<HashMap<Chars, Value>>,
+        name: Chars,
+        value: Value,
+    );
     fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>);
 }
 

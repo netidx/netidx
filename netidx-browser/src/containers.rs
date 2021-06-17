@@ -1,5 +1,6 @@
-use super::{set_common_props, BSCtx, Target, Widget, DEFAULT_PROPS};
-use crate::view;
+use super::{set_common_props, BSCtx, Widget, DEFAULT_PROPS};
+use crate::{view, bscript::LocalEvent};
+use netidx_bscript::vm;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
@@ -69,7 +70,7 @@ impl Box {
         &self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        event: &Target,
+        event: &vm::Event<LocalEvent>,
     ) {
         for c in &self.children {
             c.update(ctx, waits, event);
@@ -163,7 +164,7 @@ impl Grid {
         &self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        event: &Target,
+        event: &vm::Event<LocalEvent>,
     ) {
         for row in &self.children {
             for child in row {

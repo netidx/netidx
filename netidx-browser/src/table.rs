@@ -1,7 +1,8 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, Target, ViewLoc,
+    BSCtx, ViewLoc,
 };
+use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
@@ -18,6 +19,7 @@ use netidx::{
     resolver,
     subscriber::{Dval, Event, SubId, Typ, UpdatesFlags, Value},
 };
+use netidx_bscript::vm;
 use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
@@ -632,11 +634,11 @@ impl Table {
         &self,
         _ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        event: &Target,
+        event: &vm::Event<LocalEvent>,
     ) {
         match event {
-            Target::Event(_) | Target::Variable(_, _) | Target::Rpc(_, _) => (),
-            Target::Netidx(id, value) => {
+            vm::Event::User(_) | vm::Event::Variable(_, _) | vm::Event::Rpc(_, _) => (),
+            vm::Event::Netidx(id, value) => {
                 self.0.update.borrow_mut().insert(*id, value.clone());
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();

@@ -14,7 +14,7 @@ mod view;
 mod widgets;
 
 use anyhow::Result;
-use bscript::Target;
+use bscript::LocalEvent;
 use editor::Editor;
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
@@ -27,11 +27,11 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     resolver::Auth,
-    subscriber::{Event, SubId, Value},
+    subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
     expr::ExprKind,
-    vm::{ExecCtx, Node},
+    vm::{self, ExecCtx, Node},
 };
 use netidx_protocols::view as protocol_view;
 use std::{
@@ -49,8 +49,8 @@ use std::{
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
 
-type BSNode = Node<WidgetCtx, Target>;
-type BSCtx = ExecCtx<WidgetCtx, Target>;
+type BSNode = Node<WidgetCtx, LocalEvent>;
+type BSCtx = ExecCtx<WidgetCtx, LocalEvent>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 
@@ -144,6 +144,28 @@ struct WidgetCtx {
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
+}
+
+impl vm::Ctx for WidgetCtx {
+    fn durable_subscribe(&self, path: Path) -> Dval {
+        let dv = self.backend.subscriber.durable_subscribe(path);
+        dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.backend.updates.clone());
+        dv
+    }
+
+    fn set_var(
+        &self,
+        variables: &RefCell<HashMap<Chars, Value>>,
+        name: Chars,
+        value: Value,
+    ) {
+        variables.borrow_mut().insert(name.clone(), value.clone());
+        let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
+    }
+
+    fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>) {
+        self.backend.call_rpc(name, args)
+    }
 }
 
 fn val_to_bool(v: &Value) -> bool {
@@ -260,7 +282,7 @@ impl Widget {
         &self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        event: &Target,
+        event: &vm::Event<LocalEvent>,
     ) {
         match self {
             Widget::Action(t) => t.update(ctx, event),
@@ -441,7 +463,7 @@ impl View {
         &self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
-        event: &Target,
+        event: &vm::Event<LocalEvent>,
     ) {
         self.widget.update(ctx, waits, event);
     }
@@ -593,7 +615,11 @@ lazy_static! {
     static ref WAITS: Pool<Vec<oneshot::Receiver<()>>> = Pool::new(10, 100);
 }
 
-fn update_single(current: &Rc<RefCell<Option<View>>>, ctx: &BSCtx, event: &Target) {
+fn update_single(
+    current: &Rc<RefCell<Option<View>>>,
+    ctx: &BSCtx,
+    event: &vm::Event<LocalEvent>,
+) {
     if let Some(root) = &mut *current.borrow_mut() {
         let mut waits = Vec::new();
         root.update(ctx, &mut waits, event);
@@ -730,19 +756,19 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::UpdateVar(name, value) => {
-            update_single(&current, &ctx, &Target::Variable(name, value));
+            update_single(&current, &ctx, &vm::Event::Variable(name, value));
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
             let name = Chars::from(String::from(&*path));
-            update_single(&current, &ctx, &Target::Rpc(name, value));
+            update_single(&current, &ctx, &vm::Event::Rpc(name, value));
             Continue(true)
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = WAITS.take();
                 for (id, value) in batch.drain(..) {
-                    root.update(&ctx, &mut *waits, &Target::Netidx(id, value));
+                    root.update(&ctx, &mut *waits, &vm::Event::Netidx(id, value));
                 }
                 if waits.len() == 0 {
                     ctx.user.backend.updated()

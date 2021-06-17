@@ -1,5 +1,5 @@
 use super::{val_to_bool, BSCtx, BSNode};
-use crate::{bscript::Target, view};
+use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, Result};
 use cairo;
 use chrono::prelude::*;
@@ -11,7 +11,7 @@ use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
 };
-use netidx_bscript::expr::Expr;
+use netidx_bscript::{expr::Expr, vm};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -43,7 +43,7 @@ impl Button {
             button.set_label(&format!("{}", v));
         }
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
-            on_click.update(&ctx, &Target::Event(Value::Null));
+            on_click.update(&ctx, &vm::Event::User(LocalEvent::Event(Value::Null)));
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("on_click: {}", spec.on_click));
@@ -62,7 +62,7 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.button.set_sensitive(val_to_bool(&new));
         }
@@ -105,7 +105,7 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.text.update(ctx, event) {
             self.label.set_label(&format!("{}", new));
         }
@@ -119,11 +119,11 @@ pub(super) struct Action {
 impl Action {
     pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
         let action = Rc::new(BSNode::compile(&ctx, spec.clone()));
-        action.update(ctx, &Target::Event(Value::Null));
+        action.update(ctx, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Action { action }
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         self.action.update(ctx, event);
     }
 }
@@ -183,7 +183,7 @@ impl Selector {
             if !we_set.get() {
                 if let Some(id) = combo.get_active_id() {
                     if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                        on_change.update(&ctx, &Target::Event(idv));
+                        on_change.update(&ctx, &vm::Event::User(LocalEvent::Event(idv)));
                     }
                 }
                 idle_add_local(clone!(
@@ -239,7 +239,7 @@ impl Selector {
         Selector::update_active(combo, source)
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         self.we_set.set(true);
         self.on_change.update(ctx, event);
         if let Some(new) = self.enabled.update(ctx, event) {
@@ -290,7 +290,9 @@ impl Toggle {
             if !we_set.get() {
                 on_change.update(
                     &ctx,
-                    &Target::Event(if state { Value::True } else { Value::False }),
+                    &vm::Event::User(
+                        LocalEvent::Event(if state { Value::True } else { Value::False })
+                    ),
                 );
                 idle_add_local(
                     clone!(@strong value, @strong switch, @strong we_set => move || {
@@ -327,7 +329,7 @@ impl Toggle {
         self.switch.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
@@ -380,7 +382,9 @@ impl Entry {
             entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
             on_activate.update(
                 &ctx,
-                &Target::Event(Value::String(Chars::from(String::from(entry.get_text())))),
+                &vm::Event::User(
+                    LocalEvent::Event(Value::String(Chars::from(String::from(entry.get_text()))))
+                ),
             );
             idle_add_local(clone!(
                 @strong we_changed, @strong text, @strong entry => move || {
@@ -401,9 +405,9 @@ impl Entry {
             if !we_changed.get() {
                 let v = on_change.update(
                     &ctx,
-                    &Target::Event(
+                    &vm::Event::User(LocalEvent::Event(
                         Value::String(Chars::from(String::from(e.get_text())))
-                    ),
+                    )),
                 );
                 if let Some(v) = v {
                     if let Some(set) = v.cast_to::<bool>().ok() {
@@ -431,7 +435,7 @@ impl Entry {
         self.entry.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
@@ -798,7 +802,7 @@ impl LinePlot {
         self.root.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &Target) {
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         let mut queue_draw = false;
         if self.x_min.update(ctx, event).is_some() {
             queue_draw = true;

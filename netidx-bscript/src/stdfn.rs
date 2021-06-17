@@ -1,6 +1,6 @@
 use crate::{
     expr::{Expr, VNAME},
-    vm::{Event, Apply, Ctx, ExecCtx, InitFn, Node, Register},
+    vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
     chars::Chars,
@@ -1139,14 +1139,14 @@ impl StoreVar {
     ) {
         if let Some(name) = varname(&self.invalid, name) {
             for v in self.queued.borrow_mut().drain(..) {
-                ctx.user.set_var(name.clone(), v)
+                ctx.user.set_var(&ctx.variables, name.clone(), v)
             }
             *self.name.borrow_mut() = Some(name);
         }
         if let Some(value) = value {
             match self.name.borrow().as_ref() {
                 None => self.queue_set(value),
-                Some(name) => ctx.user.set_var(name.clone(), value),
+                Some(name) => ctx.user.set_var(&ctx.variables, name.clone(), value),
             }
         }
     }
@@ -1209,12 +1209,8 @@ impl<C: Ctx, E> Apply<C, E> for Load {
                     }
                 } else {
                     self.cur.borrow().as_ref().and_then(|dv| match event {
-                        Event::Variable(_, _) | Event::Rpc(_, _) | Event::User(_) => {
-                            None
-                        }
-                        Event::Netidx(id, value) if dv.id() == *id => {
-                            Some(value.clone())
-                        }
+                        Event::Variable(_, _) | Event::Rpc(_, _) | Event::User(_) => None,
+                        Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
                         Event::Netidx(_, _) => None,
                     })
                 }
@@ -1309,9 +1305,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar<C, E> {
                         | (Some(_), Event::Netidx(_, _))
                         | (Some(_), Event::User(_))
                         | (Some(_), Event::Rpc(_, _)) => None,
-                        (Some(vn), Event::Variable(tn, v)) if vn == tn => {
-                            Some(v.clone())
-                        }
+                        (Some(vn), Event::Variable(tn, v)) if vn == tn => Some(v.clone()),
                         (Some(_), Event::Variable(_, _)) => None,
                     }
                 }
