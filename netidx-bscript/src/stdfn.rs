@@ -1,10 +1,11 @@
 use crate::{
     expr::Expr,
-    vm::{Apply, ExecCtx, InitFn, Node, Register},
+    vm::{Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
     chars::Chars,
-    subscriber::{Typ, Value},
+    path::Path,
+    subscriber::{Dval, Typ, Value},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -16,11 +17,11 @@ use std::{
 pub struct CachedVals(pub Rc<RefCell<Vec<Option<Value>>>>);
 
 impl CachedVals {
-    pub fn new<C, E>(from: &[Node<C, E>]) -> CachedVals {
+    pub fn new<C: Ctx, E>(from: &[Node<C, E>]) -> CachedVals {
         CachedVals(Rc::new(RefCell::new(from.into_iter().map(|s| s.current()).collect())))
     }
 
-    pub fn update<C, E>(
+    pub fn update<C: Ctx, E>(
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
@@ -41,7 +42,7 @@ impl CachedVals {
 
 pub struct Any(Rc<RefCell<Option<Value>>>);
 
-impl<C, E> Register<C, E> for Any {
+impl<C: Ctx, E> Register<C, E> for Any {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_ctx, from| {
             Box::new(Any(Rc::new(RefCell::new(from.iter().find_map(|s| s.current())))))
@@ -50,7 +51,7 @@ impl<C, E> Register<C, E> for Any {
     }
 }
 
-impl<C, E> Apply<C, E> for Any {
+impl<C: Ctx, E> Apply<C, E> for Any {
     fn current(&self) -> Option<Value> {
         self.0.borrow().clone()
     }
@@ -84,7 +85,7 @@ pub struct CachedCur<T: CachedCurEval> {
     t: PhantomData<T>,
 }
 
-impl<C, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
+impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_ctx, from| {
             let cached = CachedVals::new(from);
@@ -95,7 +96,7 @@ impl<C, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
     }
 }
 
-impl<C, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
+impl<C: Ctx, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
     fn current(&self) -> Option<Value> {
         self.current.borrow().clone()
     }
@@ -628,12 +629,12 @@ impl CachedCurEval for StringConcatEv {
 
 pub type StringConcat = CachedCur<StringConcatEv>;
 
-pub struct Eval<C: 'static, E: 'static> {
+pub struct Eval<C: Ctx, E> {
     cached: CachedVals,
     current: RefCell<Result<Node<C, E>, Value>>,
 }
 
-impl<C, E> Eval<C, E> {
+impl<C: Ctx, E> Eval<C, E> {
     fn compile(&self, ctx: &ExecCtx<C, E>) {
         *self.current.borrow_mut() = match &**self.cached.0.borrow() {
             [None] => Err(Value::Null),
@@ -655,7 +656,7 @@ impl<C, E> Eval<C, E> {
     }
 }
 
-impl<C, E> Register<C, E> for Eval<C, E> {
+impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|ctx, from| {
             let t = Eval {
@@ -669,7 +670,7 @@ impl<C, E> Register<C, E> for Eval<C, E> {
     }
 }
 
-impl<C, E> Apply<C, E> for Eval<C, E> {
+impl<C: Ctx, E> Apply<C, E> for Eval<C, E> {
     fn current(&self) -> Option<Value> {
         match &*self.current.borrow() {
             Ok(s) => s.current(),
@@ -698,7 +699,7 @@ pub struct Count {
     count: Cell<u64>,
 }
 
-impl<C, E> Register<C, E> for Count {
+impl<C: Ctx, E> Register<C, E> for Count {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_, from| {
             Box::new(Count { from: CachedVals::new(from), count: Cell::new(0) })
@@ -707,7 +708,7 @@ impl<C, E> Register<C, E> for Count {
     }
 }
 
-impl<C, E> Apply<C, E> for Count {
+impl<C: Ctx, E> Apply<C, E> for Count {
     fn current(&self) -> Option<Value> {
         match &**self.from.0.borrow() {
             [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
@@ -735,7 +736,7 @@ pub struct Sample {
     current: RefCell<Option<Value>>,
 }
 
-impl<C, E> Register<C, E> for Sample {
+impl<C: Ctx, E> Register<C, E> for Sample {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_, from| {
             let v = match from {
@@ -753,7 +754,7 @@ impl<C, E> Register<C, E> for Sample {
     }
 }
 
-impl<C, E> Apply<C, E> for Sample {
+impl<C: Ctx, E> Apply<C, E> for Sample {
     fn current(&self) -> Option<Value> {
         self.current.borrow().clone()
     }
@@ -792,7 +793,7 @@ pub struct Mean {
     samples: Cell<usize>,
 }
 
-impl<C, E> Register<C, E> for Mean {
+impl<C: Ctx, E> Register<C, E> for Mean {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_, from| {
             Box::new(Mean {
@@ -805,7 +806,7 @@ impl<C, E> Register<C, E> for Mean {
     }
 }
 
-impl<C, E> Apply<C, E> for Mean {
+impl<C: Ctx, E> Apply<C, E> for Mean {
     fn current(&self) -> Option<Value> {
         match &**self.from.0.borrow() {
             [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
@@ -844,7 +845,7 @@ impl<C, E> Apply<C, E> for Mean {
 
 pub(crate) struct Uniq(RefCell<Option<Value>>);
 
-impl<C, E> Register<C, E> for Uniq {
+impl<C: Ctx, E> Register<C, E> for Uniq {
     fn register(ctx: &ExecCtx<C, E>) {
         let f: InitFn<C, E> = Box::new(|_, from| {
             let t = Uniq(RefCell::new(None));
@@ -858,7 +859,7 @@ impl<C, E> Register<C, E> for Uniq {
     }
 }
 
-impl<C, E> Apply<C, E> for Uniq {
+impl<C: Ctx, E> Apply<C, E> for Uniq {
     fn current(&self) -> Option<Value> {
         self.0.borrow().as_ref().cloned()
     }
@@ -898,5 +899,141 @@ impl<C, E> Apply<C, E> for Uniq {
 impl Uniq {
     fn usage() -> Option<Value> {
         Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
+    }
+}
+
+fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
+    invalid.set(false);
+    match path.map(|v| v.cast_to::<String>()) {
+        None => None,
+        Some(Ok(p)) => {
+            if Path::is_absolute(&p) {
+                Some(Path::from(p))
+            } else {
+                invalid.set(true);
+                None
+            }
+        }
+        Some(Err(_)) => {
+            invalid.set(true);
+            None
+        }
+    }
+}
+
+pub struct Store {
+    queued: RefCell<Vec<Value>>,
+    dv: RefCell<Option<(Path, Dval)>>,
+    invalid: Cell<bool>,
+}
+
+impl<C: Ctx, E> Register<C, E> for Store {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = Store {
+                queued: RefCell::new(Vec::new()),
+                dv: RefCell::new(None),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [to, val] => t.set(ctx, to.current(), val.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("store".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Store {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "store(tgt: absolute path, val): expected 2 arguments",
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        match from {
+            [path, val] => {
+                let path = path.update(ctx, event);
+                let value = val.update(ctx, event);
+                let value = if path.is_some() && !self.same_path(&path) {
+                    value.or_else(|| val.current())
+                } else {
+                    value
+                };
+                let up = value.is_some();
+                self.set(ctx, path, value);
+                if up {
+                    Apply::<C, E>::current(self)
+                } else {
+                    None
+                }
+            }
+            exprs => {
+                let mut up = false;
+                for expr in exprs {
+                    up = expr.update(ctx, event).is_some() || up;
+                }
+                self.invalid.set(true);
+                if up {
+                    Apply::<C, E>::current(self)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Store {
+    fn queue(&self, v: Value) {
+        self.queued.borrow_mut().push(v)
+    }
+
+    fn write(&self, dv: &Dval, v: Value) {
+        dv.write(v);
+    }
+
+    fn set<C: Ctx, E>(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        to: Option<Value>,
+        val: Option<Value>,
+    ) {
+        match (pathname(&self.invalid, to), val) {
+            (None, None) => (),
+            (None, Some(v)) => match self.dv.borrow().as_ref() {
+                None => self.queue(v),
+                Some((_, dv)) => self.write(dv, v),
+            },
+            (Some(p), val) => {
+                let path = Path::from(p);
+                let dv = ctx.user.durable_subscribe(path.clone());
+                if let Some(v) = val {
+                    self.queue(v)
+                }
+                for v in self.queued.borrow_mut().drain(..) {
+                    self.write(&dv, v);
+                }
+                *self.dv.borrow_mut() = Some((path, dv));
+            }
+        }
+    }
+
+    fn same_path(&self, new_path: &Option<Value>) -> bool {
+        match (new_path.as_ref(), self.dv.borrow().as_ref()) {
+            (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
+            _ => false,
+        }
     }
 }

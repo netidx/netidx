@@ -71,147 +71,14 @@ impl Event {
         Some(Value::Error(Chars::from("event(): expected 0 arguments")))
     }
 }
-
-fn pathname(invalid: &Cell<bool>, path: Option<Value>) -> Option<Path> {
-    invalid.set(false);
-    match path.map(|v| v.cast_to::<String>()) {
-        None => None,
-        Some(Ok(p)) => {
-            if Path::is_absolute(&p) {
-                Some(Path::from(p))
-            } else {
-                invalid.set(true);
-                None
-            }
-        }
-        Some(Err(_)) => {
-            invalid.set(true);
-            None
-        }
-    }
-}
-
-pub(crate) struct Store {
-    queued: RefCell<Vec<Value>>,
-    dv: RefCell<Option<(Path, Dval)>>,
-    invalid: Cell<bool>,
-}
-
-impl Register<WidgetCtx, Target> for Store {
-    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
-        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
-            let t = Store {
-                queued: RefCell::new(Vec::new()),
-                dv: RefCell::new(None),
-                invalid: Cell::new(false),
-            };
-            match from {
-                [to, val] => t.set(ctx, to.current(), val.current()),
-                _ => t.invalid.set(true),
-            }
-            Box::new(t)
-        });
-        ctx.functions.borrow_mut().insert("store".into(), f);
-    }
-}
-
-impl Apply<WidgetCtx, Target> for Store {
-    fn current(&self) -> Option<Value> {
-        if self.invalid.get() {
-            Some(Value::Error(Chars::from(
-                "store(tgt: absolute path, val): expected 2 arguments",
-            )))
-        } else {
-            None
-        }
-    }
-
-    fn update(
-        &self,
-        ctx: &ExecCtx<WidgetCtx, Target>,
-        from: &[Node<WidgetCtx, Target>],
-        event: &Target,
-    ) -> Option<Value> {
-        match from {
-            [path, val] => {
-                let path = path.update(ctx, event);
-                let value = val.update(ctx, event);
-                let value = if path.is_some() && !self.same_path(&path) {
-                    value.or_else(|| val.current())
-                } else {
-                    value
-                };
-                let up = value.is_some();
-                self.set(ctx, path, value);
-                if up {
-                    self.current()
-                } else {
-                    None
-                }
-            }
-            exprs => {
-                let mut up = false;
-                for expr in exprs {
-                    up = expr.update(ctx, event).is_some() || up;
-                }
-                self.invalid.set(true);
-                if up {
-                    self.current()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-impl Store {
-    fn queue(&self, v: Value) {
-        self.queued.borrow_mut().push(v)
-    }
-
-    fn write(&self, dv: &Dval, v: Value) {
-        dv.write(v);
-    }
-
-    fn set(
-        &self,
-        ctx: &ExecCtx<WidgetCtx, Target>,
-        to: Option<Value>,
-        val: Option<Value>,
-    ) {
-        match (pathname(&self.invalid, to), val) {
-            (None, None) => (),
-            (None, Some(v)) => match self.dv.borrow().as_ref() {
-                None => self.queue(v),
-                Some((_, dv)) => self.write(dv, v),
-            },
-            (Some(p), val) => {
-                let path = Path::from(p);
+/*
                 let dv = ctx.user.backend.subscriber.durable_subscribe(path.clone());
                 dv.updates(
                     UpdatesFlags::BEGIN_WITH_LAST,
                     ctx.user.backend.updates.clone(),
                 );
-                if let Some(v) = val {
-                    self.queue(v)
-                }
-                for v in self.queued.borrow_mut().drain(..) {
-                    self.write(&dv, v);
-                }
-                *self.dv.borrow_mut() = Some((path, dv));
-            }
-        }
-    }
 
-    fn same_path(&self, new_path: &Option<Value>) -> bool {
-        match (new_path.as_ref(), self.dv.borrow().as_ref()) {
-            (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
-            _ => false,
-        }
-    }
-}
-
+*/
 pub(crate) struct StoreVar {
     queued: RefCell<Vec<Value>>,
     name: RefCell<Option<Chars>>,

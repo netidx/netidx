@@ -1,6 +1,6 @@
 use crate::{expr::{Expr, ExprId, ExprKind}, stdfn};
 use fxhash::FxBuildHasher;
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::{chars::Chars, subscriber::{Value, Dval}, path::Path};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -71,11 +71,11 @@ impl DbgCtx {
 pub type InitFn<C, E> =
     Box<dyn Fn(&ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
 
-pub trait Register<C, E> {
+pub trait Register<C: Ctx, E> {
     fn register(ctx: &ExecCtx<C, E>);
 }
 
-pub trait Apply<C, E> {
+pub trait Apply<C: Ctx, E> {
     fn current(&self) -> Option<Value>;
     fn update(
         &self,
@@ -85,16 +85,20 @@ pub trait Apply<C, E> {
     ) -> Option<Value>;
 }
 
-pub struct ExecCtxInner<C: 'static, E: 'static> {
+pub trait Ctx {
+    fn durable_subscribe(&self, path: Path) -> Dval;
+}
+
+pub struct ExecCtxInner<C: Ctx + 'static, E: 'static> {
     pub functions: RefCell<HashMap<String, InitFn<C, E>>>,
     pub variables: RefCell<HashMap<Chars, Value>>,
     pub dbg_ctx: RefCell<DbgCtx>,
     pub user: C,
 }
 
-pub struct ExecCtx<C: 'static, E: 'static>(Rc<ExecCtxInner<C, E>>);
+pub struct ExecCtx<C: Ctx + 'static, E: 'static>(Rc<ExecCtxInner<C, E>>);
 
-impl<C: 'static, E: 'static> glib::clone::Downgrade for ExecCtx<C, E> {
+impl<C: Ctx, E> glib::clone::Downgrade for ExecCtx<C, E> {
     type Weak = ExecCtxWeak<C, E>;
 
     fn downgrade(&self) -> Self::Weak {
@@ -102,13 +106,13 @@ impl<C: 'static, E: 'static> glib::clone::Downgrade for ExecCtx<C, E> {
     }
 }
 
-impl<C, E> Clone for ExecCtx<C, E> {
+impl<C: Ctx, E> Clone for ExecCtx<C, E> {
     fn clone(&self) -> Self {
         ExecCtx(Rc::clone(&self.0))
     }
 }
 
-impl<C, E> Deref for ExecCtx<C, E> {
+impl<C: Ctx, E> Deref for ExecCtx<C, E> {
     type Target = ExecCtxInner<C, E>;
 
     fn deref(&self) -> &Self::Target {
@@ -116,7 +120,7 @@ impl<C, E> Deref for ExecCtx<C, E> {
     }
 }
 
-impl<C, E> ExecCtx<C, E> {
+impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn no_std(user: C) -> Self {
         let inner = ExecCtxInner {
             functions: RefCell::new(HashMap::new()),
@@ -151,13 +155,14 @@ impl<C, E> ExecCtx<C, E> {
         stdfn::Sample::register(&t);
         stdfn::Mean::register(&t);
         stdfn::Uniq::register(&t);
+        stdfn::Store::register(&t);
         t
     }
 }
 
-pub struct ExecCtxWeak<C: 'static, E: 'static>(Weak<ExecCtxInner<C, E>>);
+pub struct ExecCtxWeak<C: Ctx + 'static, E: 'static>(Weak<ExecCtxInner<C, E>>);
 
-impl<C: 'static, E: 'static> glib::clone::Upgrade for ExecCtxWeak<C, E> {
+impl<C: Ctx + 'static, E: 'static> glib::clone::Upgrade for ExecCtxWeak<C, E> {
     type Strong = ExecCtx<C, E>;
 
     fn upgrade(&self) -> Option<Self::Strong> {
@@ -165,13 +170,13 @@ impl<C: 'static, E: 'static> glib::clone::Upgrade for ExecCtxWeak<C, E> {
     }
 }
 
-pub enum Node<C: 'static, E: 'static> {
+pub enum Node<C: Ctx, E> {
     Error(Expr, Value),
     Constant(Expr, Value),
     Apply { spec: Expr, args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E>> },
 }
 
-impl<C, E> fmt::Display for Node<C, E> {
+impl<C: Ctx, E> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Node::Error(s, _) | Node::Constant(s, _) | Node::Apply { spec: s, .. } => {
@@ -181,7 +186,7 @@ impl<C, E> fmt::Display for Node<C, E> {
     }
 }
 
-impl<C, E> Node<C, E> {
+impl<C: Ctx, E> Node<C, E> {
     pub fn compile(ctx: &ExecCtx<C, E>, spec: Expr) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
