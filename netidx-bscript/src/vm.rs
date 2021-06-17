@@ -102,6 +102,7 @@ pub trait Apply<C: Ctx, E> {
 pub trait Ctx {
     fn durable_subscribe(&self, path: Path) -> Dval;
     fn set_var(&self, name: Chars, value: Value);
+    fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>);
 }
 
 pub struct ExecCtxInner<C: Ctx + 'static, E: 'static> {
@@ -174,6 +175,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::StoreVar::register(&t);
         stdfn::Load::register(&t);
         stdfn::LoadVar::register(&t);
+        stdfn::RpcCall::register(&t);
         t
     }
 }

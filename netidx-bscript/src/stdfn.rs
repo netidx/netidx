@@ -1249,7 +1249,7 @@ impl Load {
     }
 }
 
-pub struct LoadVar<C, E> {
+pub struct LoadVar<C: Ctx + 'static, E: 'static> {
     name: RefCell<Option<Chars>>,
     ctx: ExecCtx<C, E>,
     invalid: Cell<bool>,
@@ -1276,7 +1276,7 @@ impl<C: Ctx, E> Register<C, E> for LoadVar<C, E> {
 impl<C: Ctx, E> Apply<C, E> for LoadVar<C, E> {
     fn current(&self) -> Option<Value> {
         if self.invalid.get() {
-            LoadVar::err()
+            LoadVar::<C, E>::err()
         } else {
             self.name
                 .borrow()
@@ -1296,7 +1296,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar<C, E> {
                 let target = name.update(ctx, event);
                 if self.invalid.get() {
                     if target.is_some() {
-                        LoadVar::err()
+                        LoadVar::<C, E>::err()
                     } else {
                         None
                     }
@@ -1323,7 +1323,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar<C, E> {
                 }
                 self.invalid.set(true);
                 if up {
-                    LoadVar::err()
+                    LoadVar::<C, E>::err()
                 } else {
                     None
                 }
@@ -1342,6 +1342,133 @@ impl<C: Ctx, E> LoadVar<C, E> {
     fn subscribe(&self, name: Option<Value>) {
         if let Some(name) = varname(&self.invalid, name) {
             *self.name.borrow_mut() = Some(name);
+        }
+    }
+}
+
+pub(crate) struct RpcCall {
+    args: CachedVals,
+    invalid: Cell<bool>,
+}
+
+impl<C: Ctx, E> Register<C, E> for RpcCall {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = RpcCall { args: CachedVals::new(from), invalid: Cell::new(true) };
+            t.maybe_call(ctx);
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("call".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for RpcCall {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        if self.args.update(ctx, from, event) {
+            self.maybe_call(ctx);
+            Apply::<C, E>::current(self)
+        } else {
+            match event {
+                Event::Netidx(_, _) | Event::Variable(_, _) | Event::User(_) => None,
+                Event::Rpc(name, v) => {
+                    // CR estokes: How to deal with this race? the
+                    // function being called could change before the
+                    // return value is delivered.
+                    let args = self.args.0.borrow();
+                    if args.len() == 0 {
+                        self.invalid.set(true);
+                        Apply::<C, E>::current(self)
+                    } else {
+                        match args[0]
+                            .as_ref()
+                            .and_then(|v| v.clone().cast_to::<Chars>().ok())
+                        {
+                            Some(fname) if &fname == name => Some(v.clone()),
+                            Some(_) => None,
+                            None => {
+                                self.invalid.set(true);
+                                Apply::<C, E>::current(self)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl RpcCall {
+    fn get_args(&self) -> Option<(Path, Vec<(Chars, Value)>)> {
+        self.invalid.set(false);
+        let len = self.args.0.borrow().len();
+        if len == 0 || (len > 1 && len.is_power_of_two()) {
+            self.invalid.set(true);
+            None
+        } else if self.args.0.borrow().iter().any(|v| v.is_none()) {
+            None
+        } else {
+            match &self.args.0.borrow()[..] {
+                [] => {
+                    self.invalid.set(true);
+                    None
+                }
+                [path, args @ ..] => {
+                    match path.as_ref().unwrap().clone().cast_to::<Chars>() {
+                        Err(_) => {
+                            self.invalid.set(true);
+                            None
+                        }
+                        Ok(name) => {
+                            let mut iter = args.into_iter();
+                            let mut args = Vec::new();
+                            loop {
+                                match iter.next() {
+                                    None | Some(None) => break,
+                                    Some(Some(name)) => {
+                                        match name.clone().cast_to::<Chars>() {
+                                            Err(_) => {
+                                                self.invalid.set(true);
+                                                return None;
+                                            }
+                                            Ok(name) => match iter.next() {
+                                                None | Some(None) => {
+                                                    self.invalid.set(true);
+                                                    return None;
+                                                }
+                                                Some(Some(val)) => {
+                                                    args.push((name, val.clone()));
+                                                }
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                            Some((Path::from(name), args))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn maybe_call<C: Ctx, E>(&self, ctx: &ExecCtx<C, E>) {
+        if let Some((name, args)) = self.get_args() {
+            ctx.user.call_rpc(Path::from(name), args);
         }
     }
 }
