@@ -1,6 +1,13 @@
-use crate::{expr::{Expr, ExprId, ExprKind}, stdfn};
+use crate::{
+    expr::{Expr, ExprId, ExprKind},
+    stdfn,
+};
 use fxhash::FxBuildHasher;
-use netidx::{chars::Chars, subscriber::{Value, Dval}, path::Path};
+use netidx::{
+    chars::Chars,
+    path::Path,
+    subscriber::{Dval, SubId, Value},
+};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -68,6 +75,13 @@ impl DbgCtx {
     }
 }
 
+pub enum Event<E> {
+    Variable(Chars, Value),
+    Netidx(SubId, Value),
+    Rpc(Chars, Value),
+    User(E),
+}
+
 pub type InitFn<C, E> =
     Box<dyn Fn(&ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
 
@@ -81,7 +95,7 @@ pub trait Apply<C: Ctx, E> {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value>;
 }
 
@@ -227,7 +241,7 @@ impl<C: Ctx, E> Node<C, E> {
         }
     }
 
-    pub fn update(&self, ctx: &ExecCtx<C, E>, event: &E) -> Option<Value> {
+    pub fn update(&self, ctx: &ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
             Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,

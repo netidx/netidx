@@ -1,11 +1,11 @@
 use crate::{
     expr::{Expr, VNAME},
-    vm::{Apply, Ctx, ExecCtx, InitFn, Node, Register},
+    vm::{Event, Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{Dval, Typ, Value},
+    subscriber::{self, Dval, Typ, Value},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -25,7 +25,7 @@ impl CachedVals {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> bool {
         let mut vals = self.0.borrow_mut();
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
@@ -60,7 +60,7 @@ impl<C: Ctx, E> Apply<C, E> for Any {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         let res =
             from.into_iter().filter_map(|s| s.update(ctx, event)).fold(None, |res, v| {
@@ -105,7 +105,7 @@ impl<C: Ctx, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         if !self.cached.update(ctx, from, event) {
             None
@@ -682,7 +682,7 @@ impl<C: Ctx, E> Apply<C, E> for Eval<C, E> {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         if self.cached.update(ctx, from, event) {
             self.compile(ctx);
@@ -721,7 +721,7 @@ impl<C: Ctx, E> Apply<C, E> for Count {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         if self.from.update(ctx, from, event) {
             self.count.set(self.count.get() + 1);
@@ -763,7 +763,7 @@ impl<C: Ctx, E> Apply<C, E> for Sample {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         match from {
             [trigger, source] => {
@@ -825,7 +825,7 @@ impl<C: Ctx, E> Apply<C, E> for Mean {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         if self.from.update(ctx, from, event) {
             for v in &*self.from.0.borrow() {
@@ -868,7 +868,7 @@ impl<C: Ctx, E> Apply<C, E> for Uniq {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         match from {
             [e] => e.update(ctx, event).and_then(|v| {
@@ -960,7 +960,7 @@ impl<C: Ctx, E> Apply<C, E> for Store {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         match from {
             [path, val] => {
@@ -1052,7 +1052,7 @@ fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
     }
 }
 
-pub(crate) struct StoreVar {
+pub struct StoreVar {
     queued: RefCell<Vec<Value>>,
     name: RefCell<Option<Chars>>,
     invalid: Cell<bool>,
@@ -1091,7 +1091,7 @@ impl<C: Ctx, E> Apply<C, E> for StoreVar {
         &self,
         ctx: &ExecCtx<C, E>,
         from: &[Node<C, E>],
-        event: &E,
+        event: &Event<E>,
     ) -> Option<Value> {
         match from {
             [name, val] => {
@@ -1156,5 +1156,95 @@ impl StoreVar {
             (Some(Value::String(n0)), Some(n1)) => n0 == n1,
             _ => false,
         }
+    }
+}
+
+pub(crate) struct Load {
+    cur: RefCell<Option<Dval>>,
+    invalid: Cell<bool>,
+}
+
+impl<C: Ctx, E> Register<C, E> for Load {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = Load { cur: RefCell::new(None), invalid: Cell::new(false) };
+            match from {
+                [path] => t.subscribe(ctx, path.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("load".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Load {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Load::err()
+        } else {
+            self.cur.borrow().as_ref().and_then(|dv| match dv.last() {
+                subscriber::Event::Unsubscribed => None,
+                subscriber::Event::Update(v) => Some(v),
+            })
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [name] => {
+                let target = name.update(ctx, event);
+                let up = target.is_some();
+                self.subscribe(ctx, target);
+                if self.invalid.get() {
+                    if up {
+                        Load::err()
+                    } else {
+                        None
+                    }
+                } else {
+                    self.cur.borrow().as_ref().and_then(|dv| match event {
+                        Event::Variable(_, _) | Event::Rpc(_, _) | Event::User(_) => {
+                            None
+                        }
+                        Event::Netidx(id, value) if dv.id() == *id => {
+                            Some(value.clone())
+                        }
+                        Event::Netidx(_, _) => None,
+                    })
+                }
+            }
+            exprs => {
+                let mut up = false;
+                for e in exprs {
+                    up = e.update(ctx, event).is_some() || up;
+                }
+                self.invalid.set(true);
+                if up {
+                    Load::err()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Load {
+    fn subscribe<C: Ctx, E>(&self, ctx: &ExecCtx<C, E>, name: Option<Value>) {
+        if let Some(path) = pathname(&self.invalid, name) {
+            *self.cur.borrow_mut() = Some(ctx.user.durable_subscribe(path));
+        }
+    }
+
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from(
+            "load(expr: path) expected 1 absolute path as argument",
+        )))
     }
 }
