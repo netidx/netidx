@@ -87,6 +87,7 @@ pub trait Apply<C: Ctx, E> {
 
 pub trait Ctx {
     fn durable_subscribe(&self, path: Path) -> Dval;
+    fn set_var(&self, name: Chars, value: Value);
 }
 
 pub struct ExecCtxInner<C: Ctx + 'static, E: 'static> {

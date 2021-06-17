@@ -1,5 +1,5 @@
 use crate::{
-    expr::Expr,
+    expr::{Expr, VNAME},
     vm::{Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
@@ -1004,12 +1004,7 @@ impl Store {
         dv.write(v);
     }
 
-    fn set<C: Ctx, E>(
-        &self,
-        ctx: &ExecCtx<C, E>,
-        to: Option<Value>,
-        val: Option<Value>,
-    ) {
+    fn set<C: Ctx, E>(&self, ctx: &ExecCtx<C, E>, to: Option<Value>, val: Option<Value>) {
         match (pathname(&self.invalid, to), val) {
             (None, None) => (),
             (None, Some(v)) => match self.dv.borrow().as_ref() {
@@ -1033,6 +1028,132 @@ impl Store {
     fn same_path(&self, new_path: &Option<Value>) -> bool {
         match (new_path.as_ref(), self.dv.borrow().as_ref()) {
             (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
+            _ => false,
+        }
+    }
+}
+
+fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
+    invalid.set(false);
+    match name.map(|n| n.cast_to::<Chars>()) {
+        None => None,
+        Some(Err(_)) => {
+            invalid.set(true);
+            None
+        }
+        Some(Ok(n)) => {
+            if VNAME.is_match(&n) {
+                Some(n)
+            } else {
+                invalid.set(true);
+                None
+            }
+        }
+    }
+}
+
+pub(crate) struct StoreVar {
+    queued: RefCell<Vec<Value>>,
+    name: RefCell<Option<Chars>>,
+    invalid: Cell<bool>,
+}
+
+impl<C: Ctx, E> Register<C, E> for StoreVar {
+    fn register(ctx: &ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Box::new(|ctx, from| {
+            let t = StoreVar {
+                queued: RefCell::new(Vec::new()),
+                name: RefCell::new(None),
+                invalid: Cell::new(false),
+            };
+            match from {
+                [name, value] => t.set(ctx, name.current(), value.current()),
+                _ => t.invalid.set(true),
+            }
+            Box::new(t)
+        });
+        ctx.functions.borrow_mut().insert("store_var".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for StoreVar {
+    fn current(&self) -> Option<Value> {
+        if self.invalid.get() {
+            Some(Value::Error(Chars::from(
+                "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn update(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        from: &[Node<C, E>],
+        event: &E,
+    ) -> Option<Value> {
+        match from {
+            [name, val] => {
+                let name = name.update(ctx, event);
+                let value = val.update(ctx, event);
+                let value = if name.is_some() && !self.same_name(&name) {
+                    value.or_else(|| val.current())
+                } else {
+                    value
+                };
+                let up = value.is_some();
+                self.set(ctx, name, value);
+                if up {
+                    Apply::<C, E>::current(self)
+                } else {
+                    None
+                }
+            }
+            exprs => {
+                let mut up = false;
+                for expr in exprs {
+                    up = expr.update(ctx, event).is_some() || up;
+                }
+                self.invalid.set(true);
+                if up {
+                    Apply::<C, E>::current(self)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl StoreVar {
+    fn queue_set(&self, v: Value) {
+        self.queued.borrow_mut().push(v)
+    }
+
+    fn set<C: Ctx, E>(
+        &self,
+        ctx: &ExecCtx<C, E>,
+        name: Option<Value>,
+        value: Option<Value>,
+    ) {
+        if let Some(name) = varname(&self.invalid, name) {
+            for v in self.queued.borrow_mut().drain(..) {
+                ctx.user.set_var(name.clone(), v)
+            }
+            *self.name.borrow_mut() = Some(name);
+        }
+        if let Some(value) = value {
+            match self.name.borrow().as_ref() {
+                None => self.queue_set(value),
+                Some(name) => ctx.user.set_var(name.clone(), value),
+            }
+        }
+    }
+
+    fn same_name(&self, new_name: &Option<Value>) -> bool {
+        match (new_name, self.name.borrow().as_ref()) {
+            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
             _ => false,
         }
     }

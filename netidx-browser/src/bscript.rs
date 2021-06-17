@@ -78,138 +78,13 @@ impl Event {
                     ctx.user.backend.updates.clone(),
                 );
 
-*/
-pub(crate) struct StoreVar {
-    queued: RefCell<Vec<Value>>,
-    name: RefCell<Option<Chars>>,
-    invalid: Cell<bool>,
-}
 
-fn varname(invalid: &Cell<bool>, name: Option<Value>) -> Option<Chars> {
-    invalid.set(false);
-    match name.map(|n| n.cast_to::<Chars>()) {
-        None => None,
-        Some(Err(_)) => {
-            invalid.set(true);
-            None
-        }
-        Some(Ok(n)) => {
-            if expr::VNAME.is_match(&n) {
-                Some(n)
-            } else {
-                invalid.set(true);
-                None
-            }
-        }
-    }
-}
-
-impl Register<WidgetCtx, Target> for StoreVar {
-    fn register(ctx: &ExecCtx<WidgetCtx, Target>) {
-        let f: InitFn<WidgetCtx, Target> = Box::new(|ctx, from| {
-            let t = StoreVar {
-                queued: RefCell::new(Vec::new()),
-                name: RefCell::new(None),
-                invalid: Cell::new(false),
-            };
-            match from {
-                [name, value] => t.set(ctx, name.current(), value.current()),
-                _ => t.invalid.set(true),
-            }
-            Box::new(t)
-        });
-        ctx.functions.borrow_mut().insert("store_var".into(), f);
-    }
-}
-
-impl Apply<WidgetCtx, Target> for StoreVar {
-    fn current(&self) -> Option<Value> {
-        if self.invalid.get() {
-            Some(Value::Error(Chars::from(
-                "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
-            )))
-        } else {
-            None
-        }
-    }
-
-    fn update(
-        &self,
-        ctx: &ExecCtx<WidgetCtx, Target>,
-        from: &[Node<WidgetCtx, Target>],
-        event: &Target,
-    ) -> Option<Value> {
-        match from {
-            [name, val] => {
-                let name = name.update(ctx, event);
-                let value = val.update(ctx, event);
-                let value = if name.is_some() && !self.same_name(&name) {
-                    value.or_else(|| val.current())
-                } else {
-                    value
-                };
-                let up = value.is_some();
-                self.set(ctx, name, value);
-                if up {
-                    self.current()
-                } else {
-                    None
-                }
-            }
-            exprs => {
-                let mut up = false;
-                for expr in exprs {
-                    up = expr.update(ctx, event).is_some() || up;
-                }
-                self.invalid.set(true);
-                if up {
-                    self.current()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-impl StoreVar {
     fn set_var(&self, ctx: &ExecCtx<WidgetCtx, Target>, name: Chars, v: Value) {
         ctx.variables.borrow_mut().insert(name.clone(), v.clone());
         let _: Result<_, _> =
             ctx.user.backend.to_gui.send(ToGui::UpdateVar(name.clone(), v));
     }
-
-    fn queue_set(&self, v: Value) {
-        self.queued.borrow_mut().push(v)
-    }
-
-    fn set(
-        &self,
-        ctx: &ExecCtx<WidgetCtx, Target>,
-        name: Option<Value>,
-        value: Option<Value>,
-    ) {
-        if let Some(name) = varname(&self.invalid, name) {
-            for v in self.queued.borrow_mut().drain(..) {
-                self.set_var(ctx, name.clone(), v)
-            }
-            *self.name.borrow_mut() = Some(name);
-        }
-        if let Some(value) = value {
-            match self.name.borrow().as_ref() {
-                None => self.queue_set(value),
-                Some(name) => self.set_var(ctx, name.clone(), value),
-            }
-        }
-    }
-
-    fn same_name(&self, new_name: &Option<Value>) -> bool {
-        match (new_name, self.name.borrow().as_ref()) {
-            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
-            _ => false,
-        }
-    }
-}
+*/
 
 pub(crate) struct Load {
     cur: RefCell<Option<Dval>>,
