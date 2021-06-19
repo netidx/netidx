@@ -787,14 +787,8 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::TableResolved(path, table) => {
-            if let Some(root) = &mut *current.borrow_mut() {
-                let mut waits = WAITS.take();
-                root.update(
-                    &ctx,
-                    &mut *waits,
-                    &vm::Event::User(LocalEvent::TableResolved(path, table)),
-                );
-            }
+            let e = vm::Event::User(LocalEvent::TableResolved(path, table));
+            update_single(&current, &ctx, &e);
             Continue(true)
         }
         ToGui::NavigateInWindow(loc) => {

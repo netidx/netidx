@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, ViewLoc,
+    BSCtx, BSNode, ViewLoc,
 };
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
@@ -38,7 +38,8 @@ struct Subscription {
     col: u32,
 }
 
-struct TableInner {
+struct RaeifiedTableInner {
+    path: Path,
     ctx: BSCtx,
     root: ScrolledWindow,
     view: TreeView,
@@ -51,7 +52,6 @@ struct TableInner {
     focus_row: RefCell<Option<String>>,
     descriptor: resolver::Table,
     vector_mode: bool,
-    spec: view::Table,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
@@ -59,24 +59,18 @@ struct TableInner {
 }
 
 #[derive(Clone)]
-pub(super) struct Table(Rc<TableInner>);
+struct RaeifiedTable(Rc<RaeifiedTableInner>);
 
-pub(super) struct TableWeak(Weak<TableInner>);
+pub(super) struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
-impl clone::Downgrade for Table {
-    type Weak = TableWeak;
-
-    fn downgrade(&self) -> Self::Weak {
-        TableWeak(Rc::downgrade(&self.0))
-    }
-}
-
-impl clone::Upgrade for TableWeak {
-    type Strong = Table;
-
-    fn upgrade(&self) -> Option<Self::Strong> {
-        Weak::upgrade(&self.0).map(Table)
-    }
+pub(super) struct Table {
+    table: RefCell<Option<RaeifiedTable>>,
+    root: ScrolledWindow,
+    path: BSNode,
+    default_sort_column: BSNode,
+    default_sort_column_direction: BSNode,
+    column_mode: BSNode,
+    column_list: BSNode,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -111,9 +105,51 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-fn apply_spec(spec: &view::Table, descr: &mut resolver::Table) {
+#[derive(Clone, Copy)]
+enum SortDir {
+    Ascending,
+    Descending
+}
+
+impl SortDir {
+    fn new(v: Value) -> Self {
+        match v {
+            Value::String(c) if &*c == "ascending" => SortDir::Ascending,
+            _ => SortDir::Descending
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ColumnMode {
+    Auto,
+    Hide,
+    Exactly,
+}
+
+impl ColumnMode {
+    fn new(v: Value) -> Self {
+        match v {
+            Value::String(c) if &*c == "hide" => ColumnMode::Hide,
+            Value::String(c) if &*c == "exactly" => ColumnMode::Exactly,
+            _ => ColumnMode::Auto,
+        }
+    }
+}
+
+fn cols_from_val(v: Value) -> Vec<String> {
+    match v {
+        Value::String(c) => match serde_json::from_str::<Vec<String>>(&*c) {
+            Ok(cols) => cols,
+            Err(_) => vec![],
+        },
+        _ => vec![],
+    }
+}
+
+fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
     fn filter_cols(
-        cols: &Vec<String>,
+        cols: &[String],
         descr: &mut resolver::Table,
         f: impl Fn(bool) -> bool,
     ) {
@@ -127,35 +163,56 @@ fn apply_spec(spec: &view::Table, descr: &mut resolver::Table) {
             }
         }
     }
-    match &spec.columns {
-        view::ColumnSpec::Auto => (),
-        view::ColumnSpec::Hide(cols) => filter_cols(&cols, descr, |x| x),
-        view::ColumnSpec::Exactly(cols) => {
+    match mode {
+        ColumnMode::Hide => filter_cols(cols, descr, |x| x),
+        ColumnMode::Exactly => {
             let order: HashMap<Path, usize> = HashMap::from_iter(
                 cols.iter().cloned().map(Path::from).enumerate().map(|(i, c)| (c, i)),
             );
             filter_cols(&cols, descr, |x| !x);
             descr.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(&order[c1]));
         }
+        _ => (),
     }
 }
 
-impl Table {
-    pub(super) fn new(
+impl clone::Downgrade for RaeifiedTable {
+    type Weak = RaeifiedTableWeak;
+
+    fn downgrade(&self) -> Self::Weak {
+        RaeifiedTableWeak(Rc::downgrade(&self.0))
+    }
+}
+
+impl clone::Upgrade for RaeifiedTableWeak {
+    type Strong = RaeifiedTable;
+
+    fn upgrade(&self) -> Option<Self::Strong> {
+        Weak::upgrade(&self.0).map(RaeifiedTable)
+    }
+}
+// let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+
+impl RaeifiedTable {
+    fn new(
         ctx: BSCtx,
-        spec: view::Table,
+        root: ScrolledWindow,
+        path: Path,
+        default_sort_column: Option<String>,
+        default_sort_column_direction: SortDir,
+        column_mode: ColumnMode,
+        column_list: Vec<String>,
         mut descriptor: resolver::Table,
         selected_path: Label,
-    ) -> Table {
-        apply_spec(&spec, &mut descriptor);
+    ) -> RaeifiedTable {
+        apply_spec(column_mode, &column_list, &mut descriptor);
         let view = TreeView::new();
-        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         root.add(&view);
         let nrows = descriptor.rows.len();
         descriptor.rows.sort();
-        match spec.columns {
-            view::ColumnSpec::Exactly(_) => (),
-            view::ColumnSpec::Auto | view::ColumnSpec::Hide(_) => {
+        match column_mode {
+            ColumnMode::Exactly => (),
+            ColumnMode::Auto | ColumnMode::Hide => {
                 descriptor.cols.sort_by_key(|(p, _)| p.clone());
                 descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
             }
@@ -178,7 +235,8 @@ impl Table {
         }
         let style = view.get_style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
-        let t = Table(Rc::new(TableInner {
+        let t = RaeifiedTable(Rc::new(RaeifiedTableInner {
+            path,
             ctx,
             root,
             view,
@@ -186,7 +244,6 @@ impl Table {
             store,
             descriptor,
             vector_mode,
-            spec,
             style,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
@@ -254,7 +311,7 @@ impl Table {
         t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
-                    let path = t.0.spec.path.append(row_name);
+                    let path = t.0.path.append(row_name);
                     t.0.ctx.user.backend.navigate(ViewLoc::Netidx(path));
                 }
             }
@@ -268,7 +325,7 @@ impl Table {
                 }));
             }));
         });
-        if let Some((col, dir)) = &t.0.spec.default_sort_column {
+        if let Some(col) = &default_sort_column {
             let col = Path::from(col.clone());
             let idx = t.0.descriptor.cols.iter().enumerate().find_map(|(i, (c, _))| {
                 if c == &col {
@@ -277,9 +334,9 @@ impl Table {
                     None
                 }
             });
-            let dir = match dir {
-                view::SortDir::Ascending => gtk::SortType::Ascending,
-                view::SortDir::Descending => gtk::SortType::Descending,
+            let dir = match default_sort_column_direction {
+                SortDir::Ascending => gtk::SortType::Ascending,
+                SortDir::Descending => gtk::SortType::Descending,
             };
             if let Some(i) = idx {
                 t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
@@ -453,9 +510,9 @@ impl Table {
                         c.as_ref().and_then(|c| c.get_title())
                     };
                     match col_name {
-                        None => self.0.spec.path.append(row_name),
+                        None => self.0.path.append(row_name),
                         Some(col_name) => {
-                            self.0.spec.path.append(row_name).append(col_name.as_str())
+                            self.0.path.append(row_name).append(col_name.as_str())
                         }
                     }
                 }
@@ -524,7 +581,7 @@ impl Table {
             let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
-                let p = self.0.spec.path.append(row_name);
+                let p = self.0.path.append(row_name);
                 let p = if self.0.vector_mode {
                     p
                 } else {
