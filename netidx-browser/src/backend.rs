@@ -1,5 +1,5 @@
 use super::{default_view, FromGui, RawBatch, ToGui, ViewLoc, WidgetPath};
-use crate::{util::OneShot, view};
+use crate::util::OneShot;
 use anyhow::{anyhow, Error, Result};
 use futures::{
     channel::{mpsc, oneshot},
@@ -14,6 +14,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
+    protocol::resolver,
     resolver::{Auth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
@@ -60,11 +61,7 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::Navigate(loc));
     }
 
-    pub(crate) async fn save(
-        &self,
-        loc: ViewLoc,
-        spec: protocol_view::View,
-    ) -> Result<()> {
+    pub(crate) async fn save(&self, loc: ViewLoc, spec: view::View) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Save(loc, spec, tx));
@@ -79,8 +76,13 @@ impl Ctx {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Updated);
     }
 
-    pub(crate) fn render(&self, spec: protocol_view::View) {
+    pub(crate) fn render(&self, spec: view::View) {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Render(spec));
+    }
+
+    pub(crate) fn resolve_table(&self, path: Path) {
+        let _: result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::ResolveTable(path));
     }
 
     pub(crate) fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>) {
@@ -146,7 +148,7 @@ impl CtxInner {
         self.dv_view = None;
         let m = ToGui::View {
             loc: Some(ViewLoc::Netidx(base_path.clone())),
-            view: default_view(base_path.clone()),
+            spec: default_view(base_path.clone()),
             generated: true,
         };
         self.to_gui.send(m)?;
@@ -177,7 +179,7 @@ impl CtxInner {
                 Ok(v) => {
                     let m = ToGui::View {
                         loc: Some(ViewLoc::File(file)),
-                        view: v,
+                        spec: v,
                         generated: false,
                     };
                     self.to_gui.send(m)?;
@@ -187,10 +189,24 @@ impl CtxInner {
         Ok(())
     }
 
+    async fn resolve_table(&self, path: Path) {
+        let table = match self.resolver.table(path.clone()).await {
+            Ok(table) => table,
+            Err(e) => {
+                warn!("failed to resolve table {},  {}", path, e);
+                resolver::Table {
+                    rows: Pooled::orphan(vec![]),
+                    cols: Pooled::orphan(vec![]),
+                }
+            }
+        };
+        let _: result::Result<_, _> = self.to_gui.send(ToGui::TableResolved(path, table));
+    }
+
     async fn save_view_netidx(
         &self,
         path: Path,
-        view: view::View,
+        spec: view::View,
         fin: oneshot::Sender<Result<()>>,
     ) {
         let to = Some(Duration::from_secs(10));
@@ -223,7 +239,7 @@ impl CtxInner {
     fn save_view_file(
         &self,
         file: PathBuf,
-        view: view::View,
+        spec: view::View,
         fin: oneshot::Sender<Result<()>>,
     ) {
         match serde_json::to_string(&view) {
@@ -254,11 +270,11 @@ impl CtxInner {
                         Event::Update(Value::String(s)) => {
                             match serde_json::from_str::<view::View>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
-                                Ok(view) => {
+                                Ok(spec) => {
                                     if let Some(path) = &self.view_path {
                                         let m = ToGui::View {
                                             loc: Some(ViewLoc::Netidx(path.clone())),
-                                            view,
+                                            spec,
                                             generated: false,
                                         };
                                         self.to_gui.send(m)?;
@@ -275,23 +291,13 @@ impl CtxInner {
         Ok(())
     }
 
-    async fn render_view(&mut self, view: protocol_view::View) -> Result<()> {
+    fn render_view(&mut self, spec: view::View) -> Result<()> {
         self.view_path = None;
         self.rx_view = None;
         self.dv_view = None;
-        match view::View::new(&self.resolver, view.clone()).await {
-            Err(e) => warn!("failed to raeify view {}", e),
-            Ok(v) => {
-                let m = ToGui::View {
-                    loc: None,
-                    original: view,
-                    raeified: v,
-                    generated: false,
-                };
-                self.to_gui.send(m)?;
-                info!("updated gui view (render)")
-            }
-        }
+        let m = ToGui::View { loc: None, view, generated: false };
+        self.to_gui.send(m)?;
+        info!("updated gui view (render)");
         Ok(())
     }
 
@@ -405,8 +411,10 @@ impl CtxInner {
                         break_err!(self.refresh())
                     },
                     Some(FromGui::Render(view)) => {
-                        break_err!(self.render_view(view).await)
+                        break_err!(self.render_view(view))
                     },
+                    Some(FromGui::ResolveTable(path)) =>
+                        self.resolve_table(path).await,
                     Some(FromGui::Save(ViewLoc::Netidx(path), view, fin)) =>
                         self.save_view_netidx(path, view, fin).await,
                     Some(FromGui::Save(ViewLoc::File(file), view, fin)) => {
@@ -423,7 +431,7 @@ impl CtxInner {
                     break_err!(self.process_updates(batch))
                 },
                 m = read_view(&mut self.rx_view).fuse() => {
-                    break_err!(self.load_custom_view(m).await)
+                    break_err!(self.load_custom_view(m))
                 },
                 _ = gc_rpcs.tick().fuse() => self.gc_rpcs(),
             }

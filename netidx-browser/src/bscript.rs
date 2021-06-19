@@ -1,5 +1,5 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::{chars::Chars, path::Path, resolver, subscriber::Value};
 use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register};
 use std::{
     cell::{Cell, RefCell},
@@ -9,6 +9,7 @@ use std::{
 
 pub(crate) enum LocalEvent {
     Event(Value),
+    TableResolved(Path, resolver::Table),
 }
 
 pub(crate) struct Event {
@@ -47,7 +48,8 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
         match event {
             vm::Event::Variable(_, _)
             | vm::Event::Netidx(_, _)
-            | vm::Event::Rpc(_, _) => None,
+            | vm::Event::Rpc(_, _)
+            | vm::Event::User(LocalEvent::TableResolved(_, _)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
                 *self.cur.borrow_mut() = Some(value.clone());
                 self.current()

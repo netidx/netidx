@@ -117,11 +117,7 @@ impl fmt::Display for ViewLoc {
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View {
-        loc: Option<ViewLoc>,
-        view: view::View,
-        generated: bool,
-    },
+    View { loc: Option<ViewLoc>, spec: view::View, generated: bool },
     NavigateInWindow(ViewLoc),
     Highlight(Vec<WidgetPath>),
     Update(Batch),
@@ -221,8 +217,8 @@ impl Widget {
             view::WidgetKind::Action(spec) => {
                 Widget::Action(widgets::Action::new(ctx, spec))
             }
-            view::WidgetKind::Table(base_path, spec) => {
-                let tbl = table::Table::new(ctx.clone(), base_path, spec, selected_path);
+            view::WidgetKind::Table(spec) => {
+                let tbl = table::Table::new(ctx.clone(), spec, selected_path);
                 // force the initial update/subscribe
                 tbl.start_update_task(None);
                 Widget::Table(tbl)
@@ -573,7 +569,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
 fn save_view(
     ctx: &BSCtx,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
-    current_spec: &Rc<RefCell<protocol_view::View>>,
+    current_spec: &Rc<RefCell<view::View>>,
     save_button: &gtk::ToolButton,
     save_as: bool,
 ) {
@@ -674,7 +670,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> =
         Rc::new(RefCell::new(ViewLoc::Netidx(Path::from("/"))));
-    let current_spec: Rc<RefCell<protocol_view::View>> =
+    let current_spec: Rc<RefCell<view::View>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
@@ -790,12 +786,23 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             }
             Continue(true)
         }
+        ToGui::TableResolved(path, table) => {
+            if let Some(root) = &mut *current.borrow_mut() {
+                let mut waits = WAITS.take();
+                root.update(
+                    &ctx,
+                    &mut *waits,
+                    &vm::Event::User(LocalEvent::TableResolved(path, table)),
+                );
+            }
+            Continue(true)
+        }
         ToGui::NavigateInWindow(loc) => {
             *ctx.user.new_window_loc.borrow_mut() = loc;
             app.activate();
             Continue(true)
         }
-        ToGui::View { loc, original, raeified, generated } => {
+        ToGui::View { loc, spec, generated } => {
             match loc {
                 None => {
                     ctx.user.view_saved.set(false);
@@ -822,9 +829,9 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 mainbox.remove(cur.root());
             }
             ctx.variables.borrow_mut().clear();
-            *current_spec.borrow_mut() = original.clone();
+            *current_spec.borrow_mut() = spec.clone();
             ctx.dbg_ctx.borrow_mut().clear();
-            let cur = View::new(&ctx, &*current_loc.borrow(), raeified);
+            let cur = View::new(&ctx, &*current_loc.borrow(), spec);
             ctx.user
                 .window
                 .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
