@@ -10,7 +10,6 @@ mod containers;
 mod editor;
 mod table;
 mod util;
-mod view;
 mod widgets;
 
 use anyhow::Result;
@@ -26,14 +25,14 @@ use netidx::{
     config::{self, Config},
     path::Path,
     pool::{Pool, Pooled},
-    resolver::Auth,
+    resolver::{self, Auth},
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
-    expr::ExprKind,
+    expr::{self, ExprKind},
     vm::{self, ExecCtx, Node},
 };
-use netidx_protocols::view as protocol_view;
+use netidx_protocols::view;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -54,15 +53,21 @@ type BSCtx = ExecCtx<WidgetCtx, LocalEvent>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 
-fn default_view(path: Path) -> protocol_view::View {
-    protocol_view::View {
+fn default_view(path: Path) -> view::View {
+    view::View {
         variables: HashMap::new(),
         keybinds: Vec::new(),
-        root: protocol_view::Widget {
-            kind: protocol_view::WidgetKind::Table(protocol_view::Table {
-                path,
-                default_sort_column: None,
-                columns: protocol_view::ColumnSpec::Auto,
+        root: view::Widget {
+            kind: view::WidgetKind::Table(view::Table {
+                path: expr::Expr::new(ExprKind::Constant(Value::String(Chars::from(
+                    &*path,
+                )))),
+                default_sort_column: expr::Expr::new(ExprKind::Constant(Value::Null)),
+                default_sort_column_direction: expr::Expr::new(ExprKind::Constant(
+                    Value::Null,
+                )),
+                column_mode: expr::Expr::new(ExprKind::Constant(Value::Null)),
+                column_list: expr::Expr::new(ExprKind::Constant(Value::Null)),
             }),
             props: None,
         },
@@ -114,8 +119,7 @@ impl fmt::Display for ViewLoc {
 enum ToGui {
     View {
         loc: Option<ViewLoc>,
-        original: protocol_view::View,
-        raeified: view::View,
+        view: view::View,
         generated: bool,
     },
     NavigateInWindow(ViewLoc),
@@ -123,6 +127,7 @@ enum ToGui {
     Update(Batch),
     UpdateVar(Chars, Value),
     UpdateRpc(Path, Value),
+    TableResolved(Path, resolver::Table),
     ShowError(String),
     SaveError(String),
     Terminate,
@@ -131,8 +136,9 @@ enum ToGui {
 #[derive(Debug)]
 enum FromGui {
     Navigate(ViewLoc),
-    Render(protocol_view::View),
-    Save(ViewLoc, protocol_view::View, oneshot::Sender<Result<()>>),
+    Render(view::View),
+    ResolveTable(Path),
+    Save(ViewLoc, view::View, oneshot::Sender<Result<()>>),
     CallRpc(Path, Vec<(Chars, Value)>),
     Updated,
     Terminate,

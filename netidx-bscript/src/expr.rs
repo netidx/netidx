@@ -190,6 +190,10 @@ impl<'de> Deserialize<'de> for Expr {
 }
 
 impl Expr {
+    pub fn new(kind: ExprKind) -> Self {
+        Expr { id: ExprId::new(), kind }
+    }
+
     pub fn is_fn(&self) -> bool {
         match &self.kind {
             ExprKind::Constant(Value::String(c)) => VNAME.is_match(&*c),

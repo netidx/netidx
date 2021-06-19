@@ -1,4 +1,4 @@
-use netidx::{path::Path, publisher::Value};
+use netidx::publisher::Value;
 use netidx_bscript::expr::Expr;
 use std::{
     boxed,
@@ -18,24 +18,13 @@ pub enum Direction {
     Vertical,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum SortDir {
-    Ascending,
-    Descending,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ColumnSpec {
-    Exactly(Vec<String>),
-    Hide(Vec<String>),
-    Auto,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
-    pub path: Path,
-    pub default_sort_column: Option<(String, SortDir)>,
-    pub columns: ColumnSpec,
+    pub path: Expr,
+    pub default_sort_column: Expr, // column name or Null
+    pub default_sort_column_direction: Expr, // Ascending, Descending, or Null
+    pub column_mode: Expr, // Exactly, Hide, or Null
+    pub column_list: Expr, // json list of column names, interpreted according to column_mode
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

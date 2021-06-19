@@ -17,7 +17,7 @@ use netidx::{
     resolver::{Auth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
-use netidx_protocols::{rpc::client as rpc, view as protocol_view};
+use netidx_protocols::{rpc::client as rpc, view};
 use std::{
     collections::HashMap,
     fs, mem,
@@ -144,43 +144,19 @@ impl CtxInner {
     async fn navigate_path(&mut self, base_path: Path) -> Result<()> {
         self.rx_view = None;
         self.dv_view = None;
-        match self.resolver.table(base_path.clone()).await {
-            Err(e) => {
-                let m = format!("can't fetch table spec for {}, {}", base_path, e);
-                self.to_gui.send(ToGui::ShowError(m))?
-            }
-            Ok(spec) => {
-                let raeified_default = view::View {
-                    variables: HashMap::new(),
-                    root: view::Widget {
-                        props: None,
-                        kind: view::WidgetKind::Table(
-                            view::Table {
-                                path: base_path.clone(),
-                                default_sort_column: None,
-                                columns: view::ColumnSpec::Auto,
-                            },
-                            spec,
-                        ),
-                    },
-                };
-                let raw = self.raw_view.load(Ordering::Relaxed);
-                let m = ToGui::View {
-                    loc: Some(ViewLoc::Netidx(base_path.clone())),
-                    original: default_view(base_path.clone()),
-                    raeified: raeified_default,
-                    generated: true,
-                };
-                self.to_gui.send(m)?;
-                if !raw {
-                    let s = self.subscriber.durable_subscribe(base_path.append(".view"));
-                    let (tx, rx) = mpsc::channel(2);
-                    s.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
-                    self.view_path = Some(base_path.clone());
-                    self.rx_view = Some(rx);
-                    self.dv_view = Some(s);
-                }
-            }
+        let m = ToGui::View {
+            loc: Some(ViewLoc::Netidx(base_path.clone())),
+            view: default_view(base_path.clone()),
+            generated: true,
+        };
+        self.to_gui.send(m)?;
+        if !self.raw_view.load(Ordering::Relaxed) {
+            let s = self.subscriber.durable_subscribe(base_path.append(".view"));
+            let (tx, rx) = mpsc::channel(2);
+            s.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
+            self.view_path = Some(base_path.clone());
+            self.rx_view = Some(rx);
+            self.dv_view = Some(s);
         }
         Ok(())
     }
@@ -193,26 +169,19 @@ impl CtxInner {
                 let m = format!("can't load view from file {:?}, {}", file, e);
                 self.to_gui.send(ToGui::ShowError(m))?;
             }
-            Ok(s) => match serde_json::from_str::<protocol_view::View>(&s) {
+            Ok(s) => match serde_json::from_str::<view::View>(&s) {
                 Err(e) => {
                     let m = format!("invalid view: {:?}, {}", file, e);
                     self.to_gui.send(ToGui::ShowError(m))?;
                 }
-                Ok(v) => match view::View::new(&self.resolver, v.clone()).await {
-                    Err(e) => {
-                        let m = format!("error building view: {}", e);
-                        self.to_gui.send(ToGui::ShowError(m))?;
-                    }
-                    Ok(r) => {
-                        let m = ToGui::View {
-                            loc: Some(ViewLoc::File(file)),
-                            original: v,
-                            raeified: r,
-                            generated: false,
-                        };
-                        self.to_gui.send(m)?;
-                    }
-                },
+                Ok(v) => {
+                    let m = ToGui::View {
+                        loc: Some(ViewLoc::File(file)),
+                        view: v,
+                        generated: false,
+                    };
+                    self.to_gui.send(m)?;
+                }
             },
         }
         Ok(())
@@ -221,7 +190,7 @@ impl CtxInner {
     async fn save_view_netidx(
         &self,
         path: Path,
-        view: protocol_view::View,
+        view: view::View,
         fin: oneshot::Sender<Result<()>>,
     ) {
         let to = Some(Duration::from_secs(10));
@@ -254,7 +223,7 @@ impl CtxInner {
     fn save_view_file(
         &self,
         file: PathBuf,
-        view: protocol_view::View,
+        view: view::View,
         fin: oneshot::Sender<Result<()>>,
     ) {
         match serde_json::to_string(&view) {
@@ -272,7 +241,7 @@ impl CtxInner {
         }
     }
 
-    async fn load_custom_view(&mut self, view: Option<RawBatch>) -> Result<()> {
+    fn load_custom_view(&mut self, view: Option<RawBatch>) -> Result<()> {
         match view {
             None => {
                 self.view_path = None;
@@ -280,35 +249,20 @@ impl CtxInner {
                 self.dv_view = None;
             }
             Some(mut batch) => {
-                if let Some((_, view)) = batch.pop() {
+                for (_, view) in batch.drain(..) {
                     match view {
                         Event::Update(Value::String(s)) => {
-                            match serde_json::from_str::<protocol_view::View>(&*s) {
+                            match serde_json::from_str::<view::View>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
                                 Ok(view) => {
                                     if let Some(path) = &self.view_path {
-                                        match view::View::new(
-                                            &self.resolver,
-                                            view.clone(),
-                                        )
-                                        .await
-                                        {
-                                            Err(e) => {
-                                                warn!("failed to raeify view {}", e)
-                                            }
-                                            Ok(v) => {
-                                                let m = ToGui::View {
-                                                    loc: Some(ViewLoc::Netidx(
-                                                        path.clone(),
-                                                    )),
-                                                    original: view,
-                                                    raeified: v,
-                                                    generated: false,
-                                                };
-                                                self.to_gui.send(m)?;
-                                                info!("updated gui view")
-                                            }
-                                        }
+                                        let m = ToGui::View {
+                                            loc: Some(ViewLoc::Netidx(path.clone())),
+                                            view,
+                                            generated: false,
+                                        };
+                                        self.to_gui.send(m)?;
+                                        info!("updated gui view")
                                     }
                                 }
                             }
