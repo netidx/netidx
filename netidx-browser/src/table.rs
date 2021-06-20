@@ -61,13 +61,19 @@ struct RaeifiedTableInner {
 #[derive(Clone)]
 struct RaeifiedTable(Rc<RaeifiedTableInner>);
 
-pub(super) struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
+pub struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
+
+enum TableState {
+    Empty,
+    Resolving(Path),
+    Raeified { path: Path, table: RaeifiedTable },
+}
 
 pub(super) struct Table {
     ctx: BSCtx,
-    table: RefCell<Option<RaeifiedTable>>,
-    descriptor: RefCell<Option<resolver::Table>>,
+    state: RefCell<TableState>,
     root: ScrolledWindow,
+    selected_path: Label,
     path_expr: BSNode,
     path: RefCell<Option<Path>>,
     default_sort_column_expr: BSNode,
@@ -737,11 +743,18 @@ impl Table {
         let column_list = RefCell::new(cols_from_val(
             column_list_expr.current().unwrap_or(Value::Null),
         ));
-        let t = Table {
+        let state = RefCell::new(match &*path.borrow() {
+            None => TableState::Empty,
+            Some(path) => {
+                ctx.user.backend.resolve_table(path.clone());
+                TableState::Resolving(path.clone())
+            }
+        });
+        Table {
             ctx,
-            table: RefCell::new(None),
+            state,
             root: ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>),
-            descriptor: RefCell::new(None),
+            selected_path,
             path_expr,
             path,
             default_sort_column_expr,
@@ -752,24 +765,28 @@ impl Table {
             column_mode,
             column_list_expr,
             column_list,
-        };
-        t.resolve();
-        t
-    }
-
-    fn resolve(&self) {
-        if let Some(path) = &*self.path.borrow() {
-            self.ctx.user.backend.resolve_table(path.clone());
         }
     }
 
-    fn raeify(&self) {
+    fn refresh(&self) {
+        let state = &mut *self.state.borrow_mut();
+        let path = &*self.path.borrow();
         if let Some(c) = self.root.get_child() {
             self.root.remove(&c);
-            *self.table.borrow_mut() = None;
         }
-        if let Some(path) = &*self.path.borrow() {
-            *self.table.borrow_mut() = Some(Table::new(self.ctx.clone()))
+        match state {
+            TableState::Resolving(rpath) if path.as_ref() == Some(rpath) => (),
+            TableState::Resolving(_)
+            | TableState::Raeified { .. }
+            | TableState::Empty => match path {
+                None => {
+                    *state = TableState::Empty;
+                }
+                Some(path) => {
+                    self.ctx.user.backend.resolve_table(path.clone());
+                    *state = TableState::Resolving(path.clone());
+                }
+            },
         }
     }
 
@@ -779,46 +796,74 @@ impl Table {
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        let mut refresh = false;
         if let Some(path) = self.path_expr.update(ctx, event) {
             let new_path = match path {
                 Value::String(p) => Some(Path::from(Arc::from(&*p))),
-                _ => None
+                _ => None,
             };
             if &*self.path.borrow() != &new_path {
-                if let Some(path) = &new_path {
-                    self.ctx.user.backend.resolve_table(path.clone());
-                }
                 *self.path.borrow_mut() = new_path;
-                refresh = true;
+                self.refresh();
             }
         }
         if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
             let new_col = col.cast_to::<String>().ok();
             if &*self.default_sort_column.borrow() != &new_col {
                 *self.default_sort_column.borrow_mut() = new_col;
-                refresh = true;
+                self.refresh();
             }
         }
         if let Some(dir) = self.default_sort_column_direction_expr.update(ctx, event) {
             let new_dir = SortDir::new(dir);
             if &*self.default_sort_column_direction.borrow() != &new_dir {
                 *self.default_sort_column_direction.borrow_mut() = new_dir;
-                refresh = true;
+                self.refresh();
             }
         }
         if let Some(mode) = self.column_mode_expr.update(ctx, event) {
             let new_mode = ColumnMode::new(mode);
             if &*self.column_mode.borrow() != &new_mode {
                 *self.column_mode.borrow_mut() = new_mode;
-                refresh = true;
+                self.refresh();
             }
         }
         if let Some(cols) = self.column_list_expr.update(ctx, event) {
             let new_lst = cols_from_val(cols);
             if &*self.column_list.borrow() != &new_lst {
                 *self.column_list.borrow_mut() = new_lst;
-                refresh = true;
+                self.refresh();
+            }
+        }
+        match &*self.state.borrow() {
+            TableState::Empty | TableState::Resolving(_) => (),
+            TableState::Raeified { table, .. } => table.update(ctx, waits, event),
+        }
+        match event {
+            vm::Event::Netidx(_, _)
+            | vm::Event::Rpc(_, _)
+            | vm::Event::Variable(_, _)
+            | vm::Event::User(LocalEvent::Event(_)) => (),
+            vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
+                let state = &mut *self.state.borrow_mut();
+                match state {
+                    TableState::Empty | TableState::Raeified { .. } => (),
+                    TableState::Resolving(rpath) => {
+                        if path == rpath {
+                            let table = RaeifiedTable::new(
+                                ctx.clone(),
+                                self.root.clone(),
+                                path.clone(),
+                                self.default_sort_column.borrow().clone(),
+                                self.default_sort_column_direction.borrow().clone(),
+                                self.column_mode.borrow().clone(),
+                                self.column_list.borrow().clone(),
+                                descriptor.clone(),
+                                self.selected_path.clone(),
+                            );
+                            *state = TableState::Raeified { path: path.clone(), table };
+                        }
+                    }
+                }
             }
         }
     }
