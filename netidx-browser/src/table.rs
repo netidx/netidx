@@ -64,13 +64,20 @@ struct RaeifiedTable(Rc<RaeifiedTableInner>);
 pub(super) struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
 pub(super) struct Table {
+    ctx: BSCtx,
     table: RefCell<Option<RaeifiedTable>>,
+    descriptor: RefCell<Option<resolver::Table>>,
     root: ScrolledWindow,
-    path: BSNode,
-    default_sort_column: BSNode,
-    default_sort_column_direction: BSNode,
-    column_mode: BSNode,
-    column_list: BSNode,
+    path_expr: BSNode,
+    path: RefCell<Option<Path>>,
+    default_sort_column_expr: BSNode,
+    default_sort_column: RefCell<Option<String>>,
+    default_sort_column_direction_expr: BSNode,
+    default_sort_column_direction: RefCell<SortDir>,
+    column_mode_expr: BSNode,
+    column_mode: RefCell<ColumnMode>,
+    column_list_expr: BSNode,
+    column_list: RefCell<Vec<String>>,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -105,22 +112,22 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SortDir {
     Ascending,
-    Descending
+    Descending,
 }
 
 impl SortDir {
     fn new(v: Value) -> Self {
         match v {
             Value::String(c) if &*c == "ascending" => SortDir::Ascending,
-            _ => SortDir::Descending
+            _ => SortDir::Descending,
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ColumnMode {
     Auto,
     Hide,
@@ -191,7 +198,6 @@ impl clone::Upgrade for RaeifiedTableWeak {
         Weak::upgrade(&self.0).map(RaeifiedTable)
     }
 }
-// let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
 
 impl RaeifiedTable {
     fn new(
@@ -702,6 +708,117 @@ impl RaeifiedTable {
                     waits.push(rx);
                     self.start_update_task(Some(tx));
                 }
+            }
+        }
+    }
+}
+
+impl Table {
+    fn new(ctx: BSCtx, spec: view::Table, selected_path: Label) -> Table {
+        let path_expr = BSNode::compile(&ctx, spec.path);
+        let path = RefCell::new(path_expr.current().and_then(|v| match v {
+            Value::String(path) => Some(Path::from(Arc::from(&*path))),
+            _ => None,
+        }));
+        let default_sort_column_expr = BSNode::compile(&ctx, spec.default_sort_column);
+        let default_sort_column = RefCell::new(
+            default_sort_column_expr.current().and_then(|v| v.cast_to::<String>().ok()),
+        );
+        let default_sort_column_direction_expr =
+            BSNode::compile(&ctx, spec.default_sort_column_direction);
+        let default_sort_column_direction = RefCell::new(SortDir::new(
+            default_sort_column_direction_expr.current().unwrap_or(Value::Null),
+        ));
+        let column_mode_expr = BSNode::compile(&ctx, spec.column_mode);
+        let column_mode = RefCell::new(ColumnMode::new(
+            column_mode_expr.current().unwrap_or(Value::Null),
+        ));
+        let column_list_expr = BSNode::compile(&ctx, spec.column_list);
+        let column_list = RefCell::new(cols_from_val(
+            column_list_expr.current().unwrap_or(Value::Null),
+        ));
+        let t = Table {
+            ctx,
+            table: RefCell::new(None),
+            root: ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>),
+            descriptor: RefCell::new(None),
+            path_expr,
+            path,
+            default_sort_column_expr,
+            default_sort_column,
+            default_sort_column_direction_expr,
+            default_sort_column_direction,
+            column_mode_expr,
+            column_mode,
+            column_list_expr,
+            column_list,
+        };
+        t.resolve();
+        t
+    }
+
+    fn resolve(&self) {
+        if let Some(path) = &*self.path.borrow() {
+            self.ctx.user.backend.resolve_table(path.clone());
+        }
+    }
+
+    fn raeify(&self) {
+        if let Some(c) = self.root.get_child() {
+            self.root.remove(&c);
+            *self.table.borrow_mut() = None;
+        }
+        if let Some(path) = &*self.path.borrow() {
+            *self.table.borrow_mut() = Some(Table::new(self.ctx.clone()))
+        }
+    }
+
+    pub(super) fn update(
+        &self,
+        ctx: &BSCtx,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        let mut refresh = false;
+        if let Some(path) = self.path_expr.update(ctx, event) {
+            let new_path = match path {
+                Value::String(p) => Some(Path::from(Arc::from(&*p))),
+                _ => None
+            };
+            if &*self.path.borrow() != &new_path {
+                if let Some(path) = &new_path {
+                    self.ctx.user.backend.resolve_table(path.clone());
+                }
+                *self.path.borrow_mut() = new_path;
+                refresh = true;
+            }
+        }
+        if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
+            let new_col = col.cast_to::<String>().ok();
+            if &*self.default_sort_column.borrow() != &new_col {
+                *self.default_sort_column.borrow_mut() = new_col;
+                refresh = true;
+            }
+        }
+        if let Some(dir) = self.default_sort_column_direction_expr.update(ctx, event) {
+            let new_dir = SortDir::new(dir);
+            if &*self.default_sort_column_direction.borrow() != &new_dir {
+                *self.default_sort_column_direction.borrow_mut() = new_dir;
+                refresh = true;
+            }
+        }
+        if let Some(mode) = self.column_mode_expr.update(ctx, event) {
+            let new_mode = ColumnMode::new(mode);
+            if &*self.column_mode.borrow() != &new_mode {
+                *self.column_mode.borrow_mut() = new_mode;
+                refresh = true;
+            }
+        }
+        if let Some(cols) = self.column_list_expr.update(ctx, event) {
+            let new_lst = cols_from_val(cols);
+            if &*self.column_list.borrow() != &new_lst {
+                *self.column_list.borrow_mut() = new_lst;
+                refresh = true;
             }
         }
     }
