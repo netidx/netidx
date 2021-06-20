@@ -1,3 +1,33 @@
+* 0.8.0 netidx-protocols, tools, browser:
+  - Crate cleanup: netidx-protocols was split into 3 crates
+    - netidx-bscript: The bscript parser, and vm implementation
+    - netidx-archive: The archive file reader/writer library
+    - netidx-protocols: Actual protocols built on top of netidx
+  - the big bscript refactor: The bscript VM along with the
+    implementation of the core of the language was moved out of the
+    browser and combined with the parser, which was moved out of
+    netidx-protocols to form netidx-bscript. No semantic changed were
+    intended as a result of this refactor. Now it should be possible
+    to use bscript in other projects besides the browser, and I have
+    one planned for soon.
+  - table is a normal widget now! Previous to this, unlike every other
+    browser widget table didn't use bscript. Now that that has been
+    fixed it's easier to use table in more complex projects.
+
+    Probably the most important difference is the path of the table is
+    now a bscript expression instead of a hard coded string. So you
+    can now derive the table path from a variable, or load it from
+    netidx, or a lot of other creative things. And of course now if
+    the value of the expression changes, then the table will
+    automatically rebuild, just like every other widget.
+
+    Unfortunatly if you had tables saved in view definitions they
+    won't parse anymore, you'll have to update the view definition for
+    the new syntax, or rebuild it. Sorry about that. At some point the
+    view format will stabilize and I'll commit to writing upgrade
+    code, or compatible code, but at the moment there's still a lot I
+    want to do with it, so more breakage will come in the future.
+
 * 0.7.3 netidx-tools:
   - Additional error handling fixes in the recorder.
 
