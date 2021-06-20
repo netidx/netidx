@@ -26,7 +26,8 @@
     the new syntax, or rebuild it. Sorry about that. At some point the
     view format will stabilize and I'll commit to writing upgrade
     code, or compatible code, but at the moment there's still a lot I
-    want to do with it, so more breakage will come in the future.
+    want to do with it, so more breakage will probably come in the
+    future.
 
 * 0.7.3 netidx-tools:
   - Additional error handling fixes in the recorder.

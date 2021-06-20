@@ -6,7 +6,9 @@ use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
+use glib::{
+    self, clone, idle_add_local, signal::Inhibit, source::Continue, SignalHandlerId,
+};
 use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
@@ -30,6 +32,7 @@ use std::{
     result,
     str::FromStr,
     sync::Arc,
+    ops::Drop,
 };
 
 struct Subscription {
@@ -56,6 +59,7 @@ struct RaeifiedTableInner {
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
     destroyed: Cell<bool>,
+    va_id: RefCell<Option<SignalHandlerId>>,
 }
 
 #[derive(Clone)]
@@ -189,6 +193,16 @@ fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
     }
 }
 
+impl Drop for RaeifiedTableInner {
+    fn drop(&mut self) {
+        if let Some(id) = self.va_id.borrow_mut().take() {
+            self.root.get_adjustment().map(|va| {
+                va.disconnect(id);
+            })
+        }
+    }
+}
+
 impl clone::Downgrade for RaeifiedTable {
     type Weak = RaeifiedTableWeak;
 
@@ -265,6 +279,7 @@ impl RaeifiedTable {
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::new()),
             destroyed: Cell::new(false),
+            va_id: RefCell::new(None),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
         t.view().append_column(&{
@@ -330,12 +345,13 @@ impl RaeifiedTable {
         }));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.get_vadjustment().map(|va| {
-            va.connect_value_changed(clone!(@weak t => move |_| {
+            let id = va.connect_value_changed(clone!(@weak t => move |_| {
                 idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                     t.update_subscriptions();
                     Continue(false)
                 }));
             }));
+            *t.0.va_id.borrow_mut() = Some(id);
         });
         if let Some(col) = &default_sort_column {
             let col = Path::from(col.clone());
@@ -354,6 +370,7 @@ impl RaeifiedTable {
                 t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
             }
         }
+        t.0.root.show_all();
         t
     }
 
