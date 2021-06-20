@@ -4,7 +4,7 @@ mod widgets;
 use super::{BSCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
-use netidx::{chars::Chars, path::Path, subscriber::Value};
+use netidx::{chars::Chars, subscriber::Value};
 use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
@@ -240,61 +240,37 @@ impl Widget {
             ),
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
                 "Table",
-                WidgetKind::Table(widgets::Table::new(on_change.clone(), s)),
+                WidgetKind::Table(widgets::Table::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
-                WidgetKind::Label(widgets::Label::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::Label(widgets::Label::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
-                WidgetKind::Button(widgets::Button::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::Button(widgets::Button::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
-                WidgetKind::Toggle(widgets::Toggle::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::Toggle(widgets::Toggle::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
-                WidgetKind::Selector(widgets::Selector::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::Selector(widgets::Selector::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
-                WidgetKind::Entry(widgets::Entry::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::Entry(widgets::Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
-                WidgetKind::LinePlot(widgets::LinePlot::new(
-                    ctx,
-                    on_change.clone(),
-                    s,
-                )),
+                WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
@@ -360,20 +336,24 @@ impl Widget {
         fn widget(kind: view::WidgetKind) -> view::Widget {
             view::Widget { kind, props: None }
         }
+        fn table() -> view::Widget {
+            widget(view::WidgetKind::Table(view::Table {
+                path: expr::ExprKind::Constant(Value::from("/")).to_expr(),
+                default_sort_column: expr::ExprKind::Constant(Value::Null).to_expr(),
+                default_sort_column_direction: expr::ExprKind::Constant(Value::from(
+                    "descending",
+                ))
+                .to_expr(),
+                column_mode: expr::ExprKind::Constant(Value::from("auto")).to_expr(),
+                column_list: expr::ExprKind::Constant(Value::from("[]")).to_expr(),
+            }))
+        }
         match name {
-            None => widget(view::WidgetKind::Table(view::Table {
-                path: Path::from("/"),
-                default_sort_column: None,
-                columns: view::ColumnSpec::Auto,
-            })),
+            None => table(),
             Some("Action") => widget(view::WidgetKind::Action(
                 expr::ExprKind::Constant(Value::U64(42)).to_expr(),
             )),
-            Some("Table") => widget(view::WidgetKind::Table(view::Table {
-                path: Path::from("/"),
-                default_sort_column: None,
-                columns: view::ColumnSpec::Auto,
-            })),
+            Some("Table") => table(),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
                 widget(view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()))
@@ -694,13 +674,7 @@ impl Editor {
                 }
             }
         });
-        Editor::build_tree(
-            &ctx,
-            &on_change,
-            &store,
-            None,
-            &spec.borrow().root,
-        );
+        Editor::build_tree(&ctx, &on_change, &store, None, &spec.borrow().root);
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root_lower.pack_start(&reveal_properties, true, true, 5);
@@ -938,25 +912,17 @@ impl Editor {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
-            view::WidgetKind::BoxChild(b) => Editor::build_tree(
-                ctx,
-                on_change,
-                store,
-                Some(&iter),
-                &*b.widget,
-            ),
+            view::WidgetKind::BoxChild(b) => {
+                Editor::build_tree(ctx, on_change, store, Some(&iter), &*b.widget)
+            }
             view::WidgetKind::Grid(g) => {
                 for w in &g.rows {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
-            view::WidgetKind::GridChild(g) => Editor::build_tree(
-                ctx,
-                on_change,
-                store,
-                Some(&iter),
-                &*g.widget,
-            ),
+            view::WidgetKind::GridChild(g) => {
+                Editor::build_tree(ctx, on_change, store, Some(&iter), &*g.widget)
+            }
             view::WidgetKind::GridRow(g) => {
                 for w in &g.columns {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);

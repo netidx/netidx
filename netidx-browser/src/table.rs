@@ -61,12 +61,12 @@ struct RaeifiedTableInner {
 #[derive(Clone)]
 struct RaeifiedTable(Rc<RaeifiedTableInner>);
 
-pub struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
+struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
 enum TableState {
     Empty,
     Resolving(Path),
-    Raeified { path: Path, table: RaeifiedTable },
+    Raeified(RaeifiedTable),
 }
 
 pub(super) struct Table {
@@ -657,10 +657,6 @@ impl RaeifiedTable {
         self.0.sort_temp_disabled.set(false);
     }
 
-    pub(super) fn root(&self) -> &GtkWidget {
-        self.0.root.upcast_ref()
-    }
-
     fn view(&self) -> &TreeView {
         &self.0.view
     }
@@ -720,7 +716,7 @@ impl RaeifiedTable {
 }
 
 impl Table {
-    fn new(ctx: BSCtx, spec: view::Table, selected_path: Label) -> Table {
+    pub(super) fn new(ctx: BSCtx, spec: view::Table, selected_path: Label) -> Table {
         let path_expr = BSNode::compile(&ctx, spec.path);
         let path = RefCell::new(path_expr.current().and_then(|v| match v {
             Value::String(path) => Some(Path::from(Arc::from(&*path))),
@@ -790,6 +786,10 @@ impl Table {
         }
     }
 
+    pub(super) fn root(&self) -> &GtkWidget {
+        self.root.upcast_ref()
+    }
+
     pub(super) fn update(
         &self,
         ctx: &BSCtx,
@@ -836,7 +836,7 @@ impl Table {
         }
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) => (),
-            TableState::Raeified { table, .. } => table.update(ctx, waits, event),
+            TableState::Raeified(table) => table.update(ctx, waits, event),
         }
         match event {
             vm::Event::Netidx(_, _)
@@ -860,7 +860,8 @@ impl Table {
                                 descriptor.clone(),
                                 self.selected_path.clone(),
                             );
-                            *state = TableState::Raeified { path: path.clone(), table };
+                            table.start_update_task(None);
+                            *state = TableState::Raeified(table);
                         }
                     }
                 }

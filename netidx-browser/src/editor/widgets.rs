@@ -15,244 +15,6 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, Debug)]
-pub(super) struct Table {
-    root: gtk::Box,
-    spec: Rc<RefCell<view::Table>>,
-}
-
-impl Table {
-    pub(super) fn new(on_change: OnChange, path: view::Table) -> Self {
-        let spec = Rc::new(RefCell::new(path));
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        root.pack_start(&pathbox, false, false, 0);
-        let (label, entry) = parse_entry(
-            "Path:",
-            &spec.borrow().path,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().path = s;
-                on_change()
-            }),
-        );
-        pathbox.pack_start(&label, false, false, 0);
-        pathbox.pack_start(&entry, true, true, 0);
-        let default_sort_frame = gtk::Frame::new(Some("Sort Config"));
-        let default_sort_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.pack_start(&default_sort_frame, false, false, 0);
-        default_sort_frame.add(&default_sort_box);
-        let default_sort_cb = gtk::CheckButton::with_label("Has Default Sort");
-        let show_hide_default_sort_gui = Rc::new(clone!(
-            @strong spec, @strong on_change, @weak default_sort_box => move |show: bool| {
-                if !show {
-                    let children = default_sort_box.get_children();
-                    if children.len() > 1 {
-                        for c in &children[1..] {
-                            c.hide();
-                            default_sort_box.remove(c);
-                        }
-                    }
-                    spec.borrow_mut().default_sort_column = None;
-                    on_change()
-                } else {
-                    let empty_col = String::new();
-                    let spec_ref = spec.borrow();
-                    let (current_col, current_dir) = match spec_ref.default_sort_column {
-                        None => (&empty_col, view::SortDir::Ascending),
-                        Some((ref c, d)) => (c, d)
-                    };
-                    let col_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-                    let (lbl, ent) = parse_entry(
-                        "Column:",
-                        current_col,
-                        clone!(@strong spec, @strong on_change => move |c| {
-                            let mut spec = spec.borrow_mut();
-                            match &mut spec.default_sort_column {
-                                Some((ref mut column, _)) => { *column = c; }
-                                None => {
-                                    spec.default_sort_column =
-                                        Some((c, view::SortDir::Ascending));
-                                }
-                            }
-                            on_change()
-                        })
-                    );
-                    col_box.pack_start(&lbl, false, false, 0);
-                    col_box.pack_start(&ent, false, false, 0);
-                    default_sort_box.pack_start(&col_box, false, false, 0);
-                    let cb = gtk::ComboBoxText::new();
-                    cb.append(Some("Ascending"), "Ascending");
-                    cb.append(Some("Descending"), "Descending");
-                    cb.set_active_id(Some(match current_dir {
-                        view::SortDir::Ascending => "Ascending",
-                        view::SortDir::Descending => "Descending"
-                    }));
-                    cb.connect_changed(clone!(@strong spec, @strong on_change => move |c| {
-                        let dir = match c.get_active_id() {
-                            Some(s) if &*s == "Ascending" => view::SortDir::Ascending,
-                            Some(s) if &*s == "Descending" => view::SortDir::Descending,
-                            _ => view::SortDir::Ascending
-                        };
-                        let mut spec = spec.borrow_mut();
-                        match &mut spec.default_sort_column {
-                            Some((_, ref mut d)) => { *d = dir; }
-                            None => {
-                                spec.default_sort_column = Some(("".into(), dir));
-                            }
-                        }
-                        on_change()
-                    }));
-                    default_sort_box.pack_start(&cb, false, false, 0);
-                    default_sort_box.show_all();
-                }
-            }
-        ));
-        default_sort_box.pack_start(&default_sort_cb, false, false, 0);
-        default_sort_cb.connect_toggled(
-            clone!(@strong show_hide_default_sort_gui => move |b| {
-                show_hide_default_sort_gui(b.get_active())
-            }),
-        );
-        if spec.borrow().default_sort_column.is_some() {
-            show_hide_default_sort_gui(true);
-        }
-        let colscb = gtk::ComboBoxText::new();
-        colscb.append(Some("Auto"), "Auto");
-        colscb.append(Some("Exactly"), "Exactly");
-        colscb.append(Some("Hide"), "Hide");
-        colscb.set_active_id(match spec.borrow().columns {
-            view::ColumnSpec::Auto => Some("Auto"),
-            view::ColumnSpec::Hide(_) => Some("Hide"),
-            view::ColumnSpec::Exactly(_) => Some("Exactly"),
-        });
-        let cols_frame = gtk::Frame::new(Some("Column Config"));
-        let cols_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        cols_frame.add(&cols_box);
-        root.pack_start(&cols_frame, true, true, 0);
-        cols_box.pack_start(&colscb, false, false, 0);
-        let cols_gui =
-            Rc::new(clone!(@strong spec, @strong on_change, @weak cols_box => move || {
-                for c in cols_box.get_children().into_iter().skip(1) {
-                    c.hide();
-                    cols_box.remove(&c)
-                }
-                match &spec.borrow().columns {
-                    view::ColumnSpec::Auto => on_change(),
-                    view::ColumnSpec::Exactly(cols) | view::ColumnSpec::Hide(cols) => {
-                        let btnbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-                        let addbtn = gtk::Button::with_label("+");
-                        let delbtn = gtk::Button::with_label("-");
-                        btnbox.pack_start(&addbtn, false, false, 0);
-                        btnbox.pack_start(&delbtn, false, false, 0);
-                        cols_box.pack_start(&btnbox, false, false, 0);
-                        let win = gtk::ScrolledWindow::new(
-                            None::<&gtk::Adjustment>,
-                            None::<&gtk::Adjustment>
-                        );
-                        win.set_policy(
-                            gtk::PolicyType::Automatic,
-                            gtk::PolicyType::Automatic
-                        );
-                        cols_box.pack_start(&win, true, true, 0);
-                        let view = gtk::TreeView::new();
-                        let store = gtk::ListStore::new(&[String::static_type()]);
-                        win.add(&view);
-                        for c in cols.iter() {
-                            let iter = store.append();
-                            store.set_value(&iter, 0, &c.to_value());
-                        }
-                        view.append_column(&{
-                            let column = gtk::TreeViewColumn::new();
-                            let cell = gtk::CellRendererText::new();
-                            column.pack_start(&cell, true);
-                            column.set_title("column");
-                            column.add_attribute(&cell, "text", 0);
-                            cell.set_property_editable(true);
-                            cell.connect_edited(clone!(@weak store => move |_, p, txt| {
-                                if let Some(iter) = store.get_iter(&p) {
-                                    store.set_value(&iter, 0, &txt.to_value());
-                                }
-                            }));
-                            column
-                        });
-                        view.get_selection().set_mode(gtk::SelectionMode::Single);
-                        view.set_reorderable(true);
-                        view.set_model(Some(&store));
-                        addbtn.connect_clicked(clone!(
-                            @weak view, @weak store => move |_| {
-                                let iter = store.append();
-                                store.set_value(&iter, 0, &"".to_value());
-                                view.get_selection().select_iter(&iter);
-                            }));
-                        delbtn.connect_clicked(clone!(
-                            @weak store, @weak view => move |_| {
-                                let selection = view.get_selection();
-                                if let Some((_, i)) = selection.get_selected() {
-                                    store.remove(&i);
-                                }
-                            }));
-                        let changed = Rc::new(clone!(
-                            @weak store,
-                            @strong spec,
-                            @strong on_change => move || {
-                                match &mut spec.borrow_mut().columns {
-                                    view::ColumnSpec::Auto => (),
-                                    view::ColumnSpec::Exactly(ref mut cols)
-                                        | view::ColumnSpec::Hide(ref mut cols) => {
-                                            cols.clear();
-                                            store.foreach(|store, _, iter| {
-                                                let v = store.get_value(&iter, 0);
-                                                if let Ok(Some(c)) = v.get::<&str>() {
-                                                    cols.push(String::from(c));
-                                                }
-                                                false
-                                            })
-                                        }
-                                }
-                                on_change()
-                            }));
-                        store.connect_row_changed(
-                            clone!(@strong changed => move |_, _, _| changed())
-                        );
-                        store.connect_row_deleted(
-                            clone!(@strong changed => move |_, _| changed())
-                        );
-                        store.connect_row_inserted(
-                            clone!(@strong changed => move |_, _, _| changed())
-                        );
-                        cols_box.show_all();
-                    }
-                }
-            }));
-        colscb.connect_changed(clone!(
-            @strong spec, @strong cols_gui => move |b| {
-                match b.get_active_id() {
-                    Some(s) if &*s == "Auto" => {
-                        spec.borrow_mut().columns = view::ColumnSpec::Auto;
-                    }
-                    Some(s) if &*s == "Exactly" => {
-                        spec.borrow_mut().columns = view::ColumnSpec::Exactly(Vec::new());
-                    }
-                    Some(s) if &*s == "Hide" => {
-                        spec.borrow_mut().columns = view::ColumnSpec::Hide(Vec::new());
-                    }
-                    _ => { spec.borrow_mut().columns = view::ColumnSpec::Auto; }
-                }
-                cols_gui()
-        }));
-        cols_gui();
-        Table { root, spec }
-    }
-
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Table(self.spec.borrow().clone())
-    }
-
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-}
-
 type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 
 fn expr(
@@ -335,6 +97,91 @@ fn expr(
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct Table {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Table>>,
+    dbg_path: DbgExpr,
+    dbg_default_sort_column: DbgExpr,
+    dbg_default_sort_column_direction: DbgExpr,
+    dbg_column_mode: DbgExpr,
+    dbg_column_list: DbgExpr,
+}
+
+impl Table {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Table) -> Self {
+        let spec = Rc::new(RefCell::new(spec));
+        let mut root = TwoColGrid::new();
+        let (l, e, dbg_path) = expr(
+            ctx,
+            "Path:",
+            &spec.borrow().path,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().path = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, dbg_default_sort_column) = expr(
+            ctx,
+            "Default sort column:",
+            &spec.borrow().default_sort_column,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().default_sort_column = e;
+                on_change();
+            }),
+        );
+        root.add((l, e));
+        let (l, e, dbg_default_sort_column_direction) = expr(
+            ctx,
+            "Default sort column direction:",
+            &spec.borrow().default_sort_column_direction,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().default_sort_column_direction = e;
+                on_change();
+            }),
+        );
+        root.add((l, e));
+        let (l, e, dbg_column_mode) = expr(
+            ctx,
+            "Column filter mode:",
+            &spec.borrow().column_mode,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().column_mode = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, dbg_column_list) = expr(
+            ctx,
+            "Column filter list:",
+            &spec.borrow().column_list,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().column_list = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Table {
+            root,
+            spec,
+            dbg_path,
+            dbg_default_sort_column,
+            dbg_default_sort_column_direction,
+            dbg_column_mode,
+            dbg_column_list,
+        }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Table(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<expr::Expr>>,
@@ -399,11 +246,7 @@ pub(super) struct Label {
 }
 
 impl Label {
-    pub(super) fn new(
-        ctx: &BSCtx,
-        on_change: OnChange,
-        spec: expr::Expr,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: expr::Expr) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
@@ -441,11 +284,7 @@ pub(super) struct Button {
 }
 
 impl Button {
-    pub(super) fn new(
-        ctx: &BSCtx,
-        on_change: OnChange,
-        spec: view::Button,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Button) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(
@@ -500,11 +339,7 @@ pub(super) struct Toggle {
 }
 
 impl Toggle {
-    pub(super) fn new(
-        ctx: &BSCtx,
-        on_change: OnChange,
-        spec: view::Toggle,
-    ) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Toggle) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, enabled_expr) = expr(

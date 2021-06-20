@@ -214,7 +214,7 @@ impl CtxInner {
             Err(e) => {
                 let _ = fin.send(Err(e));
             }
-            Ok(val) => match serde_json::to_string(&view) {
+            Ok(val) => match serde_json::to_string(&spec) {
                 Err(e) => {
                     let _ = fin.send(Err(Error::from(e)));
                 }
@@ -242,7 +242,7 @@ impl CtxInner {
         spec: view::View,
         fin: oneshot::Sender<Result<()>>,
     ) {
-        match serde_json::to_string(&view) {
+        match serde_json::to_string(&spec) {
             Err(e) => {
                 let _ = fin.send(Err(Error::from(e)));
             }
@@ -295,7 +295,7 @@ impl CtxInner {
         self.view_path = None;
         self.rx_view = None;
         self.dv_view = None;
-        let m = ToGui::View { loc: None, view, generated: false };
+        let m = ToGui::View { loc: None, spec, generated: false };
         self.to_gui.send(m)?;
         info!("updated gui view (render)");
         Ok(())

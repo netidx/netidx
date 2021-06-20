@@ -60,7 +60,7 @@ fn default_view(path: Path) -> view::View {
         root: view::Widget {
             kind: view::WidgetKind::Table(view::Table {
                 path: expr::Expr::new(ExprKind::Constant(Value::String(Chars::from(
-                    &*path,
+                    String::from(&*path),
                 )))),
                 default_sort_column: expr::Expr::new(ExprKind::Constant(Value::Null)),
                 default_sort_column_direction: expr::Expr::new(ExprKind::Constant(
@@ -218,10 +218,7 @@ impl Widget {
                 Widget::Action(widgets::Action::new(ctx, spec))
             }
             view::WidgetKind::Table(spec) => {
-                let tbl = table::Table::new(ctx.clone(), spec, selected_path);
-                // force the initial update/subscribe
-                tbl.start_update_task(None);
-                Widget::Table(tbl)
+                Widget::Table(table::Table::new(ctx.clone(), spec, selected_path))
             }
             view::WidgetKind::Label(spec) => {
                 Widget::Label(widgets::Label::new(ctx, spec, selected_path))
