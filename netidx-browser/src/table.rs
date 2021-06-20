@@ -6,9 +6,7 @@ use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{
-    self, clone, idle_add_local, signal::Inhibit, source::Continue, SignalHandlerId,
-};
+use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
@@ -32,7 +30,6 @@ use std::{
     result,
     str::FromStr,
     sync::Arc,
-    ops::Drop,
 };
 
 struct Subscription {
@@ -59,7 +56,6 @@ struct RaeifiedTableInner {
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
     destroyed: Cell<bool>,
-    va_id: RefCell<Option<SignalHandlerId>>,
 }
 
 #[derive(Clone)]
@@ -122,7 +118,7 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDir {
     Ascending,
     Descending,
@@ -137,7 +133,7 @@ impl SortDir {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColumnMode {
     Auto,
     Hide,
@@ -190,16 +186,6 @@ fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
             descr.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(&order[c1]));
         }
         _ => (),
-    }
-}
-
-impl Drop for RaeifiedTableInner {
-    fn drop(&mut self) {
-        if let Some(id) = self.va_id.borrow_mut().take() {
-            self.root.get_adjustment().map(|va| {
-                va.disconnect(id);
-            })
-        }
     }
 }
 
@@ -279,7 +265,6 @@ impl RaeifiedTable {
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::new()),
             destroyed: Cell::new(false),
-            va_id: RefCell::new(None),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
         t.view().append_column(&{
@@ -345,13 +330,12 @@ impl RaeifiedTable {
         }));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.get_vadjustment().map(|va| {
-            let id = va.connect_value_changed(clone!(@weak t => move |_| {
+            va.connect_value_changed(clone!(@weak t => move |_| {
                 idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                     t.update_subscriptions();
                     Continue(false)
                 }));
             }));
-            *t.0.va_id.borrow_mut() = Some(id);
         });
         if let Some(col) = &default_sort_column {
             let col = Path::from(col.clone());
@@ -740,9 +724,11 @@ impl Table {
             _ => None,
         }));
         let default_sort_column_expr = BSNode::compile(&ctx, spec.default_sort_column);
-        let default_sort_column = RefCell::new(
-            default_sort_column_expr.current().and_then(|v| v.cast_to::<String>().ok()),
-        );
+        let default_sort_column =
+            RefCell::new(default_sort_column_expr.current().and_then(|v| match v {
+                Value::String(c) => Some(String::from(&*c)),
+                _ => None,
+            }));
         let default_sort_column_direction_expr =
             BSNode::compile(&ctx, spec.default_sort_column_direction);
         let default_sort_column_direction = RefCell::new(SortDir::new(
@@ -784,9 +770,6 @@ impl Table {
     fn refresh(&self) {
         let state = &mut *self.state.borrow_mut();
         let path = &*self.path.borrow();
-        if let Some(c) = self.root.get_child() {
-            self.root.remove(&c);
-        }
         match state {
             TableState::Resolving(rpath) if path.as_ref() == Some(rpath) => (),
             TableState::Resolving(_)
@@ -800,6 +783,9 @@ impl Table {
                     *state = TableState::Resolving(path.clone());
                 }
             },
+        }
+        if let Some(c) = self.root.get_child() {
+            self.root.remove(&c);
         }
     }
 
@@ -824,7 +810,10 @@ impl Table {
             }
         }
         if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
-            let new_col = col.cast_to::<String>().ok();
+            let new_col = match col {
+                Value::String(c) => Some(String::from(&*c)),
+                _ => None,
+            };
             if &*self.default_sort_column.borrow() != &new_col {
                 *self.default_sort_column.borrow_mut() = new_col;
                 self.refresh();
