@@ -1,12 +1,12 @@
 [package]
-name = "netidx-protocols"
+name = "netidx-archive"
 version = "0.8.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 homepage = "https://estokes.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
-description = "Various protocols build on top of netidx"
-documentation = "https://docs.rs/netidx-protocols"
+description = "mmap based archive format for netidx"
+documentation = "https://docs.rs/netidx-archive"
 readme = "../README.md"
 license = "MIT"
 
@@ -17,17 +17,16 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = "1"
 netidx = { path = "../netidx", version = "0.7", default_features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.8" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
-serde = "1"
-serde_derive = "1"
-serde_json = "1"
 bytes = "1"
+fs3 = "0.5"
+mapr = "0.8"
 fxhash = "0.2"
 lazy_static = "1"
+packed_struct = "0.5"
+packed_struct_codegen = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
-futures = "0.3"
-uuid = { version = "0.8", features = ["v4"] }
-
-[dev-dependencies]
-proptest = "1"
+parking_lot = "0.11"
+indexmap = "1"
+diligent-date-parser = "0.1"

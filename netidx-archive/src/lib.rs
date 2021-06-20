@@ -1,7 +1,12 @@
+#[macro_use] extern crate packed_struct_codegen;
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate anyhow;
+
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
+use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
 use log::warn;
 use mapr::{Mmap, MmapMut};
@@ -502,7 +507,7 @@ impl fmt::Display for RecordTooLarge {
 impl error::Error for RecordTooLarge {}
 
 fn scan_records(
-    path_by_id: &mut IndexMap<Id, Path>,
+    path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut HashMap<Path, Id>,
     mut imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     mut deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
@@ -571,7 +576,7 @@ fn scan_records(
 }
 
 fn scan_file(
-    path_by_id: &mut IndexMap<Id, Path>,
+    path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut HashMap<Path, Id>,
     imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
@@ -676,7 +681,7 @@ fn scan_file(
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
 pub struct ArchiveWriter {
-    path_by_id: IndexMap<Id, Path>,
+    path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     file: Arc<File>,
     end: Arc<AtomicUsize>,
@@ -707,7 +712,7 @@ impl ArchiveWriter {
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
-                path_by_id: IndexMap::new(),
+                path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
                 end: Arc::new(AtomicUsize::new(0)),
@@ -746,7 +751,7 @@ impl ArchiveWriter {
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             mmap.flush()?;
             Ok(ArchiveWriter {
-                path_by_id: IndexMap::new(),
+                path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
                 end: Arc::new(AtomicUsize::new(fh_len)),
@@ -926,7 +931,7 @@ impl ArchiveWriter {
 
 #[derive(Debug)]
 struct ArchiveIndex {
-    path_by_id: IndexMap<Id, Path>,
+    path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     imagemap: BTreeMap<DateTime<Utc>, usize>,
     deltamap: BTreeMap<DateTime<Utc>, usize>,
@@ -937,7 +942,7 @@ struct ArchiveIndex {
 impl ArchiveIndex {
     fn new() -> Self {
         ArchiveIndex {
-            path_by_id: IndexMap::new(),
+            path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
             id_by_path: HashMap::new(),
             imagemap: BTreeMap::new(),
             deltamap: BTreeMap::new(),

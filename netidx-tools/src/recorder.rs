@@ -22,11 +22,11 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
 };
+use netidx_archive::{
+    ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper,
+    RecordTooLarge, Seek, Timestamp, BATCH_POOL,
+};
 use netidx_protocols::{
-    archive::{
-        ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper,
-        RecordTooLarge, Seek, Timestamp, BATCH_POOL,
-    },
     cluster::{uuid_string, Cluster},
     rpc::server::Proc,
 };
