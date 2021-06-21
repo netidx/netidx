@@ -859,6 +859,8 @@ impl Table {
                 self.refresh();
             }
         }
+        self.on_activate.update(ctx, event);
+        self.on_select.update(ctx, event);
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) => (),
             TableState::Raeified(table) => table.update(ctx, waits, event),
