@@ -291,12 +291,14 @@ impl RaeifiedTable {
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
             column.pack_start(&cell, true);
+            cell.set_property_editable(true);
             let f = Box::new(clone!(@weak t =>
                 move |c: &TreeViewColumn,
                       cr: &CellRenderer,
                       _: &TreeModel,
                       i: &TreeIter| t.render_cell(id, c, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_edited(|_, _, v| { dbg!(v); });
             column.set_title(&if vector_mode {
                 Path::from("value")
             } else {
@@ -547,17 +549,7 @@ impl RaeifiedTable {
             let ev = vm::Event::User(LocalEvent::Event(v));
             self.0.on_select.update(&self.0.ctx, &ev);
         }
-        let (mut start, end) = match self.view().get_visible_range() {
-            None => return,
-            Some((s, e)) => (s, e),
-        };
         self.view().columns_autosize();
-        while start <= end {
-            if let Some(i) = self.store().get_iter(&start) {
-                self.store().row_changed(&start, &i);
-            }
-            start.next();
-        }
     }
 
     pub(super) fn update_subscriptions(&self) {
@@ -704,7 +696,17 @@ impl RaeifiedTable {
                         let _: result::Result<_, _> = tx.send(());
                     }
                     t.enable_sort(sctx);
-                    t.update_subscriptions();
+                    let (mut start, end) = match t.view().get_visible_range() {
+                        None => return Continue(false),
+                        Some((s, e)) => (s, e),
+                    };
+                    while start <= end {
+                        if let Some(i) = t.store().get_iter(&start) {
+                            t.store().row_changed(&start, &i);
+                        }
+                        start.next();
+                    }
+                    t.view().columns_autosize();
                     Continue(false)
                 }
             }
@@ -889,7 +891,7 @@ impl Table {
                                 descriptor.clone(),
                                 self.selected_path.clone(),
                             );
-                            table.start_update_task(None);
+                            table.update_subscriptions();
                             *state = TableState::Raeified(table);
                         }
                     }
