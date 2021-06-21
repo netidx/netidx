@@ -105,6 +105,8 @@ pub(super) struct Table {
     dbg_default_sort_column_direction: DbgExpr,
     dbg_column_mode: DbgExpr,
     dbg_column_list: DbgExpr,
+    dbg_on_activate: DbgExpr,
+    dbg_on_select: DbgExpr,
 }
 
 impl Table {
@@ -123,7 +125,7 @@ impl Table {
         root.add((l, e));
         let (l, e, dbg_default_sort_column) = expr(
             ctx,
-            "Default sort column:",
+            "Default Sort Column:",
             &spec.borrow().default_sort_column,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().default_sort_column = e;
@@ -133,7 +135,7 @@ impl Table {
         root.add((l, e));
         let (l, e, dbg_default_sort_column_direction) = expr(
             ctx,
-            "Default sort column direction:",
+            "Default Sort Column Direction:",
             &spec.borrow().default_sort_column_direction,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().default_sort_column_direction = e;
@@ -143,7 +145,7 @@ impl Table {
         root.add((l, e));
         let (l, e, dbg_column_mode) = expr(
             ctx,
-            "Column filter mode:",
+            "Column Filter Mode:",
             &spec.borrow().column_mode,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().column_mode = e;
@@ -153,12 +155,32 @@ impl Table {
         root.add((l, e));
         let (l, e, dbg_column_list) = expr(
             ctx,
-            "Column filter list:",
+            "Column Filter List:",
             &spec.borrow().column_list,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().column_list = e;
                 on_change()
             }),
+        );
+        root.add((l, e));
+        let (l, e, dbg_on_activate) = expr(
+            ctx,
+            "On Activate:",
+            &spec.borrow().on_activate,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().on_activate = e;
+                on_change()
+            })
+        );
+        root.add((l, e));
+        let (l, e, dbg_on_select) = expr(
+            ctx,
+            "On Select:",
+            &spec.borrow().on_select,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().on_select = e;
+                on_change()
+            })
         );
         root.add((l, e));
         Table {
@@ -169,6 +191,8 @@ impl Table {
             dbg_default_sort_column_direction,
             dbg_column_mode,
             dbg_column_list,
+            dbg_on_activate,
+            dbg_on_select
         }
     }
 
