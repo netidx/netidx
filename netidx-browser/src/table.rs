@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSNode, ViewLoc,
+    BSCtx, BSNode,
 };
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
@@ -15,6 +15,7 @@ use gtk::{
 };
 use indexmap::IndexMap;
 use netidx::{
+    chars::Chars,
     path::Path,
     resolver,
     subscriber::{Dval, Event, SubId, Typ, UpdatesFlags, Value},
@@ -56,6 +57,8 @@ struct RaeifiedTableInner {
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value>>,
     destroyed: Cell<bool>,
+    on_select: Rc<BSNode>,
+    on_activate: Rc<BSNode>,
 }
 
 #[derive(Clone)]
@@ -84,6 +87,8 @@ pub(super) struct Table {
     column_mode: RefCell<ColumnMode>,
     column_list_expr: BSNode,
     column_list: RefCell<Vec<String>>,
+    on_select: Rc<BSNode>,
+    on_activate: Rc<BSNode>,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -214,6 +219,8 @@ impl RaeifiedTable {
         default_sort_column_direction: SortDir,
         column_mode: ColumnMode,
         column_list: Vec<String>,
+        on_select: Rc<BSNode>,
+        on_activate: Rc<BSNode>,
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
@@ -257,6 +264,8 @@ impl RaeifiedTable {
             descriptor,
             vector_mode,
             style,
+            on_select,
+            on_activate,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
             focus_column: RefCell::new(None),
@@ -323,8 +332,9 @@ impl RaeifiedTable {
         t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
             if let Some(iter) = t.store().get_iter(&p) {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
-                    let path = t.0.path.append(row_name);
-                    t.0.ctx.user.backend.navigate(ViewLoc::Netidx(path));
+                    let path = String::from(&*t.0.path.append(row_name));
+                    let e = LocalEvent::Event(Value::String(Chars::from(path)));
+                    t.0.on_activate.update(&t.0.ctx, &vm::Event::User(e));
                 }
             }
         }));
@@ -509,9 +519,9 @@ impl RaeifiedTable {
             },
         };
         let path = match row_name {
-            None => Path::from(""),
+            None => None,
             Some(row_name) => match row_name.get::<&str>().ok().flatten() {
-                None => Path::from(""),
+                None => None,
                 Some(row_name) => {
                     *self.0.focus_column.borrow_mut() = c.clone();
                     *self.0.focus_row.borrow_mut() = Some(String::from(row_name));
@@ -523,15 +533,20 @@ impl RaeifiedTable {
                         c.as_ref().and_then(|c| c.get_title())
                     };
                     match col_name {
-                        None => self.0.path.append(row_name),
+                        None => Some(self.0.path.append(row_name)),
                         Some(col_name) => {
-                            self.0.path.append(row_name).append(col_name.as_str())
+                            Some(self.0.path.append(row_name).append(col_name.as_str()))
                         }
                     }
                 }
             },
         };
-        self.0.selected_path.set_label(&*path);
+        self.0.selected_path.set_label(path.as_ref().map(|c| c.as_ref()).unwrap_or(""));
+        if let Some(path) = path {
+            let v = Value::from(String::from(&*path));
+            let ev = vm::Event::User(LocalEvent::Event(v));
+            self.0.on_select.update(&self.0.ctx, &ev);
+        }
         let (mut start, end) = match self.view().get_visible_range() {
             None => return,
             Some((s, e)) => (s, e),
@@ -749,6 +764,8 @@ impl Table {
                 TableState::Resolving(path.clone())
             }
         });
+        let on_select = Rc::new(BSNode::compile(&ctx, spec.on_select));
+        let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate));
         Table {
             ctx,
             state,
@@ -756,6 +773,8 @@ impl Table {
             selected_path,
             path_expr,
             path,
+            on_select,
+            on_activate,
             default_sort_column_expr,
             default_sort_column,
             default_sort_column_direction_expr,
@@ -863,6 +882,8 @@ impl Table {
                                 self.default_sort_column_direction.borrow().clone(),
                                 self.column_mode.borrow().clone(),
                                 self.column_list.borrow().clone(),
+                                self.on_select.clone(),
+                                self.on_activate.clone(),
                                 descriptor.clone(),
                                 self.selected_path.clone(),
                             );

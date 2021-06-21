@@ -22,9 +22,11 @@ pub enum Direction {
 pub struct Table {
     pub path: Expr,
     pub default_sort_column: Expr, // column name or Null
-    pub default_sort_column_direction: Expr, // Ascending, Descending, or Null
-    pub column_mode: Expr, // Exactly, Hide, or Null
-    pub column_list: Expr, // json list of column names, interpreted according to column_mode
+    pub default_sort_column_direction: Expr, // ascending, descending, or Null
+    pub column_mode: Expr, // exactly, hide, or Null
+    pub column_list: Expr, // csv or json list of column names, interpreted according to column_mode
+    pub on_select: Expr,
+    pub on_activate: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

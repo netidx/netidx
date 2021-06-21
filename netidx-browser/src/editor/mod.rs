@@ -1,10 +1,10 @@
 mod expr_inspector;
 mod util;
 mod widgets;
-use super::{BSCtx, WidgetPath, DEFAULT_PROPS};
+use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
 use gtk::{self, prelude::*};
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
@@ -337,16 +337,7 @@ impl Widget {
             view::Widget { kind, props: None }
         }
         fn table() -> view::Widget {
-            widget(view::WidgetKind::Table(view::Table {
-                path: expr::ExprKind::Constant(Value::from("/")).to_expr(),
-                default_sort_column: expr::ExprKind::Constant(Value::Null).to_expr(),
-                default_sort_column_direction: expr::ExprKind::Constant(Value::from(
-                    "descending",
-                ))
-                .to_expr(),
-                column_mode: expr::ExprKind::Constant(Value::from("auto")).to_expr(),
-                column_list: expr::ExprKind::Constant(Value::from("[]")).to_expr(),
-            }))
+            default_view(Path::from("/")).root
         }
         match name {
             None => table(),

@@ -20,8 +20,8 @@ use std::{
 };
 
 pub(super) struct Button {
-    enabled: Rc<BSNode>,
-    label: Rc<BSNode>,
+    enabled: BSNode,
+    label: BSNode,
     on_click: Rc<BSNode>,
     button: gtk::Button,
 }
@@ -33,8 +33,8 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
-        let label = Rc::new(BSNode::compile(&ctx, spec.label.clone()));
+        let enabled = BSNode::compile(&ctx, spec.enabled.clone());
+        let label = BSNode::compile(&ctx, spec.label.clone());
         let on_click = Rc::new(BSNode::compile(&ctx, spec.on_click.clone()));
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
@@ -75,12 +75,12 @@ impl Button {
 
 pub(super) struct Label {
     label: gtk::Label,
-    text: Rc<BSNode>,
+    text: BSNode,
 }
 
 impl Label {
     pub(super) fn new(ctx: &BSCtx, spec: Expr, selected_path: gtk::Label) -> Label {
-        let text = Rc::new(BSNode::compile(&ctx, spec.clone()));
+        let text = BSNode::compile(&ctx, spec.clone());
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
@@ -113,12 +113,12 @@ impl Label {
 }
 
 pub(super) struct Action {
-    action: Rc<BSNode>,
+    action: BSNode,
 }
 
 impl Action {
     pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
-        let action = Rc::new(BSNode::compile(&ctx, spec.clone()));
+        let action = BSNode::compile(&ctx, spec.clone());
         action.update(ctx, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Action { action }
     }
@@ -131,8 +131,8 @@ impl Action {
 pub(super) struct Selector {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
-    enabled: Rc<BSNode>,
-    choices: Rc<BSNode>,
+    enabled: BSNode,
+    choices: BSNode,
     selected: Rc<BSNode>,
     on_change: Rc<BSNode>,
     we_set: Rc<Cell<bool>>,
@@ -161,8 +161,8 @@ impl Selector {
                 Inhibit(false)
             }),
         );
-        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
-        let choices = Rc::new(BSNode::compile(&ctx, spec.choices.clone()));
+        let enabled = BSNode::compile(&ctx, spec.enabled.clone());
+        let choices = BSNode::compile(&ctx, spec.choices.clone());
         let selected = Rc::new(BSNode::compile(&ctx, spec.selected.clone()));
         let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
         let we_set = Rc::new(Cell::new(false));
@@ -258,7 +258,7 @@ impl Selector {
 }
 
 pub(super) struct Toggle {
-    enabled: Rc<BSNode>,
+    enabled: BSNode,
     value: Rc<BSNode>,
     on_change: Rc<BSNode>,
     we_set: Rc<Cell<bool>>,
@@ -272,7 +272,7 @@ impl Toggle {
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
+        let enabled = BSNode::compile(&ctx, spec.enabled.clone());
         let value = Rc::new(BSNode::compile(&ctx, spec.value.clone()));
         let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
         let we_set = Rc::new(Cell::new(false));
@@ -346,8 +346,8 @@ impl Toggle {
 pub(super) struct Entry {
     entry: gtk::Entry,
     we_changed: Rc<Cell<bool>>,
-    enabled: Rc<BSNode>,
-    visible: Rc<BSNode>,
+    enabled: BSNode,
+    visible: BSNode,
     text: Rc<BSNode>,
     on_change: Rc<BSNode>,
     on_activate: Rc<BSNode>,
@@ -356,8 +356,8 @@ pub(super) struct Entry {
 impl Entry {
     pub(super) fn new(ctx: &BSCtx, spec: view::Entry, selected_path: gtk::Label) -> Self {
         let we_changed = Rc::new(Cell::new(false));
-        let enabled = Rc::new(BSNode::compile(&ctx, spec.enabled.clone()));
-        let visible = Rc::new(BSNode::compile(&ctx, spec.visible.clone()));
+        let enabled = BSNode::compile(&ctx, spec.enabled.clone());
+        let visible = BSNode::compile(&ctx, spec.visible.clone());
         let text = Rc::new(BSNode::compile(&ctx, spec.text.clone()));
         let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
         let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate.clone()));

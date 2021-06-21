@@ -29,7 +29,7 @@ use netidx::{
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
-    expr::{self, ExprKind},
+    expr::ExprKind,
     vm::{self, ExecCtx, Node},
 };
 use netidx_protocols::view;
@@ -59,15 +59,27 @@ fn default_view(path: Path) -> view::View {
         keybinds: Vec::new(),
         root: view::Widget {
             kind: view::WidgetKind::Table(view::Table {
-                path: expr::Expr::new(ExprKind::Constant(Value::String(Chars::from(
-                    String::from(&*path),
-                )))),
-                default_sort_column: expr::Expr::new(ExprKind::Constant(Value::Null)),
-                default_sort_column_direction: expr::Expr::new(ExprKind::Constant(
-                    Value::Null,
-                )),
-                column_mode: expr::Expr::new(ExprKind::Constant(Value::Null)),
-                column_list: expr::Expr::new(ExprKind::Constant(Value::Null)),
+                path: ExprKind::Constant(Value::String(Chars::from(String::from(
+                    &*path,
+                ))))
+                .to_expr(),
+                default_sort_column: ExprKind::Constant(Value::Null).to_expr(),
+                default_sort_column_direction: ExprKind::Constant(Value::from(
+                    "descending",
+                ))
+                .to_expr(),
+                column_mode: ExprKind::Constant(Value::from("auto")).to_expr(),
+                column_list: ExprKind::Constant(Value::from("[]")).to_expr(),
+                on_select: ExprKind::Constant(Value::Null).to_expr(),
+                on_activate: ExprKind::Apply {
+                    function: "navigate".into(),
+                    args: vec![ExprKind::Apply {
+                        function: "event".into(),
+                        args: vec![],
+                    }
+                    .to_expr()],
+                }
+                .to_expr(),
             }),
             props: None,
         },
