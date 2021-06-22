@@ -6,7 +6,7 @@ use fxhash::FxBuildHasher;
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{Dval, SubId, Value},
+    subscriber::{Dval, SubId, Value, UpdatesFlags},
 };
 use std::{
     cell::RefCell,
@@ -100,7 +100,7 @@ pub trait Apply<C: Ctx, E> {
 }
 
 pub trait Ctx {
-    fn durable_subscribe(&self, path: Path) -> Dval;
+    fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval;
     fn set_var(
         &self,
         variables: &RefCell<HashMap<Chars, Value>>,

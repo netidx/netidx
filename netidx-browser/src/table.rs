@@ -14,6 +14,7 @@ use gtk::{
     Widget as GtkWidget,
 };
 use indexmap::IndexMap;
+use fxhash::FxBuildHasher;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -56,7 +57,7 @@ struct RaeifiedTableInner {
     vector_mode: bool,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
-    update: RefCell<IndexMap<SubId, Value>>,
+    update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
     destroyed: Cell<bool>,
     on_select: Rc<BSNode>,
     on_activate: Rc<BSNode>,
@@ -306,7 +307,7 @@ impl RaeifiedTable {
             focus_row: RefCell::new(None),
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
-            update: RefCell::new(IndexMap::new()),
+            update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
             destroyed: Cell::new(false),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
@@ -345,7 +346,7 @@ impl RaeifiedTable {
                       i: &TreeIter| t.render_cell(id, c, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
-                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
+                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(dbg!(v)))));
                 t.0.on_edit.update(&t.0.ctx, &vm::Event::User(ev));
             }));
             column.set_title(&name);
@@ -767,6 +768,7 @@ impl RaeifiedTable {
         match event {
             vm::Event::User(_) | vm::Event::Variable(_, _) | vm::Event::Rpc(_, _) => (),
             vm::Event::Netidx(id, value) => {
+                dbg!((&id, &value));
                 self.0.update.borrow_mut().insert(*id, value.clone());
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();
@@ -922,6 +924,7 @@ impl Table {
         }
         self.on_activate.update(ctx, event);
         self.on_select.update(ctx, event);
+        self.on_edit.update(ctx, event);
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) => (),
             TableState::Raeified(table) => table.update(ctx, waits, event),

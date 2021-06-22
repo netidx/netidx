@@ -163,9 +163,9 @@ struct WidgetCtx {
 }
 
 impl vm::Ctx for WidgetCtx {
-    fn durable_subscribe(&self, path: Path) -> Dval {
+    fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval {
         let dv = self.backend.subscriber.durable_subscribe(path);
-        dv.updates(UpdatesFlags::BEGIN_WITH_LAST, self.backend.updates.clone());
+        dv.updates(flags, self.backend.updates.clone());
         dv
     }
 

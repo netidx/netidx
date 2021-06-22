@@ -105,8 +105,10 @@ pub(super) struct Table {
     dbg_default_sort_column_direction: DbgExpr,
     dbg_column_mode: DbgExpr,
     dbg_column_list: DbgExpr,
+    dbg_editable: DbgExpr,
     dbg_on_activate: DbgExpr,
     dbg_on_select: DbgExpr,
+    dbg_on_edit: DbgExpr,
 }
 
 impl Table {
@@ -163,6 +165,16 @@ impl Table {
             }),
         );
         root.add((l, e));
+        let (l, e, dbg_editable) = expr(
+            ctx,
+            "Editable:",
+            &spec.borrow().editable,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().editable = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
         let (l, e, dbg_on_activate) = expr(
             ctx,
             "On Activate:",
@@ -183,6 +195,16 @@ impl Table {
             })
         );
         root.add((l, e));
+        let (l, e, dbg_on_edit) = expr(
+            ctx,
+            "On Edit:",
+            &spec.borrow().on_edit,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().on_edit = e;
+                on_change()
+            })
+        );
+        root.add((l, e));
         Table {
             root,
             spec,
@@ -191,8 +213,10 @@ impl Table {
             dbg_default_sort_column_direction,
             dbg_column_mode,
             dbg_column_list,
+            dbg_editable,
             dbg_on_activate,
-            dbg_on_select
+            dbg_on_select,
+            dbg_on_edit
         }
     }
 

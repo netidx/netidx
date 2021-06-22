@@ -5,7 +5,7 @@ use crate::{
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{self, Dval, Typ, Value},
+    subscriber::{self, Dval, Typ, UpdatesFlags, Value},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1013,7 +1013,7 @@ impl Store {
             },
             (Some(p), val) => {
                 let path = Path::from(p);
-                let dv = ctx.user.durable_subscribe(path.clone());
+                let dv = ctx.user.durable_subscribe(UpdatesFlags::empty(), path.clone());
                 if let Some(v) = val {
                     self.queue(v)
                 }
@@ -1234,7 +1234,8 @@ impl<C: Ctx, E> Apply<C, E> for Load {
 impl Load {
     fn subscribe<C: Ctx, E>(&self, ctx: &ExecCtx<C, E>, name: Option<Value>) {
         if let Some(path) = pathname(&self.invalid, name) {
-            *self.cur.borrow_mut() = Some(ctx.user.durable_subscribe(path));
+            *self.cur.borrow_mut() =
+                Some(ctx.user.durable_subscribe(UpdatesFlags::BEGIN_WITH_LAST, path));
         }
     }
 
