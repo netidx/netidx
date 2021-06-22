@@ -346,7 +346,7 @@ impl RaeifiedTable {
                       i: &TreeIter| t.render_cell(id, c, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
-                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(dbg!(v)))));
+                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
                 t.0.on_edit.update(&t.0.ctx, &vm::Event::User(ev));
             }));
             column.set_title(&name);
@@ -768,7 +768,6 @@ impl RaeifiedTable {
         match event {
             vm::Event::User(_) | vm::Event::Variable(_, _) | vm::Event::Rpc(_, _) => (),
             vm::Event::Netidx(id, value) => {
-                dbg!((&id, &value));
                 self.0.update.borrow_mut().insert(*id, value.clone());
                 if self.0.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();

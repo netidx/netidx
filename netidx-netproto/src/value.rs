@@ -100,7 +100,7 @@ impl Typ {
 
     pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
         Ok(match s {
-            "null" => Value::Null,
+            "null" | "Null" => Value::Null,
             s => match self {
                 Typ::U32 => Value::U32(s.parse::<u32>()?),
                 Typ::V32 => Value::V32(s.parse::<u32>()?),
@@ -138,18 +138,20 @@ impl Typ {
                         .cast(Typ::Duration)
                         .ok_or_else(|| anyhow!("failed to cast float to duration"))?
                 }
-                Typ::Bool => match s.parse::<bool>()? {
-                    true => Value::True,
-                    false => Value::False,
+                Typ::Bool => match s.trim() {
+                    "true" | "True" => Value::True,
+                    "false" | "False" => Value::False,
+                    _ => bail!("parse error expected boolean {}", s)
                 },
                 Typ::String => Value::String(Chars::from(String::from(s))),
                 Typ::Bytes => Value::Bytes(Bytes::from(base64::decode(s)?)),
                 Typ::Result => {
-                    if s == "ok" {
+                    let s = s.trim();
+                    if s == "ok" || s == "Ok" {
                         Value::Ok
-                    } else if s == "error" {
+                    } else if s == "error" || s == "Error" {
                         Value::Error(Chars::from(""))
-                    } else if s.starts_with("error:") {
+                    } else if s.starts_with("error:") || s.starts_with("Error:") {
                         Value::Error(Chars::from(String::from(s[6..].trim())))
                     } else {
                         bail!("invalid error type, must start with 'ok' or 'error:'")
@@ -605,10 +607,7 @@ impl Value {
                 Value::F64(v) => Some(Value::U32(v as u32)),
                 Value::DateTime(_) => None,
                 Value::Duration(d) => Some(Value::U32(d.as_secs() as u32)),
-                Value::String(s) => match s.parse::<u32>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::U32(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::U32(1)),
                 Value::False => Some(Value::U32(0)),
@@ -629,10 +628,7 @@ impl Value {
                 Value::F64(v) => Some(Value::V32(v as u32)),
                 Value::DateTime(_) => None,
                 Value::Duration(d) => Some(Value::V32(d.as_secs() as u32)),
-                Value::String(s) => match s.parse::<u32>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::V32(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::V32(1)),
                 Value::False => Some(Value::V32(0)),
@@ -653,10 +649,7 @@ impl Value {
                 Value::F64(v) => Some(Value::I32(v as i32)),
                 Value::DateTime(v) => Some(Value::I32(v.timestamp() as i32)),
                 Value::Duration(v) => Some(Value::I32(v.as_secs() as i32)),
-                Value::String(s) => match s.parse::<i32>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::I32(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::I32(1)),
                 Value::False => Some(Value::I32(0)),
@@ -677,10 +670,7 @@ impl Value {
                 Value::F64(v) => Some(Value::Z32(v as i32)),
                 Value::DateTime(v) => Some(Value::Z32(v.timestamp() as i32)),
                 Value::Duration(v) => Some(Value::Z32(v.as_secs() as i32)),
-                Value::String(s) => match s.parse::<i32>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::Z32(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::Z32(1)),
                 Value::False => Some(Value::Z32(0)),
@@ -701,10 +691,7 @@ impl Value {
                 Value::F64(v) => Some(Value::U64(v as u64)),
                 Value::DateTime(_) => None,
                 Value::Duration(d) => Some(Value::U64(d.as_secs())),
-                Value::String(s) => match s.parse::<u64>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::U64(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::U64(1)),
                 Value::False => Some(Value::U64(0)),
@@ -725,10 +712,7 @@ impl Value {
                 Value::F64(v) => Some(Value::V64(v as u64)),
                 Value::DateTime(_) => None,
                 Value::Duration(d) => Some(Value::V64(d.as_secs())),
-                Value::String(s) => match s.parse::<u64>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::V64(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::V64(1)),
                 Value::False => Some(Value::V64(0)),
@@ -749,10 +733,7 @@ impl Value {
                 Value::F64(v) => Some(Value::I64(v as i64)),
                 Value::DateTime(v) => Some(Value::I64(v.timestamp())),
                 Value::Duration(v) => Some(Value::I64(v.as_secs() as i64)),
-                Value::String(s) => match s.parse::<i64>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::I64(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::I64(1)),
                 Value::False => Some(Value::I64(0)),
@@ -773,10 +754,7 @@ impl Value {
                 Value::F64(v) => Some(Value::Z64(v as i64)),
                 Value::DateTime(v) => Some(Value::Z64(v.timestamp())),
                 Value::Duration(v) => Some(Value::Z64(v.as_secs() as i64)),
-                Value::String(s) => match s.parse::<i64>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::Z64(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::Z64(1)),
                 Value::False => Some(Value::Z64(0)),
@@ -797,10 +775,7 @@ impl Value {
                 Value::F64(v) => Some(Value::F32(v as f32)),
                 Value::DateTime(v) => Some(Value::F32(v.timestamp() as f32)),
                 Value::Duration(v) => Some(Value::F32(v.as_secs() as f32)),
-                Value::String(s) => match s.parse::<f32>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::F32(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::F32(1.)),
                 Value::False => Some(Value::F32(0.)),
@@ -821,10 +796,7 @@ impl Value {
                 Value::F64(v) => Some(Value::F64(v)),
                 Value::DateTime(v) => Some(Value::F64(v.timestamp() as f64)),
                 Value::Duration(v) => Some(Value::F64(v.as_secs() as f64)),
-                Value::String(s) => match s.parse::<f64>() {
-                    Err(_) => None,
-                    Ok(v) => Some(Value::F64(v)),
-                },
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::F64(1.)),
                 Value::False => Some(Value::F64(0.)),
@@ -845,9 +817,7 @@ impl Value {
                 Value::F64(v) => Some(if v > 0. { Value::True } else { Value::False }),
                 Value::DateTime(_) => None,
                 Value::Duration(_) => None,
-                Value::String(s) => {
-                    Some(if s.len() > 0 { Value::True } else { Value::False })
-                }
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::True),
                 Value::False => Some(Value::False),
@@ -892,7 +862,7 @@ impl Value {
                 Value::F64(_) => Some(Value::Ok),
                 Value::DateTime(_) => Some(Value::Ok),
                 Value::Duration(_) => Some(Value::Ok),
-                Value::String(_) => Some(Value::Ok),
+                Value::String(s) => typ.parse(&*s).ok(),
                 Value::Bytes(_) => None,
                 Value::True => Some(Value::Ok),
                 Value::False => Some(Value::Ok),
@@ -954,11 +924,7 @@ impl Value {
                     )?,
                     Utc,
                 ))),
-
-                Value::String(c) => match Typ::DateTime.parse(&*c) {
-                    Err(_) => None,
-                    Ok(dt) => Some(dt),
-                },
+                Value::String(c) => typ.parse(&*c).ok(),
                 Value::Bytes(_)
                 | Value::True
                 | Value::False
@@ -1005,12 +971,7 @@ impl Value {
                     Some(Value::Duration(Duration::from_secs_f64(dur)))
                 }
                 v @ Value::Duration(_) => Some(v),
-                Value::String(c) => {
-                    match c.trim_matches(|c: char| !c.is_ascii_digit()).parse::<f64>() {
-                        Err(_) => None,
-                        Ok(v) => Value::F64(v).cast(Typ::Duration),
-                    }
-                }
+                Value::String(c) => typ.parse(&*c).ok(),
                 Value::Bytes(_)
                 | Value::True
                 | Value::False
