@@ -47,6 +47,12 @@
     a write is queued it will tell you how many writes are in the
     queue for a given path
 
+* 0.7.1 netidx:
+  - slightly improve resubscription timeout logic to improve
+    responsiveness of resubscription when a publisher is not hung, but
+    also not responding to subscription requests in a reasonable
+    amount of time.
+
 * 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
   - major update to the filter language syntax and semantics
   - add netidx rpc to protocols, use it in the recorder, implement it
