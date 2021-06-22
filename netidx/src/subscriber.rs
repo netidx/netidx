@@ -32,7 +32,7 @@ use log::{info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
-    cmp::{max, Eq, PartialEq},
+    cmp::{max, min, Eq, PartialEq},
     collections::{hash_map::Entry, HashMap, VecDeque},
     error, fmt,
     hash::Hash,
@@ -368,7 +368,7 @@ impl Dval {
     pub async fn wait_subscribed(&self) -> Result<()> {
         match &self.0.lock().sub {
             DvState::Subscribed(_) => return Ok(()),
-            DvState::Dead(_) => ()
+            DvState::Dead(_) => (),
         }
         let (tx, mut rx) = mpsc::channel(2);
         self.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
@@ -379,12 +379,16 @@ impl Dval {
                     let mut subed = false;
                     for (_, ev) in batch.drain(..) {
                         match ev {
-                            Event::Unsubscribed => { subed = false; },
-                            Event::Update(_) => { subed = true; }
+                            Event::Unsubscribed => {
+                                subed = false;
+                            }
+                            Event::Update(_) => {
+                                subed = true;
+                            }
                         }
                     }
                     if subed {
-                        break Ok(())
+                        break Ok(());
                     }
                 }
             }
@@ -589,7 +593,7 @@ impl Subscriber {
                     let mut b = HashMap::new();
                     let mut gc = Vec::new();
                     let mut subscriber = subscriber.0.lock();
-                    let mut max_tries = 0;
+                    let mut max_tries = 1;
                     let ndead = subscriber.durable_dead.len();
                     for (p, w) in &subscriber.durable_dead {
                         match w.upgrade() {
@@ -617,7 +621,7 @@ impl Subscriber {
                     (
                         b,
                         Duration::from_secs(max(
-                            30,
+                            min(30, 2 * max_tries as u64),
                             ((ndead / 10000) * max_tries) as u64,
                         )),
                     )
