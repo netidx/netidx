@@ -21,12 +21,42 @@ pub enum Direction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub path: Expr,
-    pub default_sort_column: Expr, // column name or Null
-    pub default_sort_column_direction: Expr, // ascending, descending, or Null
-    pub column_mode: Expr, // exactly, hide, or Null
-    pub column_list: Expr, // csv or json list of column names, interpreted according to column_mode
+    /// column name or Null, Null means no sorting by default
+    pub default_sort_column: Expr,
+    /// ascending, descending, or Null (same as descending)
+    pub default_sort_column_direction: Expr,
+    /// auto, exactly, hide, or Null (same as auto)
+    ///
+    /// auto: the default, automatically determine the column set, and
+    /// show columns that are present in 50% or more of the rows.
+    ///
+    /// exactly: column_list specifies the exact list of columns that
+    /// will appear, no auto discovery will happen, listed columns
+    /// will appear even if they do not exist in the table.
+    ///
+    /// hide: column_list specifies the columns that will be omitted
+    /// from the table. All columns not specified in the list will be
+    /// shown, reguardless of whether or not they appear in 50% or
+    /// more of the rows.
+    pub column_mode: Expr,
+    /// csv or json list of column names, interpreted according to
+    /// column_mode.
+    ///
+    /// csv form: col1,col2,col\,3,col4 note the escaped
+    /// comma
+    ///
+    /// json form: ["col1", "col2", "col,3", "col4"]
+    pub column_list: Expr,
+    /// either a boolean, which effects the entire table, or a csv or
+    /// json list of columns that that are editable.
+    pub editable: Expr,
+    /// event() will yield the selected path when the user selects a
+    /// cell
     pub on_select: Expr,
+    /// event() will yield the row path when the user activates a row
     pub on_activate: Expr,
+    /// event() will yield the new value when the user edits a cell
+    pub on_edit: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

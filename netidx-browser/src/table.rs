@@ -19,6 +19,7 @@ use netidx::{
     path::Path,
     resolver,
     subscriber::{Dval, Event, SubId, Typ, UpdatesFlags, Value},
+    utils::split_escaped,
 };
 use netidx_bscript::vm;
 use netidx_protocols::view;
@@ -59,6 +60,7 @@ struct RaeifiedTableInner {
     destroyed: Cell<bool>,
     on_select: Rc<BSNode>,
     on_activate: Rc<BSNode>,
+    on_edit: Rc<BSNode>,
 }
 
 #[derive(Clone)]
@@ -87,8 +89,11 @@ pub(super) struct Table {
     column_mode: RefCell<ColumnMode>,
     column_list_expr: BSNode,
     column_list: RefCell<Vec<String>>,
+    editable_expr: BSNode,
+    editable: RefCell<EditMode>,
     on_select: Rc<BSNode>,
     on_activate: Rc<BSNode>,
+    on_edit: Rc<BSNode>,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -155,11 +160,37 @@ impl ColumnMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditMode {
+    Full(bool),
+    Partial(HashSet<String>),
+}
+
+impl EditMode {
+    fn new(v: Value) -> Self {
+        match v {
+            Value::True => EditMode::Full(true),
+            Value::False => EditMode::Full(false),
+            Value::String(s) => match serde_json::from_str::<HashSet<String>>(&*s) {
+                Ok(cols) => EditMode::Partial(cols),
+                Err(_) => EditMode::Partial(
+                    split_escaped(&*s, '\\', ',')
+                        .map(|s| String::from(s.trim()))
+                        .collect(),
+                ),
+            },
+            _ => EditMode::Full(false),
+        }
+    }
+}
+
 fn cols_from_val(v: Value) -> Vec<String> {
     match v {
         Value::String(c) => match serde_json::from_str::<Vec<String>>(&*c) {
             Ok(cols) => cols,
-            Err(_) => vec![],
+            Err(_) => {
+                split_escaped(&*c, '\\', ',').map(|s| String::from(s.trim())).collect()
+            }
         },
         _ => vec![],
     }
@@ -219,8 +250,10 @@ impl RaeifiedTable {
         default_sort_column_direction: SortDir,
         column_mode: ColumnMode,
         column_list: Vec<String>,
+        editable: EditMode,
         on_select: Rc<BSNode>,
         on_activate: Rc<BSNode>,
+        on_edit: Rc<BSNode>,
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
@@ -266,6 +299,7 @@ impl RaeifiedTable {
             style,
             on_select,
             on_activate,
+            on_edit,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
             focus_column: RefCell::new(None),
@@ -290,20 +324,31 @@ impl RaeifiedTable {
             let id = (col + 1) as i32;
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
+            let name = if vector_mode {
+                Path::from("value")
+            } else {
+                t.0.descriptor.cols[col].0.clone()
+            };
             column.pack_start(&cell, true);
-            cell.set_property_editable(true);
+            match &editable {
+                EditMode::Full(v) => cell.set_property_editable(*v),
+                EditMode::Partial(allowed) => {
+                    if allowed.contains(&*name) {
+                        cell.set_property_editable(true);
+                    }
+                }
+            }
             let f = Box::new(clone!(@weak t =>
                 move |c: &TreeViewColumn,
                       cr: &CellRenderer,
                       _: &TreeModel,
                       i: &TreeIter| t.render_cell(id, c, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_edited(|_, _, v| { dbg!(v); });
-            column.set_title(&if vector_mode {
-                Path::from("value")
-            } else {
-                t.0.descriptor.cols[col].0.clone()
-            });
+            cell.connect_edited(clone!(@weak t => move |_, _, v| {
+                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
+                t.0.on_edit.update(&t.0.ctx, &vm::Event::User(ev));
+            }));
+            column.set_title(&name);
             t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
                 compare_row(id, m, r0, r1)
             });
@@ -759,6 +804,9 @@ impl Table {
         let column_list = RefCell::new(cols_from_val(
             column_list_expr.current().unwrap_or(Value::Null),
         ));
+        let editable_expr = BSNode::compile(&ctx, spec.editable);
+        let editable =
+            RefCell::new(EditMode::new(editable_expr.current().unwrap_or(Value::Null)));
         let state = RefCell::new(match &*path.borrow() {
             None => TableState::Empty,
             Some(path) => {
@@ -768,6 +816,7 @@ impl Table {
         });
         let on_select = Rc::new(BSNode::compile(&ctx, spec.on_select));
         let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate));
+        let on_edit = Rc::new(BSNode::compile(&ctx, spec.on_edit));
         Table {
             ctx,
             state,
@@ -777,6 +826,7 @@ impl Table {
             path,
             on_select,
             on_activate,
+            on_edit,
             default_sort_column_expr,
             default_sort_column,
             default_sort_column_direction_expr,
@@ -785,6 +835,8 @@ impl Table {
             column_mode,
             column_list_expr,
             column_list,
+            editable_expr,
+            editable,
         }
     }
 
@@ -861,6 +913,13 @@ impl Table {
                 self.refresh();
             }
         }
+        if let Some(v) = self.editable_expr.update(ctx, event) {
+            let new_mode = EditMode::new(v);
+            if &*self.editable.borrow() != &new_mode {
+                *self.editable.borrow_mut() = new_mode;
+                self.refresh();
+            }
+        }
         self.on_activate.update(ctx, event);
         self.on_select.update(ctx, event);
         match &*self.state.borrow() {
@@ -886,8 +945,10 @@ impl Table {
                                 self.default_sort_column_direction.borrow().clone(),
                                 self.column_mode.borrow().clone(),
                                 self.column_list.borrow().clone(),
+                                self.editable.borrow().clone(),
                                 self.on_select.clone(),
                                 self.on_activate.clone(),
+                                self.on_edit.clone(),
                                 descriptor.clone(),
                                 self.selected_path.clone(),
                             );

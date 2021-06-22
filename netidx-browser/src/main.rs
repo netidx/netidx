@@ -69,8 +69,10 @@ fn default_view(path: Path) -> view::View {
                 ))
                 .to_expr(),
                 column_mode: ExprKind::Constant(Value::from("auto")).to_expr(),
-                column_list: ExprKind::Constant(Value::from("[]")).to_expr(),
+                column_list: ExprKind::Constant(Value::from("")).to_expr(),
+                editable: ExprKind::Constant(Value::False).to_expr(),
                 on_select: ExprKind::Constant(Value::Null).to_expr(),
+                on_edit: ExprKind::Constant(Value::Null).to_expr(),
                 on_activate: ExprKind::Apply {
                     function: "navigate".into(),
                     args: vec![ExprKind::Apply {
