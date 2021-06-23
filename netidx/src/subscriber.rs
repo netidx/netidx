@@ -34,7 +34,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use std::{
     cmp::{max, Eq, PartialEq},
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     error, fmt,
     hash::Hash,
     iter, mem,
@@ -596,41 +596,34 @@ impl Subscriber {
             info!("doing resubscriptions");
             let now = Instant::now();
             let (batch, timeout) = {
-                let mut b = HashSet::new();
-                let mut gc = Vec::new();
+                let mut batch = Vec::new();
                 let mut subscriber = subscriber.0.lock();
+                let subscriber = &mut *subscriber;
+                let durable_dead = &mut subscriber.durable_dead;
+                let durable_pending = &mut subscriber.durable_pending;
                 let mut max_tries = 1;
-                let ndead = subscriber.durable_dead.len();
-                for (p, w) in &subscriber.durable_dead {
-                    match w.upgrade() {
-                        None => {
-                            gc.push(p.clone());
-                        }
-                        Some(s) => {
-                            let (next_try, tries) = {
-                                let dv = s.0.lock();
-                                match &dv.sub {
-                                    DvState::Dead(d) => (d.next_try, d.tries),
-                                    DvState::Subscribed(_) => unreachable!(),
-                                }
-                            };
-                            if next_try <= now {
-                                b.insert(p.clone());
-                                max_tries = max(max_tries, tries);
+                durable_dead.retain(|p, w| match w.upgrade() {
+                    None => false,
+                    Some(s) => {
+                        let (next_try, tries) = {
+                            let dv = s.0.lock();
+                            match &dv.sub {
+                                DvState::Dead(d) => (d.next_try, d.tries),
+                                DvState::Subscribed(_) => unreachable!(),
                             }
+                        };
+                        if next_try > now {
+                            true
+                        } else {
+                            batch.push(p.clone());
+                            durable_pending.insert(p.clone(), w.clone());
+                            max_tries = max(max_tries, tries);
+                            false
                         }
                     }
-                }
-                for p in gc {
-                    subscriber.durable_dead.remove(&p);
-                }
-                for p in b.iter() {
-                    if let Some(dv) = subscriber.durable_dead.remove(p) {
-                        subscriber.durable_pending.insert(p.clone(), dv);
-                    }
-                }
-                let n_adj = ((ndead / 10000) * max_tries) as u64;
-                (b, Duration::from_secs(max(30, n_adj)))
+                });
+                let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
+                (batch, Duration::from_secs(timeout as u64))
             };
             if batch.len() == 0 {
                 let mut subscriber = subscriber.0.lock();
@@ -650,9 +643,9 @@ impl Subscriber {
                 let mut subscriber = subscriber.0.lock();
                 let now = Instant::now();
                 for (p, r) in batch.drain(..) {
-                    let ds =
-                        subscriber.durable_pending.remove(&p).and_then(|ds| ds.upgrade());
-                    if let Some(ds) = ds {
+                    if let Some(ds) =
+                        subscriber.durable_pending.remove(&p).and_then(|ds| ds.upgrade())
+                    {
                         let dsw = ds.downgrade();
                         let mut dv = ds.0.lock();
                         match r {
@@ -696,6 +689,20 @@ impl Subscriber {
                 update_retry(&mut *subscriber, retry);
             }
         }
+        async fn next_subscription_result(
+            subscriptions: &mut Batched<
+                SelectAll<FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>>,
+            >,
+        ) -> BatchItem<(Path, Result<Val>)> {
+            if subscriptions.inner().is_empty() {
+                future::pending().await
+            } else {
+                match subscriptions.next().await {
+                    Some(set) => set,
+                    None => future::pending().await,
+                }
+            }
+        }
         let subscriber = self.downgrade();
         task::spawn(async move {
             let mut incoming = Batched::new(incoming.fuse(), 100_000);
@@ -718,7 +725,7 @@ impl Subscriber {
                             }
                         }
                     },
-                    m = subscriptions.select_next_some() => match m {
+                    m = next_subscription_result(&mut subscriptions).fuse() => match m {
                         BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
                         BatchItem::EndBatch => {
                             finish_resubscription_batch(
@@ -905,11 +912,7 @@ impl Subscriber {
             }
         }
         // Wait
-        async fn wait_result(
-            sub: Subscriber,
-            path: Path,
-            st: St,
-        ) -> (Path, Result<Val>) {
+        async fn wait_result(sub: Subscriber, path: Path, st: St) -> (Path, Result<Val>) {
             match st {
                 St::Resolve => unreachable!(),
                 St::Subscribed(raw) => (path, Ok(raw)),
@@ -973,10 +976,7 @@ impl Subscriber {
                 }
             }
         }
-        pending
-            .drain()
-            .map(|(path, st)| wait_result(self.clone(), path, st))
-            .collect()
+        pending.drain().map(|(path, st)| wait_result(self.clone(), path, st)).collect()
     }
 
     /// Subscribe to just one value. This is sufficient for a small
