@@ -1,15 +1,17 @@
-* 0.8.0 netidx-protocols, tools, browser:
+* 0.8.0 netidx, netidx-protocols, tools, browser:
   - Crate cleanup: netidx-protocols was split into 3 crates
     - netidx-bscript: The bscript parser, and vm implementation
     - netidx-archive: The archive file reader/writer library
     - netidx-protocols: Actual protocols built on top of netidx
+
   - the big bscript refactor: The bscript VM along with the
     implementation of the core of the language was moved out of the
     browser and combined with the parser, which was moved out of
-    netidx-protocols to form netidx-bscript. No semantic changed were
-    intended as a result of this refactor. Now it should be possible
+    netidx-protocols to form netidx-bscript. Now it should be possible
     to use bscript in other projects besides the browser, and I have
-    one planned for soon.
+    one planned soon. No semantic changes were intended as a result of
+    this refactor.
+
   - table is a normal widget now! Previous to this, unlike every other
     browser widget table didn't use bscript. Now that that has been
     fixed it's easier to use table in more complex projects.
@@ -23,11 +25,29 @@
 
     Unfortunatly if you had tables saved in view definitions they
     won't parse anymore, you'll have to update the view definition for
-    the new syntax, or rebuild it. Sorry about that. At some point the
-    view format will stabilize and I'll commit to writing upgrade
-    code, or compatible code, but at the moment there's still a lot I
-    want to do with it, so more breakage will probably come in the
-    future.
+    the new syntax, or rebuild it.
+
+  - API change, the return value of Subscriber::subscribe is now a
+    FuturesUnordered collection instead of a Vec. This allows
+    applications to get subscriptions as they individually complete
+    instead of being forced to wait until the entire batch is
+    done. The old behavior can be easily replicated by just calling
+    collect (from StreamExt in futures-rs) on the returned stream.
+
+  - Major refactor of durable subscriptions. Previously the durable
+    subscriber kept track of one outstanding batch of subscriptions at
+    a time. This meant that if one of the publishers in the batch was
+    hung, or just slow, subscriptions would have to wait until it's
+    timeout expired to be processed.
+
+    Now the durable subscriber can keep track of any number of
+    outstanding subscribe batches, and more importantly, it will
+    process every subscription individually as soon as it resolves. So
+    now if a publisher hangs, it won't become a poisioned chalice that
+    slows down subscriptions to unrelated publishers. I'm kinda
+    embarrased that this problem ever existed, but in fairness fixing
+    it was hard, and some of the tools that made it doable with
+    reasonable effort only recently became available.
 
 * 0.7.3 netidx-tools:
   - Additional error handling fixes in the recorder.
@@ -46,12 +66,6 @@
   - Subscriber will now automatically subscribe when you write, and if
     a write is queued it will tell you how many writes are in the
     queue for a given path
-
-* 0.7.1 netidx:
-  - slightly improve resubscription timeout logic to improve
-    responsiveness of resubscription when a publisher is not hung, but
-    also not responding to subscription requests in a reasonable
-    amount of time.
 
 * 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
   - major update to the filter language syntax and semantics
