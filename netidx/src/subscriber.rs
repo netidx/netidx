@@ -26,7 +26,7 @@ use futures::{
     },
     prelude::*,
     select_biased,
-    stream::{FuturesUnordered, SelectAll},
+    stream::FuturesUnordered,
 };
 use fxhash::FxBuildHasher;
 use log::{info, warn};
@@ -653,11 +653,12 @@ impl Subscriber {
                                 DvState::Subscribed(_) => unreachable!(),
                                 DvState::Dead(d) => {
                                     d.tries += 1;
-                                    d.next_try =
-                                        now + Duration::from_secs(pick(d.tries) as u64);
+                                    let wait = Duration::from_secs(pick(d.tries) as u64);
+                                    d.next_try = now + wait;
+                                    let s = wait.as_secs();
                                     warn!(
-                                        "resubscription error {}: {}, next try: {:?}",
-                                        p, e, d.next_try
+                                        "resubscription error {}: {}, next try: {}s",
+                                        p, e, s
                                     );
                                     subscriber.durable_dead.insert(p.clone(), dsw);
                                 }
@@ -690,30 +691,46 @@ impl Subscriber {
             }
         }
         async fn next_subscription_result(
-            subscriptions: &mut Batched<
-                SelectAll<FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>>,
+            subscriptions: &mut VecDeque<
+                Batched<FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>>,
             >,
         ) -> BatchItem<(Path, Result<Val>)> {
-            if subscriptions.inner().is_empty() {
-                future::pending().await
-            } else {
-                match subscriptions.next().await {
-                    Some(set) => set,
-                    None => future::pending().await,
+            loop {
+                if subscriptions.is_empty() {
+                    return future::pending().await;
+                } else if subscriptions.len() == 1 {
+                    match subscriptions[0].next().await {
+                        Some(v) => return v,
+                        None => {
+                            subscriptions.pop_front();
+                        }
+                    }
+                } else {
+                    let i = subscriptions
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(i, f)| f.next().map(move |r| (r, i)));
+                    let ((r, i), _, _) = future::select_all(i).await;
+                    match r {
+                        Some(v) => return v,
+                        None => {
+                            subscriptions.remove(i);
+                        }
+                    }
                 }
             }
         }
         let subscriber = self.downgrade();
         task::spawn(async move {
             let mut incoming = Batched::new(incoming.fuse(), 100_000);
-            let mut subscriptions = Batched::new(SelectAll::new(), 100_000);
+            let mut subscriptions = VecDeque::new();
             let mut subscription_batch = Vec::new();
             let mut retry: Option<Instant> = None;
             loop {
                 select_biased! {
                     _ = wait_retry(retry).fuse() => {
                         if let Some(set) = do_resub(&subscriber, &mut retry).await {
-                            subscriptions.inner_mut().push(set);
+                            subscriptions.push_back(Batched::new(set, 100_000));
                         }
                     },
                     m = incoming.next() => match m {
@@ -721,7 +738,7 @@ impl Subscriber {
                         Some(BatchItem::InBatch(())) => (),
                         Some(BatchItem::EndBatch) => {
                             if let Some(set) = do_resub(&subscriber, &mut retry).await {
-                                subscriptions.inner_mut().push(set);
+                                subscriptions.push_back(Batched::new(set, 100_000));
                             }
                         }
                     },
