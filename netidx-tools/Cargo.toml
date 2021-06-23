@@ -31,7 +31,7 @@ serde = "1"
 serde_json = "1"
 serde_derive = "1"
 netidx-core = { path = "../netidx-core", version = "0.7" }
-netidx = { path = "../netidx", version = "0.7" , default_features = false }
+netidx = { path = "../netidx", version = "0.8" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.8", default_features = false }
 netidx-archive = { path = "../netidx-archive", version = "0.8", default_features = false }
 chrono = { version = "0.4" }

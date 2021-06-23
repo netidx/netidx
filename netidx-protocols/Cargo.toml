@@ -16,7 +16,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx = { path = "../netidx", version = "0.7", default_features = false }
+netidx = { path = "../netidx", version = "0.8", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.8" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
 serde = "1"

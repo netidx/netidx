@@ -26,14 +26,15 @@ use futures::{
     },
     prelude::*,
     select_biased,
+    stream::{FuturesUnordered, SelectAll},
 };
 use fxhash::FxBuildHasher;
 use log::{info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
-    cmp::{max, min, Eq, PartialEq},
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    cmp::{max, Eq, PartialEq},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     error, fmt,
     hash::Hash,
     iter, mem,
@@ -483,6 +484,7 @@ struct SubscriberInner {
     recently_failed: HashMap<SocketAddr, Instant, FxBuildHasher>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DvalWeak>,
+    durable_pending: HashMap<Path, DvalWeak>,
     durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: Auth,
@@ -542,6 +544,7 @@ impl Subscriber {
             recently_failed: HashMap::with_hasher(FxBuildHasher::default()),
             subscribed: HashMap::new(),
             durable_dead: HashMap::new(),
+            durable_pending: HashMap::new(),
             durable_alive: HashMap::new(),
             trigger_resub: tx,
         })));
@@ -585,59 +588,76 @@ impl Subscriber {
                 })
                 .map(|t| t + Duration::from_secs(1));
         }
-        async fn do_resub(subscriber: &SubscriberWeak, retry: &mut Option<Instant>) {
-            if let Some(subscriber) = subscriber.upgrade() {
-                info!("doing resubscriptions");
-                let now = Instant::now();
-                let (mut batch, timeout) = {
-                    let mut b = HashMap::new();
-                    let mut gc = Vec::new();
-                    let mut subscriber = subscriber.0.lock();
-                    let mut max_tries = 1;
-                    let ndead = subscriber.durable_dead.len();
-                    for (p, w) in &subscriber.durable_dead {
-                        match w.upgrade() {
-                            None => {
-                                gc.push(p.clone());
-                            }
-                            Some(s) => {
-                                let (next_try, tries) = {
-                                    let dv = s.0.lock();
-                                    match &dv.sub {
-                                        DvState::Dead(d) => (d.next_try, d.tries),
-                                        DvState::Subscribed(_) => unreachable!(),
-                                    }
-                                };
-                                if next_try <= now {
-                                    b.insert(p.clone(), s);
-                                    max_tries = max(max_tries, tries);
+        async fn do_resub(
+            subscriber: &SubscriberWeak,
+            retry: &mut Option<Instant>,
+        ) -> Option<FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>> {
+            let subscriber = subscriber.upgrade()?;
+            info!("doing resubscriptions");
+            let now = Instant::now();
+            let (batch, timeout) = {
+                let mut b = HashSet::new();
+                let mut gc = Vec::new();
+                let mut subscriber = subscriber.0.lock();
+                let mut max_tries = 1;
+                let ndead = subscriber.durable_dead.len();
+                for (p, w) in &subscriber.durable_dead {
+                    match w.upgrade() {
+                        None => {
+                            gc.push(p.clone());
+                        }
+                        Some(s) => {
+                            let (next_try, tries) = {
+                                let dv = s.0.lock();
+                                match &dv.sub {
+                                    DvState::Dead(d) => (d.next_try, d.tries),
+                                    DvState::Subscribed(_) => unreachable!(),
                                 }
+                            };
+                            if next_try <= now {
+                                b.insert(p.clone());
+                                max_tries = max(max_tries, tries);
                             }
                         }
                     }
-                    for p in gc {
-                        subscriber.durable_dead.remove(&p);
+                }
+                for p in gc {
+                    subscriber.durable_dead.remove(&p);
+                }
+                for p in b.iter() {
+                    if let Some(dv) = subscriber.durable_dead.remove(p) {
+                        subscriber.durable_pending.insert(p.clone(), dv);
                     }
-                    (
-                        b,
-                        Duration::from_secs(max(
-                            min(30, 2 * max_tries as u64),
-                            ((ndead / 10000) * max_tries) as u64,
-                        )),
-                    )
-                };
-                if batch.len() == 0 {
-                    let mut subscriber = subscriber.0.lock();
-                    update_retry(&mut *subscriber, retry);
-                } else {
-                    let r =
-                        subscriber.subscribe(batch.keys().cloned(), Some(timeout)).await;
-                    let mut subscriber = subscriber.0.lock();
-                    let now = Instant::now();
-                    for (p, r) in r {
-                        let mut ds = batch.get_mut(&p).unwrap().0.lock();
+                }
+                let n_adj = ((ndead / 10000) * max_tries) as u64;
+                (b, Duration::from_secs(max(30, n_adj)))
+            };
+            if batch.len() == 0 {
+                let mut subscriber = subscriber.0.lock();
+                update_retry(&mut *subscriber, retry);
+                None
+            } else {
+                update_retry(&mut *subscriber.0.lock(), retry);
+                Some(subscriber.subscribe(batch, Some(timeout)).await)
+            }
+        }
+        fn finish_resubscription_batch(
+            subscriber: &SubscriberWeak,
+            batch: &mut Vec<(Path, Result<Val>)>,
+            retry: &mut Option<Instant>,
+        ) {
+            if let Some(subscriber) = subscriber.upgrade() {
+                let mut subscriber = subscriber.0.lock();
+                let now = Instant::now();
+                for (p, r) in batch.drain(..) {
+                    let ds =
+                        subscriber.durable_pending.remove(&p).and_then(|ds| ds.upgrade());
+                    if let Some(ds) = ds {
+                        let dsw = ds.downgrade();
+                        let mut dv = ds.0.lock();
                         match r {
-                            Err(e) => match &mut ds.sub {
+                            Err(e) => match &mut dv.sub {
+                                DvState::Subscribed(_) => unreachable!(),
                                 DvState::Dead(d) => {
                                     d.tries += 1;
                                     d.next_try =
@@ -646,53 +666,68 @@ impl Subscriber {
                                         "resubscription error {}: {}, next try: {:?}",
                                         p, e, d.next_try
                                     );
+                                    subscriber.durable_dead.insert(p.clone(), dsw);
                                 }
-                                DvState::Subscribed(_) => unreachable!(),
                             },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
-                                ds.streams.retain(|(_, c)| !c.is_closed());
-                                for (flags, tx) in ds.streams.iter().cloned() {
+                                dv.streams.retain(|(_, c)| !c.is_closed());
+                                for (flags, tx) in dv.streams.iter().cloned() {
                                     sub.0.connection.send(ToCon::Stream {
                                         tx,
-                                        sub_id: ds.sub_id,
+                                        sub_id: dv.sub_id,
                                         id: sub.0.id,
                                         flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
                                     });
                                 }
-                                if let DvState::Dead(d) = &mut ds.sub {
+                                if let DvState::Dead(d) = &mut dv.sub {
                                     for (v, resp) in d.queued_writes.drain(..) {
                                         sub.0
                                             .connection
                                             .send(ToCon::Write(sub.0.id, v, resp));
                                     }
                                 }
-                                ds.sub = DvState::Subscribed(sub);
-                                let w = subscriber.durable_dead.remove(&p).unwrap();
-                                subscriber.durable_alive.insert(p.clone(), w.clone());
+                                dv.sub = DvState::Subscribed(sub);
+                                subscriber.durable_alive.insert(p.clone(), dsw);
                             }
                         }
                     }
-                    update_retry(&mut *subscriber, retry);
                 }
+                update_retry(&mut *subscriber, retry);
             }
         }
         let subscriber = self.downgrade();
         task::spawn(async move {
             let mut incoming = Batched::new(incoming.fuse(), 100_000);
+            let mut subscriptions = Batched::new(SelectAll::new(), 100_000);
+            let mut subscription_batch = Vec::new();
             let mut retry: Option<Instant> = None;
             loop {
                 select_biased! {
                     _ = wait_retry(retry).fuse() => {
-                        do_resub(&subscriber, &mut retry).await;
+                        if let Some(set) = do_resub(&subscriber, &mut retry).await {
+                            subscriptions.inner_mut().push(set);
+                        }
                     },
                     m = incoming.next() => match m {
                         None => break,
                         Some(BatchItem::InBatch(())) => (),
                         Some(BatchItem::EndBatch) => {
-                            do_resub(&subscriber, &mut retry).await;
+                            if let Some(set) = do_resub(&subscriber, &mut retry).await {
+                                subscriptions.inner_mut().push(set);
+                            }
                         }
                     },
+                    m = subscriptions.select_next_some() => match m {
+                        BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
+                        BatchItem::EndBatch => {
+                            finish_resubscription_batch(
+                                &subscriber,
+                                &mut subscription_batch,
+                                &mut retry
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -726,7 +761,7 @@ impl Subscriber {
         &self,
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
-    ) -> Vec<(Path, Result<Val>)> {
+    ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)>> {
         #[derive(Debug)]
         enum St {
             Resolve,
@@ -738,8 +773,8 @@ impl Subscriber {
         let now = Instant::now();
         let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
+        // Init
         let r = {
-            // Init
             let mut t = self.0.lock();
             t.gc_recently_failed();
             for p in paths.clone() {
@@ -768,8 +803,8 @@ impl Subscriber {
             }
             t.resolver.clone()
         };
+        // Resolve, Connect, Subscribe
         {
-            // Resolve, Connect, Subscribe
             let to_resolve = pending
                 .iter()
                 .filter(|(_, s)| match s {
@@ -870,12 +905,16 @@ impl Subscriber {
             }
         }
         // Wait
-        for (path, st) in pending.iter_mut() {
+        async fn wait_result(
+            sub: Subscriber,
+            path: Path,
+            st: St,
+        ) -> (Path, Result<Val>) {
             match st {
                 St::Resolve => unreachable!(),
-                St::Subscribed(_) => (),
+                St::Subscribed(raw) => (path, Ok(raw)),
                 St::Error(e) => {
-                    let mut t = self.0.lock();
+                    let mut t = sub.0.lock();
                     if let Some(sub) = t.subscribed.remove(path.as_ref()) {
                         match sub {
                             SubStatus::Subscribed(_) => unreachable!(),
@@ -887,11 +926,12 @@ impl Subscriber {
                             }
                         }
                     }
+                    (path, Err(e))
                 }
                 St::WaitingOther(w) => match w.await {
-                    Err(_) => *st = St::Error(anyhow!("other side died")),
-                    Ok(Err(e)) => *st = St::Error(e),
-                    Ok(Ok(raw)) => *st = St::Subscribed(raw),
+                    Err(_) => (path, Err(anyhow!("other side died"))),
+                    Ok(Err(e)) => (path, Err(e)),
+                    Ok(Ok(raw)) => (path, Ok(raw)),
                 },
                 St::Subscribing(w) => {
                     let res = match w.await {
@@ -899,7 +939,7 @@ impl Subscriber {
                         Ok(Err(e)) => Err(e),
                         Ok(Ok(raw)) => Ok(raw),
                     };
-                    let mut t = self.0.lock();
+                    let mut t = sub.0.lock();
                     match t.subscribed.entry(path.clone()) {
                         Entry::Vacant(_) => unreachable!(),
                         Entry::Occupied(mut e) => match res {
@@ -910,7 +950,7 @@ impl Subscriber {
                                         let err = Err(anyhow!("{}", err));
                                         let _ = w.send(err);
                                     }
-                                    *st = St::Error(err);
+                                    (path, Err(err))
                                 }
                             },
                             Ok(raw) => {
@@ -924,7 +964,7 @@ impl Subscriber {
                                         for w in waiters {
                                             let _ = w.send(Ok(raw.clone()));
                                         }
-                                        *st = St::Subscribed(raw);
+                                        (path, Ok(raw))
                                     }
                                 }
                             }
@@ -933,13 +973,9 @@ impl Subscriber {
                 }
             }
         }
-        paths
-            .into_iter()
-            .map(|p| match pending.remove(&p).unwrap() {
-                St::Resolve | St::Subscribing(_) | St::WaitingOther(_) => unreachable!(),
-                St::Subscribed(raw) => (p, Ok(raw)),
-                St::Error(e) => (p, Err(e)),
-            })
+        pending
+            .drain()
+            .map(|(path, st)| wait_result(self.clone(), path, st))
             .collect()
     }
 
@@ -952,7 +988,7 @@ impl Subscriber {
         path: Path,
         timeout: Option<Duration>,
     ) -> Result<Val> {
-        self.subscribe(iter::once(path), timeout).await.pop().unwrap().1
+        self.subscribe(iter::once(path), timeout).await.next().await.unwrap().1
     }
 
     /// Create a durable value subscription to `path`.
@@ -965,7 +1001,11 @@ impl Subscriber {
     /// resubscriptions are attempted. see `Dval`.
     pub fn durable_subscribe(&self, path: Path) -> Dval {
         let mut t = self.0.lock();
-        if let Some(s) = t.durable_dead.get(&path).or_else(|| t.durable_alive.get(&path))
+        if let Some(s) = t
+            .durable_dead
+            .get(&path)
+            .or_else(|| t.durable_pending.get(&path))
+            .or_else(|| t.durable_alive.get(&path))
         {
             if let Some(s) = s.upgrade() {
                 return s;
@@ -1036,7 +1076,11 @@ fn unsubscribe(
             .push((*sub_id, Event::Unsubscribed))
     }
     *sub.last.lock() = Event::Unsubscribed;
-    if let Some(dsw) = subscriber.durable_alive.remove(&sub.path) {
+    if let Some(dsw) = subscriber
+        .durable_alive
+        .remove(&sub.path)
+        .or_else(|| subscriber.durable_pending.remove(&sub.path))
+    {
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
             inner.sub = DvState::Dead(Box::new(DvDead {
