@@ -67,6 +67,14 @@ pub struct Button {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkButton {
+    pub enabled: Expr,
+    pub uri: Expr,
+    pub label: Expr,
+    pub on_activate_link: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toggle {
     pub enabled: Expr,
     pub value: Expr,
@@ -113,6 +121,13 @@ pub struct BoxChild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame {
+    pub label: Expr,
+    pub label_align: Expr,
+    pub child: boxed::Box<Widget>
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Box {
     pub direction: Direction,
     pub homogeneous: bool,
@@ -139,6 +154,57 @@ pub struct Grid {
     pub column_spacing: u32,
     pub row_spacing: u32,
     pub rows: Vec<Widget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pane {
+    pub orientation: Direction,
+    pub pane0: boxed::Box<Widget>,
+    pub pane1: boxed::Box<Widget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StackSwitcher {
+    None,
+    SideBar,
+    TabsTop,
+    TabsBottom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StackTransitionType {
+    None,
+    Crossfade,
+    SlideRight,
+    SlideLeft,
+    SlideUp,
+    SlideDown,
+    SlideLeftRight,
+    SlideUpDown,
+    OverUp,
+    OverDown,
+    OverLeft,
+    OverRight,
+    UnderUp,
+    UnderDown,
+    UnderLeft,
+    UnderRight,
+    OverUpDown,
+    OverDownUp,
+    OverLeftRight,
+    OverRightLeft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stack {
+    pub vhomogeneous: bool,
+    pub hhomogeneous: bool,
+    pub transition_type: StackTransitionType,
+    pub transition_duration: u32,
+    pub switcher: StackSwitcher,
+    pub pages: Vec<(String, Widget)>,
+    pub visible_child: Expr,
+    pub on_switch_visible_child: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -182,14 +248,20 @@ pub enum WidgetKind {
     Table(Table),
     Label(Expr),
     Button(Button),
+    LinkButton(LinkButton),
+    CheckButton(Toggle),
+    ToggleButton(Toggle),
     Toggle(Toggle),
     Selector(Selector),
     Entry(Entry),
+    Frame(Frame),
     Box(Box),
     BoxChild(BoxChild),
     Grid(Grid),
     GridChild(GridChild),
     GridRow(GridRow),
+    Pane(Pane),
+    Stack(Stack),
     LinePlot(LinePlot),
 }
 

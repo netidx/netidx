@@ -217,6 +217,7 @@ enum Widget {
     Table(table::Table),
     Label(widgets::Label),
     Button(widgets::Button),
+    LinkButton(widgets::LinkButton),
     Toggle(widgets::Toggle),
     Selector(widgets::Selector),
     Entry(widgets::Entry),
@@ -240,6 +241,11 @@ impl Widget {
             view::WidgetKind::Button(spec) => {
                 Widget::Button(widgets::Button::new(ctx, spec, selected_path))
             }
+            view::WidgetKind::LinkButton(spec) => {
+                Widget::LinkButton(widgets::LinkButton::new(ctx, spec, selected_path))
+            }
+            view::WidgetKind::CheckButton(_) => unimplemented!(),
+            view::WidgetKind::ToggleButton(_) => unimplemented!(),
             view::WidgetKind::Toggle(spec) => {
                 Widget::Toggle(widgets::Toggle::new(ctx, spec, selected_path))
             }
@@ -249,6 +255,7 @@ impl Widget {
             view::WidgetKind::Entry(spec) => {
                 Widget::Entry(widgets::Entry::new(ctx, spec, selected_path))
             }
+            view::WidgetKind::Frame(_) => unimplemented!(),
             view::WidgetKind::Box(s) => {
                 Widget::Box(containers::Box::new(ctx, s, selected_path))
             }
@@ -266,6 +273,8 @@ impl Widget {
                 let spec = ExprKind::Constant(s).to_expr();
                 Widget::Label(widgets::Label::new(ctx, spec, selected_path))
             }
+            view::WidgetKind::Pane(_) => unimplemented!(),
+            view::WidgetKind::Stack(_) => unimplemented!(),
             view::WidgetKind::LinePlot(spec) => {
                 Widget::LinePlot(widgets::LinePlot::new(ctx, spec, selected_path))
             }
@@ -282,6 +291,7 @@ impl Widget {
             Widget::Table(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
             Widget::Button(t) => Some(t.root()),
+            Widget::LinkButton(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
             Widget::Selector(t) => Some(t.root()),
             Widget::Entry(t) => Some(t.root()),
@@ -302,6 +312,7 @@ impl Widget {
             Widget::Table(t) => t.update(ctx, waits, event),
             Widget::Label(t) => t.update(ctx, event),
             Widget::Button(t) => t.update(ctx, event),
+            Widget::LinkButton(t) => t.update(ctx, event),
             Widget::Toggle(t) => t.update(ctx, event),
             Widget::Selector(t) => t.update(ctx, event),
             Widget::Entry(t) => t.update(ctx, event),
@@ -351,6 +362,7 @@ impl Widget {
                 (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::LinkButton(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Toggle(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Selector(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Entry(w)) => set(w.root(), h),

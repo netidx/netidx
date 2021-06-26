@@ -73,6 +73,81 @@ impl Button {
     }
 }
 
+pub(super) struct LinkButton {
+    enabled: BSNode,
+    uri: BSNode,
+    label: BSNode,
+    on_activate_link: Rc<BSNode>,
+    button: gtk::LinkButton,
+}
+
+impl LinkButton {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::LinkButton,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let enabled = BSNode::compile(&ctx, spec.enabled.clone());
+        let uri = BSNode::compile(&ctx, spec.uri.clone());
+        let label = BSNode::compile(&ctx, spec.label.clone());
+        let on_activate_link =
+            Rc::new(BSNode::compile(&ctx, spec.on_activate_link.clone()));
+        let cur_label = label.current().and_then(|v| v.cast_to::<Chars>().ok());
+        let cur_label = cur_label.as_ref().map(|s| s.as_ref());
+        let cur_uri = uri.current().and_then(|v| v.cast_to::<Chars>().ok());
+        let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("~");
+        let button = gtk::LinkButton::with_label(cur_uri, cur_label);
+        if let Some(v) = enabled.current() {
+            button.set_sensitive(val_to_bool(&v));
+        }
+        button.connect_activate_link(clone!(
+        @strong ctx,
+        @strong on_activate_link => move |_| {
+            let ev = vm::Event::User(LocalEvent::Event(Value::Null));
+            match on_activate_link.update(&ctx, &ev) {
+                Some(Value::True) => Inhibit(true),
+                _ => Inhibit(false),
+            }
+        }));
+        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(
+                &format!("on_activate_link: {}", spec.on_activate_link)
+            );
+            Inhibit(false)
+        }));
+        button.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(
+                    &format!("on_activate_link: {}", spec.on_activate_link)
+                );
+                Inhibit(false)
+            }),
+        );
+        LinkButton { enabled, uri, label, on_activate_link, button }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.button.upcast_ref()
+    }
+
+    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+        if let Some(new) = self.enabled.update(ctx, event) {
+            self.button.set_sensitive(val_to_bool(&new));
+        }
+        if let Some(new) = self.uri.update(ctx, event) {
+            if let Some(new) = new.cast_to::<String>().ok() {
+                self.button.set_uri(&new);
+            }
+        }
+        if let Some(new) = self.label.update(ctx, event) {
+            if let Some(new) = new.cast_to::<String>().ok() {
+                self.button.set_label(&new);
+            }
+        }
+        self.on_activate_link.update(ctx, event);
+    }
+}
+
 pub(super) struct Label {
     label: gtk::Label,
     text: BSNode,
