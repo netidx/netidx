@@ -156,6 +156,10 @@ mod publish {
         fn from_value(v: Value) -> Result<Self> {
             Ok(v.cast_to::<Chars>()?.parse::<State>()?)
         }
+
+        fn get(_: Value) -> Option<Self> {
+            None
+        }
     }
 
     impl State {

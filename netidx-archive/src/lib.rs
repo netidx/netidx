@@ -1,6 +1,9 @@
-#[macro_use] extern crate packed_struct_codegen;
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate anyhow;
+#[macro_use]
+extern crate packed_struct_codegen;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate anyhow;
 
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
@@ -277,6 +280,10 @@ impl FromValue for Seek {
             v if v.is_number() => Ok(Seek::BatchRelative(v.cast_to::<i8>()?)),
             v => v.cast_to::<Chars>()?.parse::<Seek>(),
         }
+    }
+
+    fn get(_: Value) -> Option<Self> {
+        None
     }
 }
 

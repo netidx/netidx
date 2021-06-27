@@ -141,7 +141,7 @@ impl Typ {
                 Typ::Bool => match s.trim() {
                     "true" | "True" => Value::True,
                     "false" | "False" => Value::False,
-                    _ => bail!("parse error expected boolean {}", s)
+                    _ => bail!("parse error expected boolean {}", s),
                 },
                 Typ::String => Value::String(Chars::from(String::from(s))),
                 Typ::Bytes => Value::Bytes(Bytes::from(base64::decode(s)?)),
@@ -585,7 +585,14 @@ impl Pack for Value {
 pub trait FromValue {
     type Error;
 
+    /// attempt to cast v to the type of self using any reasonable means
     fn from_value(v: Value) -> result::Result<Self, Self::Error>
+    where
+        Self: Sized;
+
+    /// extract the type of self from v if the type of v is equivelent
+    /// to the type of self, otherwise return None.
+    fn get(v: Value) -> Option<Self>
     where
         Self: Sized;
 }
@@ -987,6 +994,10 @@ impl Value {
         <T as FromValue>::from_value(self)
     }
 
+    pub fn get_as<T: FromValue + Sized>(self) -> Option<T> {
+        <T as FromValue>::get(self)
+    }
+
     /// return true if the value is some kind of number, otherwise
     /// false.
     pub fn is_number(&self) -> bool {
@@ -1042,6 +1053,16 @@ impl FromValue for u8 {
             Err(CantCast)
         }
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as u8),
+            Value::U64(v) | Value::V64(v) => Some(v as u8),
+            Value::I32(v) | Value::Z32(v) => Some(v as u8),
+            Value::I64(v) | Value::Z64(v) => Some(v as u8),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<u8> for Value {
@@ -1059,6 +1080,16 @@ impl FromValue for i8 {
             Ok(v as i8)
         } else {
             Err(CantCast)
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as i8),
+            Value::U64(v) | Value::V64(v) => Some(v as i8),
+            Value::I32(v) | Value::Z32(v) => Some(v as i8),
+            Value::I64(v) | Value::Z64(v) => Some(v as i8),
+            _ => None,
         }
     }
 }
@@ -1080,6 +1111,16 @@ impl FromValue for u16 {
             Err(CantCast)
         }
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as u16),
+            Value::U64(v) | Value::V64(v) => Some(v as u16),
+            Value::I32(v) | Value::Z32(v) => Some(v as u16),
+            Value::I64(v) | Value::Z64(v) => Some(v as u16),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<u16> for Value {
@@ -1099,6 +1140,16 @@ impl FromValue for i16 {
             Err(CantCast)
         }
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as i16),
+            Value::U64(v) | Value::V64(v) => Some(v as i16),
+            Value::I32(v) | Value::Z32(v) => Some(v as i16),
+            Value::I64(v) | Value::Z64(v) => Some(v as i16),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<i16> for Value {
@@ -1115,6 +1166,16 @@ impl FromValue for u32 {
             Value::U32(v) => Ok(v),
             _ => Err(CantCast),
         })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as u32),
+            Value::U64(v) | Value::V64(v) => Some(v as u32),
+            Value::I32(v) | Value::Z32(v) => Some(v as u32),
+            Value::I64(v) | Value::Z64(v) => Some(v as u32),
+            _ => None,
+        }
     }
 }
 
@@ -1133,6 +1194,16 @@ impl FromValue for i32 {
             _ => Err(CantCast),
         })
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as i32),
+            Value::U64(v) | Value::V64(v) => Some(v as i32),
+            Value::I32(v) | Value::Z32(v) => Some(v as i32),
+            Value::I64(v) | Value::Z64(v) => Some(v as i32),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<i32> for Value {
@@ -1149,6 +1220,16 @@ impl FromValue for u64 {
             Value::U64(v) => Ok(v),
             _ => Err(CantCast),
         })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as u64),
+            Value::U64(v) | Value::V64(v) => Some(v as u64),
+            Value::I32(v) | Value::Z32(v) => Some(v as u64),
+            Value::I64(v) | Value::Z64(v) => Some(v as u64),
+            _ => None,
+        }
     }
 }
 
@@ -1167,6 +1248,16 @@ impl FromValue for i64 {
             _ => Err(CantCast),
         })
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as i64),
+            Value::U64(v) | Value::V64(v) => Some(v as i64),
+            Value::I32(v) | Value::Z32(v) => Some(v as i64),
+            Value::I64(v) | Value::Z64(v) => Some(v as i64),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<i64> for Value {
@@ -1183,6 +1274,14 @@ impl FromValue for f32 {
             Value::F32(v) => Ok(v),
             _ => Err(CantCast),
         })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::F32(v) => Some(v as f32),
+            Value::F64(v) => Some(v as f32),
+            _ => None,
+        }
     }
 }
 
@@ -1201,6 +1300,14 @@ impl FromValue for f64 {
             _ => Err(CantCast),
         })
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::F32(v) => Some(v as f64),
+            Value::F64(v) => Some(v as f64),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<f64> for Value {
@@ -1218,6 +1325,13 @@ impl FromValue for Chars {
             _ => Err(CantCast),
         })
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(c),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<Chars> for Value {
@@ -1231,6 +1345,13 @@ impl FromValue for String {
 
     fn from_value(v: Value) -> result::Result<Self, Self::Error> {
         v.cast_to::<Chars>().map(|c| c.into())
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(c.into()),
+            _ => None,
+        }
     }
 }
 
@@ -1255,6 +1376,13 @@ impl FromValue for DateTime<Utc> {
             _ => Err(CantCast),
         })
     }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::DateTime(d) => Some(d),
+            _ => None,
+        }
+    }
 }
 
 impl convert::From<DateTime<Utc>> for Value {
@@ -1271,6 +1399,13 @@ impl FromValue for Duration {
             Value::Duration(d) => Ok(d),
             _ => Err(CantCast),
         })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Duration(d) => Some(d),
+            _ => None,
+        }
     }
 }
 
@@ -1289,5 +1424,13 @@ impl FromValue for bool {
             Value::False => Ok(false),
             _ => Err(CantCast),
         })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::True => Some(true),
+            Value::False => Some(false),
+            _ => None,
+        }
     }
 }

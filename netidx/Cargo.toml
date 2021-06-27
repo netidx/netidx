@@ -24,7 +24,7 @@ winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winer
 
 [dependencies]
 netidx-core = { version = "0.7", path = "../netidx-core" }
-netidx-netproto = { version = "0.7", path = "../netidx-netproto" }
+netidx-netproto = { version = "0.8", path = "../netidx-netproto" }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"
