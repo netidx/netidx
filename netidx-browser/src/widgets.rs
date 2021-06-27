@@ -92,9 +92,9 @@ impl LinkButton {
         let label = BSNode::compile(&ctx, spec.label.clone());
         let on_activate_link =
             Rc::new(BSNode::compile(&ctx, spec.on_activate_link.clone()));
-        let cur_label = label.current().and_then(|v| v.cast_to::<Chars>().ok());
+        let cur_label = label.current().and_then(|v| v.get_as::<Chars>());
         let cur_label = cur_label.as_ref().map(|s| s.as_ref());
-        let cur_uri = uri.current().and_then(|v| v.cast_to::<Chars>().ok());
+        let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
         let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("file:///");
         let button = gtk::LinkButton::with_label(cur_uri, cur_label);
         if let Some(v) = enabled.current() {
@@ -135,12 +135,12 @@ impl LinkButton {
             self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.uri.update(ctx, event) {
-            if let Some(new) = new.cast_to::<String>().ok() {
+            if let Some(new) = new.get_as::<Chars>() {
                 self.button.set_uri(&new);
             }
         }
         if let Some(new) = self.label.update(ctx, event) {
-            if let Some(new) = new.cast_to::<String>().ok() {
+            if let Some(new) = new.get_as::<Chars>() {
                 self.button.set_label(&new);
             }
         }
