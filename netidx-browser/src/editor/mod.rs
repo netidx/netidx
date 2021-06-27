@@ -189,6 +189,7 @@ enum WidgetKind {
     BoxChild(widgets::BoxChild),
     Grid(widgets::Grid),
     GridChild(widgets::GridChild),
+    Paned(widgets::Paned),
     GridRow,
 }
 
@@ -209,6 +210,7 @@ impl WidgetKind {
             WidgetKind::BoxChild(w) => Some(w.root()),
             WidgetKind::Grid(w) => Some(w.root()),
             WidgetKind::GridChild(w) => Some(w.root()),
+            WidgetKind::Paned(w) => Some(w.root()),
             WidgetKind::GridRow => None,
         }
     }
@@ -309,9 +311,11 @@ impl Widget {
             view::Widget { props: _, kind: view::WidgetKind::GridRow(_) } => {
                 ("GridRow", WidgetKind::GridRow, None)
             }
-            view::Widget { props: _, kind: view::WidgetKind::Pane(_) } => {
-                unimplemented!()
-            }
+            view::Widget { props, kind: view::WidgetKind::Paned(s) } => (
+                "Paned",
+                WidgetKind::Paned(widgets::Paned::new(on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, props)),
+            ),
             view::Widget { props: _, kind: view::WidgetKind::Stack(_) } => {
                 unimplemented!()
             }
@@ -351,6 +355,7 @@ impl Widget {
             WidgetKind::BoxChild(w) => w.spec(),
             WidgetKind::Grid(w) => w.spec(),
             WidgetKind::GridChild(w) => w.spec(),
+            WidgetKind::Paned(w) => w.spec(),
             WidgetKind::GridRow => {
                 view::WidgetKind::GridRow(view::GridRow { columns: vec![] })
             }
@@ -529,6 +534,12 @@ impl Widget {
                 row_spacing: 0,
                 rows: Vec::new(),
             })),
+            Some("Paned") => widget(view::WidgetKind::Paned(view::Paned {
+                direction: view::Direction::Vertical,
+                wide_handle: false,
+                first_child: None,
+                second_child: None,
+            })),
             Some("GridChild") => {
                 let s = Value::String(Chars::from("empty grid child"));
                 let w = view::Widget {
@@ -568,12 +579,13 @@ impl Widget {
             | WidgetKind::BoxChild(_)
             | WidgetKind::Grid(_)
             | WidgetKind::GridChild(_)
+            | WidgetKind::Paned(_)
             | WidgetKind::GridRow => (),
         }
     }
 }
 
-static KINDS: [&'static str; 15] = [
+static KINDS: [&'static str; 16] = [
     "Action",
     "Table",
     "Label",
@@ -584,6 +596,7 @@ static KINDS: [&'static str; 15] = [
     "Entry",
     "LinePlot",
     "Frame",
+    "Paned",
     "Box",
     "BoxChild",
     "Grid",
@@ -970,6 +983,14 @@ impl Editor {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
+            view::WidgetKind::Paned(p) => {
+                if let Some(w) = &p.first_child {
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                }
+                if let Some(w) = &p.second_child {
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                }
+            }
             view::WidgetKind::Action(_)
             | view::WidgetKind::Table(_)
             | view::WidgetKind::Label(_)
@@ -978,7 +999,6 @@ impl Editor {
             | view::WidgetKind::Toggle(_)
             | view::WidgetKind::Selector(_)
             | view::WidgetKind::Entry(_)
-            | view::WidgetKind::Pane(_)
             | view::WidgetKind::Stack(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
@@ -1009,6 +1029,19 @@ impl Editor {
                         if let Some(iter) = store.iter_children(Some(root)) {
                             f.child =
                                 Some(boxed::Box::new(Editor::build_spec(store, &iter)));
+                        }
+                    }
+                    view::WidgetKind::Paned(ref mut p) => {
+                        p.first_child = None;
+                        p.second_child = None;
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            p.first_child =
+                                Some(boxed::Box::new(Editor::build_spec(store, &iter)));
+                            if store.iter_next(&iter) {
+                                p.second_child = Some(boxed::Box::new(
+                                    Editor::build_spec(store, &iter),
+                                ));
+                            }
                         }
                     }
                     view::WidgetKind::Box(ref mut b) => {
@@ -1054,7 +1087,16 @@ impl Editor {
                             }
                         }
                     }
-                    _ => (),
+                    view::WidgetKind::Stack(_) => unimplemented!(),
+                    view::WidgetKind::Action(_)
+                    | view::WidgetKind::Table(_)
+                    | view::WidgetKind::Label(_)
+                    | view::WidgetKind::Button(_)
+                    | view::WidgetKind::LinkButton(_)
+                    | view::WidgetKind::Toggle(_)
+                    | view::WidgetKind::Selector(_)
+                    | view::WidgetKind::Entry(_)
+                    | view::WidgetKind::LinePlot(_) => (),
                 };
                 spec
             }
@@ -1108,7 +1150,7 @@ impl Editor {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
-                WidgetKind::Frame(_) | WidgetKind::Box(_) => {
+                WidgetKind::Frame(_) | WidgetKind::Box(_) | WidgetKind::Paned(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     } else {

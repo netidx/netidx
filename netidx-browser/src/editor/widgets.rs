@@ -1083,6 +1083,43 @@ fn dirselect(
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct Paned {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Paned>>,
+}
+
+impl Paned {
+    pub(super) fn new(on_change: OnChange, spec: view::Paned) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let dircb = dirselect(
+            spec.borrow().direction,
+            clone!(@strong on_change, @strong spec => move |d| {
+                spec.borrow_mut().direction = d;
+                on_change()
+            }),
+        );
+        let dirlbl = gtk::Label::new(Some("Direction:"));
+        root.add((dirlbl, dircb));
+        let wide = gtk::CheckButton::with_label("Wide Handle:");
+        root.attach(&wide, 0, 2, 1);
+        wide.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
+            spec.borrow_mut().wide_handle = b.get_active();
+            on_change()
+        }));
+        Paned { root, spec }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Paned(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct Frame {
     root: TwoColGrid,
     label_expr: DbgExpr,

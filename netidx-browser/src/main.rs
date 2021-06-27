@@ -224,6 +224,7 @@ enum Widget {
     Frame(containers::Frame),
     Box(containers::Box),
     Grid(containers::Grid),
+    Paned(containers::Paned),
     LinePlot(widgets::LinePlot),
 }
 
@@ -256,7 +257,7 @@ impl Widget {
             }
             view::WidgetKind::Frame(spec) => {
                 Widget::Frame(containers::Frame::new(ctx, spec, selected_path))
-            },
+            }
             view::WidgetKind::Box(spec) => {
                 Widget::Box(containers::Box::new(ctx, spec, selected_path))
             }
@@ -274,7 +275,9 @@ impl Widget {
                 let spec = ExprKind::Constant(s).to_expr();
                 Widget::Label(widgets::Label::new(ctx, spec, selected_path))
             }
-            view::WidgetKind::Pane(_) => unimplemented!(),
+            view::WidgetKind::Paned(spec) => {
+                Widget::Paned(containers::Paned::new(ctx, spec, selected_path))
+            }
             view::WidgetKind::Stack(_) => unimplemented!(),
             view::WidgetKind::LinePlot(spec) => {
                 Widget::LinePlot(widgets::LinePlot::new(ctx, spec, selected_path))
@@ -299,6 +302,7 @@ impl Widget {
             Widget::Frame(t) => Some(t.root()),
             Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
+            Widget::Paned(t) => Some(t.root()),
             Widget::LinePlot(t) => Some(t.root()),
         }
     }
@@ -321,6 +325,7 @@ impl Widget {
             Widget::Frame(t) => t.update(ctx, waits, event),
             Widget::Box(t) => t.update(ctx, waits, event),
             Widget::Grid(t) => t.update(ctx, waits, event),
+            Widget::Paned(t) => t.update(ctx, waits, event),
             Widget::LinePlot(t) => t.update(ctx, event),
         }
     }
@@ -349,6 +354,18 @@ impl Widget {
                         }
                     }
                 }
+                (WidgetPath::Box(i), Widget::Paned(w)) => {
+                    let c = if i == 0 {
+                        &w.first_child
+                    } else if i == 1 {
+                        &w.second_child
+                    } else {
+                        &None
+                    };
+                    if let Some(c) = c {
+                        c.set_highlight(path, h)
+                    }
+                }
                 (WidgetPath::GridItem(i, j), Widget::Grid(w)) => {
                     if i < w.children.len() && j < w.children[i].len() {
                         w.children[i][j].set_highlight(path, h)
@@ -366,6 +383,7 @@ impl Widget {
                 (WidgetPath::Box(_), _) => (),
                 (WidgetPath::GridItem(_, _), _) => (),
                 (WidgetPath::GridRow(_), _) => (),
+                (WidgetPath::Leaf, Widget::Paned(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Frame(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),

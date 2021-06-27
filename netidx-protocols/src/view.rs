@@ -158,10 +158,11 @@ pub struct Grid {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Pane {
-    pub orientation: Direction,
-    pub pane0: boxed::Box<Widget>,
-    pub pane1: boxed::Box<Widget>,
+pub struct Paned {
+    pub direction: Direction,
+    pub wide_handle: bool,
+    pub first_child: Option<boxed::Box<Widget>>,
+    pub second_child: Option<boxed::Box<Widget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,7 +260,7 @@ pub enum WidgetKind {
     Grid(Grid),
     GridChild(GridChild),
     GridRow(GridRow),
-    Pane(Pane),
+    Paned(Paned),
     Stack(Stack),
     LinePlot(LinePlot),
 }

@@ -7,6 +7,59 @@ use netidx::chars::Chars;
 use netidx_bscript::vm;
 use std::{boxed, cmp::max};
 
+fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
+    match d {
+        view::Direction::Horizontal => Orientation::Horizontal,
+        view::Direction::Vertical => Orientation::Vertical,
+    }
+}
+
+pub(super) struct Paned {
+    root: gtk::Paned,
+    pub(super) first_child: Option<boxed::Box<Widget>>,
+    pub(super) second_child: Option<boxed::Box<Widget>>,
+}
+
+impl Paned {
+    pub(super) fn new(ctx: &BSCtx, spec: view::Paned, selected_path: gtk::Label) -> Self {
+        let root = gtk::Paned::new(dir_to_gtk(&spec.direction));
+        root.set_wide_handle(spec.wide_handle);
+        let first_child = spec.first_child.map(|child| {
+            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            if let Some(w) = w.root() {
+                root.pack1(w, true, true);
+            }
+            boxed::Box::new(w)
+        });
+        let second_child = spec.second_child.map(|child| {
+            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            if let Some(w) = w.root() {
+                root.pack2(w, true, true);
+            }
+            boxed::Box::new(w)
+        });
+        Paned { root, first_child, second_child }
+    }
+
+    pub(super) fn update(
+        &self,
+        ctx: &BSCtx,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        if let Some(c) = &self.first_child {
+            c.update(ctx, waits, event);
+        }
+        if let Some(c) = &self.second_child {
+            c.update(ctx, waits, event);
+        }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
+
 pub(super) struct Frame {
     root: gtk::Frame,
     label: BSNode,
@@ -62,11 +115,7 @@ impl Box {
                 view::Align::Start | view::Align::Center | view::Align::End => false,
             }
         }
-        let dir = match spec.direction {
-            view::Direction::Horizontal => Orientation::Horizontal,
-            view::Direction::Vertical => Orientation::Vertical,
-        };
-        let root = gtk::Box::new(dir, 0);
+        let root = gtk::Box::new(dir_to_gtk(&spec.direction), 0);
         root.set_homogeneous(spec.homogeneous);
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
