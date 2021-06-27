@@ -1105,17 +1105,17 @@ impl Frame {
         root.add((l, e));
         root.add(parse_entry(
             "Label Horizontal Align:",
-            &spec.borrow().label_align.0,
+            &spec.borrow().label_align_horizontal,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().label_align.0 = s;
+                spec.borrow_mut().label_align_horizontal = s;
                 on_change();
             })
         ));
         root.add(parse_entry(
             "Label Vertical Align:",
-            &spec.borrow().label_align.1,
+            &spec.borrow().label_align_vertical,
             clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().label_align.1 = s;
+                spec.borrow_mut().label_align_vertical = s;
                 on_change()
             })
         ));

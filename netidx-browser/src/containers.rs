@@ -19,6 +19,7 @@ impl Frame {
         let label_val = label.current().and_then(|v| v.get_as::<Chars>());
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
+        root.set_label_align(spec.label_align_horizontal, spec.label_align_vertical);
         let child = spec.child.map(|child| {
             let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
             if let Some(w) = w.root() {

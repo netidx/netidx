@@ -123,7 +123,8 @@ pub struct BoxChild {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
     pub label: Expr,
-    pub label_align: (f32, f32),
+    pub label_align_horizontal: f32,
+    pub label_align_vertical: f32,
     pub child: Option<boxed::Box<Widget>>,
 }
 

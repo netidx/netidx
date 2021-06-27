@@ -500,7 +500,8 @@ impl Widget {
             })),
             Some("Frame") => widget(view::WidgetKind::Frame(view::Frame {
                 label: expr::ExprKind::Constant(Value::Null).to_expr(),
-                label_align: (0., 0.5),
+                label_align_horizontal: 0.,
+                label_align_vertical: 0.5,
                 child: None,
             })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
