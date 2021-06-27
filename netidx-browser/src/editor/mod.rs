@@ -179,6 +179,7 @@ enum WidgetKind {
     Table(widgets::Table),
     Label(widgets::Label),
     Button(widgets::Button),
+    LinkButton(widgets::LinkButton),
     Toggle(widgets::Toggle),
     Selector(widgets::Selector),
     Entry(widgets::Entry),
@@ -197,6 +198,7 @@ impl WidgetKind {
             WidgetKind::Table(w) => Some(w.root()),
             WidgetKind::Label(w) => Some(w.root()),
             WidgetKind::Button(w) => Some(w.root()),
+            WidgetKind::LinkButton(w) => Some(w.root()),
             WidgetKind::Toggle(w) => Some(w.root()),
             WidgetKind::Selector(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
@@ -253,6 +255,21 @@ impl Widget {
                 WidgetKind::Button(widgets::Button::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
+            view::Widget { props, kind: view::WidgetKind::LinkButton(s) } => (
+                "LinkButton",
+                WidgetKind::LinkButton(widgets::LinkButton::new(
+                    ctx,
+                    on_change.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(on_change, props)),
+            ),
+            view::Widget { props: _, kind: view::WidgetKind::CheckButton(_) } => {
+                unimplemented!()
+            }
+            view::Widget { props: _, kind: view::WidgetKind::ToggleButton(_) } => {
+                unimplemented!()
+            }
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
                 WidgetKind::Toggle(widgets::Toggle::new(ctx, on_change.clone(), s)),
@@ -268,11 +285,9 @@ impl Widget {
                 WidgetKind::Entry(widgets::Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
-            view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
-                "LinePlot",
-                WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
-                Some(WidgetProps::new(on_change, props)),
-            ),
+            view::Widget { props: _, kind: view::WidgetKind::Frame(_) } => {
+                unimplemented!()
+            }
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(widgets::BoxContainer::new(on_change.clone(), s)),
@@ -296,6 +311,17 @@ impl Widget {
             view::Widget { props: _, kind: view::WidgetKind::GridRow(_) } => {
                 ("GridRow", WidgetKind::GridRow, None)
             }
+            view::Widget { props: _, kind: view::WidgetKind::Pane(_) } => {
+                unimplemented!()
+            }
+            view::Widget { props: _, kind: view::WidgetKind::Stack(_) } => {
+                unimplemented!()
+            }
+            view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
+                "LinePlot",
+                WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, props)),
+            ),
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(p) = props.as_ref() {
@@ -317,6 +343,7 @@ impl Widget {
             WidgetKind::Table(w) => w.spec(),
             WidgetKind::Label(w) => w.spec(),
             WidgetKind::Button(w) => w.spec(),
+            WidgetKind::LinkButton(w) => w.spec(),
             WidgetKind::Toggle(w) => w.spec(),
             WidgetKind::Selector(w) => w.spec(),
             WidgetKind::Entry(w) => w.spec(),
@@ -367,6 +394,16 @@ impl Widget {
                         function: "store".into(),
                     }
                     .to_expr(),
+                }))
+            }
+            Some("LinkButton") => {
+                let u = Chars::from("file:///");
+                let l = Chars::from("click me!");
+                widget(view::WidgetKind::LinkButton(view::LinkButton {
+                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+                    uri: expr::ExprKind::Constant(Value::String(u)).to_expr(),
+                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
+                    on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
                 }))
             }
             Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
@@ -516,6 +553,7 @@ impl Widget {
             WidgetKind::Table(_)
             | WidgetKind::Label(_)
             | WidgetKind::Button(_)
+            | WidgetKind::LinkButton(_)
             | WidgetKind::Toggle(_)
             | WidgetKind::Selector(_)
             | WidgetKind::Entry(_)
@@ -529,11 +567,12 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 13] = [
+static KINDS: [&'static str; 14] = [
     "Action",
     "Table",
     "Label",
     "Button",
+    "LinkButton",
     "Toggle",
     "Selector",
     "Entry",
@@ -923,9 +962,15 @@ impl Editor {
             | view::WidgetKind::Table(_)
             | view::WidgetKind::Label(_)
             | view::WidgetKind::Button(_)
+            | view::WidgetKind::LinkButton(_)
+            | view::WidgetKind::CheckButton(_)
+            | view::WidgetKind::ToggleButton(_)
             | view::WidgetKind::Toggle(_)
             | view::WidgetKind::Selector(_)
             | view::WidgetKind::Entry(_)
+            | view::WidgetKind::Frame(_)
+            | view::WidgetKind::Pane(_)
+            | view::WidgetKind::Stack(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
     }
@@ -1024,6 +1069,10 @@ impl Editor {
                     false
                 }
                 WidgetKind::Button(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                WidgetKind::LinkButton(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }

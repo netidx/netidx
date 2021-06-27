@@ -95,7 +95,7 @@ impl LinkButton {
         let cur_label = label.current().and_then(|v| v.cast_to::<Chars>().ok());
         let cur_label = cur_label.as_ref().map(|s| s.as_ref());
         let cur_uri = uri.current().and_then(|v| v.cast_to::<Chars>().ok());
-        let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("~");
+        let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("file:///");
         let button = gtk::LinkButton::with_label(cur_uri, cur_label);
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));

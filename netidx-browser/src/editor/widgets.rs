@@ -182,7 +182,7 @@ impl Table {
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_activate = e;
                 on_change()
-            })
+            }),
         );
         root.add((l, e));
         let (l, e, dbg_on_select) = expr(
@@ -192,7 +192,7 @@ impl Table {
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_select = e;
                 on_change()
-            })
+            }),
         );
         root.add((l, e));
         let (l, e, dbg_on_edit) = expr(
@@ -202,7 +202,7 @@ impl Table {
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_edit = e;
                 on_change()
-            })
+            }),
         );
         root.add((l, e));
         Table {
@@ -216,7 +216,7 @@ impl Table {
             dbg_editable,
             dbg_on_activate,
             dbg_on_select,
-            dbg_on_edit
+            dbg_on_edit,
         }
     }
 
@@ -370,6 +370,79 @@ impl Button {
 
     pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Button(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LinkButton {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::LinkButton>>,
+    enabled_expr: DbgExpr,
+    uri_expr: DbgExpr,
+    label_expr: DbgExpr,
+    on_activate_link_expr: DbgExpr,
+}
+
+impl LinkButton {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::LinkButton) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, enabled_expr) = expr(
+            ctx,
+            "Enabled:",
+            &spec.borrow().enabled,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().enabled = s;
+                on_change();
+            }),
+        );
+        root.add((l, e));
+        let (l, e, label_expr) = expr(
+            ctx,
+            "Label:",
+            &spec.borrow().label,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().label = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, uri_expr) = expr(
+            ctx,
+            "URI:",
+            &spec.borrow().uri,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().uri = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, on_activate_link_expr) = expr(
+            ctx,
+            "On Activate Link:",
+            &spec.borrow().on_activate_link,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().on_activate_link = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        LinkButton {
+            root,
+            spec,
+            enabled_expr,
+            label_expr,
+            uri_expr,
+            on_activate_link_expr,
+        }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::LinkButton(self.spec.borrow().clone())
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
