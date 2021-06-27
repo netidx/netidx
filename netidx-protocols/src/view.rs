@@ -123,8 +123,8 @@ pub struct BoxChild {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
     pub label: Expr,
-    pub label_align: Expr,
-    pub child: boxed::Box<Widget>
+    pub label_align: (f32, f32),
+    pub child: Option<boxed::Box<Widget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,8 +249,6 @@ pub enum WidgetKind {
     Label(Expr),
     Button(Button),
     LinkButton(LinkButton),
-    CheckButton(Toggle),
-    ToggleButton(Toggle),
     Toggle(Toggle),
     Selector(Selector),
     Entry(Entry),

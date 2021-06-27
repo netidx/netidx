@@ -44,10 +44,7 @@
     outstanding subscribe batches, and more importantly, it will
     process every subscription individually as soon as it resolves. So
     now if a publisher hangs, it won't become a poisioned chalice that
-    slows down subscriptions to unrelated publishers. I'm kinda
-    embarrased that this problem ever existed, but in fairness fixing
-    it was hard, and some of the tools that made it doable with
-    reasonable effort only recently became available.
+    slows down subscriptions to unrelated publishers.
 
 * 0.7.3 netidx-tools:
   - Additional error handling fixes in the recorder.

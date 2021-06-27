@@ -1083,6 +1083,55 @@ fn dirselect(
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct Frame {
+    root: TwoColGrid,
+    label_expr: DbgExpr,
+    spec: Rc<RefCell<view::Frame>>,
+}
+
+impl Frame {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Frame) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, label_expr) = expr(
+            ctx,
+            "Label:",
+            &spec.borrow().label,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().label = e;
+                on_change();
+            }),
+        );
+        root.add((l, e));
+        root.add(parse_entry(
+            "Label Horizontal Align:",
+            &spec.borrow().label_align.0,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().label_align.0 = s;
+                on_change();
+            })
+        ));
+        root.add(parse_entry(
+            "Label Vertical Align:",
+            &spec.borrow().label_align.1,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().label_align.1 = s;
+                on_change()
+            })
+        ));
+        Frame { root, label_expr, spec }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Frame(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct BoxContainer {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Box>>,

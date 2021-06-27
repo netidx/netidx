@@ -1,10 +1,52 @@
-use super::{set_common_props, BSCtx, Widget, DEFAULT_PROPS};
-use crate::{view, bscript::LocalEvent};
-use netidx_bscript::vm;
+use super::{set_common_props, BSCtx, BSNode, Widget, DEFAULT_PROPS};
+use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
-use std::cmp::max;
+use netidx::chars::Chars;
+use netidx_bscript::vm;
+use std::{boxed, cmp::max};
+
+pub(super) struct Frame {
+    root: gtk::Frame,
+    label: BSNode,
+    pub(super) child: Option<boxed::Box<Widget>>,
+}
+
+impl Frame {
+    pub(super) fn new(ctx: &BSCtx, spec: view::Frame, selected_path: gtk::Label) -> Self {
+        let label = BSNode::compile(ctx, spec.label);
+        let label_val = label.current().and_then(|v| v.get_as::<Chars>());
+        let label_val = label_val.as_ref().map(|s| s.as_ref());
+        let root = gtk::Frame::new(label_val);
+        let child = spec.child.map(|child| {
+            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            if let Some(w) = w.root() {
+                root.add(w);
+            }
+            boxed::Box::new(w)
+        });
+        Frame { root, label, child }
+    }
+
+    pub(super) fn update(
+        &self,
+        ctx: &BSCtx,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        if let Some(new_lbl) = self.label.update(ctx, event) {
+            self.root.set_label(new_lbl.get_as::<Chars>().as_ref().map(|c| c.as_ref()));
+        }
+        if let Some(c) = &self.child {
+            c.update(ctx, waits, event);
+        }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
 
 pub(super) struct Box {
     root: gtk::Box,

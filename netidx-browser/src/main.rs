@@ -221,6 +221,7 @@ enum Widget {
     Toggle(widgets::Toggle),
     Selector(widgets::Selector),
     Entry(widgets::Entry),
+    Frame(containers::Frame),
     Box(containers::Box),
     Grid(containers::Grid),
     LinePlot(widgets::LinePlot),
@@ -244,8 +245,6 @@ impl Widget {
             view::WidgetKind::LinkButton(spec) => {
                 Widget::LinkButton(widgets::LinkButton::new(ctx, spec, selected_path))
             }
-            view::WidgetKind::CheckButton(_) => unimplemented!(),
-            view::WidgetKind::ToggleButton(_) => unimplemented!(),
             view::WidgetKind::Toggle(spec) => {
                 Widget::Toggle(widgets::Toggle::new(ctx, spec, selected_path))
             }
@@ -255,9 +254,11 @@ impl Widget {
             view::WidgetKind::Entry(spec) => {
                 Widget::Entry(widgets::Entry::new(ctx, spec, selected_path))
             }
-            view::WidgetKind::Frame(_) => unimplemented!(),
-            view::WidgetKind::Box(s) => {
-                Widget::Box(containers::Box::new(ctx, s, selected_path))
+            view::WidgetKind::Frame(spec) => {
+                Widget::Frame(containers::Frame::new(ctx, spec, selected_path))
+            },
+            view::WidgetKind::Box(spec) => {
+                Widget::Box(containers::Box::new(ctx, spec, selected_path))
             }
             view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
                 Widget::new(ctx, (&*widget).clone(), selected_path)
@@ -295,6 +296,7 @@ impl Widget {
             Widget::Toggle(t) => Some(t.root()),
             Widget::Selector(t) => Some(t.root()),
             Widget::Entry(t) => Some(t.root()),
+            Widget::Frame(t) => Some(t.root()),
             Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
             Widget::LinePlot(t) => Some(t.root()),
@@ -316,6 +318,7 @@ impl Widget {
             Widget::Toggle(t) => t.update(ctx, event),
             Widget::Selector(t) => t.update(ctx, event),
             Widget::Entry(t) => t.update(ctx, event),
+            Widget::Frame(t) => t.update(ctx, waits, event),
             Widget::Box(t) => t.update(ctx, waits, event),
             Widget::Grid(t) => t.update(ctx, waits, event),
             Widget::LinePlot(t) => t.update(ctx, event),
@@ -339,6 +342,13 @@ impl Widget {
                         w.children[i].set_highlight(path, h)
                     }
                 }
+                (WidgetPath::Box(i), Widget::Frame(w)) => {
+                    if i == 0 {
+                        if let Some(c) = &w.child {
+                            c.set_highlight(path, h)
+                        }
+                    }
+                }
                 (WidgetPath::GridItem(i, j), Widget::Grid(w)) => {
                     if i < w.children.len() && j < w.children[i].len() {
                         w.children[i][j].set_highlight(path, h)
@@ -356,6 +366,7 @@ impl Widget {
                 (WidgetPath::Box(_), _) => (),
                 (WidgetPath::GridItem(_, _), _) => (),
                 (WidgetPath::GridRow(_), _) => (),
+                (WidgetPath::Leaf, Widget::Frame(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Action(_)) => (),

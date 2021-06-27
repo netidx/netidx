@@ -184,6 +184,7 @@ enum WidgetKind {
     Selector(widgets::Selector),
     Entry(widgets::Entry),
     LinePlot(widgets::LinePlot),
+    Frame(widgets::Frame),
     Box(widgets::BoxContainer),
     BoxChild(widgets::BoxChild),
     Grid(widgets::Grid),
@@ -203,6 +204,7 @@ impl WidgetKind {
             WidgetKind::Selector(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
+            WidgetKind::Frame(w) => Some(w.root()),
             WidgetKind::Box(w) => Some(w.root()),
             WidgetKind::BoxChild(w) => Some(w.root()),
             WidgetKind::Grid(w) => Some(w.root()),
@@ -264,12 +266,6 @@ impl Widget {
                 )),
                 Some(WidgetProps::new(on_change, props)),
             ),
-            view::Widget { props: _, kind: view::WidgetKind::CheckButton(_) } => {
-                unimplemented!()
-            }
-            view::Widget { props: _, kind: view::WidgetKind::ToggleButton(_) } => {
-                unimplemented!()
-            }
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
                 WidgetKind::Toggle(widgets::Toggle::new(ctx, on_change.clone(), s)),
@@ -285,9 +281,11 @@ impl Widget {
                 WidgetKind::Entry(widgets::Entry::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
-            view::Widget { props: _, kind: view::WidgetKind::Frame(_) } => {
-                unimplemented!()
-            }
+            view::Widget { props, kind: view::WidgetKind::Frame(s) } => (
+                "Frame",
+                WidgetKind::Frame(widgets::Frame::new(ctx, on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, props)),
+            ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
                 WidgetKind::Box(widgets::BoxContainer::new(on_change.clone(), s)),
@@ -348,6 +346,7 @@ impl Widget {
             WidgetKind::Selector(w) => w.spec(),
             WidgetKind::Entry(w) => w.spec(),
             WidgetKind::LinePlot(w) => w.spec(),
+            WidgetKind::Frame(w) => w.spec(),
             WidgetKind::Box(w) => w.spec(),
             WidgetKind::BoxChild(w) => w.spec(),
             WidgetKind::Grid(w) => w.spec(),
@@ -499,6 +498,11 @@ impl Widget {
                 keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
                 series: Vec::new(),
             })),
+            Some("Frame") => widget(view::WidgetKind::Frame(view::Frame {
+                label: expr::ExprKind::Constant(Value::Null).to_expr(),
+                label_align: (0., 0.5),
+                child: None,
+            })),
             Some("Box") => widget(view::WidgetKind::Box(view::Box {
                 direction: view::Direction::Vertical,
                 homogeneous: false,
@@ -558,6 +562,7 @@ impl Widget {
             | WidgetKind::Selector(_)
             | WidgetKind::Entry(_)
             | WidgetKind::LinePlot(_)
+            | WidgetKind::Frame(_)
             | WidgetKind::Box(_)
             | WidgetKind::BoxChild(_)
             | WidgetKind::Grid(_)
@@ -567,7 +572,7 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 14] = [
+static KINDS: [&'static str; 15] = [
     "Action",
     "Table",
     "Label",
@@ -577,6 +582,7 @@ static KINDS: [&'static str; 14] = [
     "Selector",
     "Entry",
     "LinePlot",
+    "Frame",
     "Box",
     "BoxChild",
     "Grid",
@@ -937,6 +943,11 @@ impl Editor {
         let iter = store.insert_before(parent, None);
         Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
         match &w.kind {
+            view::WidgetKind::Frame(f) => {
+                if let Some(w) = &f.child {
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                }
+            }
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
@@ -963,12 +974,9 @@ impl Editor {
             | view::WidgetKind::Label(_)
             | view::WidgetKind::Button(_)
             | view::WidgetKind::LinkButton(_)
-            | view::WidgetKind::CheckButton(_)
-            | view::WidgetKind::ToggleButton(_)
             | view::WidgetKind::Toggle(_)
             | view::WidgetKind::Selector(_)
             | view::WidgetKind::Entry(_)
-            | view::WidgetKind::Frame(_)
             | view::WidgetKind::Pane(_)
             | view::WidgetKind::Stack(_)
             | view::WidgetKind::LinePlot(_) => (),
@@ -995,6 +1003,13 @@ impl Editor {
             Ok(Some(w)) => {
                 let mut spec = w.spec();
                 match &mut spec.kind {
+                    view::WidgetKind::Frame(ref mut f) => {
+                        f.child = None;
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            f.child =
+                                Some(boxed::Box::new(Editor::build_spec(store, &iter)));
+                        }
+                    }
                     view::WidgetKind::Box(ref mut b) => {
                         b.children.clear();
                         if let Some(iter) = store.iter_children(Some(root)) {
@@ -1092,7 +1107,7 @@ impl Editor {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
-                WidgetKind::Box(_) => {
+                WidgetKind::Frame(_) | WidgetKind::Box(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     } else {
