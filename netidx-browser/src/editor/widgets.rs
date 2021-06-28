@@ -1146,7 +1146,7 @@ impl Frame {
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().label_align_horizontal = s;
                 on_change();
-            })
+            }),
         ));
         root.add(parse_entry(
             "Label Vertical Align:",
@@ -1154,7 +1154,7 @@ impl Frame {
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().label_align_vertical = s;
                 on_change()
-            })
+            }),
         ));
         Frame { root, label_expr, spec }
     }
@@ -1206,6 +1206,132 @@ impl BoxContainer {
 
     pub(super) fn spec(&self) -> view::WidgetKind {
         view::WidgetKind::Box(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct NotebookPage {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::NotebookPage>>,
+}
+
+impl NotebookPage {
+    pub(super) fn new(on_change: OnChange, spec: view::NotebookPage) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        root.add(parse_entry(
+            "Tab Label:",
+            &spec.borrow().label,
+            clone!(@strong on_change, @strong spec => move |w| {
+                spec.borrow_mut().label = w;
+                on_change()
+            }),
+        ));
+        let reorderable = gtk::CheckButton::with_label("Reorderable");
+        reorderable.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
+            spec.borrow_mut().reorderable = b.get_active();
+            on_change()
+        }));
+        root.attach(&reorderable, 0, 2, 1);
+        NotebookPage { root, spec }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::NotebookPage(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Notebook {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Notebook>>,
+    page: DbgExpr,
+    on_switch_page: DbgExpr,
+}
+
+impl Notebook {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Notebook) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let poscb_lbl = gtk::Label::new(Some("Position:"));
+        let poscb = gtk::ComboBoxText::new();
+        poscb.append(Some("Top"), "Top");
+        poscb.append(Some("Bottom"), "Bottom");
+        poscb.append(Some("Left"), "Left");
+        poscb.append(Some("Right"), "Right");
+        poscb.set_active_id(match spec.borrow().tabs_position {
+            view::TabPosition::Top => Some("Top"),
+            view::TabPosition::Bottom => Some("Bottom"),
+            view::TabPosition::Left => Some("Left"),
+            view::TabPosition::Right => Some("Right"),
+        });
+        poscb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
+            let pos = match c.get_active_id() {
+                Some(s) if &*s == "Top" => view::TabPosition::Top,
+                Some(s) if &*s == "Bottom" => view::TabPosition::Bottom,
+                Some(s) if &*s == "Left" => view::TabPosition::Left,
+                Some(s) if &*s == "Right" => view::TabPosition::Right,
+                _ => unreachable!()
+            };
+            spec.borrow_mut().tabs_position = pos;
+            on_change()
+        }));
+        root.add((poscb_lbl, poscb));
+        let tabs_visible = gtk::CheckButton::with_label("Tabs Visible");
+        tabs_visible.connect_toggled(
+            clone!(@strong on_change, @strong spec => move |b| {
+                spec.borrow_mut().tabs_visible = b.get_active();
+                on_change();
+            }),
+        );
+        root.attach(&tabs_visible, 0, 2, 1);
+        let tabs_scrollable = gtk::CheckButton::with_label("Tabs Scrollable");
+        tabs_scrollable.connect_toggled(
+            clone!(@strong on_change, @strong spec => move |b| {
+                spec.borrow_mut().tabs_scrollable = b.get_active();
+                on_change();
+            }),
+        );
+        root.attach(&tabs_scrollable, 0, 2, 1);
+        let tabs_popup = gtk::CheckButton::with_label("Tabs Have Popup Menu");
+        tabs_popup.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
+            spec.borrow_mut().tabs_popup = b.get_active();
+            on_change()
+        }));
+        root.attach(&tabs_popup, 0, 2, 1);
+        let (l, e, page) = expr(
+            ctx,
+            "Page:",
+            &spec.borrow().page,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().page = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, on_switch_page) = expr(
+            ctx,
+            "On Switch Page:",
+            &spec.borrow().on_switch_page,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().on_switch_page = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Notebook { root, spec, page, on_switch_page }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Notebook(self.spec.borrow().clone())
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {

@@ -182,8 +182,8 @@ pub struct NotebookPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notebook {
-    pub tabs_visible: bool,
     pub tabs_position: TabPosition,
+    pub tabs_visible: bool,
     pub tabs_scrollable: bool,
     pub tabs_popup: bool,
     pub children: Vec<Widget>,

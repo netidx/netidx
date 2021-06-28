@@ -322,7 +322,7 @@ impl Widget {
             ),
             view::Widget { props, kind: view::WidgetKind::Notebook(s) } => (
                 "Notebook",
-                WidgetKind::Notebook(widgets::Notebook::new(on_change.clone(), s)),
+                WidgetKind::Notebook(widgets::Notebook::new(ctx, on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::NotebookPage(s) } => (
