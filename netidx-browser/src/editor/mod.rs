@@ -191,6 +191,7 @@ enum WidgetKind {
     GridChild(widgets::GridChild),
     Paned(widgets::Paned),
     Notebook(widgets::Notebook),
+    NotebookPage(widgets::NotebookPage),
     GridRow,
 }
 
@@ -213,6 +214,7 @@ impl WidgetKind {
             WidgetKind::GridChild(w) => Some(w.root()),
             WidgetKind::Paned(w) => Some(w.root()),
             WidgetKind::Notebook(w) => Some(w.root()),
+            WidgetKind::NotebookPage(w) => Some(w.root()),
             WidgetKind::GridRow => None,
         }
     }
@@ -323,6 +325,14 @@ impl Widget {
                 WidgetKind::Notebook(widgets::Notebook::new(on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
+            view::Widget { props: _, kind: view::WidgetKind::NotebookPage(s) } => (
+                "NotebookPage",
+                WidgetKind::NotebookPage(widgets::NotebookPage::new(
+                    on_change.clone(),
+                    s,
+                )),
+                None,
+            ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
                 WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
@@ -361,6 +371,7 @@ impl Widget {
             WidgetKind::GridChild(w) => w.spec(),
             WidgetKind::Paned(w) => w.spec(),
             WidgetKind::Notebook(w) => w.spec(),
+            WidgetKind::NotebookPage(w) => w.spec(),
             WidgetKind::GridRow => {
                 view::WidgetKind::GridRow(view::GridRow { columns: vec![] })
             }
@@ -607,6 +618,7 @@ impl Widget {
             | WidgetKind::GridChild(_)
             | WidgetKind::Paned(_)
             | WidgetKind::Notebook(_)
+            | WidgetKind::NotebookPage(_)
             | WidgetKind::GridRow => (),
         }
     }
@@ -630,7 +642,7 @@ static KINDS: [&'static str; 18] = [
     "GridChild",
     "GridRow",
     "NotebookPage",
-    "Notebook"
+    "Notebook",
 ];
 
 pub(super) struct Editor {
@@ -1139,7 +1151,6 @@ impl Editor {
                             }
                         }
                     }
-                    view::WidgetKind::Stack(_) => unimplemented!(),
                     view::WidgetKind::Action(_)
                     | view::WidgetKind::Table(_)
                     | view::WidgetKind::Label(_)
@@ -1202,7 +1213,10 @@ impl Editor {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
-                WidgetKind::Frame(_) | WidgetKind::Box(_) | WidgetKind::Paned(_) => {
+                WidgetKind::Frame(_)
+                | WidgetKind::Box(_)
+                | WidgetKind::Notebook(_)
+                | WidgetKind::Paned(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     } else {
@@ -1210,7 +1224,7 @@ impl Editor {
                     }
                     false
                 }
-                WidgetKind::BoxChild(_) => {
+                WidgetKind::NotebookPage(_) | WidgetKind::BoxChild(_) => {
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::Leaf);
                     }
