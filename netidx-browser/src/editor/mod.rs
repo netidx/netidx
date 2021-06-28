@@ -190,6 +190,7 @@ enum WidgetKind {
     Grid(widgets::Grid),
     GridChild(widgets::GridChild),
     Paned(widgets::Paned),
+    Notebook(widgets::Notebook),
     GridRow,
 }
 
@@ -211,6 +212,7 @@ impl WidgetKind {
             WidgetKind::Grid(w) => Some(w.root()),
             WidgetKind::GridChild(w) => Some(w.root()),
             WidgetKind::Paned(w) => Some(w.root()),
+            WidgetKind::Notebook(w) => Some(w.root()),
             WidgetKind::GridRow => None,
         }
     }
@@ -316,9 +318,11 @@ impl Widget {
                 WidgetKind::Paned(widgets::Paned::new(on_change.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
-            view::Widget { props: _, kind: view::WidgetKind::Stack(_) } => {
-                unimplemented!()
-            }
+            view::Widget { props, kind: view::WidgetKind::Notebook(s) } => (
+                "Notebook",
+                WidgetKind::Notebook(widgets::Notebook::new(on_change.clone(), s)),
+                Some(WidgetProps::new(on_change, props)),
+            ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
                 WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
@@ -356,6 +360,7 @@ impl Widget {
             WidgetKind::Grid(w) => w.spec(),
             WidgetKind::GridChild(w) => w.spec(),
             WidgetKind::Paned(w) => w.spec(),
+            WidgetKind::Notebook(w) => w.spec(),
             WidgetKind::GridRow => {
                 view::WidgetKind::GridRow(view::GridRow { columns: vec![] })
             }
@@ -555,6 +560,27 @@ impl Widget {
             Some("GridRow") => {
                 widget(view::WidgetKind::GridRow(view::GridRow { columns: vec![] }))
             }
+            Some("NotebookPage") => {
+                let s = Value::String(Chars::from("empty notebook page"));
+                let w = view::Widget {
+                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
+                    props: None,
+                };
+                widget(view::WidgetKind::NotebookPage(view::NotebookPage {
+                    label: "Some Page".into(),
+                    reorderable: false,
+                    widget: boxed::Box::new(w),
+                }))
+            }
+            Some("Notebook") => widget(view::WidgetKind::Notebook(view::Notebook {
+                tabs_visible: true,
+                tabs_position: view::TabPosition::Top,
+                tabs_scrollable: false,
+                tabs_popup: false,
+                children: vec![],
+                page: expr::ExprKind::Constant(Value::Null).to_expr(),
+                on_switch_page: expr::ExprKind::Constant(Value::Null).to_expr(),
+            })),
             _ => unreachable!(),
         }
     }
@@ -580,12 +606,13 @@ impl Widget {
             | WidgetKind::Grid(_)
             | WidgetKind::GridChild(_)
             | WidgetKind::Paned(_)
+            | WidgetKind::Notebook(_)
             | WidgetKind::GridRow => (),
         }
     }
 }
 
-static KINDS: [&'static str; 16] = [
+static KINDS: [&'static str; 18] = [
     "Action",
     "Table",
     "Label",
@@ -602,6 +629,8 @@ static KINDS: [&'static str; 16] = [
     "Grid",
     "GridChild",
     "GridRow",
+    "NotebookPage",
+    "Notebook"
 ];
 
 pub(super) struct Editor {
@@ -962,6 +991,14 @@ impl Editor {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
                 }
             }
+            view::WidgetKind::NotebookPage(p) => {
+                Editor::build_tree(ctx, on_change, store, Some(&iter), &*p.widget);
+            }
+            view::WidgetKind::Notebook(n) => {
+                for w in &n.children {
+                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                }
+            }
             view::WidgetKind::Box(b) => {
                 for w in &b.children {
                     Editor::build_tree(ctx, on_change, store, Some(&iter), w);
@@ -999,7 +1036,6 @@ impl Editor {
             | view::WidgetKind::Toggle(_)
             | view::WidgetKind::Selector(_)
             | view::WidgetKind::Entry(_)
-            | view::WidgetKind::Stack(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
     }
@@ -1042,6 +1078,22 @@ impl Editor {
                                     Editor::build_spec(store, &iter),
                                 ));
                             }
+                        }
+                    }
+                    view::WidgetKind::Notebook(ref mut n) => {
+                        n.children.clear();
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            loop {
+                                n.children.push(Editor::build_spec(store, &iter));
+                                if !store.iter_next(&iter) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    view::WidgetKind::NotebookPage(ref mut p) => {
+                        if let Some(iter) = store.iter_children(Some(root)) {
+                            p.widget = boxed::Box::new(Editor::build_spec(store, &iter));
                         }
                     }
                     view::WidgetKind::Box(ref mut b) => {

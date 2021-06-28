@@ -5,7 +5,7 @@ use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::chars::Chars;
 use netidx_bscript::vm;
-use std::{boxed, cmp::max};
+use std::{boxed, cmp::max, rc::Rc};
 
 fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
     match d {
@@ -93,6 +93,88 @@ impl Frame {
             self.root.set_label(new_lbl.get_as::<Chars>().as_ref().map(|c| c.as_ref()));
         }
         if let Some(c) = &self.child {
+            c.update(ctx, waits, event);
+        }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.upcast_ref()
+    }
+}
+
+pub(super) struct Notebook {
+    root: gtk::Notebook,
+    page: BSNode,
+    on_switch_page: Rc<BSNode>,
+    pub(super) children: Vec<Widget>,
+}
+
+impl Notebook {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Notebook,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let root = gtk::Notebook::new();
+        let page = BSNode::compile(ctx, spec.page);
+        let on_switch_page = Rc::new(BSNode::compile(ctx, spec.on_switch_page));
+        root.set_show_tabs(spec.tabs_visible);
+        root.set_tab_pos(match spec.tabs_position {
+            view::TabPosition::Left => gtk::PositionType::Left,
+            view::TabPosition::Right => gtk::PositionType::Right,
+            view::TabPosition::Top => gtk::PositionType::Top,
+            view::TabPosition::Bottom => gtk::PositionType::Bottom,
+        });
+        root.set_property_enable_popup(spec.tabs_popup);
+        let mut children = Vec::new();
+        for s in spec.children.iter() {
+            match &s.kind {
+                view::WidgetKind::NotebookPage(view::NotebookPage {
+                    label,
+                    reorderable,
+                    widget,
+                }) => {
+                    let w = Widget::new(ctx, (&**widget).clone(), selected_path.clone());
+                    if let Some(r) = w.root() {
+                        let lbl = gtk::Label::new(Some(label.as_str()));
+                        root.append_page(r, Some(&lbl));
+                        root.set_tab_reorderable(r, *reorderable);
+                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
+                    }
+                    children.push(w);
+                }
+                _ => {
+                    let w = Widget::new(ctx, s.clone(), selected_path.clone());
+                    if let Some(r) = w.root() {
+                        root.append_page(r, None::<&gtk::Label>);
+                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
+                    }
+                    children.push(w);
+                }
+            }
+        }
+        root.set_current_page(page.current().and_then(|v| v.get_as::<u32>()));
+        root.connect_switch_page(clone!(
+        @strong ctx, @strong on_switch_page => move |_, _, page| {
+            let ev = vm::Event::User(LocalEvent::Event(page.into()));
+            on_switch_page.update(&ctx, &ev);
+        }));
+        Notebook { root, page, on_switch_page, children }
+    }
+
+    pub(super) fn update(
+        &self,
+        ctx: &BSCtx,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        if let Some(page) = self.page.update(ctx, event) {
+            if let Some(page) = page.get_as::<u32>() {
+                self.root.set_current_page(Some(page));
+            }
+        }
+        self.on_switch_page.update(ctx, event);
+        for c in &self.children {
             c.update(ctx, waits, event);
         }
     }

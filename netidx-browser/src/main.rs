@@ -225,6 +225,7 @@ enum Widget {
     Box(containers::Box),
     Grid(containers::Grid),
     Paned(containers::Paned),
+    Notebook(containers::Notebook),
     LinePlot(widgets::LinePlot),
 }
 
@@ -278,7 +279,12 @@ impl Widget {
             view::WidgetKind::Paned(spec) => {
                 Widget::Paned(containers::Paned::new(ctx, spec, selected_path))
             }
-            view::WidgetKind::Stack(_) => unimplemented!(),
+            view::WidgetKind::NotebookPage(view::NotebookPage { widget, .. }) => {
+                Widget::new(ctx, (&*widget).clone(), selected_path)
+            }
+            view::WidgetKind::Notebook(spec) => {
+                Widget::Notebook(containers::Notebook::new(ctx, spec, selected_path))
+            }
             view::WidgetKind::LinePlot(spec) => {
                 Widget::LinePlot(widgets::LinePlot::new(ctx, spec, selected_path))
             }
@@ -303,6 +309,7 @@ impl Widget {
             Widget::Box(t) => Some(t.root()),
             Widget::Grid(t) => Some(t.root()),
             Widget::Paned(t) => Some(t.root()),
+            Widget::Notebook(t) => Some(t.root()),
             Widget::LinePlot(t) => Some(t.root()),
         }
     }
@@ -326,6 +333,7 @@ impl Widget {
             Widget::Box(t) => t.update(ctx, waits, event),
             Widget::Grid(t) => t.update(ctx, waits, event),
             Widget::Paned(t) => t.update(ctx, waits, event),
+            Widget::Notebook(t) => t.update(ctx, waits, event),
             Widget::LinePlot(t) => t.update(ctx, event),
         }
     }
@@ -343,6 +351,11 @@ impl Widget {
             None => (),
             Some(p) => match (p, self) {
                 (WidgetPath::Box(i), Widget::Box(w)) => {
+                    if i < w.children.len() {
+                        w.children[i].set_highlight(path, h)
+                    }
+                }
+                (WidgetPath::Box(i), Widget::Notebook(w)) => {
                     if i < w.children.len() {
                         w.children[i].set_highlight(path, h)
                     }
@@ -385,6 +398,7 @@ impl Widget {
                 (WidgetPath::GridRow(_), _) => (),
                 (WidgetPath::Leaf, Widget::Paned(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Frame(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Notebook(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Action(_)) => (),

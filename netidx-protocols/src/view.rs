@@ -165,48 +165,30 @@ pub struct Paned {
     pub second_child: Option<boxed::Box<Widget>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum StackSwitcher {
-    None,
-    SideBar,
-    TabsTop,
-    TabsBottom,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TabPosition {
+    Left,
+    Right,
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum StackTransitionType {
-    None,
-    Crossfade,
-    SlideRight,
-    SlideLeft,
-    SlideUp,
-    SlideDown,
-    SlideLeftRight,
-    SlideUpDown,
-    OverUp,
-    OverDown,
-    OverLeft,
-    OverRight,
-    UnderUp,
-    UnderDown,
-    UnderLeft,
-    UnderRight,
-    OverUpDown,
-    OverDownUp,
-    OverLeftRight,
-    OverRightLeft,
+pub struct NotebookPage {
+    pub label: String,
+    pub reorderable: bool,
+    pub widget: boxed::Box<Widget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Stack {
-    pub vhomogeneous: bool,
-    pub hhomogeneous: bool,
-    pub transition_type: StackTransitionType,
-    pub transition_duration: u32,
-    pub switcher: StackSwitcher,
-    pub pages: Vec<(String, Widget)>,
-    pub visible_child: Expr,
-    pub on_switch_visible_child: Expr,
+pub struct Notebook {
+    pub tabs_visible: bool,
+    pub tabs_position: TabPosition,
+    pub tabs_scrollable: bool,
+    pub tabs_popup: bool,
+    pub children: Vec<Widget>,
+    pub page: Expr,
+    pub on_switch_page: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -261,7 +243,8 @@ pub enum WidgetKind {
     GridChild(GridChild),
     GridRow(GridRow),
     Paned(Paned),
-    Stack(Stack),
+    Notebook(Notebook),
+    NotebookPage(NotebookPage),
     LinePlot(LinePlot),
 }
 
