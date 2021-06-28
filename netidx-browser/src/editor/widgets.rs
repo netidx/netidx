@@ -1232,6 +1232,7 @@ impl NotebookPage {
             }),
         ));
         let reorderable = gtk::CheckButton::with_label("Reorderable");
+        reorderable.set_active(spec.borrow().reorderable);
         reorderable.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
             spec.borrow_mut().reorderable = b.get_active();
             on_change()
@@ -1286,6 +1287,7 @@ impl Notebook {
         }));
         root.add((poscb_lbl, poscb));
         let tabs_visible = gtk::CheckButton::with_label("Tabs Visible");
+        tabs_visible.set_active(spec.borrow().tabs_visible);
         tabs_visible.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
                 spec.borrow_mut().tabs_visible = b.get_active();
@@ -1294,6 +1296,7 @@ impl Notebook {
         );
         root.attach(&tabs_visible, 0, 2, 1);
         let tabs_scrollable = gtk::CheckButton::with_label("Tabs Scrollable");
+        tabs_scrollable.set_active(spec.borrow().tabs_scrollable);
         tabs_scrollable.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
                 spec.borrow_mut().tabs_scrollable = b.get_active();
@@ -1302,6 +1305,7 @@ impl Notebook {
         );
         root.attach(&tabs_scrollable, 0, 2, 1);
         let tabs_popup = gtk::CheckButton::with_label("Tabs Have Popup Menu");
+        tabs_popup.set_active(spec.borrow().tabs_popup);
         tabs_popup.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().tabs_popup = b.get_active();
             on_change()
