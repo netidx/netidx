@@ -12,20 +12,26 @@
     one planned soon. No semantic changes were intended as a result of
     this refactor.
 
-  - table is a normal widget now! Previous to this, unlike every other
-    browser widget table didn't use bscript. Now that that has been
-    fixed it's easier to use table in more complex projects.
+  - table is now bscript enabled. Path, default sort column, default
+    sort direction, filter mode, and the filter are now set by bscript
+    expressions instead of hard coded in the editor.
 
-    Probably the most important difference is the path of the table is
-    now a bscript expression instead of a hard coded string. So you
-    can now derive the table path from a variable, or load it from
-    netidx, or a lot of other creative things. And of course now if
-    the value of the expression changes, then the table will
-    automatically rebuild, just like every other widget.
+    Moreover, tables can be made editable, and three new events are
+    exposed to make this useful,
 
-    Unfortunatly if you had tables saved in view definitions they
-    won't parse anymore, you'll have to update the view definition for
-    the new syntax, or rebuild it.
+      - on activate: allows you to control what happens when the user
+        double clicks a row, or presses enter if the table isn't
+        editable. event() produces the path of the row, and the
+        default expression is, navigate(event()), which does the same
+        thing the browser does now.
+
+      - on select: updates when the user selects a cell, event() is
+        the path of the newly selected cell.
+
+      - on edit: updates when the user edits a cell, event() is the
+        new value.
+
+  - Implemented new wigets, linkbutton, frame, paned, and notebook.
 
   - API change, the return value of Subscriber::subscribe is now a
     FuturesUnordered collection instead of a Vec. This allows
