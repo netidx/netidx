@@ -1,4 +1,8 @@
-* 0.8.0 netidx, netidx-protocols, tools, browser:
+* 0.8.0 netidx, protocols, netproto, tools, browser:
+  - The command line publisher can now accept writes, simply say
+    WRITE|PATH to enable writes for PATH. Written values will be sent
+    to stdout in the same format as the command line subscriber.
+
   - Crate cleanup: netidx-protocols was split into 3 crates
     - netidx-bscript: The bscript parser, and vm implementation
     - netidx-archive: The archive file reader/writer library
