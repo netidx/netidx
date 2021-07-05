@@ -3,17 +3,17 @@ use crate::{
     stdfn,
 };
 use fxhash::FxBuildHasher;
+use parking_lot::RwLock;
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, SubId, Value, UpdatesFlags},
 };
 use std::{
-    cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt,
     ops::Deref,
-    rc::{Rc, Weak},
+    sync::{Weak, Arc},
 };
 
 pub struct DbgCtx {
@@ -31,12 +31,12 @@ impl DbgCtx {
         }
     }
 
-    pub fn add_watch(&mut self, id: ExprId, watch: &Rc<dyn Fn(&Value)>) {
+    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Value)>) {
         let watches = self.watch.entry(id).or_insert(vec![]);
         if let Some(v) = self.current.get(&id) {
             watch(v);
         }
-        watches.push(Rc::downgrade(watch));
+        watches.push(Arc::downgrade(watch));
     }
 
     pub fn add_event(&mut self, id: ExprId, value: Value) {
@@ -92,9 +92,9 @@ pub trait Register<C: Ctx, E> {
 pub trait Apply<C: Ctx, E> {
     fn current(&self) -> Option<Value>;
     fn update(
-        &self,
+        &mut self,
         ctx: &ExecCtx<C, E>,
-        from: &[Node<C, E>],
+        from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value>;
 }
@@ -103,7 +103,7 @@ pub trait Ctx {
     fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval;
     fn set_var(
         &self,
-        variables: &RefCell<HashMap<Chars, Value>>,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     );
@@ -111,25 +111,25 @@ pub trait Ctx {
 }
 
 pub struct ExecCtxInner<C: Ctx + 'static, E: 'static> {
-    pub functions: RefCell<HashMap<String, InitFn<C, E>>>,
-    pub variables: RefCell<HashMap<Chars, Value>>,
-    pub dbg_ctx: RefCell<DbgCtx>,
+    pub functions: RwLock<HashMap<String, InitFn<C, E>>>,
+    pub variables: RwLock<HashMap<Chars, Value>>,
+    pub dbg_ctx: RwLock<DbgCtx>,
     pub user: C,
 }
 
-pub struct ExecCtx<C: Ctx + 'static, E: 'static>(Rc<ExecCtxInner<C, E>>);
+pub struct ExecCtx<C: Ctx + 'static, E: 'static>(Arc<ExecCtxInner<C, E>>);
 
 impl<C: Ctx, E> glib::clone::Downgrade for ExecCtx<C, E> {
     type Weak = ExecCtxWeak<C, E>;
 
     fn downgrade(&self) -> Self::Weak {
-        ExecCtxWeak(Rc::downgrade(&self.0))
+        ExecCtxWeak(Arc::downgrade(&self.0))
     }
 }
 
 impl<C: Ctx, E> Clone for ExecCtx<C, E> {
     fn clone(&self) -> Self {
-        ExecCtx(Rc::clone(&self.0))
+        ExecCtx(Arc::clone(&self.0))
     }
 }
 
@@ -144,12 +144,12 @@ impl<C: Ctx, E> Deref for ExecCtx<C, E> {
 impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn no_std(user: C) -> Self {
         let inner = ExecCtxInner {
-            functions: RefCell::new(HashMap::new()),
-            variables: RefCell::new(HashMap::new()),
-            dbg_ctx: RefCell::new(DbgCtx::new()),
+            functions: RwLock::new(HashMap::new()),
+            variables: RwLock::new(HashMap::new()),
+            dbg_ctx: RwLock::new(DbgCtx::new()),
             user,
         };
-        ExecCtx(Rc::new(inner))
+        ExecCtx(Arc::new(inner))
     }
 
     pub fn new(user: C) -> Self {
@@ -215,11 +215,11 @@ impl<C: Ctx, E> Node<C, E> {
     pub fn compile(ctx: &ExecCtx<C, E>, spec: Expr) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
-                ctx.dbg_ctx.borrow_mut().add_event(*id, v.clone());
+                ctx.dbg_ctx.write().add_event(*id, v.clone());
                 Node::Constant(spec.clone(), v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, .. } => {
-                match ctx.functions.borrow().get(function) {
+                match ctx.functions.read().get(function) {
                     None => Node::Error(
                         spec.clone(),
                         Value::Error(Chars::from(format!(
@@ -234,7 +234,7 @@ impl<C: Ctx, E> Node<C, E> {
                             .collect();
                         let function = init(ctx, &args);
                         if let Some(v) = function.current() {
-                            ctx.dbg_ctx.borrow_mut().add_event(spec.id, v)
+                            ctx.dbg_ctx.write().add_event(spec.id, v)
                         }
                         Node::Apply { spec, args, function }
                     }
@@ -251,14 +251,14 @@ impl<C: Ctx, E> Node<C, E> {
         }
     }
 
-    pub fn update(&self, ctx: &ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
+    pub fn update(&mut self, ctx: &ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
             Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,
             Node::Apply { spec, args, function } => {
-                let res = function.update(ctx, &args, event);
+                let res = function.update(ctx, args, event);
                 if let Some(v) = &res {
-                    ctx.dbg_ctx.borrow_mut().add_event(spec.id, v.clone());
+                    ctx.dbg_ctx.write().add_event(spec.id, v.clone());
                 }
                 res
             }
