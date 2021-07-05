@@ -5,7 +5,7 @@ use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::chars::Chars;
 use netidx_bscript::vm;
-use std::{boxed, cmp::max, rc::Rc};
+use std::{boxed, cmp::max, rc::Rc, cell::RefCell};
 
 fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
     match d {
@@ -42,15 +42,15 @@ impl Paned {
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(c) = &self.first_child {
+        if let Some(c) = &mut self.first_child {
             c.update(ctx, waits, event);
         }
-        if let Some(c) = &self.second_child {
+        if let Some(c) = &mut self.second_child {
             c.update(ctx, waits, event);
         }
     }
@@ -84,7 +84,7 @@ impl Frame {
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
@@ -92,7 +92,7 @@ impl Frame {
         if let Some(new_lbl) = self.label.update(ctx, event) {
             self.root.set_label(new_lbl.get_as::<Chars>().as_ref().map(|c| c.as_ref()));
         }
-        if let Some(c) = &self.child {
+        if let Some(c) = &mut self.child {
             c.update(ctx, waits, event);
         }
     }
@@ -105,7 +105,7 @@ impl Frame {
 pub(super) struct Notebook {
     root: gtk::Notebook,
     page: BSNode,
-    on_switch_page: Rc<BSNode>,
+    on_switch_page: Rc<RefCell<BSNode>>,
     pub(super) children: Vec<Widget>,
 }
 
@@ -117,7 +117,8 @@ impl Notebook {
     ) -> Self {
         let root = gtk::Notebook::new();
         let page = BSNode::compile(ctx, spec.page);
-        let on_switch_page = Rc::new(BSNode::compile(ctx, spec.on_switch_page));
+        let on_switch_page =
+            Rc::new(RefCell::new(BSNode::compile(ctx, spec.on_switch_page)));
         root.set_show_tabs(spec.tabs_visible);
         root.set_tab_pos(match spec.tabs_position {
             view::TabPosition::Left => gtk::PositionType::Left,
@@ -157,13 +158,13 @@ impl Notebook {
         root.connect_switch_page(clone!(
         @strong ctx, @strong on_switch_page => move |_, _, page| {
             let ev = vm::Event::User(LocalEvent::Event(page.into()));
-            on_switch_page.update(&ctx, &ev);
+            on_switch_page.borrow_mut().update(&ctx, &ev);
         }));
         Notebook { root, page, on_switch_page, children }
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
@@ -173,8 +174,8 @@ impl Notebook {
                 self.root.set_current_page(Some(page));
             }
         }
-        self.on_switch_page.update(ctx, event);
-        for c in &self.children {
+        self.on_switch_page.borrow_mut().update(ctx, event);
+        for c in &mut self.children {
             c.update(ctx, waits, event);
         }
     }
@@ -241,12 +242,12 @@ impl Box {
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        for c in &self.children {
+        for c in &mut self.children {
             c.update(ctx, waits, event);
         }
     }
@@ -335,12 +336,12 @@ impl Grid {
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        for row in &self.children {
+        for row in &mut self.children {
             for child in row {
                 child.update(ctx, waits, event);
             }

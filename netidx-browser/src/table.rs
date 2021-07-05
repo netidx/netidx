@@ -4,6 +4,7 @@ use super::{
 };
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
+use fxhash::FxBuildHasher;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
@@ -14,7 +15,6 @@ use gtk::{
     Widget as GtkWidget,
 };
 use indexmap::IndexMap;
-use fxhash::FxBuildHasher;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -59,9 +59,9 @@ struct RaeifiedTableInner {
     sort_temp_disabled: Cell<bool>,
     update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
     destroyed: Cell<bool>,
-    on_select: Rc<BSNode>,
-    on_activate: Rc<BSNode>,
-    on_edit: Rc<BSNode>,
+    on_select: Rc<RefCell<BSNode>>,
+    on_activate: Rc<RefCell<BSNode>>,
+    on_edit: Rc<RefCell<BSNode>>,
 }
 
 #[derive(Clone)]
@@ -92,9 +92,9 @@ pub(super) struct Table {
     column_list: RefCell<Vec<String>>,
     editable_expr: BSNode,
     editable: RefCell<EditMode>,
-    on_select: Rc<BSNode>,
-    on_activate: Rc<BSNode>,
-    on_edit: Rc<BSNode>,
+    on_select: Rc<RefCell<BSNode>>,
+    on_activate: Rc<RefCell<BSNode>>,
+    on_edit: Rc<RefCell<BSNode>>,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -252,9 +252,9 @@ impl RaeifiedTable {
         column_mode: ColumnMode,
         column_list: Vec<String>,
         editable: EditMode,
-        on_select: Rc<BSNode>,
-        on_activate: Rc<BSNode>,
-        on_edit: Rc<BSNode>,
+        on_select: Rc<RefCell<BSNode>>,
+        on_activate: Rc<RefCell<BSNode>>,
+        on_edit: Rc<RefCell<BSNode>>,
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
@@ -347,7 +347,7 @@ impl RaeifiedTable {
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
                 let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
-                t.0.on_edit.update(&t.0.ctx, &vm::Event::User(ev));
+                t.0.on_edit.borrow_mut().update(&t.0.ctx, &vm::Event::User(ev));
             }));
             column.set_title(&name);
             t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
@@ -382,7 +382,7 @@ impl RaeifiedTable {
                 if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
                     let path = String::from(&*t.0.path.append(row_name));
                     let e = LocalEvent::Event(Value::String(Chars::from(path)));
-                    t.0.on_activate.update(&t.0.ctx, &vm::Event::User(e));
+                    t.0.on_activate.borrow_mut().update(&t.0.ctx, &vm::Event::User(e));
                 }
             }
         }));
@@ -593,7 +593,7 @@ impl RaeifiedTable {
         if let Some(path) = path {
             let v = Value::from(String::from(&*path));
             let ev = vm::Event::User(LocalEvent::Event(v));
-            self.0.on_select.update(&self.0.ctx, &ev);
+            self.0.on_select.borrow_mut().update(&self.0.ctx, &ev);
         }
         self.view().columns_autosize();
     }
@@ -815,9 +815,9 @@ impl Table {
                 TableState::Resolving(path.clone())
             }
         });
-        let on_select = Rc::new(BSNode::compile(&ctx, spec.on_select));
-        let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate));
-        let on_edit = Rc::new(BSNode::compile(&ctx, spec.on_edit));
+        let on_select = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_select)));
+        let on_activate = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_activate)));
+        let on_edit = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_edit)));
         Table {
             ctx,
             state,
@@ -868,7 +868,7 @@ impl Table {
     }
 
     pub(super) fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
@@ -921,9 +921,9 @@ impl Table {
                 self.refresh();
             }
         }
-        self.on_activate.update(ctx, event);
-        self.on_select.update(ctx, event);
-        self.on_edit.update(ctx, event);
+        self.on_activate.borrow_mut().update(ctx, event);
+        self.on_select.borrow_mut().update(ctx, event);
+        self.on_edit.borrow_mut().update(ctx, event);
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) => (),
             TableState::Raeified(table) => table.update(ctx, waits, event),
