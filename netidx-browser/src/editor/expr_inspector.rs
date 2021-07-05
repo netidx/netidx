@@ -10,6 +10,7 @@ use netidx_bscript::expr;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::Arc,
 };
 
 fn set_dbg_expr(
@@ -18,12 +19,12 @@ fn set_dbg_expr(
     iter: &gtk::TreeIter,
     spec: expr::Expr,
 ) -> expr::Expr {
-    let watch: Rc<dyn Fn(&Value)> = {
+    let watch: Arc<dyn Fn(&Value)> = {
         let store = store.clone();
         let iter = iter.clone();
-        Rc::new(move |v: &Value| store.set_value(&iter, 1, &format!("{}", v).to_value()))
+        Arc::new(move |v: &Value| store.set_value(&iter, 1, &format!("{}", v).to_value()))
     };
-    ctx.dbg_ctx.borrow_mut().add_watch(spec.id, &watch);
+    ctx.dbg_ctx.write().add_watch(spec.id, &watch);
     store.set_value(&iter, 3, &ExprWrap(watch).to_value());
     spec
 }
@@ -221,7 +222,7 @@ impl Properties {
 
 #[derive(Clone, GBoxed)]
 #[gboxed(type_name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Rc<dyn Fn(&Value)>);
+struct ExprWrap(Arc<dyn Fn(&Value)>);
 
 static KINDS: [&'static str; 2] = ["constant", "function"];
 

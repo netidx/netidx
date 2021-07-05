@@ -22,7 +22,7 @@ use std::{
 pub(super) struct Button {
     enabled: BSNode,
     label: BSNode,
-    on_click: Rc<BSNode>,
+    on_click: Rc<RefCell<BSNode>>,
     button: gtk::Button,
 }
 
@@ -35,7 +35,8 @@ impl Button {
         let button = gtk::Button::new();
         let enabled = BSNode::compile(&ctx, spec.enabled.clone());
         let label = BSNode::compile(&ctx, spec.label.clone());
-        let on_click = Rc::new(BSNode::compile(&ctx, spec.on_click.clone()));
+        let on_click =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_click.clone())));
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -43,7 +44,10 @@ impl Button {
             button.set_label(&format!("{}", v));
         }
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
-            on_click.update(&ctx, &vm::Event::User(LocalEvent::Event(Value::Null)));
+            on_click.borrow_mut().update(
+                &ctx,
+                &vm::Event::User(LocalEvent::Event(Value::Null))
+            );
         }));
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("on_click: {}", spec.on_click));
@@ -62,14 +66,14 @@ impl Button {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", new));
         }
-        self.on_click.update(ctx, event);
+        self.on_click.borrow_mut().update(ctx, event);
     }
 }
 
@@ -77,7 +81,7 @@ pub(super) struct LinkButton {
     enabled: BSNode,
     uri: BSNode,
     label: BSNode,
-    on_activate_link: Rc<BSNode>,
+    on_activate_link: Rc<RefCell<BSNode>>,
     button: gtk::LinkButton,
 }
 
@@ -91,7 +95,7 @@ impl LinkButton {
         let uri = BSNode::compile(&ctx, spec.uri.clone());
         let label = BSNode::compile(&ctx, spec.label.clone());
         let on_activate_link =
-            Rc::new(BSNode::compile(&ctx, spec.on_activate_link.clone()));
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_activate_link.clone())));
         let cur_label = label.current().and_then(|v| v.get_as::<Chars>());
         let cur_label = cur_label.as_ref().map(|s| s.as_ref());
         let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
@@ -104,7 +108,7 @@ impl LinkButton {
         @strong ctx,
         @strong on_activate_link => move |_| {
             let ev = vm::Event::User(LocalEvent::Event(Value::Null));
-            match on_activate_link.update(&ctx, &ev) {
+            match on_activate_link.borrow_mut().update(&ctx, &ev) {
                 Some(Value::True) => Inhibit(true),
                 _ => Inhibit(false),
             }
@@ -130,7 +134,7 @@ impl LinkButton {
         self.button.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.button.set_sensitive(val_to_bool(&new));
         }
@@ -144,7 +148,7 @@ impl LinkButton {
                 self.button.set_label(&new);
             }
         }
-        self.on_activate_link.update(ctx, event);
+        self.on_activate_link.borrow_mut().update(ctx, event);
     }
 }
 
@@ -180,7 +184,7 @@ impl Label {
         self.label.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.text.update(ctx, event) {
             self.label.set_label(&format!("{}", new));
         }
@@ -193,12 +197,12 @@ pub(super) struct Action {
 
 impl Action {
     pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
-        let action = BSNode::compile(&ctx, spec.clone());
+        let mut action = BSNode::compile(&ctx, spec.clone());
         action.update(ctx, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Action { action }
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         self.action.update(ctx, event);
     }
 }
@@ -208,8 +212,8 @@ pub(super) struct Selector {
     combo: gtk::ComboBoxText,
     enabled: BSNode,
     choices: BSNode,
-    selected: Rc<BSNode>,
-    on_change: Rc<BSNode>,
+    selected: Rc<RefCell<BSNode>>,
+    on_change: Rc<RefCell<BSNode>>,
     we_set: Rc<Cell<bool>>,
 }
 
@@ -238,17 +242,19 @@ impl Selector {
         );
         let enabled = BSNode::compile(&ctx, spec.enabled.clone());
         let choices = BSNode::compile(&ctx, spec.choices.clone());
-        let selected = Rc::new(BSNode::compile(&ctx, spec.selected.clone()));
-        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
+        let selected =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.selected.clone())));
+        let on_change =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
         }
         if let Some(choices) = choices.current() {
-            Selector::update_choices(&combo, &choices, &selected.current());
+            Selector::update_choices(&combo, &choices, &selected.borrow().current());
         }
         we_set.set(true);
-        Selector::update_active(&combo, &selected.current());
+        Selector::update_active(&combo, &selected.borrow().current());
         we_set.set(false);
         combo.connect_changed(clone!(
             @strong we_set,
@@ -258,13 +264,16 @@ impl Selector {
             if !we_set.get() {
                 if let Some(id) = combo.get_active_id() {
                     if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                        on_change.update(&ctx, &vm::Event::User(LocalEvent::Event(idv)));
+                        on_change.borrow_mut().update(
+                            &ctx,
+                            &vm::Event::User(LocalEvent::Event(idv))
+                        );
                     }
                 }
                 idle_add_local(clone!(
                     @strong selected, @strong combo, @strong we_set => move || {
                         we_set.set(true);
-                        Selector::update_active(&combo, &selected.current());
+                        Selector::update_active(&combo, &selected.borrow().current());
                         we_set.set(false);
                         Continue(false)
                     })
@@ -314,15 +323,22 @@ impl Selector {
         Selector::update_active(combo, source)
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         self.we_set.set(true);
-        self.on_change.update(ctx, event);
+        self.on_change.borrow_mut().update(ctx, event);
         if let Some(new) = self.enabled.update(ctx, event) {
             self.combo.set_sensitive(val_to_bool(&new));
         }
-        Selector::update_active(&self.combo, &self.selected.update(ctx, event));
+        Selector::update_active(
+            &self.combo,
+            &self.selected.borrow_mut().update(ctx, event),
+        );
         if let Some(new) = self.choices.update(ctx, event) {
-            Selector::update_choices(&self.combo, &new, &self.selected.current());
+            Selector::update_choices(
+                &self.combo,
+                &new,
+                &self.selected.borrow().current(),
+            );
         }
         self.we_set.set(false);
     }
@@ -334,8 +350,8 @@ impl Selector {
 
 pub(super) struct Toggle {
     enabled: BSNode,
-    value: Rc<BSNode>,
-    on_change: Rc<BSNode>,
+    value: Rc<RefCell<BSNode>>,
+    on_change: Rc<RefCell<BSNode>>,
     we_set: Rc<Cell<bool>>,
     switch: gtk::Switch,
 }
@@ -348,13 +364,14 @@ impl Toggle {
     ) -> Self {
         let switch = gtk::Switch::new();
         let enabled = BSNode::compile(&ctx, spec.enabled.clone());
-        let value = Rc::new(BSNode::compile(&ctx, spec.value.clone()));
-        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
+        let value = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.value.clone())));
+        let on_change =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
         }
-        if let Some(v) = value.current() {
+        if let Some(v) = value.borrow().current() {
             let v = val_to_bool(&v);
             switch.set_active(v);
             switch.set_state(v);
@@ -363,7 +380,7 @@ impl Toggle {
         @strong ctx, @strong on_change, @strong we_set, @strong value =>
         move |switch, state| {
             if !we_set.get() {
-                on_change.update(
+                on_change.borrow_mut().update(
                     &ctx,
                     &vm::Event::User(
                         LocalEvent::Event(if state { Value::True } else { Value::False })
@@ -372,7 +389,7 @@ impl Toggle {
                 idle_add_local(
                     clone!(@strong value, @strong switch, @strong we_set => move || {
                     we_set.set(true);
-                    if let Some(v) = value.current() {
+                    if let Some(v) = value.borrow().current() {
                         let v = val_to_bool(&v);
                         switch.set_active(v);
                         switch.set_state(v);
@@ -404,17 +421,17 @@ impl Toggle {
         self.switch.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.switch.set_sensitive(val_to_bool(&new));
         }
-        if let Some(new) = self.value.update(ctx, event) {
+        if let Some(new) = self.value.borrow_mut().update(ctx, event) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
             self.switch.set_state(val_to_bool(&new));
             self.we_set.set(false);
         }
-        self.on_change.update(ctx, event);
+        self.on_change.borrow_mut().update(ctx, event);
     }
 }
 
@@ -423,9 +440,9 @@ pub(super) struct Entry {
     we_changed: Rc<Cell<bool>>,
     enabled: BSNode,
     visible: BSNode,
-    text: Rc<BSNode>,
-    on_change: Rc<BSNode>,
-    on_activate: Rc<BSNode>,
+    text: Rc<RefCell<BSNode>>,
+    on_change: Rc<RefCell<BSNode>>,
+    on_activate: Rc<RefCell<BSNode>>,
 }
 
 impl Entry {
@@ -433,9 +450,11 @@ impl Entry {
         let we_changed = Rc::new(Cell::new(false));
         let enabled = BSNode::compile(&ctx, spec.enabled.clone());
         let visible = BSNode::compile(&ctx, spec.visible.clone());
-        let text = Rc::new(BSNode::compile(&ctx, spec.text.clone()));
-        let on_change = Rc::new(BSNode::compile(&ctx, spec.on_change.clone()));
-        let on_activate = Rc::new(BSNode::compile(&ctx, spec.on_activate.clone()));
+        let text = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.text.clone())));
+        let on_change =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_change.clone())));
+        let on_activate =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.on_activate.clone())));
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -443,7 +462,7 @@ impl Entry {
         if let Some(v) = visible.current() {
             entry.set_visibility(val_to_bool(&v));
         }
-        match text.current() {
+        match text.borrow().current() {
             None => entry.set_text(""),
             Some(Value::String(s)) => entry.set_text(&*s),
             Some(v) => entry.set_text(&format!("{}", v)),
@@ -455,7 +474,7 @@ impl Entry {
         @strong text,
         @strong on_activate => move |entry| {
             entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
-            on_activate.update(
+            on_activate.borrow_mut().update(
                 &ctx,
                 &vm::Event::User(
                     LocalEvent::Event(Value::String(Chars::from(String::from(entry.get_text()))))
@@ -464,7 +483,7 @@ impl Entry {
             idle_add_local(clone!(
                 @strong we_changed, @strong text, @strong entry => move || {
                     we_changed.set(true);
-                    match text.current() {
+                    match text.borrow().current() {
                         None => entry.set_text(""),
                         Some(Value::String(s)) => entry.set_text(&*s),
                         Some(v) => entry.set_text(&format!("{}", v)),
@@ -478,7 +497,7 @@ impl Entry {
         @strong we_changed,
         @strong on_change => move |e| {
             if !we_changed.get() {
-                let v = on_change.update(
+                let v = on_change.borrow_mut().update(
                     &ctx,
                     &vm::Event::User(LocalEvent::Event(
                         Value::String(Chars::from(String::from(e.get_text())))
@@ -510,14 +529,14 @@ impl Entry {
         self.entry.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.enabled.update(ctx, event) {
             self.entry.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.visible.update(ctx, event) {
             self.entry.set_visibility(val_to_bool(&new));
         }
-        if let Some(new) = self.text.update(ctx, event) {
+        if let Some(new) = self.text.borrow_mut().update(ctx, event) {
             self.we_changed.set(true);
             match new {
                 Value::String(s) => self.entry.set_text(&*s),
@@ -525,8 +544,8 @@ impl Entry {
             }
             self.we_changed.set(false);
         }
-        self.on_change.update(ctx, event);
-        self.on_activate.update(ctx, event);
+        self.on_change.borrow_mut().update(ctx, event);
+        self.on_activate.borrow_mut().update(ctx, event);
     }
 }
 
@@ -575,11 +594,11 @@ struct Series {
 
 pub(super) struct LinePlot {
     root: gtk::Box,
-    x_min: Rc<BSNode>,
-    x_max: Rc<BSNode>,
-    y_min: Rc<BSNode>,
-    y_max: Rc<BSNode>,
-    keep_points: Rc<BSNode>,
+    x_min: Rc<RefCell<BSNode>>,
+    x_max: Rc<RefCell<BSNode>>,
+    y_min: Rc<RefCell<BSNode>>,
+    y_max: Rc<RefCell<BSNode>>,
+    keep_points: Rc<RefCell<BSNode>>,
     series: Rc<RefCell<Vec<Series>>>,
 }
 
@@ -592,11 +611,12 @@ impl LinePlot {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
-        let x_min = Rc::new(BSNode::compile(&ctx, spec.x_min.clone()));
-        let x_max = Rc::new(BSNode::compile(&ctx, spec.x_max.clone()));
-        let y_min = Rc::new(BSNode::compile(&ctx, spec.y_min.clone()));
-        let y_max = Rc::new(BSNode::compile(&ctx, spec.y_max.clone()));
-        let keep_points = Rc::new(BSNode::compile(&ctx, spec.keep_points.clone()));
+        let x_min = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.x_min.clone())));
+        let x_max = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.x_max.clone())));
+        let y_min = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.y_min.clone())));
+        let y_max = Rc::new(RefCell::new(BSNode::compile(&ctx, spec.y_max.clone())));
+        let keep_points =
+            Rc::new(RefCell::new(BSNode::compile(&ctx, spec.keep_points.clone())));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
@@ -654,10 +674,10 @@ impl LinePlot {
         spec: &view::LinePlot,
         width: &Rc<Cell<u32>>,
         height: &Rc<Cell<u32>>,
-        x_min: &Rc<BSNode>,
-        x_max: &Rc<BSNode>,
-        y_min: &Rc<BSNode>,
-        y_max: &Rc<BSNode>,
+        x_min: &Rc<RefCell<BSNode>>,
+        x_max: &Rc<RefCell<BSNode>>,
+        y_min: &Rc<RefCell<BSNode>>,
+        y_max: &Rc<RefCell<BSNode>>,
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
@@ -700,8 +720,12 @@ impl LinePlot {
             mesh.draw().map_err(|e| anyhow!("{}", e))
         }
         if width.get() > 0 && height.get() > 0 {
-            let (x_min, x_max, y_min, y_max) =
-                (x_min.current(), x_max.current(), y_min.current(), y_max.current());
+            let (x_min, x_max, y_min, y_max) = (
+                x_min.borrow().current(),
+                x_max.borrow().current(),
+                y_min.borrow().current(),
+                y_max.borrow().current(),
+            );
             let mut computed_x_min = series
                 .borrow()
                 .last()
@@ -877,21 +901,21 @@ impl LinePlot {
         self.root.upcast_ref()
     }
 
-    pub(super) fn update(&self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
+    pub(super) fn update(&mut self, ctx: &BSCtx, event: &vm::Event<LocalEvent>) {
         let mut queue_draw = false;
-        if self.x_min.update(ctx, event).is_some() {
+        if self.x_min.borrow_mut().update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.x_max.update(ctx, event).is_some() {
+        if self.x_max.borrow_mut().update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.y_min.update(ctx, event).is_some() {
+        if self.y_min.borrow_mut().update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.y_max.update(ctx, event).is_some() {
+        if self.y_max.borrow_mut().update(ctx, event).is_some() {
             queue_draw = true;
         }
-        if self.keep_points.update(ctx, event).is_some() {
+        if self.keep_points.borrow_mut().update(ctx, event).is_some() {
             queue_draw = true;
         }
         for s in self.series.borrow_mut().iter_mut() {
@@ -905,6 +929,7 @@ impl LinePlot {
             }
             let keep = self
                 .keep_points
+                .borrow()
                 .current()
                 .and_then(|v| v.cast_to::<u64>().ok())
                 .unwrap_or(0);

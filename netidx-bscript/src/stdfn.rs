@@ -1118,7 +1118,7 @@ impl StoreVar {
     ) {
         if let Some(name) = varname(&mut self.invalid, name) {
             for v in self.queued.drain(..) {
-                ctx.user.set_var(&mut ctx.variables.write(), name.clone(), v)
+                ctx.user.set_var(&ctx.variables, name.clone(), v)
             }
             self.name = Some(name);
         }
@@ -1126,7 +1126,7 @@ impl StoreVar {
             match self.name.as_ref() {
                 None => self.queue_set(value),
                 Some(name) => {
-                    ctx.user.set_var(&mut ctx.variables.write(), name.clone(), value)
+                    ctx.user.set_var(&ctx.variables, name.clone(), value)
                 }
             }
         }

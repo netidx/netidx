@@ -103,7 +103,7 @@ pub trait Ctx {
     fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval;
     fn set_var(
         &self,
-        variables: &mut HashMap<Chars, Value>,
+        variables: &RwLock<HashMap<Chars, Value>>,
         name: Chars,
         value: Value,
     );

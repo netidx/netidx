@@ -1,8 +1,8 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use netidx::{chars::Chars, path::Path, resolver, subscriber::Value};
 use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register};
+use parking_lot::Mutex;
 use std::{
-    cell::{Cell, RefCell},
     mem,
     result::Result,
 };
@@ -13,45 +13,41 @@ pub(crate) enum LocalEvent {
 }
 
 pub(crate) struct Event {
-    cur: RefCell<Option<Value>>,
-    invalid: Cell<bool>,
+    cur: Option<Value>,
+    invalid: bool,
 }
 
 impl Register<WidgetCtx, LocalEvent> for Event {
     fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Box::new(|_, from| {
-            Box::new(Event {
-                cur: RefCell::new(None),
-                invalid: Cell::new(from.len() > 0),
-            })
-        });
-        ctx.functions.borrow_mut().insert("event".into(), f);
+        let f: InitFn<WidgetCtx, LocalEvent> =
+            Box::new(|_, from| Box::new(Event { cur: None, invalid: from.len() > 0 }));
+        ctx.functions.write().insert("event".into(), f);
     }
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Event {
     fn current(&self) -> Option<Value> {
-        if self.invalid.get() {
+        if self.invalid {
             Event::err()
         } else {
-            self.cur.borrow().as_ref().cloned()
+            self.cur.as_ref().cloned()
         }
     }
 
     fn update(
-        &self,
+        &mut self,
         _ctx: &ExecCtx<WidgetCtx, LocalEvent>,
-        from: &[Node<WidgetCtx, LocalEvent>],
+        from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
-        self.invalid.set(from.len() > 0);
+        self.invalid = from.len() > 0;
         match event {
             vm::Event::Variable(_, _)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
             | vm::Event::User(LocalEvent::TableResolved(_, _)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
-                *self.cur.borrow_mut() = Some(value.clone());
+                self.cur = Some(value.clone());
                 self.current()
             }
         }
@@ -72,40 +68,37 @@ enum ConfirmState {
 
 pub(crate) struct Confirm {
     ctx: ExecCtx<WidgetCtx, LocalEvent>,
-    state: RefCell<ConfirmState>,
+    state: Mutex<ConfirmState>,
 }
 
 impl Register<WidgetCtx, LocalEvent> for Confirm {
     fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
         let f: InitFn<WidgetCtx, LocalEvent> = Box::new(|ctx, from| {
-            let t =
-                Confirm { ctx: ctx.clone(), state: RefCell::new(ConfirmState::Empty) };
+            let mut state = ConfirmState::Empty;
             match from {
                 [msg, val] => {
                     if let Some(value) = val.current() {
-                        *t.state.borrow_mut() =
-                            ConfirmState::Ready { message: msg.current(), value };
+                        state = ConfirmState::Ready { message: msg.current(), value };
                     }
                 }
                 [val] => {
                     if let Some(value) = val.current() {
-                        *t.state.borrow_mut() =
-                            ConfirmState::Ready { message: None, value };
+                        state = ConfirmState::Ready { message: None, value };
                     }
                 }
                 _ => {
-                    *t.state.borrow_mut() = ConfirmState::Invalid;
+                    state = ConfirmState::Invalid;
                 }
             }
-            Box::new(t)
+            Box::new(Confirm { ctx: ctx.clone(), state: Mutex::new(state) })
         });
-        ctx.functions.borrow_mut().insert("confirm".into(), f);
+        ctx.functions.write().insert("confirm".into(), f);
     }
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Confirm {
     fn current(&self) -> Option<Value> {
-        match mem::replace(&mut *self.state.borrow_mut(), ConfirmState::Empty) {
+        match mem::replace(&mut *self.state.lock(), ConfirmState::Empty) {
             ConfirmState::Empty => None,
             ConfirmState::Invalid => Confirm::usage(),
             ConfirmState::Ready { message, value } => {
@@ -119,9 +112,9 @@ impl Apply<WidgetCtx, LocalEvent> for Confirm {
     }
 
     fn update(
-        &self,
+        &mut self,
         ctx: &ExecCtx<WidgetCtx, LocalEvent>,
-        from: &[Node<WidgetCtx, LocalEvent>],
+        from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
         match from {
@@ -161,40 +154,38 @@ impl Confirm {
     }
 }
 
-enum NavState {
+pub(crate) enum Navigate {
     Normal,
     Invalid,
 }
 
-pub(crate) struct Navigate(RefCell<NavState>);
-
 impl Register<WidgetCtx, LocalEvent> for Navigate {
     fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
         let f: InitFn<WidgetCtx, LocalEvent> = Box::new(|ctx, from| {
-            let t = Navigate(RefCell::new(NavState::Normal));
+            let mut t = Navigate::Normal;
             match from {
                 [new_window, to] => t.navigate(ctx, new_window.current(), to.current()),
                 [to] => t.navigate(ctx, None, to.current()),
-                _ => *t.0.borrow_mut() = NavState::Invalid,
+                _ => t = Navigate::Invalid,
             }
             Box::new(t)
         });
-        ctx.functions.borrow_mut().insert("navigate".into(), f);
+        ctx.functions.write().insert("navigate".into(), f);
     }
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Navigate {
     fn current(&self) -> Option<Value> {
-        match &*self.0.borrow() {
-            NavState::Normal => None,
-            NavState::Invalid => Navigate::usage(),
+        match self {
+            Navigate::Normal => None,
+            Navigate::Invalid => Navigate::usage(),
         }
     }
 
     fn update(
-        &self,
+        &mut self,
         ctx: &ExecCtx<WidgetCtx, LocalEvent>,
-        from: &[Node<WidgetCtx, LocalEvent>],
+        from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
         let up = match from {
@@ -217,7 +208,7 @@ impl Apply<WidgetCtx, LocalEvent> for Navigate {
                 for e in exprs {
                     up = e.update(ctx, event).is_some() || up;
                 }
-                *self.0.borrow_mut() = NavState::Invalid;
+                *self = Navigate::Invalid;
                 up
             }
         };
@@ -231,7 +222,7 @@ impl Apply<WidgetCtx, LocalEvent> for Navigate {
 
 impl Navigate {
     fn navigate(
-        &self,
+        &mut self,
         ctx: &ExecCtx<WidgetCtx, LocalEvent>,
         new_window: Option<Value>,
         to: Option<Value>,
@@ -240,9 +231,9 @@ impl Navigate {
             let new_window =
                 new_window.and_then(|v| v.cast_to::<bool>().ok()).unwrap_or(false);
             match to.cast_to::<Chars>() {
-                Err(_) => *self.0.borrow_mut() = NavState::Invalid,
+                Err(_) => *self = Navigate::Invalid,
                 Ok(s) => match s.parse::<ViewLoc>() {
-                    Err(()) => *self.0.borrow_mut() = NavState::Invalid,
+                    Err(()) => *self = Navigate::Invalid,
                     Ok(loc) => {
                         if new_window {
                             let _: Result<_, _> = ctx

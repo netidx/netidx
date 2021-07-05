@@ -28,6 +28,7 @@ use netidx::{
     resolver::{self, Auth},
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
+use parking_lot::RwLock;
 use netidx_bscript::{
     expr::ExprKind,
     vm::{self, ExecCtx, Node},
@@ -171,11 +172,11 @@ impl vm::Ctx for WidgetCtx {
 
     fn set_var(
         &self,
-        variables: &RefCell<HashMap<Chars, Value>>,
+        variables: &RwLock<HashMap<Chars, Value>>,
         name: Chars,
         value: Value,
     ) {
-        variables.borrow_mut().insert(name.clone(), value.clone());
+        variables.write().insert(name.clone(), value.clone());
         let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
     }
 
@@ -315,7 +316,7 @@ impl Widget {
     }
 
     fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
@@ -528,7 +529,7 @@ impl View {
     }
 
     fn update(
-        &self,
+        &mut self,
         ctx: &BSCtx,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
@@ -888,9 +889,9 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            ctx.variables.borrow_mut().clear();
+            ctx.variables.write().clear();
             *current_spec.borrow_mut() = spec.clone();
-            ctx.dbg_ctx.borrow_mut().clear();
+            ctx.dbg_ctx.write().clear();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
             ctx.user
                 .window
