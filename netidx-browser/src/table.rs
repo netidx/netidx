@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSNode,
+    BSCtx, BSCtxRef, BSNode,
 };
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
@@ -761,7 +761,7 @@ impl RaeifiedTable {
 
     pub(super) fn update(
         &self,
-        _ctx: &BSCtx,
+        _ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
@@ -869,7 +869,7 @@ impl Table {
 
     pub(super) fn update(
         &mut self,
-        ctx: &BSCtx,
+        ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {

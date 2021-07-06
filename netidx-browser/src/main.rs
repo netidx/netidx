@@ -28,7 +28,6 @@ use netidx::{
     resolver::{self, Auth},
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
-use parking_lot::RwLock;
 use netidx_bscript::{
     expr::ExprKind,
     vm::{self, ExecCtx, Node},
@@ -50,7 +49,8 @@ use structopt::StructOpt;
 use util::{ask_modal, err_modal};
 
 type BSNode = Node<WidgetCtx, LocalEvent>;
-type BSCtx = ExecCtx<WidgetCtx, LocalEvent>;
+type BSCtx = Rc<RefCell<ExecCtx<WidgetCtx, LocalEvent>>>;
+type BSCtxRef<'a> = &'a mut ExecCtx<WidgetCtx, LocalEvent>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 
@@ -164,23 +164,23 @@ struct WidgetCtx {
 }
 
 impl vm::Ctx for WidgetCtx {
-    fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval {
+    fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval {
         let dv = self.backend.subscriber.durable_subscribe(path);
         dv.updates(flags, self.backend.updates.clone());
         dv
     }
 
     fn set_var(
-        &self,
-        variables: &RwLock<HashMap<Chars, Value>>,
+        &mut self,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     ) {
-        variables.write().insert(name.clone(), value.clone());
+        variables.insert(name.clone(), value.clone());
         let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
     }
 
-    fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>) {
+    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>) {
         self.backend.call_rpc(name, args)
     }
 }
@@ -317,7 +317,7 @@ impl Widget {
 
     fn update(
         &mut self,
-        ctx: &BSCtx,
+        ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
@@ -530,7 +530,7 @@ impl View {
 
     fn update(
         &mut self,
-        ctx: &BSCtx,
+        ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
@@ -686,7 +686,7 @@ lazy_static! {
 
 fn update_single(
     current: &Rc<RefCell<Option<View>>>,
-    ctx: &BSCtx,
+    ctx: BSCtxRef,
     event: &vm::Event<LocalEvent>,
 ) {
     if let Some(root) = &mut *current.borrow_mut() {
@@ -998,13 +998,13 @@ fn main() {
                 default_loc.clone(),
             )));
             let window = ApplicationWindow::new(&app);
-            let ctx = bscript::create_ctx(WidgetCtx {
+            let ctx = Rc::new(RefCell::new(bscript::create_ctx(WidgetCtx {
                 backend,
                 raw_view,
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
-            });
+            })));
             run_gui(ctx, app, rx_to_gui);
         }
     });
