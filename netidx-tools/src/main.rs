@@ -8,6 +8,7 @@ use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
+mod container;
 mod publisher;
 mod recorder;
 mod resolver;

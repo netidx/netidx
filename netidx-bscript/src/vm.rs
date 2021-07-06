@@ -3,17 +3,15 @@ use crate::{
     stdfn,
 };
 use fxhash::FxBuildHasher;
-use parking_lot::RwLock;
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{Dval, SubId, Value, UpdatesFlags},
+    subscriber::{Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    ops::Deref,
-    sync::{Weak, Arc},
+    sync::{Arc, Weak},
 };
 
 pub struct DbgCtx {
@@ -83,115 +81,80 @@ pub enum Event<E> {
 }
 
 pub type InitFn<C, E> =
-    Box<dyn Fn(&ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
+    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
 
 pub trait Register<C: Ctx, E> {
-    fn register(ctx: &ExecCtx<C, E>);
+    fn register(ctx: &mut ExecCtx<C, E>);
 }
 
 pub trait Apply<C: Ctx, E> {
     fn current(&self) -> Option<Value>;
     fn update(
         &mut self,
-        ctx: &ExecCtx<C, E>,
+        ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value>;
 }
 
 pub trait Ctx {
-    fn durable_subscribe(&self, flags: UpdatesFlags, path: Path) -> Dval;
+    fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval;
     fn set_var(
-        &self,
-        variables: &RwLock<HashMap<Chars, Value>>,
+        &mut self,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     );
-    fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>);
+    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>);
 }
 
-pub struct ExecCtxInner<C: Ctx + 'static, E: 'static> {
-    pub functions: RwLock<HashMap<String, InitFn<C, E>>>,
-    pub variables: RwLock<HashMap<Chars, Value>>,
-    pub dbg_ctx: RwLock<DbgCtx>,
+pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
+    pub functions: HashMap<String, InitFn<C, E>>,
+    pub variables: HashMap<Chars, Value>,
+    pub dbg_ctx: DbgCtx,
     pub user: C,
-}
-
-pub struct ExecCtx<C: Ctx + 'static, E: 'static>(Arc<ExecCtxInner<C, E>>);
-
-impl<C: Ctx, E> glib::clone::Downgrade for ExecCtx<C, E> {
-    type Weak = ExecCtxWeak<C, E>;
-
-    fn downgrade(&self) -> Self::Weak {
-        ExecCtxWeak(Arc::downgrade(&self.0))
-    }
-}
-
-impl<C: Ctx, E> Clone for ExecCtx<C, E> {
-    fn clone(&self) -> Self {
-        ExecCtx(Arc::clone(&self.0))
-    }
-}
-
-impl<C: Ctx, E> Deref for ExecCtx<C, E> {
-    type Target = ExecCtxInner<C, E>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
 }
 
 impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn no_std(user: C) -> Self {
-        let inner = ExecCtxInner {
-            functions: RwLock::new(HashMap::new()),
-            variables: RwLock::new(HashMap::new()),
-            dbg_ctx: RwLock::new(DbgCtx::new()),
+        ExecCtx {
+            functions: HashMap::new(),
+            variables: HashMap::new(),
+            dbg_ctx: DbgCtx::new(),
             user,
-        };
-        ExecCtx(Arc::new(inner))
+        }
     }
 
     pub fn new(user: C) -> Self {
-        let t = ExecCtx::no_std(user);
-        stdfn::Any::register(&t);
-        stdfn::All::register(&t);
-        stdfn::Sum::register(&t);
-        stdfn::Product::register(&t);
-        stdfn::Divide::register(&t);
-        stdfn::Min::register(&t);
-        stdfn::Max::register(&t);
-        stdfn::And::register(&t);
-        stdfn::Or::register(&t);
-        stdfn::Not::register(&t);
-        stdfn::Cmp::register(&t);
-        stdfn::If::register(&t);
-        stdfn::Filter::register(&t);
-        stdfn::Cast::register(&t);
-        stdfn::Isa::register(&t);
-        stdfn::StringJoin::register(&t);
-        stdfn::StringConcat::register(&t);
-        stdfn::Eval::register(&t);
-        stdfn::Count::register(&t);
-        stdfn::Sample::register(&t);
-        stdfn::Mean::register(&t);
-        stdfn::Uniq::register(&t);
-        stdfn::Store::register(&t);
-        stdfn::StoreVar::register(&t);
-        stdfn::Load::register(&t);
-        stdfn::LoadVar::register(&t);
-        stdfn::RpcCall::register(&t);
+        let mut t = ExecCtx::no_std(user);
+        stdfn::Any::register(&mut t);
+        stdfn::All::register(&mut t);
+        stdfn::Sum::register(&mut t);
+        stdfn::Product::register(&mut t);
+        stdfn::Divide::register(&mut t);
+        stdfn::Min::register(&mut t);
+        stdfn::Max::register(&mut t);
+        stdfn::And::register(&mut t);
+        stdfn::Or::register(&mut t);
+        stdfn::Not::register(&mut t);
+        stdfn::Cmp::register(&mut t);
+        stdfn::If::register(&mut t);
+        stdfn::Filter::register(&mut t);
+        stdfn::Cast::register(&mut t);
+        stdfn::Isa::register(&mut t);
+        stdfn::StringJoin::register(&mut t);
+        stdfn::StringConcat::register(&mut t);
+        stdfn::Eval::register(&mut t);
+        stdfn::Count::register(&mut t);
+        stdfn::Sample::register(&mut t);
+        stdfn::Mean::register(&mut t);
+        stdfn::Uniq::register(&mut t);
+        stdfn::Store::register(&mut t);
+        stdfn::StoreVar::register(&mut t);
+        stdfn::Load::register(&mut t);
+        stdfn::LoadVar::register(&mut t);
+        stdfn::RpcCall::register(&mut t);
         t
-    }
-}
-
-pub struct ExecCtxWeak<C: Ctx + 'static, E: 'static>(Weak<ExecCtxInner<C, E>>);
-
-impl<C: Ctx + 'static, E: 'static> glib::clone::Upgrade for ExecCtxWeak<C, E> {
-    type Strong = ExecCtx<C, E>;
-
-    fn upgrade(&self) -> Option<Self::Strong> {
-        Weak::upgrade(&self.0).map(ExecCtx)
     }
 }
 
@@ -212,14 +175,18 @@ impl<C: Ctx, E> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx, E> Node<C, E> {
-    pub fn compile(ctx: &ExecCtx<C, E>, spec: Expr) -> Self {
+    pub fn compile(ctx: &mut ExecCtx<C, E>, spec: Expr) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
-                ctx.dbg_ctx.write().add_event(*id, v.clone());
+                ctx.dbg_ctx.add_event(*id, v.clone());
                 Node::Constant(spec.clone(), v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, .. } => {
-                match ctx.functions.read().get(function) {
+                let args: Vec<Node<C, E>> = args
+                    .iter()
+                    .map(|spec| Node::compile(ctx, spec.clone()))
+                    .collect();
+                match ctx.functions.get(function).map(Arc::clone) {
                     None => Node::Error(
                         spec.clone(),
                         Value::Error(Chars::from(format!(
@@ -228,13 +195,9 @@ impl<C: Ctx, E> Node<C, E> {
                         ))),
                     ),
                     Some(init) => {
-                        let args: Vec<Node<C, E>> = args
-                            .iter()
-                            .map(|spec| Node::compile(ctx, spec.clone()))
-                            .collect();
                         let function = init(ctx, &args);
                         if let Some(v) = function.current() {
-                            ctx.dbg_ctx.write().add_event(spec.id, v)
+                            ctx.dbg_ctx.add_event(spec.id, v)
                         }
                         Node::Apply { spec, args, function }
                     }
@@ -251,14 +214,14 @@ impl<C: Ctx, E> Node<C, E> {
         }
     }
 
-    pub fn update(&mut self, ctx: &ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
+    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
             Node::Error(_, v) => Some(v.clone()),
             Node::Constant(_, _) => None,
             Node::Apply { spec, args, function } => {
                 let res = function.update(ctx, args, event);
                 if let Some(v) = &res {
-                    ctx.dbg_ctx.write().add_event(spec.id, v.clone());
+                    ctx.dbg_ctx.add_event(spec.id, v.clone());
                 }
                 res
             }

@@ -10,22 +10,18 @@ documentation = "https://docs.rs/netidx-bscript"
 readme = "../README.md"
 license = "MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-glib = "0.10"
-netidx-core = { path = "../netidx-core", version = "0.7" }
-netidx = { path = "../netidx", version = "0.8" }
-chrono = { version = "0.4", features = ["serde"] }
-regex = "1"
-lazy_static = "1"
-serde = "1"
 anyhow = "1"
-bytes = "1"
 base64 = "0.13"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
 combine = "4"
 fxhash = "0.2"
-parking_lot = "0.11"
+lazy_static = "1"
+netidx-core = { path = "../netidx-core", version = "0.7" }
+netidx = { path = "../netidx", version = "0.8" }
+regex = "1"
+serde = "1"
 
 [dev-dependencies]
 proptest = "1"

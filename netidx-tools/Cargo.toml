@@ -24,26 +24,28 @@ default = ["krb5_iov"]
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-futures = "0.3"
-tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 async-stream = "0.3"
-serde = "1"
-serde_json = "1"
-serde_derive = "1"
+base64 = "0.13"
+bytes = "1"
+chrono = { version = "0.4" }
+env_logger = "0.8"
+fs3 = "0.5"
+futures = "0.3"
+fxhash = "0.2"
+indexmap = "1"
+log = "0.4"
+mapr = "0.8"
+netidx-archive = { path = "../netidx-archive", version = "0.8", default_features = false }
 netidx-core = { path = "../netidx-core", version = "0.7" }
 netidx = { path = "../netidx", version = "0.8" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.8", default_features = false }
-netidx-archive = { path = "../netidx-archive", version = "0.8", default_features = false }
-chrono = { version = "0.4" }
-structopt = "0.3"
-bytes = "1"
-anyhow = "1"
-log = "0.4"
-env_logger = "0.8"
-base64 = "0.13"
+netidx-bscript = { path = "../netidx-bscript", version = "0.8" }
 parking_lot = "0.11"
-fs3 = "0.5"
-mapr = "0.8"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+sled = { version = "0.34", features = ["zstd"] }
+structopt = "0.3"
+tokio = { version = "1", features = ["full"] }
 uuid = { version = "0.8", features = ["v4", "serde"] }
-fxhash = "0.2"
-indexmap = "1"
