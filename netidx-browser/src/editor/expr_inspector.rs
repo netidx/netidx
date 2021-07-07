@@ -24,7 +24,7 @@ fn set_dbg_expr(
         let iter = iter.clone();
         Arc::new(move |v: &Value| store.set_value(&iter, 1, &format!("{}", v).to_value()))
     };
-    ctx.dbg_ctx.write().add_watch(spec.id, &watch);
+    ctx.borrow_mut().dbg_ctx.add_watch(spec.id, &watch);
     store.set_value(&iter, 3, &ExprWrap(watch).to_value());
     spec
 }

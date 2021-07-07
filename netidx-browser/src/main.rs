@@ -164,6 +164,8 @@ struct WidgetCtx {
 }
 
 impl vm::Ctx for WidgetCtx {
+    fn clear(&mut self) {}
+
     fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval {
         let dv = self.backend.subscriber.durable_subscribe(path);
         dv.updates(flags, self.backend.updates.clone());
@@ -420,7 +422,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let ask_saved =
         Rc::new(clone!(@weak ctx, @weak root => @default-return true, move || {
-            if !ctx.user.view_saved.get() {
+            if !ctx.borrow().user.view_saved.get() {
                 ask_modal(&root, "Unsaved view will be lost.")
             } else {
                 true
@@ -450,7 +452,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.user.backend.navigate(
+                    ctx.borrow().user.backend.navigate(
                         ViewLoc::Netidx(Path::from(String::from(uri)))
                     );
                     Inhibit(false)
@@ -468,7 +470,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.user.backend.navigate(ViewLoc::Netidx(Path::from("/")));
+                    ctx.borrow().user.backend.navigate(ViewLoc::Netidx(Path::from("/")));
                     Inhibit(false)
             }));
             let sep = gtk::Label::new(Some(" > "));
@@ -484,7 +486,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                     if !ask_saved() {
                         return Inhibit(false)
                     }
-                    ctx.user.backend.navigate(ViewLoc::File(name.clone()));
+                    ctx.borrow().user.backend.navigate(ViewLoc::File(name.clone()));
                     Inhibit(false)
             }));
         }
@@ -647,10 +649,11 @@ fn save_view(
             let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
             async move {
-                match ctx.user.backend.save(loc.clone(), spec).await {
+                let ctx_r = ctx.borrow();
+                match ctx_r.user.backend.save(loc.clone(), spec).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
-                            ctx.user.backend.to_gui.send(ToGui::SaveError(format!(
+                            ctx_r.user.backend.to_gui.send(ToGui::SaveError(format!(
                                 "error saving to: {:?}, {}",
                                 &*save_loc.borrow(),
                                 e
@@ -658,12 +661,12 @@ fn save_view(
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(()) => {
-                        ctx.user.view_saved.set(true);
+                        ctx_r.user.view_saved.set(true);
                         save_button.set_sensitive(false);
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
                             *sl = Some(loc.clone());
-                            ctx.user.backend.navigate(loc.clone());
+                            ctx_r.user.backend.navigate(loc.clone());
                         }
                     }
                 }
@@ -673,7 +676,7 @@ fn save_view(
     let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
-        _ => match choose_location(&ctx.user.window, true) {
+        _ => match choose_location(&ctx.borrow().user.window, true) {
             None => (),
             Some(loc) => do_save(loc),
         },
@@ -698,7 +701,7 @@ fn update_single(
 
 fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
-    group.add_window(&ctx.user.window);
+    group.add_window(&ctx.borrow().user.window);
     let headerbar = gtk::HeaderBar::new();
     let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
@@ -726,13 +729,16 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     headerbar.pack_start(&design_mode);
     headerbar.pack_start(&save_button);
     headerbar.pack_end(&prefs_button);
-    ctx.user.window.set_titlebar(Some(&headerbar));
-    ctx.user.window.set_title("Netidx browser");
-    ctx.user.window.set_default_size(800, 600);
-    ctx.user.window.add(&mainbox);
-    ctx.user.window.show_all();
-    if let Some(screen) = ctx.user.window.get_screen() {
-        setup_css(&screen);
+    {
+        let w = &ctx.borrow().user.window;
+        w.set_titlebar(Some(&headerbar));
+        w.set_title("Netidx browser");
+        w.set_default_size(800, 600);
+        w.add(&mainbox);
+        w.show_all();
+        if let Some(screen) = w.get_screen() {
+            setup_css(&screen);
+        }
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> =
@@ -742,10 +748,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
-    ctx.user.window.connect_delete_event(clone!(
+    ctx.borrow().user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
-            if ctx.user.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
-                ctx.user.backend.terminate();
+            let u = &ctx.borrow().user;
+            if u.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
+                u.backend.terminate();
                 Inhibit(false)
             } else {
                 Inhibit(true)
@@ -786,17 +793,18 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
-    ctx.user.window.add_action(&go_act);
+    ctx.borrow().user.window.add_action(&go_act);
     go_act.connect_activate(clone!(@weak ctx => move |_, _| {
-        if ctx.user.view_saved.get()
-            || ask_modal(&ctx.user.window, "Unsaved view will be lost.") {
-            if let Some(loc) = choose_location(&ctx.user.window, false) {
-                ctx.user.backend.navigate(loc);
+        let u = &ctx.borrow().user;
+        if u.view_saved.get()
+            || ask_modal(&u.window, "Unsaved view will be lost.") {
+            if let Some(loc) = choose_location(&u.window, false) {
+                u.backend.navigate(loc);
             }
         }
     }));
     let save_as_act = gio::SimpleAction::new("save_as", None);
-    ctx.user.window.add_action(&save_as_act);
+    ctx.borrow().user.window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
         @strong save_loc,
         @strong current_spec,
@@ -807,47 +815,56 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ));
     let raw_view_act =
         gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
-    ctx.user.window.add_action(&raw_view_act);
+    ctx.borrow().user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
         if let Some(v) = a.get_state() {
             let new_v = !v.get::<bool>().expect("invalid state");
             let m = "Unsaved view will be lost.";
-            if !new_v || ctx.user.view_saved.get() || ask_modal(&ctx.user.window, m) {
-                ctx.user.raw_view.store(new_v, Ordering::Relaxed);
+            let u = &ctx.borrow().user;
+            if !new_v || u.view_saved.get() || ask_modal(&u.window, m) {
+                u.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
-                ctx.user.backend.navigate(current_loc.borrow().clone());
+                u.backend.navigate(current_loc.borrow().clone());
             }
         }
     }));
     let new_window_act = gio::SimpleAction::new("new_window", None);
-    ctx.user.window.add_action(&new_window_act);
+    ctx.borrow().user.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
         ToGui::UpdateVar(name, value) => {
-            update_single(&current, &ctx, &vm::Event::Variable(name, value));
+            update_single(
+                &current,
+                &mut ctx.borrow_mut(),
+                &vm::Event::Variable(name, value),
+            );
             Continue(true)
         }
         ToGui::UpdateRpc(path, value) => {
             let name = Chars::from(String::from(&*path));
-            update_single(&current, &ctx, &vm::Event::Rpc(name, value));
+            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Rpc(name, value));
             Continue(true)
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = WAITS.take();
                 for (id, value) in batch.drain(..) {
-                    root.update(&ctx, &mut *waits, &vm::Event::Netidx(id, value));
+                    root.update(
+                        &mut ctx.borrow_mut(),
+                        &mut *waits,
+                        &vm::Event::Netidx(id, value),
+                    );
                 }
                 if waits.len() == 0 {
-                    ctx.user.backend.updated()
+                    ctx.borrow().user.backend.updated()
                 } else {
                     let ctx = ctx.clone();
                     glib::MainContext::default().spawn_local(async move {
                         for r in waits.drain(..) {
                             let _: result::Result<_, _> = r.await;
                         }
-                        ctx.user.backend.updated();
+                        ctx.borrow().user.backend.updated();
                     });
                 }
             }
@@ -855,22 +872,22 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::TableResolved(path, table) => {
             let e = vm::Event::User(LocalEvent::TableResolved(path, table));
-            update_single(&current, &ctx, &e);
+            update_single(&current, &mut ctx.borrow_mut(), &e);
             Continue(true)
         }
         ToGui::NavigateInWindow(loc) => {
-            *ctx.user.new_window_loc.borrow_mut() = loc;
+            *ctx.borrow().user.new_window_loc.borrow_mut() = loc;
             app.activate();
             Continue(true)
         }
         ToGui::View { loc, spec, generated } => {
             match loc {
                 None => {
-                    ctx.user.view_saved.set(false);
+                    ctx.borrow().user.view_saved.set(false);
                     save_button.set_sensitive(true);
                 }
                 Some(loc) => {
-                    ctx.user.view_saved.set(true);
+                    ctx.borrow().user.view_saved.set(true);
                     save_button.set_sensitive(false);
                     if !generated {
                         *save_loc.borrow_mut() = Some(match loc.clone() {
@@ -889,11 +906,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 mainbox.remove(cur.root());
             }
-            ctx.variables.write().clear();
+            ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
-            ctx.dbg_ctx.write().clear();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
-            ctx.user
+            ctx.borrow()
+                .user
                 .window
                 .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             mainbox.add2(cur.root());
@@ -913,11 +930,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::ShowError(s) => {
-            err_modal(&ctx.user.window, &s);
+            err_modal(&ctx.borrow().user.window, &s);
             Continue(true)
         }
         ToGui::SaveError(s) => {
-            err_modal(&ctx.user.window, &s);
+            err_modal(&ctx.borrow().user.window, &s);
             idle_add_local(clone!(
                 @weak ctx,
                 @strong save_loc,

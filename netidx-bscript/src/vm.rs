@@ -98,6 +98,7 @@ pub trait Apply<C: Ctx, E> {
 }
 
 pub trait Ctx {
+    fn clear(&mut self);
     fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval;
     fn set_var(
         &mut self,
@@ -116,6 +117,12 @@ pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
 }
 
 impl<C: Ctx, E> ExecCtx<C, E> {
+    pub fn clear(&mut self) {
+        self.variables.clear();
+        self.dbg_ctx.clear();
+        self.user.clear();
+    }
+
     pub fn no_std(user: C) -> Self {
         ExecCtx {
             functions: HashMap::new(),

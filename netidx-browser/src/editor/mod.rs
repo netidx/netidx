@@ -757,7 +757,7 @@ impl Editor {
                                 undo_stack.borrow_mut().push(spec.borrow().clone());
                             }
                             spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            ctx.user.backend.render(spec.borrow().clone());
+                            ctx.borrow().user.backend.render(spec.borrow().clone());
                         }
                         scheduled.set(false);
                         glib::Continue(false)
@@ -839,14 +839,14 @@ impl Editor {
             match s.get_selected() {
                 None => {
                     *selected.borrow_mut() = None;
-                    ctx.user.backend.highlight(vec![]);
+                    ctx.borrow().user.backend.highlight(vec![]);
                     reveal_properties.set_reveal_child(false);
                 }
                 Some((_, iter)) => {
                     *selected.borrow_mut() = Some(iter.clone());
                     let mut path = Vec::new();
                     Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
-                    ctx.user.backend.highlight(path);
+                    ctx.borrow().user.backend.highlight(path);
                     let v = store.get_value(&iter, 0);
                     if let Ok(Some(id)) = v.get::<&str>() {
                         inhibit_change.set(true);
