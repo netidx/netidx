@@ -29,7 +29,7 @@ use netidx::{
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
-    expr::ExprKind,
+    expr::{ExprId, ExprKind},
     vm::{self, ExecCtx, Node},
 };
 use netidx_protocols::view;
@@ -166,11 +166,18 @@ struct WidgetCtx {
 impl vm::Ctx for WidgetCtx {
     fn clear(&mut self) {}
 
-    fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval {
+    fn durable_subscribe(
+        &mut self,
+        flags: UpdatesFlags,
+        path: Path,
+        _ref_id: ExprId,
+    ) -> Dval {
         let dv = self.backend.subscriber.durable_subscribe(path);
         dv.updates(flags, self.backend.updates.clone());
         dv
     }
+
+    fn ref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
 
     fn set_var(
         &mut self,
@@ -182,7 +189,7 @@ impl vm::Ctx for WidgetCtx {
         let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
     }
 
-    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>) {
+    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, _ref_id: ExprId) {
         self.backend.call_rpc(name, args)
     }
 }

@@ -81,7 +81,7 @@ pub enum Event<E> {
 }
 
 pub type InitFn<C, E> =
-    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>]) -> Box<dyn Apply<C, E>>>;
+    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>], ExprId) -> Box<dyn Apply<C, E>>>;
 
 pub trait Register<C: Ctx, E> {
     fn register(ctx: &mut ExecCtx<C, E>);
@@ -99,14 +99,20 @@ pub trait Apply<C: Ctx, E> {
 
 pub trait Ctx {
     fn clear(&mut self);
-    fn durable_subscribe(&mut self, flags: UpdatesFlags, path: Path) -> Dval;
+    fn durable_subscribe(
+        &mut self,
+        flags: UpdatesFlags,
+        path: Path,
+        ref_by: ExprId,
+    ) -> Dval;
+    fn ref_var(&mut self, name: Chars, ref_by: ExprId);
     fn set_var(
         &mut self,
         variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     );
-    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>);
+    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, ref_by: ExprId);
 }
 
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
@@ -182,7 +188,7 @@ impl<C: Ctx, E> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx, E> Node<C, E> {
-    pub fn compile(ctx: &mut ExecCtx<C, E>, spec: Expr) -> Self {
+    pub fn compile_int(ctx: &mut ExecCtx<C, E>, spec: Expr, top_id: ExprId) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
                 ctx.dbg_ctx.add_event(*id, v.clone());
@@ -191,7 +197,7 @@ impl<C: Ctx, E> Node<C, E> {
             Expr { kind: ExprKind::Apply { args, function }, .. } => {
                 let args: Vec<Node<C, E>> = args
                     .iter()
-                    .map(|spec| Node::compile(ctx, spec.clone()))
+                    .map(|spec| Node::compile_int(ctx, spec.clone(), top_id))
                     .collect();
                 match ctx.functions.get(function).map(Arc::clone) {
                     None => Node::Error(
@@ -202,7 +208,7 @@ impl<C: Ctx, E> Node<C, E> {
                         ))),
                     ),
                     Some(init) => {
-                        let function = init(ctx, &args);
+                        let function = init(ctx, &args, top_id);
                         if let Some(v) = function.current() {
                             ctx.dbg_ctx.add_event(spec.id, v)
                         }
@@ -211,6 +217,11 @@ impl<C: Ctx, E> Node<C, E> {
                 }
             }
         }
+    }
+
+    pub fn compile(ctx: &mut ExecCtx<C, E>, spec: Expr) -> Self {
+        let top_id = spec.id;
+        Self::compile_int(ctx, spec, top_id)
     }
 
     pub fn current(&self) -> Option<Value> {

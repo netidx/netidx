@@ -16,7 +16,7 @@ pub(crate) struct Event {
 impl Register<WidgetCtx, LocalEvent> for Event {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
         let f: InitFn<WidgetCtx, LocalEvent> =
-            Arc::new(|_, from| Box::new(Event { cur: None, invalid: from.len() > 0 }));
+            Arc::new(|_, from, _| Box::new(Event { cur: None, invalid: from.len() > 0 }));
         ctx.functions.insert("event".into(), f);
     }
 }
@@ -69,7 +69,7 @@ pub(crate) struct Confirm {
 
 impl Register<WidgetCtx, LocalEvent> for Confirm {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from| {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _| {
             let mut state = ConfirmState::Empty;
             match from {
                 [msg, val] => {
@@ -160,7 +160,7 @@ pub(crate) enum Navigate {
 
 impl Register<WidgetCtx, LocalEvent> for Navigate {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from| {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _| {
             let mut t = Navigate::Normal;
             match from {
                 [new_window, to] => t.navigate(ctx, new_window.current(), to.current()),

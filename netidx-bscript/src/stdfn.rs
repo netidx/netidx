@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Expr, VNAME},
+    expr::{Expr, ExprId, VNAME},
     vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
 };
 use netidx::{
@@ -38,8 +38,9 @@ pub struct Any(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> =
-            Arc::new(|_ctx, from| Box::new(Any(from.iter().find_map(|s| s.current()))));
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
+            Box::new(Any(from.iter().find_map(|s| s.current())))
+        });
         ctx.functions.insert("any".into(), f);
     }
 }
@@ -80,7 +81,7 @@ pub struct CachedCur<T: CachedCurEval> {
 
 impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_ctx, from| {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
             let cached = CachedVals::new(from);
             let current = T::eval(&cached);
             Box::new(CachedCur::<T> { cached, current, t: PhantomData })
@@ -651,7 +652,7 @@ impl<C: Ctx, E> Eval<C, E> {
 
 impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _| {
             let mut t = Eval { cached: CachedVals::new(from), current: Err(Value::Null) };
             t.compile(ctx);
             Box::new(t)
@@ -691,8 +692,9 @@ pub struct Count {
 
 impl<C: Ctx, E> Register<C, E> for Count {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> =
-            Arc::new(|_, from| Box::new(Count { from: CachedVals::new(from), count: 0 }));
+        let f: InitFn<C, E> = Arc::new(|_, from, _| {
+            Box::new(Count { from: CachedVals::new(from), count: 0 })
+        });
         ctx.functions.insert("count".into(), f);
     }
 }
@@ -727,7 +729,7 @@ pub struct Sample {
 
 impl<C: Ctx, E> Register<C, E> for Sample {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _| {
             let current = match from {
                 [trigger, source] => match trigger.current() {
                     None => None,
@@ -784,7 +786,7 @@ pub struct Mean {
 
 impl<C: Ctx, E> Register<C, E> for Mean {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _| {
             Box::new(Mean { from: CachedVals::new(from), total: 0., samples: 0 })
         });
         ctx.functions.insert("mean".into(), f);
@@ -833,7 +835,7 @@ pub(crate) struct Uniq(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Uniq {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _| {
             let mut t = Uniq(None);
             match from {
                 [e] => t.0 = e.current(),
@@ -908,14 +910,15 @@ fn pathname(invalid: &mut bool, path: Option<Value>) -> Option<Path> {
 
 pub struct Store {
     queued: Vec<Value>,
+    top_id: ExprId,
     dv: Option<(Path, Dval)>,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for Store {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
-            let mut t = Store { queued: Vec::new(), dv: None, invalid: false };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+            let mut t = Store { queued: Vec::new(), dv: None, invalid: false, top_id };
             match from {
                 [to, val] => t.set(ctx, to.current(), val.current()),
                 _ => t.invalid = true,
@@ -997,7 +1000,11 @@ impl Store {
             },
             (Some(p), val) => {
                 let path = Path::from(p);
-                let dv = ctx.user.durable_subscribe(UpdatesFlags::empty(), path.clone());
+                let dv = ctx.user.durable_subscribe(
+                    UpdatesFlags::empty(),
+                    path.clone(),
+                    self.top_id,
+                );
                 if let Some(v) = val {
                     self.queue(v)
                 }
@@ -1044,7 +1051,7 @@ pub struct StoreVar {
 
 impl<C: Ctx, E> Register<C, E> for StoreVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _| {
             let mut t = StoreVar { queued: Vec::new(), name: None, invalid: false };
             match from {
                 [name, value] => t.set(ctx, name.current(), value.current()),
@@ -1141,13 +1148,14 @@ impl StoreVar {
 
 pub(crate) struct Load {
     cur: Option<Dval>,
+    top_id: ExprId,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
-            let mut t = Load { cur: None, invalid: false };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+            let mut t = Load { cur: None, invalid: false, top_id };
             match from {
                 [path] => t.subscribe(ctx, path.current()),
                 _ => t.invalid = true,
@@ -1214,8 +1222,11 @@ impl<C: Ctx, E> Apply<C, E> for Load {
 impl Load {
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         if let Some(path) = pathname(&mut self.invalid, name) {
-            self.cur =
-                Some(ctx.user.durable_subscribe(UpdatesFlags::BEGIN_WITH_LAST, path));
+            self.cur = Some(ctx.user.durable_subscribe(
+                UpdatesFlags::BEGIN_WITH_LAST,
+                path,
+                self.top_id,
+            ));
         }
     }
 
@@ -1229,13 +1240,14 @@ impl Load {
 pub struct LoadVar {
     name: Option<Chars>,
     cur: Option<Value>,
+    top_id: ExprId,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for LoadVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
-            let mut t = LoadVar { name: None, cur: None, invalid: false };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+            let mut t = LoadVar { name: None, cur: None, invalid: false, top_id };
             match from {
                 [name] => t.subscribe(ctx, name.current()),
                 _ => t.invalid = true,
@@ -1313,6 +1325,7 @@ impl LoadVar {
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         if let Some(name) = varname(&mut self.invalid, name) {
             self.cur = ctx.variables.get(&name).cloned();
+            ctx.user.ref_var(name.clone(), self.top_id);
             self.name = Some(name);
         }
     }
@@ -1320,13 +1333,14 @@ impl LoadVar {
 
 pub(crate) struct RpcCall {
     args: CachedVals,
+    top_id: ExprId,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from| {
-            let mut t = RpcCall { args: CachedVals::new(from), invalid: true };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+            let mut t = RpcCall { args: CachedVals::new(from), invalid: true, top_id };
             t.maybe_call(ctx);
             Box::new(t)
         });
@@ -1439,7 +1453,7 @@ impl RpcCall {
 
     fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((name, args)) = self.get_args() {
-            ctx.user.call_rpc(Path::from(name), args);
+            ctx.user.call_rpc(Path::from(name), args, self.top_id);
         }
     }
 }
