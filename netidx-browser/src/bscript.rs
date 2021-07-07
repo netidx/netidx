@@ -1,11 +1,7 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use netidx::{chars::Chars, path::Path, resolver, subscriber::Value};
 use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register};
-use parking_lot::Mutex;
-use std::{
-    mem,
-    result::Result,
-};
+use std::{cell::RefCell, mem, result::Result, sync::Arc};
 
 pub(crate) enum LocalEvent {
     Event(Value),
@@ -18,10 +14,10 @@ pub(crate) struct Event {
 }
 
 impl Register<WidgetCtx, LocalEvent> for Event {
-    fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
+    fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
         let f: InitFn<WidgetCtx, LocalEvent> =
-            Box::new(|_, from| Box::new(Event { cur: None, invalid: from.len() > 0 }));
-        ctx.functions.write().insert("event".into(), f);
+            Arc::new(|_, from| Box::new(Event { cur: None, invalid: from.len() > 0 }));
+        ctx.functions.insert("event".into(), f);
     }
 }
 
@@ -36,7 +32,7 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
 
     fn update(
         &mut self,
-        _ctx: &ExecCtx<WidgetCtx, LocalEvent>,
+        _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
         from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
@@ -67,13 +63,13 @@ enum ConfirmState {
 }
 
 pub(crate) struct Confirm {
-    ctx: ExecCtx<WidgetCtx, LocalEvent>,
-    state: Mutex<ConfirmState>,
+    window: gtk::ApplicationWindow,
+    state: RefCell<ConfirmState>,
 }
 
 impl Register<WidgetCtx, LocalEvent> for Confirm {
-    fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Box::new(|ctx, from| {
+    fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from| {
             let mut state = ConfirmState::Empty;
             match from {
                 [msg, val] => {
@@ -90,15 +86,18 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
                     state = ConfirmState::Invalid;
                 }
             }
-            Box::new(Confirm { ctx: ctx.clone(), state: Mutex::new(state) })
+            Box::new(Confirm {
+                window: ctx.user.window.clone(),
+                state: RefCell::new(state),
+            })
         });
-        ctx.functions.write().insert("confirm".into(), f);
+        ctx.functions.insert("confirm".into(), f);
     }
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Confirm {
     fn current(&self) -> Option<Value> {
-        match mem::replace(&mut *self.state.lock(), ConfirmState::Empty) {
+        match mem::replace(&mut *self.state.borrow_mut(), ConfirmState::Empty) {
             ConfirmState::Empty => None,
             ConfirmState::Invalid => Confirm::usage(),
             ConfirmState::Ready { message, value } => {
@@ -113,7 +112,7 @@ impl Apply<WidgetCtx, LocalEvent> for Confirm {
 
     fn update(
         &mut self,
-        ctx: &ExecCtx<WidgetCtx, LocalEvent>,
+        ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
         from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
@@ -150,7 +149,7 @@ impl Confirm {
     fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
         let default = Value::from("proceed with");
         let msg = msg.unwrap_or(&default);
-        ask_modal(&self.ctx.user.window, &format!("{} {}?", msg, val))
+        ask_modal(&self.window, &format!("{} {}?", msg, val))
     }
 }
 
@@ -160,8 +159,8 @@ pub(crate) enum Navigate {
 }
 
 impl Register<WidgetCtx, LocalEvent> for Navigate {
-    fn register(ctx: &ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Box::new(|ctx, from| {
+    fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from| {
             let mut t = Navigate::Normal;
             match from {
                 [new_window, to] => t.navigate(ctx, new_window.current(), to.current()),
@@ -170,7 +169,7 @@ impl Register<WidgetCtx, LocalEvent> for Navigate {
             }
             Box::new(t)
         });
-        ctx.functions.write().insert("navigate".into(), f);
+        ctx.functions.insert("navigate".into(), f);
     }
 }
 
@@ -184,7 +183,7 @@ impl Apply<WidgetCtx, LocalEvent> for Navigate {
 
     fn update(
         &mut self,
-        ctx: &ExecCtx<WidgetCtx, LocalEvent>,
+        ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
         from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
@@ -296,9 +295,9 @@ pub(crate) static FORMULAS: [&'static str; 30] = [
 ];
 
 pub(crate) fn create_ctx(ctx: WidgetCtx) -> ExecCtx<WidgetCtx, LocalEvent> {
-    let t = ExecCtx::new(ctx);
-    Event::register(&t);
-    Confirm::register(&t);
-    Navigate::register(&t);
+    let mut t = ExecCtx::new(ctx);
+    Event::register(&mut t);
+    Confirm::register(&mut t);
+    Navigate::register(&mut t);
     t
 }

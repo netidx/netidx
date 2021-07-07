@@ -34,7 +34,7 @@ impl Button {
     ) -> Self {
         let button = gtk::Button::new();
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
         let label = BSNode::compile(ctx_r, spec.label.clone());
         let on_click =
@@ -94,7 +94,7 @@ impl LinkButton {
         selected_path: gtk::Label,
     ) -> Self {
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
         let uri = BSNode::compile(ctx_r, spec.uri.clone());
         let label = BSNode::compile(ctx_r, spec.label.clone());
@@ -202,7 +202,7 @@ pub(super) struct Action {
 impl Action {
     pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let mut action = BSNode::compile(ctx_r, spec.clone());
         action.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Action { action }
@@ -247,7 +247,7 @@ impl Selector {
             }),
         );
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
         let choices = BSNode::compile(ctx_r, spec.choices.clone());
         let selected =
@@ -372,7 +372,7 @@ impl Toggle {
     ) -> Self {
         let switch = gtk::Switch::new();
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
         let value = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.value.clone())));
         let on_change =
@@ -459,7 +459,7 @@ impl Entry {
     pub(super) fn new(ctx: &BSCtx, spec: view::Entry, selected_path: gtk::Label) -> Self {
         let we_changed = Rc::new(Cell::new(false));
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
         let visible = BSNode::compile(ctx_r, spec.visible.clone());
         let text = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.text.clone())));
@@ -624,7 +624,7 @@ impl LinePlot {
         let canvas = gtk::DrawingArea::new();
         root.pack_start(&canvas, true, true, 0);
         let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut *ctx_r;
+        let ctx_r = &mut ctx_r;
         let x_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.x_min.clone())));
         let x_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.x_max.clone())));
         let y_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.y_min.clone())));
