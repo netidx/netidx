@@ -317,7 +317,7 @@ fn main() {
             subscriber::run(cfg, no_stdin, oneshot, subscribe_timeout, paths, auth)
         }
         Sub::Container(ccfg) => {
-            let auth = auth(opt.anon, &cfg, opt.upn, spn);
+            let auth = auth(opt.anon, &cfg, opt.upn, ccfg.spn.clone());
             container::run(cfg, auth, ccfg)
         }
         Sub::Record {

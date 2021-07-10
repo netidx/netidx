@@ -102,7 +102,7 @@ pub(super) struct ContainerConfig {
     )]
     bind: BindCfg,
     #[structopt(long = "spn", help = "krb5 use <spn>")]
-    spn: Option<String>,
+    pub(super) spn: Option<String>,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
@@ -232,7 +232,10 @@ impl Container {
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
 
-    async fn run(&mut self) -> Result<()> {}
+    async fn run(&mut self) -> Result<()> {
+        self.init().await?;
+        Ok(())
+    }
 }
 
 pub(super) fn run(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) {
