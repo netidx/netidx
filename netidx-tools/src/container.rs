@@ -301,20 +301,22 @@ impl Container {
         self.init().await?;
         loop {
             select_biased! {
-                u = self.sub_updates.select_next_some() => {
-                    self.process_subscriptions(u);
-                }
-                w = self.write_updates_rx.select_next_some() => {
-                    self.process_writes(w);
-                }
                 r = self.publish_requests.select_next_some() => {
                     self.process_publish_request(r);
+                }
+                r = self.sub_updates.select_next_some() => {
+                    self.process_subscriptions(r);
+                }
+                r = self.write_updates_rx.select_next_some() => {
+                    self.process_writes(r);
                 }
                 r = self.delete_path_rx.select_next_some() => {
                     self.delete_path(r);
                 }
+                complete => break
             }
         }
+        Ok(())
     }
 }
 
