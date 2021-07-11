@@ -49,3 +49,4 @@ sled = { version = "0.34", features = ["zstd"] }
 structopt = "0.3"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "0.8", features = ["v4", "serde"] }
+lazy_static = "1"

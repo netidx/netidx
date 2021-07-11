@@ -10,25 +10,30 @@ use netidx::{
     config,
     pack::Pack,
     path::Path,
-    pool::Pooled,
+    pool::{Pool, Pooled},
     publisher::{BindCfg, DefaultHandle, Id, Publisher, Val, WriteRequest},
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_bscript::{
     expr::{Expr, ExprId},
-    vm::{Ctx, ExecCtx, Node},
+    vm::{self, Ctx, ExecCtx, Node},
 };
 use netidx_protocols::rpc::server::Proc;
 use sled;
 use std::{
     collections::{HashMap, HashSet},
-    str,
+    mem, str,
     sync::Arc,
     time::Duration,
 };
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
+
+lazy_static! {
+    static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 10_000);
+    static ref REFS: Pool<Vec<ExprId>> = Pool::new(5, 10_000);
+}
 
 struct Lc {
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
@@ -37,7 +42,7 @@ struct Lc {
     refs: FxHashMap<Path, FxHashSet<ExprId>>,
     subscriber: Subscriber,
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
-    var_updates: Vec<(Chars, Value)>,
+    var_updates: Pooled<Vec<(Chars, Value)>>,
 }
 
 impl Lc {
@@ -52,7 +57,7 @@ impl Lc {
             refs: HashMap::with_hasher(FxBuildHasher::default()),
             subscriber,
             sub_updates,
-            var_updates: vec![],
+            var_updates: VAR_UPDATES.take(),
         }
     }
 }
@@ -140,7 +145,7 @@ struct Container {
     published_formulas: FxHashMap<Path, Fids>,
     published_on_writes: FxHashMap<Path, (Id, ExprId)>,
     ctx: ExecCtx<Lc, Value>,
-    compiled: FxHashMap<ExprId, Node<Lc, Value>>,
+    compiled: FxHashMap<ExprId, (Node<Lc, Value>, Option<Id>)>,
     published: FxHashMap<Id, Val>,
     publisher: Publisher,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
@@ -261,7 +266,7 @@ impl Container {
             self.published.insert(id, val);
             self.published.insert(data_id, dataval);
             self.published_formulas.insert(path, Fids { expr_id, id, data_id });
-            self.compiled.insert(expr_id, node);
+            self.compiled.insert(expr_id, (node, Some(id)));
         }
         for res in self.on_writes.iter() {
             let (path, value) = res?;
@@ -276,9 +281,33 @@ impl Container {
             val.writes(self.write_updates_tx.clone());
             self.published.insert(id, val);
             self.published_on_writes.insert(path, (id, expr_id));
-            self.compiled.insert(expr_id, node);
+            self.compiled.insert(expr_id, (node, None));
         }
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
+    }
+
+    fn process_var_updates(&mut self) {
+        // CR estokes: deal with infinite loops
+        let mut refs = REFS.take();
+        while self.ctx.user.var_updates.len() > 0 {
+            let mut pending =
+                mem::replace(&mut self.ctx.user.var_updates, VAR_UPDATES.take());
+            for (name, value) in pending.drain(..) {
+                if let Some(expr_ids) = self.ctx.user.var.get(&name) {
+                    refs.extend(expr_ids.iter().copied());
+                }
+                let event = vm::Event::Variable(name, value);
+                for expr_id in refs.drain(..) {
+                    if let Some((node, id)) = self.compiled.get_mut(&expr_id) {
+                        if let Some(value) = node.update(&mut self.ctx, &event) {
+                            if let Some(val) = id.and_then(|id| self.published.get(&id)) {
+                                val.update(value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn process_subscriptions(&mut self, mut updates: Pooled<Vec<(SubId, Event)>>) {
@@ -315,6 +344,8 @@ impl Container {
                 }
                 complete => break
             }
+            let timeout = self.cfg.timeout.map(Duration::from_secs);
+            self.publisher.flush(timeout).await;
         }
         Ok(())
     }
