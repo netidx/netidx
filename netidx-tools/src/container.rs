@@ -1,5 +1,9 @@
 use anyhow::Result;
-use futures::channel::mpsc;
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+    select_biased,
+};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use netidx::{
     chars::Chars,
@@ -7,7 +11,7 @@ use netidx::{
     pack::Pack,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Val},
+    publisher::{BindCfg, DefaultHandle, Id, Publisher, Val, WriteRequest},
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
@@ -110,11 +114,6 @@ pub(super) struct ContainerConfig {
     timeout: Option<u64>,
     #[structopt(long = "base-path", help = "the netidx path of the db")]
     base_path: Path,
-    #[structopt(
-        long = "default-publisher",
-        help = "become the default publisher under base-path"
-    )]
-    default_publisher: bool,
     #[structopt(long = "db", help = "the db file")]
     db: String,
     #[structopt(long = "compress", help = "use zstd compression")]
@@ -144,8 +143,45 @@ struct Container {
     compiled: FxHashMap<ExprId, Node<Lc, Value>>,
     published: FxHashMap<Id, Val>,
     publisher: Publisher,
-    subscriber: Subscriber,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
+    write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    publish_requests: DefaultHandle,
+    delete_path_rpc: Proc,
+    delete_path_rx: mpsc::Receiver<Path>,
+}
+
+async fn start_delete_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+) -> Result<(Proc, mpsc::Receiver<Path>)> {
+    let (tx, rx) = mpsc::channel(10);
+    let proc = Proc::new(
+        publisher,
+        base_path.append(".api/delete"),
+        Value::from("delete a path from the database"),
+        vec![(Arc::from("path"), (Value::Null, Value::from("the path to delete")))]
+            .into_iter()
+            .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => Value::Error(Chars::from("invalid argument, expected path")),
+                    Some(Value::String(path)) => {
+                        let path = Path::from(Arc::from(&*path));
+                        let _: Result<_, _> = tx.send(path).await;
+                        Value::Ok
+                    }
+                    Some(_) => Value::Error(Chars::from(
+                        "invalid argument type, expected string",
+                    )),
+                }
+            })
+        }),
+    )
+    .await?;
+    Ok((proc, rx))
 }
 
 impl Container {
@@ -160,9 +196,13 @@ impl Container {
         let on_writes = db.open_tree("on_writes")?;
         let data = db.open_tree("data")?;
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
+        let publish_requests = publisher.publish_default(ccfg.base_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
-        let ctx = ExecCtx::new(Lc::new(subscriber.clone(), sub_updates_tx));
+        let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
+        let ctx = ExecCtx::new(Lc::new(subscriber, sub_updates_tx));
+        let (delete_path_rpc, delete_path_rx) =
+            start_delete_rpc(&publisher, &ccfg.base_path).await?;
         Ok(Container {
             cfg: ccfg,
             db,
@@ -176,8 +216,12 @@ impl Container {
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
             published: HashMap::with_hasher(FxBuildHasher::default()),
             publisher,
-            subscriber,
             sub_updates,
+            write_updates_tx,
+            write_updates_rx,
+            publish_requests,
+            delete_path_rpc,
+            delete_path_rx,
         })
     }
 
@@ -194,6 +238,7 @@ impl Container {
             let value = Value::decode(&mut &*value)?;
             let val = self.publisher.publish(path.clone(), value)?;
             let id = val.id();
+            val.writes(self.write_updates_tx.clone());
             self.published_data.insert(path, id);
             self.published.insert(id, val);
         }
@@ -211,6 +256,8 @@ impl Container {
                 .publish(path.clone(), node.current().unwrap_or(Value::Null))?;
             let id = val.id();
             let data_id = dataval.id();
+            val.writes(self.write_updates_tx.clone());
+            dataval.writes(self.write_updates_tx.clone());
             self.published.insert(id, val);
             self.published.insert(data_id, dataval);
             self.published_formulas.insert(path, Fids { expr_id, id, data_id });
@@ -223,8 +270,10 @@ impl Container {
             let expr = exprtxt.parse::<Expr>()?;
             let expr_id = expr.id;
             let node = Node::compile(&mut self.ctx, expr);
-            let val = self.publisher.publish(path.append(".on_write"), Value::from(exprtxt))?;
+            let val =
+                self.publisher.publish(path.append(".on_write"), Value::from(exprtxt))?;
             let id = val.id();
+            val.writes(self.write_updates_tx.clone());
             self.published.insert(id, val);
             self.published_on_writes.insert(path, (id, expr_id));
             self.compiled.insert(expr_id, node);
@@ -232,16 +281,46 @@ impl Container {
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
 
-    async fn run(&mut self) -> Result<()> {
+    fn process_subscriptions(&mut self, mut updates: Pooled<Vec<(SubId, Event)>>) {
+        unimplemented!()
+    }
+
+    fn process_writes(&mut self, mut writes: Pooled<Vec<WriteRequest>>) {
+        unimplemented!()
+    }
+
+    fn process_publish_request(&mut self, req: (Path, oneshot::Sender<()>)) {
+        unimplemented!()
+    }
+
+    fn delete_path(&mut self, path: Path) {
+        unimplemented!()
+    }
+
+    async fn run(mut self) -> Result<()> {
         self.init().await?;
-        Ok(())
+        loop {
+            select_biased! {
+                u = self.sub_updates.select_next_some() => {
+                    self.process_subscriptions(u);
+                }
+                w = self.write_updates_rx.select_next_some() => {
+                    self.process_writes(w);
+                }
+                r = self.publish_requests.select_next_some() => {
+                    self.process_publish_request(r);
+                }
+                r = self.delete_path_rx.select_next_some() => {
+                    self.delete_path(r);
+                }
+            }
+        }
     }
 }
 
 pub(super) fn run(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) {
     Runtime::new().expect("failed to create runtime").block_on(async move {
-        let mut t =
-            Container::new(cfg, auth, ccfg).await.expect("failed to create context");
+        let t = Container::new(cfg, auth, ccfg).await.expect("failed to create context");
         t.run().await.expect("container main loop failed")
     })
 }
