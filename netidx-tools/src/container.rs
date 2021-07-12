@@ -286,6 +286,16 @@ impl Container {
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
 
+    fn update_expr_id(&mut self, expr_id: ExprId, event: &vm::Event<Value>) {
+        if let Some((node, id)) = self.compiled.get_mut(&expr_id) {
+            if let Some(value) = node.update(&mut self.ctx, &event) {
+                if let Some(val) = id.and_then(|id| self.published.get(&id)) {
+                    val.update(value);
+                }
+            }
+        }
+    }
+
     fn process_var_updates(&mut self) {
         // CR estokes: deal with infinite loops
         let mut refs = REFS.take();
@@ -298,20 +308,26 @@ impl Container {
                 }
                 let event = vm::Event::Variable(name, value);
                 for expr_id in refs.drain(..) {
-                    if let Some((node, id)) = self.compiled.get_mut(&expr_id) {
-                        if let Some(value) = node.update(&mut self.ctx, &event) {
-                            if let Some(val) = id.and_then(|id| self.published.get(&id)) {
-                                val.update(value);
-                            }
-                        }
-                    }
+                    self.update_expr_id(expr_id, &event);
                 }
             }
         }
     }
 
     fn process_subscriptions(&mut self, mut updates: Pooled<Vec<(SubId, Event)>>) {
-        unimplemented!()
+        let mut refs = REFS.take();
+        for (id, event) in updates.drain(..) {
+            if let Event::Update(value) = event {
+                if let Some(expr_ids) = self.ctx.user.sub.get(&id) {
+                    refs.extend(expr_ids.iter().copied());
+                }
+                let event = vm::Event::Netidx(id, value);
+                for expr_id in refs.drain(..) {
+                    self.update_expr_id(expr_id, &event);
+                }
+            }
+        }
+        self.process_var_updates();
     }
 
     fn process_writes(&mut self, mut writes: Pooled<Vec<WriteRequest>>) {
