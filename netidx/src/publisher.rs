@@ -926,6 +926,11 @@ impl Publisher {
         };
         let _ = wait.await;
     }
+    
+    /// Retreive the Id of path if it is published, otherwise None
+    pub fn id(&self, path: &Path) -> Option<Id> {
+        self.0.lock().by_path.get(path).map(|id| *id)
+    }
 }
 
 const MAX_DEFERRED: usize = 1000000;

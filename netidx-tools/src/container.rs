@@ -184,41 +184,44 @@ pub(super) struct ContainerConfig {
     cache_size: Option<u64>,
 }
 
+struct Fifo {
+    data: Val,
+    src: Val,
+    on_write: Val,
+    expr_id: ExprId,
+    on_write_expr_id: ExprId,
+}
+
+#[derive(Clone)]
 enum Published {
-    FormulaVal(Val),
-    FormulaSrc(Val, Id),
-    OnWrite(Val),
+    Formula(Arc<Fifo>), // so a published is 2 words instead of lots, data is the common case
     Data(Val),
 }
 
 impl Published {
     fn val(&self) -> &Val {
         match self {
-            Published::FormulaVal(val)
-            | Published::FormulaSrc(val)
-            | Published::OnWrite(val)
-            | Published::Data(val) => val,
+            Published::Formula(fi) => &fi.data,
+            Published::Data(val) => val,
         }
     }
 }
 
-struct Fids {
-    expr_id: ExprId,
-    id: Id,
-    data_id: Id,
+struct Compiled {
+    node: Node<Lc, Value>,
+    src_id: Id,
+    data_id: Option<Id>,
 }
 
 struct Container {
     cfg: ContainerConfig,
     db: sled::Db,
     formulas: sled::Tree,
-    on_writes: sled::Tree,
     data: sled::Tree,
     published_data: FxHashMap<Path, Id>,
-    published_formulas: FxHashMap<Path, Fids>,
-    published_on_writes: FxHashMap<Path, (Id, ExprId)>,
+    published_formulas: FxHashMap<Path, Id>,
     ctx: ExecCtx<Lc, Value>,
-    compiled: FxHashMap<ExprId, (Node<Lc, Value>, Option<Id>)>,
+    compiled: FxHashMap<ExprId, Compiled>,
     published: FxHashMap<Id, Published>,
     publisher: Publisher,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
@@ -260,6 +263,15 @@ async fn start_delete_rpc(
     )
     .await?;
     Ok((proc, rx))
+}
+
+fn store(tree: &sled::Tree, path: &Path, value: &Value) -> Result<()> {
+    let mut path_buf = PKBUF.take();
+    let mut val_buf = PKBUF.take();
+    path.encode(&mut *path_buf)?;
+    value.encode(&mut *val_buf)?;
+    tree.insert(&**path_buf, &**val_buf)?;
+    Ok(())
 }
 
 impl Container {
@@ -327,19 +339,21 @@ impl Container {
             let expr = exprtxt.parse::<Expr>()?;
             let expr_id = expr.id;
             let node = Node::compile(&mut self.ctx, expr);
-            let val =
+            let src =
                 self.publisher.publish(path.append(".formula"), Value::from(exprtxt))?;
-            let dataval = self
+            let data = self
                 .publisher
                 .publish(path.clone(), node.current().unwrap_or(Value::Null))?;
-            let id = val.id();
-            let data_id = dataval.id();
-            val.writes(self.write_updates_tx.clone());
-            dataval.writes(self.write_updates_tx.clone());
-            self.published.insert(id, Published::FormulaSrc(val));
-            self.published.insert(data_id, Published::FormulaVal(dataval));
-            self.published_formulas.insert(path, Fids { expr_id, id, data_id });
-            self.compiled.insert(expr_id, (node, Some(id)));
+            let src_id = src.id();
+            let data_id = data.id();
+            src.writes(self.write_updates_tx.clone());
+            data.writes(self.write_updates_tx.clone());
+            let published = Published::Formula { src, data, expr_id };
+            self.published.insert(src_id, published.clone());
+            self.published.insert(data_id, published);
+            self.published_formulas.insert(path, expr_id);
+            self.compiled
+                .insert(expr_id, Compiled { node, src_id, data_id: Some(data_id) });
         }
         for res in self.on_writes.iter() {
             let (path, value) = res?;
@@ -352,9 +366,9 @@ impl Container {
                 self.publisher.publish(path.append(".on_write"), Value::from(exprtxt))?;
             let id = val.id();
             val.writes(self.write_updates_tx.clone());
-            self.published.insert(id, Published::OnWrite(val));
-            self.published_on_writes.insert(path, (id, expr_id));
-            self.compiled.insert(expr_id, (node, None));
+            self.published.insert(id, Published::OnWrite(val, expr_id));
+            self.published_on_writes.insert(path, expr_id);
+            self.compiled.insert(expr_id, Compiled { node, src_id: id, data_id: None });
         }
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
@@ -365,14 +379,28 @@ impl Container {
         event: &vm::Event<Value>,
     ) {
         for expr_id in refs.drain(..) {
-            if let Some((node, id)) = self.compiled.get_mut(&expr_id) {
+            if let Some(Compiled { node, src_id, data_id }) =
+                self.compiled.get_mut(&expr_id)
+            {
                 if let Some(value) = node.update(&mut self.ctx, &event) {
-                    if let Some(val) = id.and_then(|id| self.published.get(&id)) {
+                    if let Some(val) = data_id.and_then(|i| self.published.get(&i)) {
                         val.val().update(value);
                     }
                 }
             }
         }
+    }
+
+    fn update_refs(
+        &mut self,
+        refs: &mut Pooled<Vec<ExprId>>,
+        changed_path: &Path,
+        value: Value,
+    ) {
+        if let Some(expr_ids) = self.ctx.user.refs.get(changed_path) {
+            refs.extend(expr_ids.iter().copied());
+        }
+        self.update_expr_ids(&mut refs, &vm::Event::User(value));
     }
 
     fn process_var_updates(&mut self) {
@@ -404,54 +432,53 @@ impl Container {
     }
 
     fn process_writes(&mut self, mut writes: Pooled<Vec<WriteRequest>>) {
-        let mut path_buf = PKBUF.take();
-        let mut val_buf = PKBUF.take();
         let mut refs = REFS.take();
         for req in writes.drain(..) {
-            path_buf.clear();
-            val_buf.clear();
             refs.clear();
             match self.published.get(&req.id) {
                 None => (),
                 Some(Published::Data(val)) => {
-                    if let Err(_) = val.path().encode(&mut *path_buf) {
-                        continue; // CR estokes: log
-                    }
-                    if let Err(_) = req.value.encode(&mut *val_buf) {
-                        continue; // CR estokes: log
-                    }
-                    if let Err(_) = self.data.insert(&**path_buf, &**val_buf) {
-                        continue; // CR estokes: log
+                    if let Err(_) = store(&self.data, val.path(), &req.value) {
+                        continue;
                     }
                     val.update(req.value.clone());
-                    if let Some(expr_ids) = self.ctx.user.refs.get(val.path()) {
-                        refs.extend(expr_ids.iter().copied());
-                    }
-                    self.update_expr_ids(&mut refs, &vm::Event::User(req.value));
+                    self.update_refs(&mut refs, val.path(), req.value);
                 }
-                Some(Published::FormulaSrc(val, data_id)) => {
-                    if let Some(vpath) = Path::dirname(val.path()) {
-                        if let Some(fids) = self.published_formulas.remove(vpath) {
-                            self.ctx.user.unref(fids.expr_id);
-                            self.compiled.remove(&fids.expr_id);
-                        }
-                        match req.value.cast_to::<Chars>() {
-                            Ok(src) => match src.parse::<Expr>() {
-                                Ok(expr) => {
-                                    let node = Node::compile(&mut self.ctx, expr);
-                                    let expr_id = node.id;
-                                    
-                                }
-                                Err(e) => {
-                                    let e = Chars::from(format!("{}", e));
-                                    val.update(Value::Error(e))
-                                }
-                            }
-                            Err(_) => {
-                                val.update(Value::Error(Chars::from("Expected string")));
-                            }
-                        }
+                Some(Published::Formula { src, data, expr_id }) if src.id() == req.id => {
+                    let path = data.path();
+                    if let Err(_) = store(&self.formulas, path, &req.value) {
+                        continue;
                     }
+                    src.update(req.value.clone());
+                    self.compiled.remove(expr_id);
+                    self.published_formulas.remove(path);
+                    self.ctx.user.unref(*expr_id);
+                    let dv = match req.value.cast_to::<Chars>() {
+                        Ok(src_code) => match src_code.parse::<Expr>() {
+                            Ok(expr) => {
+                                let expr_id = expr.id;
+                                let node = Node::compile(&mut self.ctx, expr);
+                                let dv = node.current().unwrap_or(Value::Null);
+                                self.published_formulas.insert(path.clone(), expr_id);
+                                self.compiled.insert(
+                                    expr_id,
+                                    Compiled {
+                                        node,
+                                        src_id: src.id(),
+                                        data_id: Some(data.id()),
+                                    },
+                                );
+                                dv
+                            }
+                            Err(e) => {
+                                let e = Chars::from(format!("{}", e));
+                                Value::Error(e)
+                            }
+                        },
+                        Err(_) => Value::Error(Chars::from("Expected string")),
+                    };
+                    data.update(dv.clone());
+                    self.update_refs(&mut refs, path, dv);
                 }
                 Some(Published::FormulaVal(_)) => unimplemented!(),
                 Some(Published::OnWrite(_)) => unimplemented!(),
