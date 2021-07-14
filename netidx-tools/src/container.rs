@@ -24,9 +24,8 @@ use parking_lot::Mutex;
 use sled;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
-    fmt::Display,
     hash::Hash,
-    mem, str,
+    mem,
     sync::Arc,
     time::Duration,
 };
@@ -581,10 +580,11 @@ impl Container {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
-            bail!("can't delete .formula/.on-write, delete the base instead")
+            bail!("won't delete .formula/.on-write, delete the base instead")
         } else if let Some(id) = self.publisher.id(&path) {
             let mut kbuf = PKBUF.take();
             path.encode(&mut *kbuf)?;
+            let ref_err = Value::Error(Chars::from("#REF"));
             match self.published.remove(&id) {
                 None => (),
                 Some(Published::Data(_)) => {
@@ -607,9 +607,11 @@ impl Container {
                     }
                     let _ = self.data.remove(&*kbuf);
                     self.formulas.remove(&*kbuf)?;
+                    self.update_refs(&mut REFS.take(), &fpath, ref_err.clone());
+                    self.update_refs(&mut REFS.take(), &opath, ref_err.clone());
                 }
             }
-            self.update_refs(&mut REFS.take(), &path, Value::Error(Chars::from("#REF")));
+            self.update_refs(&mut REFS.take(), &path, ref_err);
             Ok(())
         } else {
             bail!("no such path {}", path)
