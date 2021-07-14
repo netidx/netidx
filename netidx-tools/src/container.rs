@@ -273,7 +273,14 @@ fn store<V: Pack + 'static>(tree: &sled::Tree, path: &Path, value: &V) -> Result
 }
 
 fn to_chars(value: Value) -> Chars {
-    value.cast_to::<Chars>().ok().unwrap_or_else(|| Chars::from(""))
+    value.cast_to::<Chars>().ok().unwrap_or_else(|| Chars::from("null"))
+}
+
+fn check_path(base_path: &Path, path: Path) -> Result<Path> {
+    if !path.starts_with(&**base_path) {
+        bail!("non root path")
+    }
+    Ok(path)
 }
 
 impl Container {
@@ -312,70 +319,73 @@ impl Container {
         })
     }
 
-    async fn init(&mut self) -> Result<()> {
-        fn check_path(base_path: &Path, path: Path) -> Result<Path> {
-            if !path.starts_with(&**base_path) {
-                bail!("non root paths in the database")
-            }
-            Ok(path)
+    fn publish_formula(
+        &mut self,
+        path: Path,
+        formula_txt: Chars,
+        on_write_txt: Chars,
+    ) -> Result<()> {
+        let data = self.publisher.publish(path.clone(), Value::Null)?;
+        let src = self
+            .publisher
+            .publish(path.append(".formula"), Value::from(formula_txt.clone()))?;
+        let on_write = self
+            .publisher
+            .publish(path.append(".on-write"), Value::from(on_write_txt.clone()))?;
+        let data_id = data.id();
+        let src_id = src.id();
+        let on_write_id = on_write.id();
+        data.writes(self.write_updates_tx.clone());
+        src.writes(self.write_updates_tx.clone());
+        on_write.writes(self.write_updates_tx.clone());
+        let fifo = Arc::new(Fifo {
+            data,
+            src,
+            on_write,
+            expr_id: Mutex::new(ExprId::new()),
+            on_write_expr_id: Mutex::new(ExprId::new()),
+        });
+        let published = Published::Formula(fifo.clone());
+        self.published.insert(data_id, published.clone());
+        self.published.insert(src_id, published.clone());
+        self.published.insert(on_write_id, published);
+        let expr = formula_txt.parse::<Expr>()?;
+        let on_write_expr = on_write_txt.parse::<Expr>()?;
+        let expr_id = expr.id;
+        let on_write_expr_id = on_write_expr.id;
+        let formula_node = Node::compile(&mut self.ctx, expr);
+        let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
+        if let Some(value) = formula_node.current() {
+            fifo.data.update(value);
         }
+        self.compiled.insert(expr_id, Compiled::Formula { node: formula_node, data_id });
+        self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
+        *fifo.expr_id.lock() = expr_id;
+        *fifo.on_write_expr_id.lock() = on_write_expr_id;
+        Ok(())
+    }
+
+    fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
+        let val = self.publisher.publish(path, value)?;
+        let id = val.id();
+        val.writes(self.write_updates_tx.clone());
+        self.published.insert(id, Published::Data(val));
+        Ok(())
+    }
+
+    async fn init(&mut self) -> Result<()> {
         for res in self.data.iter() {
             let (path, value) = res?;
             let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
             let value = Value::decode(&mut &*value)?;
-            let val = self.publisher.publish(path, value)?;
-            let id = val.id();
-            val.writes(self.write_updates_tx.clone());
-            self.published.insert(id, Published::Data(val));
+            let _: Result<()> = self.publish_data(path, value);
         }
         for res in self.formulas.iter() {
             let (path, value) = res?;
             let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
             let (formula_txt, on_write_txt) = <(Chars, Chars)>::decode(&mut &*value)?;
-            let data = self.publisher.publish(path.clone(), Value::Null)?;
-            let src = self
-                .publisher
-                .publish(path.append(".formula"), Value::from(formula_txt.clone()))?;
-            let on_write = self
-                .publisher
-                .publish(path.append(".on-write"), Value::from(on_write_txt.clone()))?;
-            let data_id = data.id();
-            let src_id = src.id();
-            let on_write_id = on_write.id();
-            data.writes(self.write_updates_tx.clone());
-            src.writes(self.write_updates_tx.clone());
-            on_write.writes(self.write_updates_tx.clone());
-            let fifo = Arc::new(Fifo {
-                data,
-                src,
-                on_write,
-                expr_id: Mutex::new(ExprId::new()),
-                on_write_expr_id: Mutex::new(ExprId::new()),
-            });
-            let published = Published::Formula(fifo.clone());
-            self.published.insert(data_id, published.clone());
-            self.published.insert(src_id, published.clone());
-            self.published.insert(on_write_id, published);
-            let expr = match formula_txt.parse::<Expr>() {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let on_write_expr = match on_write_txt.parse::<Expr>() {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let expr_id = expr.id;
-            let on_write_expr_id = on_write_expr.id;
-            let formula_node = Node::compile(&mut self.ctx, expr);
-            let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
-            if let Some(value) = formula_node.current() {
-                fifo.data.update(value);
-            }
-            self.compiled
-                .insert(expr_id, Compiled::Formula { node: formula_node, data_id });
-            self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
-            *fifo.expr_id.lock() = expr_id;
-            *fifo.on_write_expr_id.lock() = on_write_expr_id;
+            // CR estokes: log errors
+            let _: Result<()> = self.publish_formula(path, formula_txt, on_write_txt);
         }
         Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
@@ -536,8 +546,27 @@ impl Container {
         }
     }
 
-    fn process_publish_request(&mut self, req: (Path, oneshot::Sender<()>)) {
-        unimplemented!()
+    fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
+        match check_path(&self.cfg.base_path, path) {
+            Err(_) => {
+                let _: Result<_, _> = reply.send(());
+            }
+            Ok(path) => {
+                let name = Path::basename(&path);
+                if name == Some(".formula") || name == Some(".on-write") {
+                    let path = Path::from(Arc::from(Path::dirname(&path).unwrap()));
+                    // CR estokes: log errors
+                    let _: Result<()> = self.publish_formula(
+                        path,
+                        Chars::from("null"),
+                        Chars::from("null"),
+                    );
+                } else {
+                    let _: Result<()> = self.publish_data(path, Value::Null);
+                }
+                let _: Result<_, _> = reply.send(());
+            }
+        }
     }
 
     fn delete_path(&mut self, path: Path) {
@@ -549,7 +578,7 @@ impl Container {
         loop {
             select_biased! {
                 r = self.publish_requests.select_next_some() => {
-                    self.process_publish_request(r);
+                    self.process_publish_request(r.0, r.1);
                 }
                 r = self.sub_updates.select_next_some() => {
                     self.process_subscriptions(r);
