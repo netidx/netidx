@@ -17,7 +17,7 @@ use netidx::{
 };
 use netidx_bscript::{
     expr::{Expr, ExprId},
-    vm::{self, Ctx, ExecCtx, Node},
+    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
 use netidx_protocols::rpc::server::Proc;
 use parking_lot::Mutex;
@@ -56,6 +56,20 @@ impl Refs {
     }
 }
 
+struct Fifo {
+    data: Val,
+    src: Val,
+    on_write: Val,
+    expr_id: Mutex<ExprId>,
+    on_write_expr_id: Mutex<ExprId>,
+}
+
+#[derive(Clone)]
+enum Published {
+    Formula(Arc<Fifo>),
+    Data(Val),
+}
+
 struct Lc {
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
@@ -63,8 +77,10 @@ struct Lc {
     refs: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
     subscriber: Subscriber,
+    publisher: Publisher,
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     var_updates: Pooled<Vec<(Chars, Value)>>,
+    published: FxHashMap<Id, Published>,
 }
 
 fn remove_eid_from_set<K: Hash + Eq>(
@@ -84,6 +100,7 @@ fn remove_eid_from_set<K: Hash + Eq>(
 impl Lc {
     fn new(
         subscriber: Subscriber,
+        publisher: Publisher,
         sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) -> Self {
         Self {
@@ -93,8 +110,10 @@ impl Lc {
             refs: HashMap::with_hasher(FxBuildHasher::default()),
             forward_refs: HashMap::with_hasher(FxBuildHasher::default()),
             subscriber,
+            publisher,
             sub_updates,
             var_updates: VAR_UPDATES.take(),
+            published: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
 
@@ -158,6 +177,48 @@ impl Ctx for Lc {
     }
 }
 
+struct Ref {
+    current: Value,
+}
+
+impl Ref {
+    fn get_path(from: &[Node<Lc, Value>]) -> Option<Chars> {
+        match from {
+            [path] =>
+                path.current().and_then(|v| v.get_as::<Chars>()),
+            _ => None,
+        }
+    }
+
+    fn get_current(ctx: &ExecCtx<Lc, Value>, path: &Option<Chars>) -> Value {
+        match path {
+            None => Value::Error(Chars::from("#REF")),
+            Some(path) => match ctx.user.publisher.id(path) {
+                None => Value::Error(Chars::from("#REF")),
+                Some(id) => match ctx.user.published.get(&id) {
+                    None => Value::Error(Chars::from("#REF")),
+                    Some(Published::Data(val)) => val.current(),
+                    Some(Published::Formula(fifo)) => fifo.data.current(),
+                }
+            }
+        }
+    }
+}
+
+impl Register<Lc, Value> for Ref {
+    fn register(ctx: &mut ExecCtx<Lc, Value>) {
+        let f: InitFn<Lc, Value> = Arc::new(|_, from, _| {
+            let current = Ref::get_current(ctx, Ref::get_path(from));
+            Box::new(Ref { current })
+        });
+        ctx.functions.insert("ref".into(), f);
+    }
+}
+
+impl Apply<Lc, Value> for Ref {
+    fn current(&self) -> Option<Value> {}
+}
+
 #[derive(StructOpt, Debug)]
 pub(super) struct ContainerConfig {
     #[structopt(
@@ -185,20 +246,6 @@ pub(super) struct ContainerConfig {
     cache_size: Option<u64>,
 }
 
-struct Fifo {
-    data: Val,
-    src: Val,
-    on_write: Val,
-    expr_id: Mutex<ExprId>,
-    on_write_expr_id: Mutex<ExprId>,
-}
-
-#[derive(Clone)]
-enum Published {
-    Formula(Arc<Fifo>),
-    Data(Val),
-}
-
 impl Published {
     fn val(&self) -> &Val {
         match self {
@@ -220,8 +267,6 @@ struct Container {
     data: sled::Tree,
     ctx: ExecCtx<Lc, Value>,
     compiled: FxHashMap<ExprId, Compiled>,
-    published: FxHashMap<Id, Published>,
-    publisher: Publisher,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
     write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
@@ -302,9 +347,9 @@ impl Container {
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
-        let ctx = ExecCtx::new(Lc::new(subscriber, sub_updates_tx));
+        let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx));
         let (_delete_path_rpc, delete_path_rx) =
-            start_delete_rpc(&publisher, &ccfg.base_path).await?;
+            start_delete_rpc(&ctx.user.publisher, &ccfg.base_path).await?;
         Ok(Container {
             cfg: ccfg,
             _db,
@@ -312,8 +357,6 @@ impl Container {
             data,
             ctx,
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
-            published: HashMap::with_hasher(FxBuildHasher::default()),
-            publisher,
             sub_updates,
             write_updates_tx,
             write_updates_rx,
@@ -329,11 +372,15 @@ impl Container {
         formula_txt: Chars,
         on_write_txt: Chars,
     ) -> Result<()> {
-        let data = self.publisher.publish(path.clone(), Value::Null)?;
+        let data = self.ctx.user.publisher.publish(path.clone(), Value::Null)?;
         let src = self
+            .ctx
+            .user
             .publisher
             .publish(path.append(".formula"), Value::from(formula_txt.clone()))?;
         let on_write = self
+            .ctx
+            .user
             .publisher
             .publish(path.append(".on-write"), Value::from(on_write_txt.clone()))?;
         let data_id = data.id();
@@ -350,9 +397,9 @@ impl Container {
             on_write_expr_id: Mutex::new(ExprId::new()),
         });
         let published = Published::Formula(fifo.clone());
-        self.published.insert(data_id, published.clone());
-        self.published.insert(src_id, published.clone());
-        self.published.insert(on_write_id, published);
+        self.ctx.user.published.insert(data_id, published.clone());
+        self.ctx.user.published.insert(src_id, published.clone());
+        self.ctx.user.published.insert(on_write_id, published);
         let expr = formula_txt.parse::<Expr>()?;
         let on_write_expr = on_write_txt.parse::<Expr>()?;
         let expr_id = expr.id;
@@ -370,10 +417,10 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
-        let val = self.publisher.publish(path, value)?;
+        let val = self.ctx.user.publisher.publish(path, value)?;
         let id = val.id();
         val.writes(self.write_updates_tx.clone());
-        self.published.insert(id, Published::Data(val));
+        self.ctx.user.published.insert(id, Published::Data(val));
         Ok(())
     }
 
@@ -391,7 +438,7 @@ impl Container {
             // CR estokes: log errors
             let _: Result<()> = self.publish_formula(path, formula_txt, on_write_txt);
         }
-        Ok(self.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
+        Ok(self.ctx.user.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
     }
 
     fn process_var_updates(&mut self) {
@@ -422,7 +469,7 @@ impl Container {
                 }
                 Some(Compiled::Formula { node, data_id }) => {
                     if let Some(value) = node.update(&mut self.ctx, &event) {
-                        if let Some(val) = self.published.get(data_id) {
+                        if let Some(val) = self.ctx.user.published.get(data_id) {
                             val.val().update(value);
                         }
                     }
@@ -517,7 +564,7 @@ impl Container {
         let mut refs = REFS.take();
         for req in writes.drain(..) {
             refs.clear();
-            match self.published.get(&req.id) {
+            match self.ctx.user.published.get(&req.id) {
                 None => (),
                 Some(Published::Data(val)) => {
                     if let Err(_) = store(&self.data, val.path(), &req.value) {
@@ -581,11 +628,11 @@ impl Container {
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
             bail!("won't delete .formula/.on-write, delete the base instead")
-        } else if let Some(id) = self.publisher.id(&path) {
+        } else if let Some(id) = self.ctx.user.publisher.id(&path) {
             let mut kbuf = PKBUF.take();
             path.encode(&mut *kbuf)?;
             let ref_err = Value::Error(Chars::from("#REF"));
-            match self.published.remove(&id) {
+            match self.ctx.user.published.remove(&id) {
                 None => (),
                 Some(Published::Data(_)) => {
                     let _ = self.data.remove(&*kbuf);
@@ -599,11 +646,11 @@ impl Container {
                     let id = fifo.on_write_expr_id.lock();
                     self.ctx.user.unref(*id);
                     self.compiled.remove(&id);
-                    if let Some(id) = self.publisher.id(&fpath) {
-                        self.published.remove(&id);
+                    if let Some(id) = self.ctx.user.publisher.id(&fpath) {
+                        self.ctx.user.published.remove(&id);
                     }
-                    if let Some(id) = self.publisher.id(&opath) {
-                        self.published.remove(&id);
+                    if let Some(id) = self.ctx.user.publisher.id(&opath) {
+                        self.ctx.user.published.remove(&id);
                     }
                     let _ = self.data.remove(&*kbuf);
                     self.formulas.remove(&*kbuf)?;
@@ -640,7 +687,7 @@ impl Container {
                 complete => break
             }
             let timeout = self.cfg.timeout.map(Duration::from_secs);
-            self.publisher.flush(timeout).await;
+            self.ctx.user.publisher.flush(timeout).await;
         }
         Ok(())
     }

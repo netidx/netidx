@@ -928,8 +928,8 @@ impl Publisher {
     }
     
     /// Retreive the Id of path if it is published, otherwise None
-    pub fn id(&self, path: &Path) -> Option<Id> {
-        self.0.lock().by_path.get(path).map(|id| *id)
+    pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
+        self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
     }
 }
 
