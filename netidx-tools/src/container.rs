@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use sled;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
+    fmt::Display,
     hash::Hash,
     mem, str,
     sync::Arc,
@@ -215,7 +216,7 @@ enum Compiled {
 
 struct Container {
     cfg: ContainerConfig,
-    db: sled::Db,
+    _db: sled::Db,
     formulas: sled::Tree,
     data: sled::Tree,
     ctx: ExecCtx<Lc, Value>,
@@ -226,14 +227,14 @@ struct Container {
     write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
     publish_requests: DefaultHandle,
-    delete_path_rpc: Proc,
-    delete_path_rx: mpsc::Receiver<Path>,
+    _delete_path_rpc: Proc,
+    delete_path_rx: mpsc::Receiver<(Path, oneshot::Sender<Value>)>,
 }
 
 async fn start_delete_rpc(
     publisher: &Publisher,
     base_path: &Path,
-) -> Result<(Proc, mpsc::Receiver<Path>)> {
+) -> Result<(Proc, mpsc::Receiver<(Path, oneshot::Sender<Value>)>)> {
     let (tx, rx) = mpsc::channel(10);
     let proc = Proc::new(
         publisher,
@@ -248,9 +249,13 @@ async fn start_delete_rpc(
                 match args.remove("path") {
                     None => Value::Error(Chars::from("invalid argument, expected path")),
                     Some(Value::String(path)) => {
+                        let (reply_tx, reply_rx) = oneshot::channel();
                         let path = Path::from(Arc::from(&*path));
-                        let _: Result<_, _> = tx.send(path).await;
-                        Value::Ok
+                        let _: Result<_, _> = tx.send((path, reply_tx)).await;
+                        match reply_rx.await {
+                            Err(_) => Value::Error(Chars::from("internal error")),
+                            Ok(v) => v,
+                        }
                     }
                     Some(_) => Value::Error(Chars::from(
                         "invalid argument type, expected string",
@@ -285,25 +290,25 @@ fn check_path(base_path: &Path, path: Path) -> Result<Path> {
 
 impl Container {
     async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
-        let db = sled::Config::default()
+        let _db = sled::Config::default()
             .use_compression(ccfg.compress)
             .compression_factor(ccfg.compress_level.unwrap_or(5) as i32)
             .cache_capacity(ccfg.cache_size.unwrap_or(16 * 1024 * 1024))
             .path(&ccfg.db)
             .open()?;
-        let formulas = db.open_tree("formulas")?;
-        let data = db.open_tree("data")?;
+        let formulas = _db.open_tree("formulas")?;
+        let data = _db.open_tree("data")?;
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         let publish_requests = publisher.publish_default(ccfg.base_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let ctx = ExecCtx::new(Lc::new(subscriber, sub_updates_tx));
-        let (delete_path_rpc, delete_path_rx) =
+        let (_delete_path_rpc, delete_path_rx) =
             start_delete_rpc(&publisher, &ccfg.base_path).await?;
         Ok(Container {
             cfg: ccfg,
-            db,
+            _db,
             formulas,
             data,
             ctx,
@@ -314,7 +319,7 @@ impl Container {
             write_updates_tx,
             write_updates_rx,
             publish_requests,
-            delete_path_rpc,
+            _delete_path_rpc,
             delete_path_rx,
         })
     }
@@ -549,18 +554,21 @@ impl Container {
     fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
         match check_path(&self.cfg.base_path, path) {
             Err(_) => {
+                // this should not be possible, but in case of a bug, just do nothing
                 let _: Result<_, _> = reply.send(());
             }
             Ok(path) => {
                 let name = Path::basename(&path);
                 if name == Some(".formula") || name == Some(".on-write") {
-                    let path = Path::from(Arc::from(Path::dirname(&path).unwrap()));
-                    // CR estokes: log errors
-                    let _: Result<()> = self.publish_formula(
-                        path,
-                        Chars::from("null"),
-                        Chars::from("null"),
-                    );
+                    if let Some(path) = Path::dirname(&path) {
+                        let path = Path::from(Arc::from(path));
+                        // CR estokes: log errors
+                        let _: Result<()> = self.publish_formula(
+                            path,
+                            Chars::from("null"),
+                            Chars::from("null"),
+                        );
+                    }
                 } else {
                     let _: Result<()> = self.publish_data(path, Value::Null);
                 }
@@ -569,8 +577,43 @@ impl Container {
         }
     }
 
-    fn delete_path(&mut self, path: Path) {
-        unimplemented!()
+    fn delete_path(&mut self, path: Path) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        let bn = Path::basename(&path);
+        if bn == Some(".formula") || bn == Some(".on-write") {
+            bail!("can't delete .formula/.on-write, delete the base instead")
+        } else if let Some(id) = self.publisher.id(&path) {
+            let mut kbuf = PKBUF.take();
+            path.encode(&mut *kbuf)?;
+            match self.published.remove(&id) {
+                None => (),
+                Some(Published::Data(_)) => {
+                    let _ = self.data.remove(&*kbuf);
+                }
+                Some(Published::Formula(fifo)) => {
+                    let fpath = path.append(".formula");
+                    let opath = path.append(".on-write");
+                    let id = fifo.expr_id.lock();
+                    self.ctx.user.unref(*id);
+                    self.compiled.remove(&id);
+                    let id = fifo.on_write_expr_id.lock();
+                    self.ctx.user.unref(*id);
+                    self.compiled.remove(&id);
+                    if let Some(id) = self.publisher.id(&fpath) {
+                        self.published.remove(&id);
+                    }
+                    if let Some(id) = self.publisher.id(&opath) {
+                        self.published.remove(&id);
+                    }
+                    let _ = self.data.remove(&*kbuf);
+                    self.formulas.remove(&*kbuf)?;
+                }
+            }
+            self.update_refs(&mut REFS.take(), &path, Value::Error(Chars::from("#REF")));
+            Ok(())
+        } else {
+            bail!("no such path {}", path)
+        }
     }
 
     async fn run(mut self) -> Result<()> {
@@ -587,7 +630,10 @@ impl Container {
                     self.process_writes(r);
                 }
                 r = self.delete_path_rx.select_next_some() => {
-                    self.delete_path(r);
+                    let _: Result<_, _> = r.1.send(match self.delete_path(r.0) {
+                        Ok(()) => Value::Ok,
+                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                    });
                 }
                 complete => break
             }
