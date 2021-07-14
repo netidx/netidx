@@ -70,6 +70,8 @@ enum Published {
     Data(Val),
 }
 
+struct UserEv(Path, Value);
+
 struct Lc {
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
@@ -178,19 +180,19 @@ impl Ctx for Lc {
 }
 
 struct Ref {
+    path: Option<Chars>,
     current: Value,
 }
 
 impl Ref {
-    fn get_path(from: &[Node<Lc, Value>]) -> Option<Chars> {
+    fn get_path(from: &[Node<Lc, UserEv>]) -> Option<Chars> {
         match from {
-            [path] =>
-                path.current().and_then(|v| v.get_as::<Chars>()),
+            [path] => path.current().and_then(|v| v.get_as::<Chars>()),
             _ => None,
         }
     }
 
-    fn get_current(ctx: &ExecCtx<Lc, Value>, path: &Option<Chars>) -> Value {
+    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<Chars>) -> Value {
         match path {
             None => Value::Error(Chars::from("#REF")),
             Some(path) => match ctx.user.publisher.id(path) {
@@ -199,24 +201,76 @@ impl Ref {
                     None => Value::Error(Chars::from("#REF")),
                     Some(Published::Data(val)) => val.current(),
                     Some(Published::Formula(fifo)) => fifo.data.current(),
+                },
+            },
+        }
+    }
+
+    fn apply_ev(&mut self, ev: &vm::Event<UserEv>) -> Option<Value> {
+        match ev {
+            vm::Event::User(UserEv(path, value)) => {
+                if Some(path.as_ref()) == self.path.as_ref().map(|c| c.as_ref()) {
+                    self.current = value.clone();
+                    Some(self.current.clone())
+                } else {
+                    None
                 }
             }
+            vm::Event::Netidx(_, _)
+            | vm::Event::Rpc(_, _)
+            | vm::Event::Variable(_, _) => None,
         }
     }
 }
 
-impl Register<Lc, Value> for Ref {
-    fn register(ctx: &mut ExecCtx<Lc, Value>) {
-        let f: InitFn<Lc, Value> = Arc::new(|_, from, _| {
-            let current = Ref::get_current(ctx, Ref::get_path(from));
-            Box::new(Ref { current })
+impl Register<Lc, UserEv> for Ref {
+    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
+        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _| {
+            let path = Ref::get_path(from);
+            let current = Ref::get_current(ctx, &path);
+            Box::new(Ref { path, current })
         });
         ctx.functions.insert("ref".into(), f);
     }
 }
 
-impl Apply<Lc, Value> for Ref {
-    fn current(&self) -> Option<Value> {}
+impl Apply<Lc, UserEv> for Ref {
+    fn current(&self) -> Option<Value> {
+        Some(self.current.clone())
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<Lc, UserEv>,
+        from: &mut [Node<Lc, UserEv>],
+        event: &vm::Event<UserEv>,
+    ) -> Option<Value> {
+        match from {
+            [path] => match path.update(ctx, event).map(|p| p.get_as::<Chars>()) {
+                None => self.apply_ev(event),
+                Some(new_path) => {
+                    if new_path != self.path {
+                        self.path = new_path;
+                        match self.apply_ev(event) {
+                            v @ Some(_) => v,
+                            None => {
+                                self.current = Ref::get_current(ctx, &self.path);
+                                Some(self.current.clone())
+                            }
+                        }
+                    } else {
+                        self.apply_ev(event)
+                    }
+                }
+            },
+            from => {
+                for n in from {
+                    n.update(ctx, event);
+                }
+                None
+            }
+        }
+    }
 }
 
 #[derive(StructOpt, Debug)]
@@ -256,8 +310,8 @@ impl Published {
 }
 
 enum Compiled {
-    Formula { node: Node<Lc, Value>, data_id: Id },
-    OnWrite(Node<Lc, Value>),
+    Formula { node: Node<Lc, UserEv>, data_id: Id },
+    OnWrite(Node<Lc, UserEv>),
 }
 
 struct Container {
@@ -265,7 +319,7 @@ struct Container {
     _db: sled::Db,
     formulas: sled::Tree,
     data: sled::Tree,
-    ctx: ExecCtx<Lc, Value>,
+    ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
     write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
@@ -459,7 +513,7 @@ impl Container {
     fn update_expr_ids(
         &mut self,
         refs: &mut Pooled<Vec<ExprId>>,
-        event: &vm::Event<Value>,
+        event: &vm::Event<UserEv>,
     ) {
         for expr_id in refs.drain(..) {
             match self.compiled.get_mut(&expr_id) {
@@ -487,7 +541,7 @@ impl Container {
         if let Some(expr_ids) = self.ctx.user.refs.get(changed_path) {
             refs.extend(expr_ids.iter().copied());
         }
-        self.update_expr_ids(refs, &vm::Event::User(value));
+        self.update_expr_ids(refs, &vm::Event::User(UserEv(changed_path.clone(), value)));
         self.process_var_updates();
     }
 
@@ -588,7 +642,9 @@ impl Container {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
                         {
-                            node.update(&mut self.ctx, &vm::Event::User(req.value));
+                            let path = fifo.data.path().clone();
+                            let ev = vm::Event::User(UserEv(path, req.value));
+                            node.update(&mut self.ctx, &ev);
                             self.process_var_updates();
                         }
                     }
