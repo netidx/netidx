@@ -333,31 +333,40 @@ async fn start_delete_rpc(
     publisher: &Publisher,
     base_path: &Path,
 ) -> Result<(Proc, mpsc::Receiver<(Path, oneshot::Sender<Value>)>)> {
+    fn e(s: &'static str) -> Value {
+        Value::Error(Chars::from(s))
+    }
     let (tx, rx) = mpsc::channel(10);
     let proc = Proc::new(
         publisher,
         base_path.append(".api/delete"),
         Value::from("delete a path from the database"),
-        vec![(Arc::from("path"), (Value::Null, Value::from("the path to delete")))]
+        vec![(Arc::from("path"), (Value::Null, Value::from("the path(s) to delete")))]
             .into_iter()
             .collect(),
         Arc::new(move |_addr, mut args| {
             let mut tx = tx.clone();
             Box::pin(async move {
                 match args.remove("path") {
-                    None => Value::Error(Chars::from("invalid argument, expected path")),
-                    Some(Value::String(path)) => {
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        let path = Path::from(Arc::from(&*path));
-                        let _: Result<_, _> = tx.send((path, reply_tx)).await;
-                        match reply_rx.await {
-                            Err(_) => Value::Error(Chars::from("internal error")),
-                            Ok(v) => v,
+                    None => e("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        for path in paths.drain(..) {
+                            let path = match path {
+                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                _ => return e("invalid argument type, expected string"),
+                            };
+                            let (reply_tx, reply_rx) = oneshot::channel();
+                            let _: Result<_, _> = tx.send((path, reply_tx)).await;
+                            match reply_rx.await {
+                                Err(_) => return e("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
                         }
+                        Value::Ok
                     }
-                    Some(_) => Value::Error(Chars::from(
-                        "invalid argument type, expected string",
-                    )),
                 }
             })
         }),

@@ -279,17 +279,17 @@ mod publish {
     impl NewSessionConfig {
         fn new(
             client: SocketAddr,
-            mut args: Pooled<HashMap<Arc<str>, Value>>,
+            mut args: Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
         ) -> Result<NewSessionConfig> {
+            let mut last = |name| args.remove(name).and_then(|mut v| v.pop());
             Ok(NewSessionConfig {
                 client,
-                start: args.remove("start").map(|v| parse_bound(v)).transpose()?,
-                end: args.remove("end").map(|v| parse_bound(v)).transpose()?,
-                speed: args.remove("speed").map(|v| parse_speed(v)).transpose()?,
-                pos: args.remove("pos").map(|v| v.cast_to::<Seek>()).transpose()?,
-                state: args.remove("state").map(|v| v.cast_to::<State>()).transpose()?,
-                play_after: args
-                    .remove("play_after")
+                start: last("start").map(|v| parse_bound(v)).transpose()?,
+                end: last("end").map(|v| parse_bound(v)).transpose()?,
+                speed: last("speed").map(|v| parse_speed(v)).transpose()?,
+                pos: last("pos").map(|v| v.cast_to::<Seek>()).transpose()?,
+                state: last("state").map(|v| v.cast_to::<State>()).transpose()?,
+                play_after: last("play_after")
                     .map(|v| v.cast_to::<Duration>())
                     .transpose()?,
             })
