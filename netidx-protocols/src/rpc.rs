@@ -281,7 +281,7 @@ pub mod client {
     }
 
     #[derive(Debug)]
-    pub struct Proc {
+    struct ProcInner {
         name: Path,
         sid: SubscriberId,
         lock: Option<Arc<AsyncMutex<()>>>,
@@ -289,7 +289,7 @@ pub mod client {
         args: HashMap<String, Dval>,
     }
 
-    impl Drop for Proc {
+    impl Drop for ProcInner {
         fn drop(&mut self) {
             let mut procs = PROCS.lock();
             drop(self.lock.take());
@@ -305,6 +305,9 @@ pub mod client {
             }
         }
     }
+
+    #[derive(Debug, Clone)]
+    pub struct Proc(Arc<ProcInner>);
 
     impl Proc {
         /// Subscribe to the procedure specified by `name`, if
@@ -347,7 +350,7 @@ pub mod client {
                     );
                 }
             }
-            Ok(Proc { name, sid, lock, call, args })
+            Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args })))
         }
 
         /// Call the procedure. If supported by the procedure,
@@ -364,9 +367,9 @@ pub mod client {
             K: Borrow<str>,
         {
             let result = {
-                let _guard = self.lock.as_ref().unwrap().lock().await;
+                let _guard = self.0.lock.as_ref().unwrap().lock().await;
                 for (name, val) in args {
-                    match self.args.get(name.borrow()) {
+                    match self.0.args.get(name.borrow()) {
                         None => bail!("no such argument {}", name.borrow()),
                         Some(dv) => {
                             dv.wait_subscribed().await?;
@@ -374,7 +377,7 @@ pub mod client {
                         }
                     }
                 }
-                self.call.write_with_recipt(Value::Null)
+                self.0.call.write_with_recipt(Value::Null)
             };
             Ok(result
                 .await
@@ -383,7 +386,7 @@ pub mod client {
 
         /// List the procedures' arguments
         pub fn args(&self) -> impl Iterator<Item = &str> {
-            self.args.keys().map(|s| s.as_str())
+            self.0.args.keys().map(|s| s.as_str())
         }
     }
 }

@@ -19,7 +19,7 @@ use netidx_bscript::{
     expr::{Expr, ExprId},
     vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
-use netidx_protocols::rpc::server::Proc;
+use netidx_protocols::rpc::{self, server::Proc};
 use parking_lot::Mutex;
 use sled;
 use std::{
@@ -30,7 +30,7 @@ use std::{
     time::Duration,
 };
 use structopt::StructOpt;
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, task, time::Instant};
 
 lazy_static! {
     static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 2048);
@@ -72,6 +72,12 @@ enum Published {
 
 struct UserEv(Path, Value);
 
+enum LcEvent {
+    Vars,
+    RpcCall { name: Path, args: Vec<(Chars, Value)> },
+    RpcReply { name: Path, result: Value }, //    Set { name: Path, value: Value }
+}
+
 struct Lc {
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
@@ -83,6 +89,7 @@ struct Lc {
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     var_updates: Pooled<Vec<(Chars, Value)>>,
     published: FxHashMap<Id, Published>,
+    events: mpsc::UnboundedSender<LcEvent>,
 }
 
 fn remove_eid_from_set<K: Hash + Eq>(
@@ -103,6 +110,7 @@ impl Lc {
     fn new(
         subscriber: Subscriber,
         publisher: Publisher,
+        events: mpsc::UnboundedSender<LcEvent>,
         sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) -> Self {
         Self {
@@ -116,6 +124,7 @@ impl Lc {
             sub_updates,
             var_updates: VAR_UPDATES.take(),
             published: HashMap::with_hasher(FxBuildHasher::default()),
+            events,
         }
     }
 
@@ -174,8 +183,17 @@ impl Ctx for Lc {
         self.var_updates.push((name, value));
     }
 
-    fn call_rpc(&mut self, _name: Path, _args: Vec<(Chars, Value)>, _ref_id: ExprId) {
-        unimplemented!()
+    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, ref_id: ExprId) {
+        self.rpc
+            .entry(name.clone())
+            .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+            .insert(ref_id);
+        self.forward_refs
+            .entry(ref_id)
+            .or_insert_with(Refs.new)
+            .rpcs
+            .insert(name.clone());
+        let _: Result<_, _> = self.events.unbounded_send(LcEvent::Rpc { name, args });
     }
 }
 
@@ -327,6 +345,8 @@ struct Container {
     publish_requests: DefaultHandle,
     _delete_path_rpc: Proc,
     delete_path_rx: mpsc::Receiver<(Path, oneshot::Sender<Value>)>,
+    bscript_event: mpsc::UnboundedReceiver<LcEvent>,
+    rpcs: FxHashMap<Path, (Instant, rpc::client::Proc)>,
 }
 
 async fn start_delete_rpc(
@@ -410,7 +430,8 @@ impl Container {
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
-        let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx));
+        let (bs_tx, tx_rx) = mpsc::unbounded();
+        let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx, bs_tx));
         let (_delete_path_rpc, delete_path_rx) =
             start_delete_rpc(&ctx.user.publisher, &ccfg.base_path).await?;
         Ok(Container {
@@ -426,6 +447,8 @@ impl Container {
             publish_requests,
             _delete_path_rpc,
             delete_path_rx,
+            bscript_event: bs_rx,
+            rpcs: HashMap::with_hasher(FxBuildHasher::default()),
         })
     }
 
@@ -505,9 +528,9 @@ impl Container {
     }
 
     fn process_var_updates(&mut self) {
-        // CR estokes: deal with infinite loops
         let mut refs = REFS.take();
-        while self.ctx.user.var_updates.len() > 0 {
+        let mut n = 0;
+        while self.ctx.user.var_updates.len() > 0 && n < 10 {
             let mut pending =
                 mem::replace(&mut self.ctx.user.var_updates, VAR_UPDATES.take());
             for (name, value) in pending.drain(..) {
@@ -516,6 +539,10 @@ impl Container {
                 }
                 self.update_expr_ids(&mut refs, &vm::Event::Variable(name, value));
             }
+            n += 1;
+        }
+        if self.ctx.user.var_updates.len() > 0 {
+            let _: Result<_, _> = self.ctx.user.events.send_unbounded(LcEvent::Vars);
         }
     }
 
@@ -730,6 +757,65 @@ impl Container {
         }
     }
 
+    async fn process_bscript_event(&mut self, event: LcEvent) -> Result<()> {
+        const GC: usize = 128;
+        static AGE: Duration = Duration::from_secs(60);
+        match event {
+            LcEvent::Vars => Ok(self.process_var_updates()),
+            LcEvent::RpcReply { name, result } => {
+                let mut refs = REFS.take();
+                if let Some(expr_ids) = self.ctx.user.rpc.get(&name) {
+                    refs.extend(expr_ids);
+                }
+                let e = vm::Event::Rpc(Chars::from(String::from(&*name)), result);
+                for id in refs.drain(..) {
+                    match self.compiled.get_mut(&id) {
+                        None => (),
+                        Some(Compiled::Formula { node, .. }) => {
+                            node.update(&mut self.ctx, &e);
+                        }
+                        Some(Compiled::OnWrite(node)) => {
+                            node.update(&mut self.ctx, &e);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            LcEvent::RpcCall { name, args } => {
+                if self.rpcs.len() > GC {
+                    let now = Instant::now();
+                    self.rpcs.retain(|_, (used, _)| now - *used <= AGE);
+                }
+                let proc = match self.rpcs.entry(name.clone()) {
+                    Entry::Vacant(e) => {
+                        let proc = rpc::client::Proc::new(
+                            &self.ctx.user.subscriber,
+                            name.clone(),
+                        )
+                        .await?;
+                        e.insert((Instant::now(), proc.clone()));
+                        proc
+                    }
+                    Entry::Occupied(mut e) => {
+                        let entry = e.get_mut();
+                        entry.0 = Instant::now();
+                        entry.1.clone()
+                    }
+                };
+                let reply = self.ctx.user.events.clone();
+                task::spawn(async move {
+                    let result = match proc.call(args).await {
+                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                        Ok(result) => result,
+                    };
+                    let _: Result<_, _> =
+                        reply.unbounded_send(LcEvent::RpcReply { name, result });
+                });
+                Ok(())
+            }
+        }
+    }
+
     async fn run(mut self) -> Result<()> {
         self.init().await?;
         loop {
@@ -748,6 +834,9 @@ impl Container {
                         Ok(()) => Value::Ok,
                         Err(e) => Value::Error(Chars::from(format!("{}", e))),
                     });
+                }
+                r = self.bscript_event.select_next_some() => {
+                    self.process_bscript_event(r).await;
                 }
                 complete => break
             }
