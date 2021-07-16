@@ -162,9 +162,10 @@ pub mod server {
 
         # Example
         ```no_run
-        use netidx::path::Path;
-        use netidx_protocols::rpc::Proc;
+        use netidx::{path::Path, subscriber::Value, chars::Chars};
+        use netidx_protocols::rpc::server::Proc;
         use std::{sync::Arc, collections::HashMap};
+        use anyhow::Result;
         # async fn z() -> Result<()> {
         #   let publisher = unimplemented!();
             let echo = Proc::new(
@@ -188,6 +189,7 @@ pub mod server {
             )
             .await?;
         #   drop(echo);
+        #   Ok(())
         # }
         ```
 
