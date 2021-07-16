@@ -5,7 +5,7 @@ use futures::{
     prelude::*,
     select_biased, stream,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap};
 use log::info;
 use netidx::{
     chars::Chars,
@@ -13,30 +13,38 @@ use netidx::{
     pool::{Pool, Pooled},
     protocol::glob::{Glob, GlobSet},
     publisher::{Id, PublishFlags, Publisher, Val, Value, WriteRequest},
-    subscriber::{Dval, Subscriber},
+    subscriber::{Dval, Subscriber, SubscriberId},
 };
+use parking_lot::Mutex;
 use std::{
     borrow::Borrow,
     collections::HashMap,
     iter,
     net::SocketAddr,
-    sync::Arc,
+    ops::Drop,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
-use tokio::task;
+use tokio::{sync::Mutex as AsyncMutex, task};
 
 pub mod server {
     use super::*;
 
+    /// The rpc handler function type
     pub type Handler = Arc<
-        dyn Fn(SocketAddr, Pooled<HashMap<Arc<str>, Value>>) -> BoxFuture<'static, Value>
+        dyn Fn(
+                SocketAddr,
+                Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
+            ) -> BoxFuture<'static, Value>
             + Send
             + Sync
             + 'static,
     >;
 
     lazy_static! {
-        static ref ARGS: Pool<HashMap<Arc<str>, Value>> = Pool::new(10000, 50);
+        static ref ARG: Pool<Vec<Value>> = Pool::new(10000, 50);
+        static ref ARGS: Pool<HashMap<Arc<str>, Pooled<Vec<Value>>>> =
+            Pool::new(10000, 50);
     }
 
     struct Arg {
@@ -46,7 +54,7 @@ pub mod server {
     }
 
     struct PendingCall {
-        args: Pooled<HashMap<Arc<str>, Value>>,
+        args: Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
         initiated: Instant,
     }
 
@@ -88,9 +96,12 @@ pub mod server {
                                 let call = self.call.clone();
                                 let publisher = self.publisher.clone();
                                 task::spawn(async move {
-                                    let r = match task::spawn(handler(req.addr, args)).await {
+                                    let t = task::spawn(handler(req.addr, args));
+                                    let r = match t.await {
                                         Ok(v) => v,
-                                        Err(e) => Value::Error(Chars::from(format!("{}", e)))
+                                        Err(e) => {
+                                            Value::Error(Chars::from(format!("{}", e)))
+                                        }
                                     };
                                     match req.send_result {
                                         None => call.update_subscriber(&req.addr, r),
@@ -109,7 +120,9 @@ pub mod server {
                                         }
                                     });
                                 if let Some(Arg {name, ..}) = self.args.get(&req.id) {
-                                    pending.args.insert(name.clone(), req.value);
+                                    pending.args.entry(name.clone())
+                                        .or_insert_with(|| ARG.take())
+                                        .push(req.value);
                                 }
                                 if gc && self.pending.len() > GC_THRESHOLD {
                                     let now = Instant::now();
@@ -126,9 +139,70 @@ pub mod server {
         }
     }
 
+    /// A remote procedure published in netidx
     pub struct Proc(oneshot::Sender<()>);
 
     impl Proc {
+        /**
+        Publish a new remote procedure. If successful this will return
+        a `Proc` which, if dropped, will cause the removal of the
+        procedure from netidx.
+
+        # Arguments
+
+        * `publisher` - A reference to the publisher that will publish the procedure.
+        * `name` - The path of the procedure in netidx.
+        * `doc` - The procedure level doc string to be published along with the procedure
+        * `args` - A hashmap containing the allowed arguments to the
+          procedure. The key, is the argument name, the first value is
+          the default value, and the second argument is the doc string
+          for the argument
+        * `handler` - The function that will be called each time the
+          remote procedure is invoked
+
+        # Example
+        ```no_run
+        use netidx::path::Path;
+        use netidx_protocols::rpc::Proc;
+        use std::{sync::Arc, collections::HashMap};
+        # async fn z() -> Result<()> {
+        #   let publisher = unimplemented!();
+            let echo = Proc::new(
+                &publisher,
+                Path::from("/examples/api/echo"),
+                Value::from("echos it's argument"),
+                vec![(Arc::from("arg"), (Value::Null, Value::from("argument to echo")))]
+                    .into_iter()
+                    .collect::<HashMap<_, _>>(),
+                Arc::new(move |_, mut args| {
+                    Box::pin(async move {
+                        match args.remove("arg") {
+                            None => Value::Error(Chars::from("expected an arg")),
+                            Some(mut vals) => match vals.pop() {
+                                None => Value::Error(Chars::from("internal error")),
+                                Some(v) => v
+                            }
+                        }
+                    })
+                }),
+            )
+            .await?;
+        #   drop(echo);
+        # }
+        ```
+
+        # Notes
+
+        If more than one publisher is publishing the same compatible
+        RPC (same arguments, same name, hopefully the same
+        semantics!), then clients will randomly pick one procedure
+        from the set at client creation time.
+
+        Arguments with the same key that are specified multiple times
+        are accumulated and passed to the handler in the order they
+        were specified
+
+         **/
         pub async fn new(
             publisher: &Publisher,
             name: Path,
@@ -195,18 +269,69 @@ pub mod server {
 pub mod client {
     use super::*;
 
+    lazy_static! {
+        // The same procedure can't be called concurrently from the
+        // same subscriber. If it is, the arguments of the two calls
+        // could be permuted. This structure ensures that this does
+        // not happen.
+        static ref PROCS: Mutex<FxHashMap<SubscriberId, FxHashMap<Path, Weak<AsyncMutex<()>>>>> =
+            Mutex::new(HashMap::with_hasher(FxBuildHasher::default()));
+    }
+
     #[derive(Debug)]
     pub struct Proc {
+        name: Path,
+        sid: SubscriberId,
+        lock: Option<Arc<AsyncMutex<()>>>,
         call: Dval,
         args: HashMap<String, Dval>,
     }
 
+    impl Drop for Proc {
+        fn drop(&mut self) {
+            let mut procs = PROCS.lock();
+            drop(self.lock.take());
+            if let Some(procs_by_sub) = procs.get_mut(&self.sid) {
+                if let Some(weak_lock) = procs_by_sub.get(&self.name) {
+                    if weak_lock.strong_count() == 0 {
+                        procs_by_sub.remove(&self.name);
+                        if procs_by_sub.is_empty() {
+                            procs.remove(&self.sid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     impl Proc {
+        /// Subscribe to the procedure specified by `name`, if
+        /// successful return a `Proc` structure that may be used to
+        /// call the procedure. Dropping the `Proc` structure will
+        /// unsubscribe from the procedure and free all associated
+        /// resources.
         pub async fn new(subscriber: &Subscriber, name: Path) -> Result<Proc> {
+            let sid = subscriber.id();
+            let lock = {
+                let mut locks = PROCS.lock();
+                let lock = locks
+                    .entry(sid)
+                    .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+                    .entry(name.clone())
+                    .or_insert_with(Weak::new);
+                match Weak::upgrade(lock) {
+                    Some(lock) => Some(lock),
+                    None => {
+                        let m = Arc::new(AsyncMutex::new(()));
+                        *lock = Arc::downgrade(&m);
+                        Some(m)
+                    }
+                }
+            };
             let call = subscriber.durable_subscribe(name.clone());
             let pat = GlobSet::new(
                 true,
-                iter::once(Glob::new(Chars::from(format!("{}/*/val", name)))?),
+                iter::once(Glob::new(Chars::from(format!("{}/*/val", name.clone())))?),
             )?;
             let mut args = HashMap::new();
             let mut batches = subscriber.resolver().list_matching(&pat).await?;
@@ -220,28 +345,43 @@ pub mod client {
                     );
                 }
             }
-            Ok(Proc { call, args })
+            Ok(Proc { name, sid, lock, call, args })
         }
 
+        /// Call the procedure. If supported by the procedure,
+        /// argument keys may be specified multiple times.
+        ///
+        /// `call` may be reused to call the procedure again.
+        ///
+        /// `call` may safely be called concurrently on multiple
+        /// instances of `Proc` that call the same underling procedure
+        /// (there is internal syncronization).
         pub async fn call<I, K>(&self, args: I) -> Result<Value>
         where
             I: IntoIterator<Item = (K, Value)>,
             K: Borrow<str>,
         {
-            for (name, val) in args {
-                match self.args.get(name.borrow()) {
-                    None => bail!("no such argument {}", name.borrow()),
-                    Some(dv) => {
-                        dv.wait_subscribed().await?;
-                        dv.write(val);
+            let result = {
+                let _guard = self.lock.as_ref().unwrap().lock().await;
+                for (name, val) in args {
+                    match self.args.get(name.borrow()) {
+                        None => bail!("no such argument {}", name.borrow()),
+                        Some(dv) => {
+                            dv.wait_subscribed().await?;
+                            dv.write(val);
+                        }
                     }
                 }
-            }
-            Ok(self
-                .call
-                .write_with_recipt(Value::Null)
+                self.call.write_with_recipt(Value::Null)
+            };
+            Ok(result
                 .await
                 .map_err(|_| anyhow!("call cancelled before a reply was received"))?)
+        }
+
+        /// List the procedures' arguments
+        pub fn args(&self) -> impl Iterator<Item = &str> {
+            self.args.keys().map(|s| s.as_str())
         }
     }
 }
@@ -282,7 +422,8 @@ mod test {
                         dbg!(&addr);
                         dbg!(&*args);
                         assert_eq!(args.len(), 1);
-                        assert_eq!(args["arg1"], Value::from("hello rpc"));
+                        assert_eq!(args["arg1"].len(), 1);
+                        assert_eq!(args["arg1"][0], Value::from("hello rpc"));
                         Value::U32(42)
                     })
                 }),

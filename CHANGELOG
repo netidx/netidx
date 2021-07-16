@@ -1,3 +1,18 @@
+* 0.9.0 netidx-tools, 0.8.1 netidx-tools:
+  - Documented the rpc module.
+
+  - rpc protocol now allows procedure arguments to be specified
+    multiple times. The server side will receive a list of all values
+    specified for each key.
+
+  - the rpc client now includes internal synchronization to prevent
+    errors when the same procedure is called concurrently from the
+    same subscriber instance.
+
+  - new tool, container, a persistant, bscript enabled, value
+    store. Kinda like a distributed spreadsheet. Kinda like a nosql
+    database server. Kinda just it's own thing.
+
 * 0.8.0 netidx, protocols, netproto, tools, browser:
   - The command line publisher can now accept writes, simply say
     WRITE|PATH to enable writes for PATH. Written values will be sent

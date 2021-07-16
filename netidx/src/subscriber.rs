@@ -72,6 +72,7 @@ impl fmt::Display for NoSuchValue {
 impl error::Error for NoSuchValue {}
 
 atomic_id!(SubId);
+atomic_id!(SubscriberId);
 
 bitflags! {
     pub struct SubscribeFlags: u32 {
@@ -479,6 +480,7 @@ fn pick(n: usize) -> usize {
 
 #[derive(Debug)]
 struct SubscriberInner {
+    id: SubscriberId,
     resolver: ResolverRead,
     connections: HashMap<SocketAddr, BatchSender<ToCon>, FxBuildHasher>,
     recently_failed: HashMap<SocketAddr, Instant, FxBuildHasher>,
@@ -538,6 +540,7 @@ impl Subscriber {
         let (tx, rx) = mpsc::unbounded();
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
+            id: SubscriberId::new(),
             resolver,
             desired_auth,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
@@ -552,6 +555,13 @@ impl Subscriber {
         Ok(t)
     }
 
+    /// Return a unique identifier for this subscriber instance. The
+    /// identifier will be unique across all subscribers created in
+    /// this process, but not across processes or machines.
+    pub fn id(&self) -> SubscriberId {
+        self.0.lock().id
+    }
+    
     pub fn resolver(&self) -> ResolverRead {
         self.0.lock().resolver.clone()
     }
