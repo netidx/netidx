@@ -9,6 +9,9 @@
     errors when the same procedure is called concurrently from the
     same subscriber instance.
 
+  - fix: in bscript multiple concurrent rpc calls to the same function
+    could result in return values getting mixed up or duplicated.
+
   - new tool, container, a persistant, bscript enabled, value
     store. Kinda like a distributed spreadsheet. Kinda like a nosql
     database server. Kinda just it's own thing.
