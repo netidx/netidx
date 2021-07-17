@@ -30,7 +30,7 @@ use netidx::{
 };
 use netidx_bscript::{
     expr::{ExprId, ExprKind},
-    vm::{self, ExecCtx, Node},
+    vm::{self, ExecCtx, Node, RpcCallId},
 };
 use netidx_protocols::view;
 use std::{
@@ -137,7 +137,7 @@ enum ToGui {
     Highlight(Vec<WidgetPath>),
     Update(Batch),
     UpdateVar(Chars, Value),
-    UpdateRpc(Path, Value),
+    UpdateRpc(RpcCallId, Value),
     TableResolved(Path, resolver::Table),
     ShowError(String),
     SaveError(String),
@@ -150,7 +150,7 @@ enum FromGui {
     Render(view::View),
     ResolveTable(Path),
     Save(ViewLoc, view::View, oneshot::Sender<Result<()>>),
-    CallRpc(Path, Vec<(Chars, Value)>),
+    CallRpc(Path, Vec<(Chars, Value)>, RpcCallId),
     Updated,
     Terminate,
 }
@@ -189,8 +189,14 @@ impl vm::Ctx for WidgetCtx {
         let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
     }
 
-    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, _ref_id: ExprId) {
-        self.backend.call_rpc(name, args)
+    fn call_rpc(
+        &mut self,
+        name: Path,
+        args: Vec<(Chars, Value)>,
+        _ref_id: ExprId,
+        id: RpcCallId,
+    ) {
+        self.backend.call_rpc(name, args, id)
     }
 }
 
@@ -848,9 +854,8 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             );
             Continue(true)
         }
-        ToGui::UpdateRpc(path, value) => {
-            let name = Chars::from(String::from(&*path));
-            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Rpc(name, value));
+        ToGui::UpdateRpc(id, value) => {
+            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Rpc(id, value));
             Continue(true)
         }
         ToGui::Update(mut batch) => {

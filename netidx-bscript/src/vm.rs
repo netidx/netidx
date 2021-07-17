@@ -1,3 +1,4 @@
+pub use crate::stdfn::RpcCallId;
 use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
@@ -76,7 +77,7 @@ impl DbgCtx {
 pub enum Event<E> {
     Variable(Chars, Value),
     Netidx(SubId, Value),
-    Rpc(Chars, Value),
+    Rpc(RpcCallId, Value),
     User(E),
 }
 
@@ -112,7 +113,17 @@ pub trait Ctx {
         name: Chars,
         value: Value,
     );
-    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, ref_by: ExprId);
+
+    /// For a given name, this must have at most one outstanding call
+    /// at a time, and must preserve the order of the calls. Calls to
+    /// different names may execute concurrently.
+    fn call_rpc(
+        &mut self,
+        name: Path,
+        args: Vec<(Chars, Value)>,
+        ref_by: ExprId,
+        id: RpcCallId,
+    );
 }
 
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {

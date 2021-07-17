@@ -17,7 +17,7 @@ use netidx::{
 };
 use netidx_bscript::{
     expr::{Expr, ExprId},
-    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register},
+    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId},
 };
 use netidx_protocols::rpc::{self, server::Proc};
 use parking_lot::Mutex;
@@ -30,7 +30,11 @@ use std::{
     time::Duration,
 };
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, task, time::Instant};
+use tokio::{
+    runtime::Runtime,
+    task,
+    time::{self, Instant},
+};
 
 lazy_static! {
     static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 2048);
@@ -74,8 +78,8 @@ struct UserEv(Path, Value);
 
 enum LcEvent {
     Vars,
-    RpcCall { name: Path, args: Vec<(Chars, Value)> },
-    RpcReply { name: Path, result: Value }, //    Set { name: Path, value: Value }
+    RpcCall { name: Path, args: Vec<(Chars, Value)>, id: RpcCallId },
+    RpcReply { name: Path, id: RpcCallId, result: Value },
 }
 
 struct Lc {
@@ -110,8 +114,8 @@ impl Lc {
     fn new(
         subscriber: Subscriber,
         publisher: Publisher,
-        events: mpsc::UnboundedSender<LcEvent>,
         sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
+        events: mpsc::UnboundedSender<LcEvent>,
     ) -> Self {
         Self {
             var: HashMap::with_hasher(FxBuildHasher::default()),
@@ -183,17 +187,24 @@ impl Ctx for Lc {
         self.var_updates.push((name, value));
     }
 
-    fn call_rpc(&mut self, name: Path, args: Vec<(Chars, Value)>, ref_id: ExprId) {
+    fn call_rpc(
+        &mut self,
+        name: Path,
+        args: Vec<(Chars, Value)>,
+        ref_id: ExprId,
+        id: RpcCallId,
+    ) {
         self.rpc
             .entry(name.clone())
             .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
             .insert(ref_id);
         self.forward_refs
             .entry(ref_id)
-            .or_insert_with(Refs.new)
+            .or_insert_with(Refs::new)
             .rpcs
             .insert(name.clone());
-        let _: Result<_, _> = self.events.unbounded_send(LcEvent::Rpc { name, args });
+        let _: Result<_, _> =
+            self.events.unbounded_send(LcEvent::RpcCall { name, args, id });
     }
 }
 
@@ -346,7 +357,10 @@ struct Container {
     _delete_path_rpc: Proc,
     delete_path_rx: mpsc::Receiver<(Path, oneshot::Sender<Value>)>,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
-    rpcs: FxHashMap<Path, (Instant, rpc::client::Proc)>,
+    rpcs: FxHashMap<
+        Path,
+        (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
+    >,
 }
 
 async fn start_delete_rpc(
@@ -430,7 +444,7 @@ impl Container {
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
-        let (bs_tx, tx_rx) = mpsc::unbounded();
+        let (bs_tx, bs_rx) = mpsc::unbounded();
         let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx, bs_tx));
         let (_delete_path_rpc, delete_path_rx) =
             start_delete_rpc(&ctx.user.publisher, &ccfg.base_path).await?;
@@ -542,7 +556,7 @@ impl Container {
             n += 1;
         }
         if self.ctx.user.var_updates.len() > 0 {
-            let _: Result<_, _> = self.ctx.user.events.send_unbounded(LcEvent::Vars);
+            let _: Result<_, _> = self.ctx.user.events.unbounded_send(LcEvent::Vars);
         }
     }
 
@@ -757,17 +771,61 @@ impl Container {
         }
     }
 
-    async fn process_bscript_event(&mut self, event: LcEvent) -> Result<()> {
-        const GC: usize = 128;
-        static AGE: Duration = Duration::from_secs(60);
+    fn get_rpc_proc(
+        &mut self,
+        name: &Path,
+    ) -> mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)> {
+        async fn rpc_task(
+            reply: mpsc::UnboundedSender<LcEvent>,
+            subscriber: Subscriber,
+            name: Path,
+            mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
+        ) -> Result<()> {
+            let proc = rpc::client::Proc::new(&subscriber, name.clone()).await?;
+            while let Some((args, id)) = rx.next().await {
+                let name = name.clone();
+                let result = proc.call(args).await?;
+                reply.unbounded_send(LcEvent::RpcReply { name, id, result })?
+            }
+            Ok(())
+        }
+        match self.rpcs.get_mut(name) {
+            Some((ref mut last, ref proc)) => {
+                *last = Instant::now();
+                proc.clone()
+            }
+            None => {
+                let (tx, rx) = mpsc::unbounded();
+                task::spawn({
+                    let to_gui = self.ctx.user.events.clone();
+                    let sub = self.ctx.user.subscriber.clone();
+                    let name = name.clone();
+                    async move {
+                        let _: Result<_, _> =
+                            rpc_task(to_gui.clone(), sub, name.clone(), rx).await;
+                    }
+                });
+                self.rpcs.insert(name.clone(), (Instant::now(), tx.clone()));
+                tx
+            }
+        }
+    }
+
+    fn gc_rpcs(&mut self) {
+        static MAX_RPC_AGE: Duration = Duration::from_secs(120);
+        let now = Instant::now();
+        self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
+    }
+
+    async fn process_bscript_event(&mut self, event: LcEvent) {
         match event {
-            LcEvent::Vars => Ok(self.process_var_updates()),
-            LcEvent::RpcReply { name, result } => {
+            LcEvent::Vars => self.process_var_updates(),
+            LcEvent::RpcReply { name, id, result } => {
                 let mut refs = REFS.take();
                 if let Some(expr_ids) = self.ctx.user.rpc.get(&name) {
                     refs.extend(expr_ids);
                 }
-                let e = vm::Event::Rpc(Chars::from(String::from(&*name)), result);
+                let e = vm::Event::Rpc(id, result);
                 for id in refs.drain(..) {
                     match self.compiled.get_mut(&id) {
                         None => (),
@@ -779,44 +837,30 @@ impl Container {
                         }
                     }
                 }
-                Ok(())
             }
-            LcEvent::RpcCall { name, args } => {
-                if self.rpcs.len() > GC {
-                    let now = Instant::now();
-                    self.rpcs.retain(|_, (used, _)| now - *used <= AGE);
+            LcEvent::RpcCall { name, mut args, id } => {
+                for _ in 1..3 {
+                    let proc = self.get_rpc_proc(&name);
+                    match proc.unbounded_send((mem::replace(&mut args, vec![]), id)) {
+                        Ok(()) => return (),
+                        Err(e) => {
+                            self.rpcs.remove(&name);
+                            args = e.into_inner().0;
+                        }
+                    }
                 }
-                let proc = match self.rpcs.entry(name.clone()) {
-                    Entry::Vacant(e) => {
-                        let proc = rpc::client::Proc::new(
-                            &self.ctx.user.subscriber,
-                            name.clone(),
-                        )
-                        .await?;
-                        e.insert((Instant::now(), proc.clone()));
-                        proc
-                    }
-                    Entry::Occupied(mut e) => {
-                        let entry = e.get_mut();
-                        entry.0 = Instant::now();
-                        entry.1.clone()
-                    }
-                };
-                let reply = self.ctx.user.events.clone();
-                task::spawn(async move {
-                    let result = match proc.call(args).await {
-                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
-                        Ok(result) => result,
-                    };
-                    let _: Result<_, _> =
-                        reply.unbounded_send(LcEvent::RpcReply { name, result });
-                });
-                Ok(())
+                let result = Value::Error(Chars::from("failed to call rpc"));
+                let _: Result<_, _> = self
+                    .ctx
+                    .user
+                    .events
+                    .unbounded_send(LcEvent::RpcReply { id, name, result });
             }
         }
     }
 
     async fn run(mut self) -> Result<()> {
+        let mut gc_rpcs = time::interval(Duration::from_secs(60));
         self.init().await?;
         loop {
             select_biased! {
@@ -837,6 +881,9 @@ impl Container {
                 }
                 r = self.bscript_event.select_next_some() => {
                     self.process_bscript_event(r).await;
+                }
+                _ = gc_rpcs.tick().fuse() => {
+                    self.gc_rpcs();
                 }
                 complete => break
             }

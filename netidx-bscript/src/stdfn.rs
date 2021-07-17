@@ -2,12 +2,13 @@ use crate::{
     expr::{Expr, ExprId, VNAME},
     vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
 };
+use fxhash::{FxBuildHasher, FxHashSet};
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{self, Dval, Typ, UpdatesFlags, Value},
 };
-use std::{marker::PhantomData, sync::Arc};
+use std::{collections::HashSet, marker::PhantomData, sync::Arc};
 
 pub struct CachedVals(pub Vec<Option<Value>>);
 
@@ -1331,16 +1332,24 @@ impl LoadVar {
     }
 }
 
+atomic_id!(RpcCallId);
+
 pub(crate) struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
+    pending: FxHashSet<RpcCallId>,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
-            let mut t = RpcCall { args: CachedVals::new(from), invalid: true, top_id };
+            let mut t = RpcCall {
+                args: CachedVals::new(from),
+                invalid: true,
+                top_id,
+                pending: HashSet::with_hasher(FxBuildHasher::default()),
+            };
             t.maybe_call(ctx);
             Box::new(t)
         });
@@ -1351,9 +1360,8 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
 impl<C: Ctx, E> Apply<C, E> for RpcCall {
     fn current(&self) -> Option<Value> {
         if self.invalid {
-            Some(Value::Error(Chars::from(
-                "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs",
-            )))
+            let m = "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs";
+            Some(Value::Error(Chars::from(m)))
         } else {
             None
         }
@@ -1371,25 +1379,11 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
         } else {
             match event {
                 Event::Netidx(_, _) | Event::Variable(_, _) | Event::User(_) => None,
-                Event::Rpc(name, v) => {
-                    // CR estokes: How to deal with this race? the
-                    // function being called could change before the
-                    // return value is delivered.
-                    if self.args.0.len() == 0 {
-                        self.invalid = true;
-                        Apply::<C, E>::current(self)
+                Event::Rpc(id, v) => {
+                    if self.pending.remove(&id) {
+                        Some(v.clone())
                     } else {
-                        match self.args.0[0]
-                            .as_ref()
-                            .and_then(|v| v.clone().cast_to::<Chars>().ok())
-                        {
-                            Some(fname) if &fname == name => Some(v.clone()),
-                            Some(_) => None,
-                            None => {
-                                self.invalid = true;
-                                Apply::<C, E>::current(self)
-                            }
-                        }
+                        None
                     }
                 }
             }
@@ -1453,7 +1447,9 @@ impl RpcCall {
 
     fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((name, args)) = self.get_args() {
-            ctx.user.call_rpc(Path::from(name), args, self.top_id);
+            let id = RpcCallId::new();
+            self.pending.insert(id);
+            ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
         }
     }
 }

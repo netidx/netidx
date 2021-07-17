@@ -18,6 +18,7 @@ use netidx::{
     resolver::{Auth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
+use netidx_bscript::vm::RpcCallId;
 use netidx_protocols::{rpc::client as rpc, view};
 use std::{
     collections::HashMap,
@@ -85,9 +86,9 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::ResolveTable(path));
     }
 
-    pub(crate) fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>) {
+    pub(crate) fn call_rpc(&self, name: Path, args: Vec<(Chars, Value)>, id: RpcCallId) {
         let _: result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::CallRpc(name, args));
+            self.from_gui.unbounded_send(FromGui::CallRpc(name, args, id));
     }
 
     pub(crate) fn highlight(&self, paths: Vec<WidgetPath>) {
@@ -106,7 +107,8 @@ struct CtxInner {
     view_path: Option<Path>,
     rx_view: Option<mpsc::Receiver<RawBatch>>,
     dv_view: Option<Dval>,
-    rpcs: HashMap<Path, (Instant, mpsc::UnboundedSender<Vec<(Chars, Value)>>)>,
+    rpcs:
+        HashMap<Path, (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>)>,
     changed: Pooled<Vec<(SubId, Value)>>,
     refreshing: bool,
 }
@@ -316,17 +318,17 @@ impl CtxInner {
     fn get_rpc_proc(
         &mut self,
         name: &Path,
-    ) -> mpsc::UnboundedSender<Vec<(Chars, Value)>> {
+    ) -> mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)> {
         async fn rpc_task(
             to_gui: glib::Sender<ToGui>,
             subscriber: Subscriber,
             name: Path,
-            mut rx: mpsc::UnboundedReceiver<Vec<(Chars, Value)>>,
+            mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
         ) -> Result<()> {
             let proc = rpc::Proc::new(&subscriber, name.clone()).await?;
-            while let Some(args) = rx.next().await {
+            while let Some((args, id)) = rx.next().await {
                 let res = proc.call(args).await?;
-                to_gui.send(ToGui::UpdateRpc(name.clone(), res))?
+                to_gui.send(ToGui::UpdateRpc(id, res))?
             }
             Ok(())
         }
@@ -342,16 +344,8 @@ impl CtxInner {
                     let sub = self.subscriber.clone();
                     let name = name.clone();
                     async move {
-                        match rpc_task(to_gui.clone(), sub, name.clone(), rx).await {
-                            Ok(()) => (),
-                            Err(e) => {
-                                let e = Value::Error(Chars::from(format!(
-                                    "rpc task died {}",
-                                    e
-                                )));
-                                let _ = to_gui.send(ToGui::UpdateRpc(name, e));
-                            }
-                        }
+                        let _: Result<_, _> =
+                            rpc_task(to_gui.clone(), sub, name.clone(), rx).await;
                     }
                 });
                 self.rpcs.insert(name.clone(), (Instant::now(), tx.clone()));
@@ -360,19 +354,24 @@ impl CtxInner {
         }
     }
 
-    fn call_rpc(&mut self, name: Path, mut args: Vec<(Chars, Value)>) -> Result<()> {
+    fn call_rpc(
+        &mut self,
+        name: Path,
+        mut args: Vec<(Chars, Value)>,
+        id: RpcCallId,
+    ) -> Result<()> {
         for _ in 1..3 {
             let proc = self.get_rpc_proc(&name);
-            match proc.unbounded_send(mem::replace(&mut args, vec![])) {
+            match proc.unbounded_send((mem::replace(&mut args, vec![]), id)) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     self.rpcs.remove(&name);
-                    args = e.into_inner();
+                    args = e.into_inner().0;
                 }
             }
         }
         let e = Value::Error(Chars::from("failed to call rpc"));
-        self.to_gui.send(ToGui::UpdateRpc(name, e))?;
+        self.to_gui.send(ToGui::UpdateRpc(id, e))?;
         Ok(())
     }
 
@@ -424,8 +423,8 @@ impl CtxInner {
                         break_err!(self.navigate_path(path).await),
                     Some(FromGui::Navigate(ViewLoc::File(file))) =>
                         break_err!(self.navigate_file(file).await),
-                    Some(FromGui::CallRpc(path, args)) =>
-                        break_err!(self.call_rpc(path, args)),
+                    Some(FromGui::CallRpc(path, args, id)) =>
+                        break_err!(self.call_rpc(path, args, id)),
                 },
                 b = self.updates.next() => if let Some(batch) = b {
                     break_err!(self.process_updates(batch))
