@@ -194,29 +194,6 @@ impl Val {
         batch.lasts.insert(self.0.id, v);
     }
 
-    /// `update` the current value only if the new value is different
-    /// from the existing one. Otherwise exactly the same as update.
-    pub fn update_changed(&self, batch: &mut UpdateBatch, v: Value) {
-        let subscribed = self.0.subscribed.lock();
-        let changed = match batch.lasts.get(&self.0.id) {
-            None => match self.current() {
-                None => true,
-                Some(current) => v != current,
-            },
-            Some(current) => &v != current,
-        };
-        if changed {
-            for addr in subscribed.iter() {
-                batch
-                    .msgs
-                    .entry(*addr)
-                    .or_insert_with(|| TOCL.take())
-                    .push(ToClientMsg::Val(self.0.id, v.clone()))
-            }
-            batch.lasts.insert(self.0.id, v);
-        }
-    }
-
     /// Send `v` as an update ONLY to the specified subscriber, and do
     /// not update `current`. You can use this to implement a simple
     /// unicast side channel in parallel with the existing multicast
