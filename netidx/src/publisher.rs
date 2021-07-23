@@ -87,6 +87,12 @@ pub struct WriteRequest {
     pub send_result: Option<SendResult>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Event {
+    Subscribe(Id, SocketAddr),
+    Unsubscribe(Id, SocketAddr),
+}
+
 lazy_static! {
     static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
     static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
@@ -259,25 +265,22 @@ impl Val {
         }
     }
 
-    /// Register `tx` to receive a message when a new client
-    /// subscribes to this value. If `include_existing` is true, then
-    /// current subscribers will be sent to the channel immediatly,
-    /// otherwise it will only receive new subscribers.
-    pub fn subscribers(
-        &self,
-        include_existing: bool,
-        tx: UnboundedSender<(Id, SocketAddr)>,
-    ) {
+    /// Register `tx` to receive a message when a client subscribes or
+    /// unsubscribes. If `include_existing` is true, then current
+    /// subscribers will be sent to the channel immediatly, otherwise
+    /// it will only receive new subscribers.
+    pub fn events(&self, include_existing: bool, tx: UnboundedSender<Event>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut inner = publisher.0.lock();
             inner
-                .on_subscribe_chans
+                .on_event_chans
                 .entry(self.0.id)
                 .or_insert_with(Vec::new)
                 .push(tx.clone());
             if include_existing {
                 for a in self.0.subscribed.lock().iter() {
-                    let _: result::Result<_, _> = tx.unbounded_send((self.0.id, a.0));
+                    let e = Event::Subscribe(self.0.id, a.0);
+                    let _: result::Result<_, _> = tx.unbounded_send(e);
                 }
             }
         }
@@ -418,8 +421,7 @@ struct PublisherInner {
         (ChanId, HashSet<Id>),
         FxBuildHasher,
     >,
-    on_subscribe_chans:
-        HashMap<Id, Vec<UnboundedSender<(Id, SocketAddr)>>, FxBuildHasher>,
+    on_event_chans: HashMap<Id, Vec<UnboundedSender<Event>>, FxBuildHasher>,
     on_write:
         HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
@@ -442,6 +444,15 @@ impl PublisherInner {
                 self.clients.clear();
                 self.by_id.clear();
                 true
+            }
+        }
+    }
+
+    fn send_event(&mut self, id: Id, event: Event) {
+        if let Some(chans) = self.on_event_chans.get_mut(&id) {
+            chans.retain(|chan| chan.unbounded_send(event).is_ok());
+            if chans.is_empty() {
+                self.on_event_chans.remove(&id);
             }
         }
     }
@@ -690,7 +701,7 @@ impl Publisher {
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             current: HashMap::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
-            on_subscribe_chans: HashMap::with_hasher(FxBuildHasher::default()),
+            on_event_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
             to_publish: TOPUB.take(),
@@ -1001,16 +1012,12 @@ fn subscribe(
                     let m = publisher::From::Subscribed(path, id, current.clone());
                     con.queue_send(&m)?;
                 }
-                if let Some(chans) = t.on_subscribe_chans.get(&id) {
-                    for chan in chans {
-                        let _: result::Result<_, _> = chan.unbounded_send((id, addr));
-                    }
-                }
                 if let Some(waiters) = t.wait_clients.remove(&id) {
                     for tx in waiters {
                         let _ = tx.send(());
                     }
                 }
+                t.send_event(id, Event::Subscribe(id, addr));
             }
         }
     }
@@ -1037,6 +1044,7 @@ fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
         if let Some(cl) = t.clients.get_mut(&addr.0) {
             cl.subscribed.remove(&id);
         }
+        t.send_event(id, Event::Unsubscribe(id, addr.0));
     }
 }
 
