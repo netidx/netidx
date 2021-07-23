@@ -16,7 +16,6 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
-use crossbeam::queue::SegQueue;
 use futures::{
     channel::{
         mpsc::{
@@ -142,6 +141,7 @@ impl Drop for ValInner {
                 self.path.clone(),
                 Some((self.id, self.subscribed.lock().clone())),
             );
+            pb.trigger_publish();
         }
     }
 }
@@ -322,8 +322,7 @@ impl Val {
         self.0
             .publisher
             .upgrade()
-            .and_then(|p| p.0.lock().current.get(&self.0.id))
-            .cloned()
+            .and_then(|p| p.0.lock().current.get(&self.0.id).cloned())
     }
 
     /// Get the unique `Id` of this `Val`
@@ -1476,9 +1475,24 @@ async fn publish_loop(publisher: PublisherWeak, mut trigger_rx: UnboundedReceive
                 }
             }
             if to_unpublish.len() > 0 {
-                if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
+                let mut batch = publisher.start_batch();
+                let iter = to_unpublish.drain().map(|(path, subs)| match subs {
+                    None => path,
+                    Some((id, subs)) => {
+                        for addr in subs.iter() {
+                            batch
+                                .msgs
+                                .entry(*addr)
+                                .or_insert_with(|| TOCL.take())
+                                .push(ToClientMsg::Unpublish(id));
+                        }
+                        path
+                    }
+                });
+                if let Err(e) = resolver.unpublish(iter).await {
                     error!("failed to unpublish some paths {} will retry", e)
                 }
+                batch.commit(None).await;
             }
         }
     }
