@@ -148,7 +148,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
 
     /// Return the number of bytes queued for sending.
     pub(crate) fn bytes_queued(&self) -> usize {
-        self.buf.len()
+        self.buf.remaining()
     }
 
     /// Initiate sending all outgoing messages. The actual send will

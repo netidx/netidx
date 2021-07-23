@@ -89,28 +89,32 @@ pub struct WriteRequest {
 }
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50000);
+    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
+    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
+    static ref TOUPUB: Pool<HashMap<Path, Option<(Id, Subscribed)>>> =
+        Pool::new(10, 500_000);
+    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
+    static ref LASTS: Pool<HashMap<Id, Value, FxBuildHasher>> = Pool::new(1000, 500_000);
+    static ref BATCHMSGS: Pool<HashMap<Addr, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
+        Pool::new(100, 10000);
 }
+
+type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
 
 // The set of clients subscribed to a given value is hashconsed.
 // Instead of having a seperate hash table for each published value,
 // we can just keep a pointer to a set shared by other published
-// values. Since in the case where we care about memory useage there
+// values. Since in the case where we care about memory usage there
 // are many more published values than clients we can save a lot of
 // memory this way. Roughly the size of a hashmap, plus it's
 // keys/values, replaced by 1 word.
-type Subscribed = Arc<HashMap<Addr, Arc<SegQueue<ToClientMsg>>, FxBuildHasher>>;
-
-struct ValLocked {
-    current: Value,
-    subscribed: Subscribed,
-}
+type Subscribed = Arc<HashSet<Addr, FxBuildHasher>>;
 
 struct ValInner {
     id: Id,
     path: Path,
     publisher: PublisherWeak,
-    locked: Mutex<ValLocked>,
+    subscribed: Mutex<Subscribed>,
 }
 
 impl Drop for ValInner {
@@ -133,10 +137,11 @@ impl Drop for ValInner {
                 }
             }
             pb.to_publish.remove(&self.path);
-            pb.to_unpublish.insert(self.path.clone());
-            for q in self.locked.lock().subscribed.values() {
-                q.push(ToClientMsg::Unpublish(self.id));
-            }
+            pb.current.remove(&self.id);
+            pb.to_unpublish.insert(
+                self.path.clone(),
+                Some((self.id, self.subscribed.lock().clone())),
+            );
         }
     }
 }
@@ -160,9 +165,7 @@ impl SendResult {
 
 /// This represents a published value. Internally it is wrapped in an
 /// Arc, so cloning it is free. When all references to a given
-/// published value have been dropped it will be unpublished.  However
-/// you must call flush before references to it will be removed from
-/// the resolver server.
+/// published value have been dropped it will be unpublished.
 #[derive(Clone)]
 pub struct Val(Arc<ValInner>);
 
@@ -180,23 +183,37 @@ impl Val {
     /// updates are queued on multiple different published values
     /// before `flush` is called, they will all be sent out as a batch
     /// and are guarenteed to arrive in the order `update` was called.
-    pub fn update(&self, v: Value) {
-        let mut inner = self.0.locked.lock();
-        for q in inner.subscribed.values() {
-            q.push(ToClientMsg::Val(self.0.id, v.clone()))
+    pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
+        for addr in self.0.subscribed.lock().iter() {
+            batch
+                .msgs
+                .entry(*addr)
+                .or_insert_with(|| TOCL.take())
+                .push(ToClientMsg::Val(self.0.id, v.clone()))
         }
-        inner.current = v;
+        batch.lasts.insert(self.0.id, v);
     }
 
     /// `update` the current value only if the new value is different
     /// from the existing one. Otherwise exactly the same as update.
-    pub fn update_changed(&self, v: Value) {
-        let mut inner = self.0.locked.lock();
-        if v != inner.current {
-            for q in inner.subscribed.values() {
-                q.push(ToClientMsg::Val(self.0.id, v.clone()))
+    pub fn update_changed(&self, batch: &mut UpdateBatch, v: Value) {
+        let subscribed = self.0.subscribed.lock();
+        let changed = match batch.lasts.get(&self.0.id) {
+            None => match self.current() {
+                None => true,
+                Some(current) => v != current,
+            },
+            Some(current) => &v != current,
+        };
+        if changed {
+            for addr in subscribed.iter() {
+                batch
+                    .msgs
+                    .entry(*addr)
+                    .or_insert_with(|| TOCL.take())
+                    .push(ToClientMsg::Val(self.0.id, v.clone()))
             }
-            inner.current = v;
+            batch.lasts.insert(self.0.id, v);
         }
     }
 
@@ -209,10 +226,18 @@ impl Val {
     /// response value, where the query is encoded in the name of the
     /// value (perhaps passed via publish_default), and the full
     /// response set is sent to each client as it subscribes.
-    pub fn update_subscriber(&self, subscriber: &SocketAddr, v: Value) {
-        let inner = self.0.locked.lock();
-        if let Some(q) = inner.subscribed.get(subscriber) {
-            q.push(ToClientMsg::Val(self.0.id, v));
+    pub fn update_subscriber(
+        &self,
+        batch: &mut UpdateBatch,
+        subscriber: &SocketAddr,
+        v: Value,
+    ) {
+        if self.0.subscribed.lock().contains(subscriber) {
+            batch
+                .msgs
+                .entry(Addr(*subscriber))
+                .or_insert_with(|| TOCL.take())
+                .push(ToClientMsg::Val(self.0.id, v));
         }
     }
 
@@ -274,7 +299,7 @@ impl Val {
                 .or_insert_with(Vec::new)
                 .push(tx.clone());
             if include_existing {
-                for a in self.0.locked.lock().subscribed.keys() {
+                for a in self.0.subscribed.lock().iter() {
                     let _: result::Result<_, _> = tx.unbounded_send((self.0.id, a.0));
                 }
             }
@@ -282,16 +307,23 @@ impl Val {
     }
 
     /// Unsubscribe the specified client.
-    pub fn unsubscribe(&self, subscriber: &SocketAddr) {
-        let inner = self.0.locked.lock();
-        if let Some(q) = inner.subscribed.get(subscriber) {
-            q.push(ToClientMsg::Unpublish(self.0.id));
+    pub fn unsubscribe(&self, batch: &mut UpdateBatch, subscriber: &SocketAddr) {
+        if self.0.subscribed.lock().contains(subscriber) {
+            batch
+                .msgs
+                .entry(Addr(*subscriber))
+                .or_insert_with(|| TOCL.take())
+                .push(ToClientMsg::Unpublish(self.0.id));
         }
     }
 
     /// Get a copy of the current value
-    pub fn current(&self) -> Value {
-        self.0.locked.lock().current.clone()
+    pub fn current(&self) -> Option<Value> {
+        self.0
+            .publisher
+            .upgrade()
+            .and_then(|p| p.0.lock().current.get(&self.0.id))
+            .cloned()
     }
 
     /// Get the unique `Id` of this `Val`
@@ -305,11 +337,11 @@ impl Val {
     }
 
     pub fn subscribed(&self) -> Vec<SocketAddr> {
-        self.0.locked.lock().subscribed.keys().map(|a| a.0).collect()
+        self.0.subscribed.lock().iter().map(|a| a.0).collect()
     }
 
     pub fn subscribed_len(&self) -> usize {
-        self.0.locked.lock().subscribed.len()
+        self.0.subscribed.lock().len()
     }
 }
 
@@ -350,8 +382,39 @@ impl Drop for DefaultHandle {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.default.remove(self.path.as_ref());
-            pb.to_unpublish.insert(self.path.clone());
+            pb.to_unpublish.insert(self.path.clone(), None);
         }
+    }
+}
+
+#[must_use = "update batches do nothing unless committed"]
+pub struct UpdateBatch {
+    origin: Publisher,
+    msgs: Pooled<HashMap<Addr, Pooled<Vec<ToClientMsg>>, FxBuildHasher>>,
+    lasts: Pooled<HashMap<Id, Value, FxBuildHasher>>,
+}
+
+impl UpdateBatch {
+    pub async fn commit(mut self, timeout: Option<Duration>) {
+        let fut = {
+            let mut pb = self.origin.0.lock();
+            for (id, value) in self.lasts.drain() {
+                pb.current.insert(id, value);
+            }
+            future::join_all(
+                self.msgs
+                    .drain()
+                    .filter_map(|(addr, batch)| {
+                        pb.clients
+                            .get(&addr.0)
+                            .map(move |cl| (cl.msg_queue.clone(), batch))
+                    })
+                    .map(|(mut q, batch)| async move {
+                        let _: Result<_, _> = q.send((timeout, batch)).await;
+                    }),
+            )
+        };
+        fut.await;
     }
 }
 
@@ -359,12 +422,10 @@ impl Drop for DefaultHandle {
 enum ToClientMsg {
     Val(Id, Value),
     Unpublish(Id),
-    Flush,
 }
 
 struct Client {
-    flush_trigger: Sender<Option<Duration>>,
-    msg_queue: Arc<SegQueue<ToClientMsg>>,
+    msg_queue: MsgQ,
     subscribed: HashMap<Id, Permissions, FxBuildHasher>,
 }
 
@@ -375,6 +436,7 @@ struct PublisherInner {
     hc_subscribed: HashMap<BTreeSet<Addr>, Subscribed, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, ValWeak, FxBuildHasher>,
+    current: HashMap<Id, Value, FxBuildHasher>,
     on_write_chans: HashMap<
         ChanWrap<Pooled<Vec<WriteRequest>>>,
         (ChanId, HashSet<Id>),
@@ -385,9 +447,11 @@ struct PublisherInner {
     on_write:
         HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
-    to_publish: HashMap<Path, Option<u16>>,
-    to_publish_default: HashMap<Path, Option<u16>>,
-    to_unpublish: HashSet<Path>,
+    to_publish: Pooled<HashMap<Path, Option<u16>>>,
+    to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
+    to_unpublish: Pooled<HashMap<Path, Option<(Id, Subscribed)>>>,
+    publish_triggered: bool,
+    trigger_publish: UnboundedSender<()>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
@@ -403,6 +467,13 @@ impl PublisherInner {
                 self.by_id.clear();
                 true
             }
+        }
+    }
+
+    fn trigger_publish(&mut self) {
+        if !self.publish_triggered {
+            self.publish_triggered = true;
+            let _: Result<_, _> = self.trigger_publish.unbounded_send(());
         }
     }
 
@@ -633,6 +704,7 @@ impl Publisher {
         };
         let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
         let (stop, receive_stop) = oneshot::channel();
+        let (tx_trigger, rx_trigger) = unbounded();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
             stop: Some(stop),
@@ -640,13 +712,16 @@ impl Publisher {
             hc_subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
+            current: HashMap::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_subscribe_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
-            to_publish: HashMap::new(),
-            to_publish_default: HashMap::new(),
-            to_unpublish: HashSet::new(),
+            to_publish: TOPUB.take(),
+            to_publish_default: TOPUB.take(),
+            to_unpublish: TOUPUB.take(),
+            publish_triggered: false,
+            trigger_publish: tx_trigger,
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
             wait_any_client: Vec::new(),
             default: BTreeMap::new(),
@@ -656,6 +731,13 @@ impl Publisher {
             async move {
                 accept_loop(pb_weak.clone(), listener, receive_stop, desired_auth).await;
                 info!("accept loop shutdown");
+            }
+        });
+        task::spawn({
+            let pb_weak = pb.downgrade();
+            async move {
+                publish_loop(pb_weak, rx_trigger).await;
+                info!("publish loop shutdown")
             }
         });
         Ok(pb)
@@ -716,7 +798,7 @@ impl Publisher {
                 .hc_subscribed
                 .entry(BTreeSet::new())
                 .or_insert_with(|| {
-                    Arc::new(HashMap::with_hasher(FxBuildHasher::default()))
+                    Arc::new(HashSet::with_hasher(FxBuildHasher::default()))
                 })
                 .clone();
             let id = Id::new();
@@ -724,15 +806,17 @@ impl Publisher {
                 id,
                 path: path.clone(),
                 publisher: self.downgrade(),
-                locked: Mutex::new(ValLocked { current: init, subscribed }),
+                subscribed: Mutex::new(subscribed),
             }));
             pb.by_id.insert(id, val.downgrade());
+            pb.current.insert(id, init);
             pb.to_unpublish.remove(&path);
             pb.to_publish.insert(
                 path.clone(),
                 if flags.is_empty() { None } else { Some(flags.bits) },
             );
             pb.by_path.insert(path, id);
+            pb.trigger_publish();
             Ok(val)
         }
     }
@@ -785,6 +869,7 @@ impl Publisher {
             );
             let (tx, rx) = unbounded();
             pb.default.insert(base.clone(), tx);
+            pb.trigger_publish();
             Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
         }
     }
@@ -813,65 +898,8 @@ impl Publisher {
         self.publish_default_with_flags(PublishFlags::empty(), base)
     }
 
-    /// Flush initiates sending queued updates out to subscribers, and
-    /// also sends all queued publish/unpublish operations to the
-    /// resolver. The semantics of flush are such that any update
-    /// queued before flush is called will go out when it is called,
-    /// and any update queued after flush is called will only go out
-    /// on the next flush.
-    ///
-    /// If you don't want to wait for the future you can just throw it
-    /// away, `flush` triggers sending the data whether you await the
-    /// future or not, unlike most futures. However if you never wait
-    /// for any of the futures returned by flush there won't be any
-    /// pushback, so a slow client could cause the publisher to
-    /// consume arbitrary amounts of memory unless you set an
-    /// aggressive timeout.
-    ///
-    /// If timeout is specified then any client that can't accept the
-    /// update within the timeout duration will be disconnected.
-    /// Otherwise flush will wait as long as necessary to flush the
-    /// update to every client.
-    pub async fn flush(&self, timeout: Option<Duration>) {
-        let mut to_publish;
-        let mut to_publish_default;
-        let mut to_unpublish;
-        let clients;
-        let resolver = {
-            let mut pb = self.0.lock();
-            to_publish = mem::replace(&mut pb.to_publish, HashMap::new());
-            to_publish_default = mem::replace(&mut pb.to_publish_default, HashMap::new());
-            to_unpublish = mem::replace(&mut pb.to_unpublish, HashSet::new());
-            clients = pb
-                .clients
-                .values()
-                .map(|c| {
-                    c.msg_queue.push(ToClientMsg::Flush);
-                    c.flush_trigger.clone()
-                })
-                .collect::<Vec<_>>();
-            pb.resolver.clone()
-        };
-        for mut client in clients {
-            let _ = client.send(timeout).await;
-        }
-        if to_publish.len() > 0 {
-            if let Err(e) = resolver.publish_with_flags(to_publish.drain()).await {
-                error!("failed to publish some paths {} will retry", e);
-            }
-        }
-        if to_publish_default.len() > 0 {
-            if let Err(e) =
-                resolver.publish_default_with_flags(to_publish_default.drain()).await
-            {
-                error!("failed to publish_default some paths {} will retry", e)
-            }
-        }
-        if to_unpublish.len() > 0 {
-            if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
-                error!("failed to unpublish some paths {} will retry", e)
-            }
-        }
+    pub fn start_batch(&self) -> UpdateBatch {
+        UpdateBatch { origin: self.clone(), msgs: BATCHMSGS.take(), lasts: LASTS.take() }
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
@@ -914,7 +942,7 @@ impl Publisher {
                 Some(ut) => match ut.upgrade() {
                     None => return,
                     Some(ut) => {
-                        if ut.0.locked.lock().subscribed.len() > 0 {
+                        if ut.0.subscribed.lock().len() > 0 {
                             return;
                         }
                         let (tx, rx) = oneshot::channel();
@@ -926,7 +954,7 @@ impl Publisher {
         };
         let _ = wait.await;
     }
-    
+
     /// Retreive the Id of path if it is published, otherwise None
     pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
         self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
@@ -939,7 +967,6 @@ type DeferredSubs =
 
 fn subscribe(
     t: &mut PublisherInner,
-    updates: &Arc<SegQueue<ToClientMsg>>,
     con: &mut Channel<ServerCtx>,
     addr: SocketAddr,
     path: Path,
@@ -979,23 +1006,25 @@ fn subscribe(
                 if let Some(cl) = t.clients.get_mut(&addr) {
                     cl.subscribed.insert(id, permissions);
                 }
-                let mut inner = ut.0.locked.lock();
+                let mut subscribed = ut.0.subscribed.lock();
                 let subs = BTreeSet::from_iter(
-                    iter::once(Addr::from(addr)).chain(inner.subscribed.keys().copied()),
+                    iter::once(Addr::from(addr)).chain(subscribed.iter().copied()),
                 );
                 match t.hc_subscribed.entry(subs) {
                     Entry::Occupied(e) => {
-                        inner.subscribed = e.get().clone();
+                        *subscribed = e.get().clone();
                     }
                     Entry::Vacant(e) => {
-                        let mut s = HashMap::clone(&inner.subscribed);
-                        s.insert(Addr::from(addr), Arc::clone(updates));
-                        inner.subscribed = Arc::new(s);
-                        e.insert(inner.subscribed.clone());
+                        let mut s = HashSet::clone(&*subscribed);
+                        s.insert(Addr::from(addr));
+                        *subscribed = Arc::new(s);
+                        e.insert(subscribed.clone());
                     }
                 }
-                let m = publisher::From::Subscribed(path, id, inner.current.clone());
-                con.queue_send(&m)?;
+                if let Some(current) = t.current.get(&id) {
+                    let m = publisher::From::Subscribed(path, id, current.clone());
+                    con.queue_send(&m)?;
+                }
                 if let Some(chans) = t.on_subscribe_chans.get(&id) {
                     for chan in chans {
                         let _: result::Result<_, _> = chan.unbounded_send((id, addr));
@@ -1015,18 +1044,18 @@ fn subscribe(
 fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
     if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
         let addr = Addr::from(*addr);
-        let mut inner = ut.0.locked.lock();
-        let subs =
-            BTreeSet::from_iter(inner.subscribed.keys().filter(|a| *a != &addr).copied());
+        let mut subscribed = ut.0.subscribed.lock();
+        let subs = // CR estokes: use a pooled sorted vec
+            BTreeSet::from_iter(subscribed.iter().filter(|a| *a != &addr).copied());
         match t.hc_subscribed.entry(subs) {
             Entry::Occupied(e) => {
-                inner.subscribed = e.get().clone();
+                *subscribed = e.get().clone();
             }
             Entry::Vacant(e) => {
-                let mut h = HashMap::clone(&inner.subscribed);
+                let mut h = HashSet::clone(&subscribed);
                 h.remove(&addr);
-                inner.subscribed = Arc::new(h);
-                e.insert(inner.subscribed.clone());
+                *subscribed = Arc::new(h);
+                e.insert(subscribed.clone());
             }
         }
         if let Some(cl) = t.clients.get_mut(&addr.0) {
@@ -1037,7 +1066,6 @@ fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
 
 async fn handle_batch(
     t: &PublisherWeak,
-    updates: &Arc<SegQueue<ToClientMsg>>,
     addr: &SocketAddr,
     msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel<ServerCtx>,
@@ -1073,7 +1101,6 @@ async fn handle_batch(
                     match auth {
                         Auth::Anonymous => subscribe(
                             &mut *pb,
-                            updates,
                             con,
                             *addr,
                             path,
@@ -1117,7 +1144,6 @@ async fn handle_batch(
                                 } else {
                                     subscribe(
                                         &mut *pb,
-                                        updates,
                                         con,
                                         *addr,
                                         path,
@@ -1263,10 +1289,9 @@ async fn hello_client(
 
 async fn client_loop(
     t: PublisherWeak,
-    updates: Arc<SegQueue<ToClientMsg>>,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     addr: SocketAddr,
-    flushes: Receiver<Option<Duration>>,
+    updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
     s: TcpStream,
     desired_auth: Auth,
 ) -> Result<()> {
@@ -1277,7 +1302,7 @@ async fn client_loop(
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
         FxBuildHasher,
     > = HashMap::with_hasher(FxBuildHasher::default());
-    let mut flushes = flushes.fuse();
+    let mut updates = updates.fuse();
     let mut hb = time::interval(HB);
     let mut msg_sent = false;
     let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
@@ -1308,7 +1333,7 @@ async fn client_loop(
                                     con.queue_send(&m)?
                                 } else {
                                     subscribe(
-                                        &mut *pb, &updates, &mut con, addr,
+                                        &mut *pb, &mut con, addr,
                                         path, perms, &mut deferred_subs
                                     )?
                                 }
@@ -1325,18 +1350,17 @@ async fn client_loop(
                         .duration_since(SystemTime::UNIX_EPOCH)?
                         .as_secs();
                     handle_batch(
-                        &t, &updates, &addr, batch.drain(..), &mut con,
+                        &t, &addr, batch.drain(..), &mut con,
                         &mut write_batches, &secrets, &desired_auth, now,
                         &mut deferred_subs,
                     ).await?;
                     con.flush().await?
                 }
             },
-            to_cl = flushes.next() => match to_cl {
+            to_cl = updates.next() => match to_cl {
                 None => break Ok(()),
-                Some(timeout) => {
-                    while let Some(m) = updates.pop() {
-                        msg_sent = true;
+                Some((timeout, mut msgs)) => {
+                    for m in msgs.drain(..) {
                         match m {
                             ToClientMsg::Val(id, v) => {
                                 con.queue_send(&publisher::From::Update(id, v))?;
@@ -1345,7 +1369,6 @@ async fn client_loop(
                                 // handle this as if the client had requested it
                                 batch.push(publisher::To::Unsubscribe(id));
                             }
-                            ToClientMsg::Flush => break,
                         }
                     }
                     if batch.len() > 0 {
@@ -1353,15 +1376,18 @@ async fn client_loop(
                             .duration_since(SystemTime::UNIX_EPOCH)?
                             .as_secs();
                         handle_batch(
-                            &t, &updates, &addr, batch.drain(..),
+                            &t, &addr, batch.drain(..),
                             &mut con, &mut write_batches, &secrets,
                             &desired_auth, now, &mut deferred_subs,
                         ).await?;
                     }
-                    let f = con.flush();
-                    match timeout {
-                        None => f.await?,
-                        Some(d) => time::timeout(d, f).await??
+                    if con.bytes_queued() > 0 {
+                        msg_sent = true;
+                        let f = con.flush();
+                        match timeout {
+                            None => f.await?,
+                            Some(d) => time::timeout(d, f).await??
+                        }
                     }
                 }
             },
@@ -1393,16 +1419,14 @@ async fn accept_loop(
                     if pb.clients.len() < MAX_CLIENTS {
                         let (tx, rx) = channel(3);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
-                        let updates = Arc::new(SegQueue::new());
                         pb.clients.insert(addr, Client {
-                            flush_trigger: tx,
-                            msg_queue: updates.clone(),
+                            msg_queue: tx,
                             subscribed: HashMap::with_hasher(FxBuildHasher::default()),
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
                             let r = client_loop(
-                                t_weak.clone(), updates, secrets, addr, rx, s, desired_auth
+                                t_weak.clone(), secrets, addr, rx, s, desired_auth
                             ).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
@@ -1420,6 +1444,42 @@ async fn accept_loop(
                     }
                 }
             },
+        }
+    }
+}
+
+async fn publish_loop(publisher: PublisherWeak, mut trigger_rx: UnboundedReceiver<()>) {
+    while let Some(()) = trigger_rx.next().await {
+        if let Some(publisher) = publisher.upgrade() {
+            let mut to_publish;
+            let mut to_publish_default;
+            let mut to_unpublish;
+            let resolver = {
+                let mut pb = publisher.0.lock();
+                to_publish = mem::replace(&mut pb.to_publish, TOPUB.take());
+                to_publish_default =
+                    mem::replace(&mut pb.to_publish_default, TOPUB.take());
+                to_unpublish = mem::replace(&mut pb.to_unpublish, TOUPUB.take());
+                pb.publish_triggered = false;
+                pb.resolver.clone()
+            };
+            if to_publish.len() > 0 {
+                if let Err(e) = resolver.publish_with_flags(to_publish.drain()).await {
+                    error!("failed to publish some paths {} will retry", e);
+                }
+            }
+            if to_publish_default.len() > 0 {
+                if let Err(e) =
+                    resolver.publish_default_with_flags(to_publish_default.drain()).await
+                {
+                    error!("failed to publish_default some paths {} will retry", e)
+                }
+            }
+            if to_unpublish.len() > 0 {
+                if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
+                    error!("failed to unpublish some paths {} will retry", e)
+                }
+            }
         }
     }
 }
