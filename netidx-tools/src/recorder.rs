@@ -17,7 +17,9 @@ use netidx::{
         glob::{Glob, GlobSet},
         value::FromValue,
     },
-    publisher::{BindCfg, PublishFlags, Publisher, Val, Value, WriteRequest},
+    publisher::{
+        BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
+    },
     resolver::{Auth, ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
@@ -34,7 +36,6 @@ use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     mem,
-    net::SocketAddr,
     ops::Bound,
     str::FromStr,
     sync::Arc,
@@ -250,7 +251,7 @@ mod publish {
                 Value::Null,
             )?;
             pos_ctl.writes(control_tx.clone());
-            publisher.flush(None).await;
+            publisher.flushed().await;
             Ok(Controls {
                 _start_doc,
                 start_ctl,
@@ -267,7 +268,7 @@ mod publish {
     }
 
     struct NewSessionConfig {
-        client: SocketAddr,
+        client: ClId,
         start: Option<Bound<DateTime<Utc>>>,
         end: Option<Bound<DateTime<Utc>>>,
         speed: Option<Option<f64>>,
@@ -278,7 +279,7 @@ mod publish {
 
     impl NewSessionConfig {
         fn new(
-            client: SocketAddr,
+            client: ClId,
             mut args: Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
         ) -> Result<NewSessionConfig> {
             let mut last = |name| args.remove(name).and_then(|mut v| v.pop());
@@ -346,8 +347,9 @@ mod publish {
                             match batches.pop_front() {
                                 Some(batch) => Ok(batch),
                                 None => {
-                                    self.set_state(State::Tail);
-                                    self.publisher.flush(None).await;
+                                    let mut cbatch = self.publisher.start_batch();
+                                    self.set_state(&mut cbatch, State::Tail);
+                                    cbatch.commit(None).await;
                                     future::pending().await
                                 }
                             }
@@ -365,8 +367,9 @@ mod publish {
                             }
                             *current = cur;
                             if current.is_empty() {
-                                self.set_state(State::Tail);
-                                self.publisher.flush(None).await;
+                                let mut cbatch = self.publisher.start_batch();
+                                self.set_state(&mut cbatch, State::Tail);
+                                cbatch.commit(None).await;
                                 return future::pending().await;
                             }
                         }
@@ -377,8 +380,9 @@ mod publish {
                             now = Instant::now();
                         }
                         if current.is_empty() {
-                            self.set_state(State::Tail);
-                            self.publisher.flush(None).await;
+                            let mut cbatch = self.publisher.start_batch();
+                            self.set_state(&mut cbatch, State::Tail);
+                            cbatch.commit(None).await;
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
@@ -396,6 +400,7 @@ mod publish {
             &mut self,
             batch: (DateTime<Utc>, &mut Vec<BatchItem>),
         ) -> Result<()> {
+            let mut pbatch = self.publisher.start_batch();
             for BatchItem(id, ev) in batch.1.drain(..) {
                 let v = match ev {
                     Event::Unsubscribed => Value::Null,
@@ -403,7 +408,7 @@ mod publish {
                 };
                 match self.published.get(&id) {
                     Some(val) => {
-                        val.update(v);
+                        val.update(&mut pbatch, v);
                     }
                     None => {
                         let path = self.archive.path_for_id(&id).unwrap();
@@ -413,8 +418,8 @@ mod publish {
                     }
                 }
             }
-            self.controls.pos_ctl.update(Value::DateTime(batch.0));
-            Ok(self.publisher.flush(None).await)
+            self.controls.pos_ctl.update(&mut pbatch, Value::DateTime(batch.0));
+            Ok(pbatch.commit(None).await)
         }
 
         async fn process_bcast(
@@ -457,67 +462,79 @@ mod publish {
             }
         }
 
-        fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
-            self.controls.start_ctl.update(bound_to_val(new_start));
+        fn set_start(
+            &mut self,
+            cbatch: &mut UpdateBatch,
+            new_start: Bound<DateTime<Utc>>,
+        ) -> Result<()> {
+            self.controls.start_ctl.update(cbatch, bound_to_val(new_start));
             self.cursor.set_start(new_start);
             if self.cursor.current().is_none() {
-                self.seek(Seek::Beginning)?;
+                self.seek(cbatch, Seek::Beginning)?;
             }
             Ok(())
         }
 
-        fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
-            self.controls.end_ctl.update(bound_to_val(new_end));
+        fn set_end(
+            &mut self,
+            cbatch: &mut UpdateBatch,
+            new_end: Bound<DateTime<Utc>>,
+        ) -> Result<()> {
+            self.controls.end_ctl.update(cbatch, bound_to_val(new_end));
             self.cursor.set_end(new_end);
             if self.cursor.current().is_none() {
-                self.seek(Seek::Beginning)?;
+                self.seek(cbatch, Seek::Beginning)?;
             }
             Ok(())
         }
 
-        fn set_state(&mut self, state: State) {
+        fn set_state(&mut self, cbatch: &mut UpdateBatch, state: State) {
             match (self.state, state) {
                 (State::Tail, State::Play) => (),
                 (s0, s1) if s0 == s1 => (),
                 (_, state) => {
                     self.state = state;
-                    self.controls.state_ctl.update(Value::from(match state {
-                        State::Play => "play",
-                        State::Pause => "pause",
-                        State::Tail => "tail",
-                    }));
+                    self.controls.state_ctl.update(
+                        cbatch,
+                        Value::from(match state {
+                            State::Play => "play",
+                            State::Pause => "pause",
+                            State::Tail => "tail",
+                        }),
+                    );
                 }
             }
         }
 
         async fn apply_config(
             &mut self,
+            cbatch: &mut UpdateBatch,
             cluster: &Cluster<ClusterCmd>,
             cfg: NewSessionConfig,
         ) -> Result<()> {
             if let Some(start) = cfg.start {
-                self.set_start(start)?;
+                self.set_start(cbatch, start)?;
                 cluster.send_cmd(&ClusterCmd::SetStart(start));
             }
             if let Some(end) = cfg.end {
-                self.set_end(end)?;
+                self.set_end(cbatch, end)?;
                 cluster.send_cmd(&ClusterCmd::SetEnd(end))
             }
             if let Some(speed) = cfg.speed {
-                self.set_speed(speed);
+                self.set_speed(cbatch, speed);
                 cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
             }
             if let Some(pos) = cfg.pos {
-                self.seek(pos)?;
+                self.seek(cbatch, pos)?;
                 cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
             }
             if let Some(state) = cfg.state {
-                self.set_state(state);
+                self.set_state(cbatch, state);
                 cluster.send_cmd(&ClusterCmd::SetState(state));
             }
             if let Some(play_after) = cfg.play_after {
                 time::sleep(play_after).await;
-                self.set_state(State::Play);
+                self.set_state(cbatch, State::Play);
                 cluster.send_cmd(&ClusterCmd::SetState(State::Play));
             }
             Ok(())
@@ -530,6 +547,7 @@ mod publish {
             mut batch: Pooled<Vec<WriteRequest>>,
         ) -> Result<()> {
             let mut inst = HashMap::new();
+            let mut cbatch = self.publisher.start_batch();
             for req in batch.drain(..) {
                 inst.insert(req.id, req);
             }
@@ -537,20 +555,20 @@ mod publish {
                 if req.id == self.controls.start_ctl.id() {
                     info!("set start {}: {}", session_id, req.value);
                     if let Some(new_start) = get_bound(req) {
-                        self.set_start(new_start)?;
+                        self.set_start(&mut cbatch, new_start)?;
                         cluster.send_cmd(&ClusterCmd::SetStart(new_start));
                     }
                 } else if req.id == self.controls.end_ctl.id() {
                     info!("set end {}: {}", session_id, req.value);
                     if let Some(new_end) = get_bound(req) {
-                        self.set_end(new_end)?;
+                        self.set_end(&mut cbatch, new_end)?;
                         cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
                     }
                 } else if req.id == self.controls.speed_ctl.id() {
                     info!("set speed {}: {}", session_id, req.value);
                     match parse_speed(req.value) {
                         Ok(speed) => {
-                            self.set_speed(speed);
+                            self.set_speed(&mut cbatch, speed);
                             cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
                         }
                         Err(e) => {
@@ -563,7 +581,7 @@ mod publish {
                     info!("set state {}: {}", session_id, req.value);
                     match req.value.cast_to::<State>() {
                         Ok(state) => {
-                            self.set_state(state);
+                            self.set_state(&mut cbatch, state);
                             cluster.send_cmd(&ClusterCmd::SetState(state));
                         }
                         Err(e) => {
@@ -576,11 +594,11 @@ mod publish {
                     info!("set pos {}: {}", session_id, req.value);
                     match req.value.cast_to::<Seek>() {
                         Ok(pos) => {
-                            self.seek(pos)?;
+                            self.seek(&mut cbatch, pos)?;
                             match self.state {
                                 State::Pause | State::Play => (),
                                 State::Tail => {
-                                    self.set_state(State::Play);
+                                    self.set_state(&mut cbatch, State::Play);
                                 }
                             }
                             cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
@@ -593,37 +611,44 @@ mod publish {
                     }
                 }
             }
-            Ok(self.publisher.flush(None).await)
+            Ok(cbatch.commit(None).await)
         }
 
-        fn process_control_cmd(&mut self, cmd: ClusterCmd) -> Result<()> {
+        fn process_control_cmd(
+            &mut self,
+            cbatch: &mut UpdateBatch,
+            cmd: ClusterCmd,
+        ) -> Result<()> {
             match cmd {
                 ClusterCmd::SeekTo(s) => match s.parse::<Seek>() {
-                    Ok(pos) => self.seek(pos),
+                    Ok(pos) => self.seek(cbatch, pos),
                     Err(e) => {
                         warn!("invalid seek from cluster {}, {}", s, e);
                         Ok(())
                     }
                 },
-                ClusterCmd::SetStart(new_start) => self.set_start(new_start),
-                ClusterCmd::SetEnd(new_end) => self.set_end(new_end),
-                ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(sp)),
-                ClusterCmd::SetState(st) => Ok(self.set_state(st)),
+                ClusterCmd::SetStart(new_start) => self.set_start(cbatch, new_start),
+                ClusterCmd::SetEnd(new_end) => self.set_end(cbatch, new_end),
+                ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(cbatch, sp)),
+                ClusterCmd::SetState(st) => Ok(self.set_state(cbatch, st)),
                 ClusterCmd::NotIdle => Ok(()),
             }
         }
 
-        fn reimage(&mut self) -> Result<()> {
+        fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
             let mut img =
                 task::block_in_place(|| self.archive.build_image(&self.cursor))?;
             let mut idx = task::block_in_place(|| self.archive.get_index());
-            self.controls.pos_ctl.update(match self.cursor.current() {
-                Some(ts) => Value::DateTime(ts),
-                None => match self.cursor.start() {
-                    Bound::Unbounded => Value::Null,
-                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+            self.controls.pos_ctl.update(
+                pbatch,
+                match self.cursor.current() {
+                    Some(ts) => Value::DateTime(ts),
+                    None => match self.cursor.start() {
+                        Bound::Unbounded => Value::Null,
+                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                    },
                 },
-            });
+            );
             for (id, path) in idx.drain(..) {
                 let v = match img.remove(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
@@ -631,7 +656,7 @@ mod publish {
                 };
                 match self.published.get(&id) {
                     Some(val) => {
-                        val.update(v);
+                        val.update(pbatch, v);
                     }
                     None => {
                         let path = self.data_base.append(path.as_ref());
@@ -643,7 +668,7 @@ mod publish {
             Ok(())
         }
 
-        fn seek(&mut self, seek: Seek) -> Result<()> {
+        fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
             let current = match &mut self.speed {
                 Speed::Unlimited(v) => v,
                 Speed::Limited { current, next, .. } => {
@@ -656,18 +681,18 @@ mod publish {
                 current.clear()
             }
             self.archive.seek(&mut self.cursor, seek);
-            self.reimage()
+            self.reimage(pbatch)
         }
 
-        fn set_speed(&mut self, new_rate: Option<f64>) {
+        fn set_speed(&mut self, cbatch: &mut UpdateBatch, new_rate: Option<f64>) {
             match new_rate {
                 None => {
                     self.controls
                         .speed_ctl
-                        .update(Value::String(Chars::from("unlimited")));
+                        .update(cbatch, Value::String(Chars::from("unlimited")));
                 }
                 Some(new_rate) => {
-                    self.controls.speed_ctl.update(Value::F64(new_rate));
+                    self.controls.speed_ctl.update(cbatch, Value::F64(new_rate));
                 }
             };
             match &mut self.speed {
@@ -716,11 +741,12 @@ mod publish {
                 .await?;
         archive.check_remap_rescan()?;
         let mut t = T::new(publisher.clone(), archive, session_base, &control_tx).await?;
-        t.seek(Seek::Beginning)?;
-        t.publisher.flush(None).await;
+        let mut batch = publisher.start_batch();
+        t.seek(&mut batch, Seek::Beginning)?;
         if let Some(cfg) = cfg {
-            t.apply_config(&cluster, cfg).await?
+            t.apply_config(&mut batch, &cluster, cfg).await?
         }
+        batch.commit(None).await;
         let mut control_rx = control_rx.fuse();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         let mut idle = false;
@@ -743,10 +769,11 @@ mod publish {
                 },
                 m = bcast.recv().fuse() => t.process_bcast(m).await?,
                 cmds = cluster.wait_cmds().fuse() => {
+                    let mut cbatch = publisher.start_batch();
                     for cmd in cmds? {
-                        t.process_control_cmd(cmd)?
+                        t.process_control_cmd(&mut cbatch, cmd)?
                     }
-                    publisher.flush(None).await;
+                    cbatch.commit(None).await;
                 },
                 r = control_rx.next() => match r {
                     None => break Ok(()),
@@ -766,7 +793,7 @@ mod publish {
         max_total: usize,
         max_by_client: usize,
         total: usize,
-        by_client: HashMap<SocketAddr, usize, FxBuildHasher>,
+        by_client: HashMap<ClId, usize, FxBuildHasher>,
     }
 
     #[derive(Clone)]
@@ -782,7 +809,7 @@ mod publish {
             })))
         }
 
-        fn add_session(&self, client: SocketAddr) -> Option<Session> {
+        fn add_session(&self, client: ClId) -> Option<Session> {
             let mut inner = self.0.lock();
             let inner = &mut *inner;
             let by_client = inner.by_client.entry(client).or_insert(0);
@@ -804,7 +831,7 @@ mod publish {
         }
     }
 
-    struct Session(Sessions, SocketAddr);
+    struct Session(Sessions, ClId);
 
     impl Drop for Session {
         fn drop(&mut self) {
@@ -813,21 +840,16 @@ mod publish {
     }
 
     async fn start_session(
+        publisher: Publisher,
         session_id: Uuid,
         session_token: Session,
         bcast: &broadcast::Sender<BCastMsg>,
-        resolver: &Config,
-        desired_auth: &Auth,
-        bind_cfg: &BindCfg,
         subscriber: &Subscriber,
         archive: &ArchiveReader,
         shards: usize,
         publish_base: &Path,
         cfg: Option<NewSessionConfig>,
     ) -> Result<()> {
-        let publisher =
-            Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
-                .await?;
         let bcast = bcast.subscribe();
         let archive = archive.clone();
         let publish_base = publish_base.clone();
@@ -874,12 +896,12 @@ mod publish {
     ) -> Result<()> {
         let sessions: Sessions = Sessions::new(max_sessions, max_sessions_per_client);
         let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
-        let session_publisher =
+        let publisher =
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
                 .await?;
         let (control_tx, control_rx) = mpsc::channel(3);
         let _new_session = Proc::new(
-            &session_publisher,
+            &publisher,
             publish_base.append("session"),
             Value::from("create a new playback session"),
             vec![
@@ -909,10 +931,9 @@ mod publish {
                     }
                 })
             }),
-        )
-        .await?;
-        let mut cluster = Cluster::<(SocketAddr, Uuid)>::new(
-            &session_publisher,
+        )?;
+        let mut cluster = Cluster::<(ClId, Uuid)>::new(
+            &publisher,
             subscriber.clone(),
             publish_base.append("cluster"),
             shards,
@@ -943,12 +964,10 @@ mod publish {
                             },
                             Some(session_token) => {
                                 let r = start_session(
+                                    publisher.clone(),
                                     session_id,
                                     session_token,
                                     &bcast,
-                                    &resolver,
-                                    &desired_auth,
-                                    &bind_cfg,
                                     &subscriber,
                                     &archive,
                                     shards,
@@ -967,7 +986,7 @@ mod publish {
                     Some((cfg, reply)) => {
                         match sessions.add_session(cfg.client) {
                             None => {
-                                let m = format!("too many sessions, client {}", cfg.client);
+                                let m = format!("too many sessions, client {:?}", cfg.client);
                                 let _ = reply.send(Value::Error(Chars::from(m)));
                             },
                             Some(session_token) => {
@@ -975,12 +994,10 @@ mod publish {
                                 let client = cfg.client;
                                 info!("start session {}", session_id);
                                 let r = start_session(
+                                    publisher.clone(),
                                     session_id,
                                     session_token,
                                     &bcast,
-                                    &resolver,
-                                    &desired_auth,
-                                    &bind_cfg,
                                     &subscriber,
                                     &archive,
                                     shards,

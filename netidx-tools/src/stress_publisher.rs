@@ -5,8 +5,8 @@ use netidx::{
     publisher::{BindCfg, Publisher, Value},
     resolver::Auth,
 };
-use std::time::{Duration, Instant};
-use tokio::{runtime::Runtime, signal, task, time};
+use std::{time::{Duration, Instant}, mem};
+use tokio::{runtime::Runtime, signal, time};
 
 async fn run_publisher(
     config: Config,
@@ -23,44 +23,33 @@ async fn run_publisher(
     let mut v = 0u64;
     let published = {
         let mut published = Vec::with_capacity(rows * cols);
-        let mut n = 0;
-        let mut task: Option<task::JoinHandle<()>> = None;
         for row in 0..rows {
             for col in 0..cols {
                 let path = Path::from(format!("/bench/{}/{}", row, col));
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
-            n += cols;
-            if n >= 1000000 {
-                n = 0;
-                if let Some(task) = task.take() {
-                    task.await.expect("publish join")
-                }
-                let publisher = publisher.clone();
-                task = Some(task::spawn(async move { publisher.flush(None).await }));
-            }
         }
         published
     };
-    publisher.flush(None).await;
     let mut last_stat = Instant::now();
-    let mut batch = 0;
+    let mut batch: usize = 0;
     let one_second = Duration::from_secs(1);
     loop {
+        let mut updates = publisher.start_batch();
         v += 1;
         for (i, p) in published.iter().enumerate() {
-            p.update(Value::V64(v + i as u64));
+            p.update(&mut updates, Value::V64(v + i as u64));
             sent += 1;
             batch += 1;
             if batch > 10000 {
                 batch = 0;
-                publisher.flush(None).await;
+                mem::replace(&mut updates, publisher.start_batch()).commit(None).await;
                 if let Some(delay) = delay {
                     time::sleep(delay).await;
                 }
             }
         }
-        publisher.flush(None).await;
+        updates.commit(None).await;
         if let Some(delay) = delay {
             time::sleep(delay).await;
         }

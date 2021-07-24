@@ -96,6 +96,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
             }
         });
         let res = loop {
+            let mut batch = publisher.start_batch();
             buf.clear();
             match stdin.read_line(&mut buf).await {
                 Err(e) => break Err(anyhow::Error::from(e)),
@@ -143,7 +144,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 };
                 match by_path.get(path) {
                     Some(p) => {
-                        p.update(val);
+                        p.update(&mut batch, val);
                     }
                     None => {
                         tryc!(
@@ -153,7 +154,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                     }
                 }
             }
-            publisher.flush(timeout).await
+            batch.commit(timeout).await
         };
         warn!("read loop exited {:?}, running until killed", res);
         // run until we are killed even if stdin closes or ends

@@ -363,7 +363,7 @@ struct Container {
     >,
 }
 
-async fn start_delete_rpc(
+fn start_delete_rpc(
     publisher: &Publisher,
     base_path: &Path,
 ) -> Result<(Proc, mpsc::Receiver<(Path, oneshot::Sender<Value>)>)> {
@@ -404,8 +404,7 @@ async fn start_delete_rpc(
                 }
             })
         }),
-    )
-    .await?;
+    )?;
     Ok((proc, rx))
 }
 
@@ -447,7 +446,7 @@ impl Container {
         let (bs_tx, bs_rx) = mpsc::unbounded();
         let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx, bs_tx));
         let (_delete_path_rpc, delete_path_rx) =
-            start_delete_rpc(&ctx.user.publisher, &ccfg.base_path).await?;
+            start_delete_rpc(&ctx.user.publisher, &ccfg.base_path)?;
         Ok(Container {
             cfg: ccfg,
             _db,

@@ -115,7 +115,18 @@ macro_rules! try_cf {
 #[macro_export]
 macro_rules! atomic_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+        )]
         pub struct $name(u64);
 
         impl $name {
@@ -178,7 +189,7 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
 /// escape the specified string using the specified escape character
 /// and a slice of special characters that need escaping.
 pub fn escape<'a, 'b, T>(s: &'a T, esc: char, spec: &'b [char]) -> Cow<'a, str>
-where 
+where
     T: AsRef<str> + ?Sized,
     'a: 'b,
 {
@@ -203,7 +214,10 @@ where
 }
 
 /// unescape the specified string using the specified escape character
-pub fn unescape<T>(s: &T, esc: char) -> Cow<str> where T: AsRef<str> + ?Sized {
+pub fn unescape<T>(s: &T, esc: char) -> Cow<str>
+where
+    T: AsRef<str> + ?Sized,
+{
     let s = s.as_ref();
     if !s.contains(esc) {
         Cow::Borrowed(s.as_ref())
