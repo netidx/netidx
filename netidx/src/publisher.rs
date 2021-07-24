@@ -481,7 +481,7 @@ pub struct UpdateBatch {
 
 impl UpdateBatch {
     /// Commit this batch, triggering all queued values to be
-    /// sent. Any subscribe that can't accept all the updates within
+    /// sent. Any subscriber that can't accept all the updates within
     /// `timeout` will be disconnected.
     pub async fn commit(mut self, timeout: Option<Duration>) {
         let fut = {
@@ -503,7 +503,7 @@ impl UpdateBatch {
                         }
                     }
                     Some(cl) => {
-                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m.clone())
+                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m)
                     }
                 }
             }
