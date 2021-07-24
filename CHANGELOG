@@ -1,7 +1,8 @@
 * 0.9.0 netidx, netidx-tools, 0.9.0 netidx-tools:
 
-  - BREAKING: Publisher API reworked. The rework is meant to solve
-    three problems with the previous api.
+  - Publisher API reworked unfortunatly these are BREAKING
+    changes. The rework is meant to solve three problems with the
+    previous api.
 
     - most serious, you had to remember to call flush after updating
       values, if you forgot nothing would be sent. Now there is a
@@ -10,14 +11,24 @@
 
     - It wasn't possible with the old api to have multiple concurrent
       processes using the same publisher but retaining control of
-      their own batching. This meant that it was often necessary to
-      create separate publishers within the same process just to get
-      control of the grouping of updates (e.g. in the recorder).
+      their own batching. This meant that it was sometimes necessary
+      to create separate publishers within the same process just to
+      get control of the grouping of updates (e.g. in the recorder).
 
     - The use of SocketAddr as a unique id for a client was dangerous,
-      it has been replaced everywhere with a process uniq id that will
-      never repeat even if a new client happens to connect from the
-      same ip and port as an old client.
+      it has been replaced everywhere with a unique id.
+
+    - The API change had the unintended, but welcome, consequence of
+      reorganizing the code and improving performance by a fair bit
+
+      - 32% faster message rates on OpenPower (POWER 9), I think due
+        to decreased use of atomic data structures that are not well
+        optimized for POWER. Now POWER 9 performance lines up much
+        better with other benchmarks vs x86_64.
+
+      - 18% faster message rates on ARM (A72)
+
+      - 11% faster message rates on x86_64 (Skylake)
 
   - Documented the rpc module.
 
