@@ -11,7 +11,7 @@ use netidx::{
     pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
-    publisher::{BindCfg, DefaultHandle, Id, Publisher, Val, WriteRequest},
+    publisher::{BindCfg, DefaultHandle, Id, Publisher, UpdateBatch, Val, WriteRequest},
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
@@ -228,8 +228,12 @@ impl Ref {
                 None => Value::Error(Chars::from("#REF")),
                 Some(id) => match ctx.user.published.get(&id) {
                     None => Value::Error(Chars::from("#REF")),
-                    Some(Published::Data(val)) => val.current(),
-                    Some(Published::Formula(fifo)) => fifo.data.current(),
+                    Some(Published::Data(val)) => {
+                        ctx.user.publisher.current(&val.id()).unwrap_or(Value::Null)
+                    }
+                    Some(Published::Formula(fifo)) => {
+                        ctx.user.publisher.current(&fifo.data.id()).unwrap_or(Value::Null)
+                    }
                 },
             },
         }
@@ -468,6 +472,7 @@ impl Container {
     fn publish_formula(
         &mut self,
         path: Path,
+        batch: &mut UpdateBatch,
         formula_txt: Chars,
         on_write_txt: Chars,
     ) -> Result<()> {
@@ -506,7 +511,7 @@ impl Container {
         let formula_node = Node::compile(&mut self.ctx, expr);
         let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
         if let Some(value) = formula_node.current() {
-            fifo.data.update(value);
+            fifo.data.update(batch, value);
         }
         self.compiled.insert(expr_id, Compiled::Formula { node: formula_node, data_id });
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
@@ -524,6 +529,7 @@ impl Container {
     }
 
     async fn init(&mut self) -> Result<()> {
+        let mut batch = self.ctx.user.publisher.start_batch();
         for res in self.data.iter() {
             let (path, value) = res?;
             let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
@@ -535,12 +541,13 @@ impl Container {
             let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
             let (formula_txt, on_write_txt) = <(Chars, Chars)>::decode(&mut &*value)?;
             // CR estokes: log errors
-            let _: Result<()> = self.publish_formula(path, formula_txt, on_write_txt);
+            let _: Result<()> =
+                self.publish_formula(path, &mut batch, formula_txt, on_write_txt);
         }
-        Ok(self.ctx.user.publisher.flush(self.cfg.timeout.map(Duration::from_secs)).await)
+        Ok(batch.commit(self.cfg.timeout.map(Duration::from_secs)).await)
     }
 
-    fn process_var_updates(&mut self) {
+    fn process_var_updates(&mut self, batch: &mut UpdateBatch) {
         let mut refs = REFS.take();
         let mut n = 0;
         while self.ctx.user.var_updates.len() > 0 && n < 10 {
@@ -550,7 +557,7 @@ impl Container {
                 if let Some(expr_ids) = self.ctx.user.var.get(&name) {
                     refs.extend(expr_ids.iter().copied());
                 }
-                self.update_expr_ids(&mut refs, &vm::Event::Variable(name, value));
+                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(name, value));
             }
             n += 1;
         }
@@ -561,6 +568,7 @@ impl Container {
 
     fn update_expr_ids(
         &mut self,
+        batch: &mut UpdateBatch,
         refs: &mut Pooled<Vec<ExprId>>,
         event: &vm::Event<UserEv>,
     ) {
@@ -573,7 +581,7 @@ impl Container {
                 Some(Compiled::Formula { node, data_id }) => {
                     if let Some(value) = node.update(&mut self.ctx, &event) {
                         if let Some(val) = self.ctx.user.published.get(data_id) {
-                            val.val().update(value);
+                            val.val().update(batch, value);
                         }
                     }
                 }
@@ -583,6 +591,7 @@ impl Container {
 
     fn update_refs(
         &mut self,
+        batch: &mut UpdateBatch,
         refs: &mut Pooled<Vec<ExprId>>,
         changed_path: &Path,
         value: Value,
@@ -590,30 +599,39 @@ impl Container {
         if let Some(expr_ids) = self.ctx.user.refs.get(changed_path) {
             refs.extend(expr_ids.iter().copied());
         }
-        self.update_expr_ids(refs, &vm::Event::User(UserEv(changed_path.clone(), value)));
-        self.process_var_updates();
+        self.update_expr_ids(
+            batch,
+            refs,
+            &vm::Event::User(UserEv(changed_path.clone(), value)),
+        );
+        self.process_var_updates(batch);
     }
 
-    fn process_subscriptions(&mut self, mut updates: Pooled<Vec<(SubId, Event)>>) {
+    fn process_subscriptions(
+        &mut self,
+        batch: &mut UpdateBatch,
+        mut updates: Pooled<Vec<(SubId, Event)>>,
+    ) {
         let mut refs = REFS.take();
         for (id, event) in updates.drain(..) {
             if let Event::Update(value) = event {
                 if let Some(expr_ids) = self.ctx.user.sub.get(&id) {
                     refs.extend(expr_ids.iter().copied());
                 }
-                self.update_expr_ids(&mut refs, &vm::Event::Netidx(id, value));
+                self.update_expr_ids(batch, &mut refs, &vm::Event::Netidx(id, value));
             }
         }
-        self.process_var_updates();
+        self.process_var_updates(batch);
     }
 
     fn change_formula(
         &mut self,
+        batch: &mut UpdateBatch,
         refs: &mut Pooled<Vec<ExprId>>,
         fifo: &Arc<Fifo>,
         value: Chars,
     ) -> Result<()> {
-        fifo.src.update(Value::String(value.clone()));
+        fifo.src.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.expr_id.lock();
         self.compiled.remove(&expr_id);
         self.ctx.user.unref(*expr_id);
@@ -633,20 +651,23 @@ impl Container {
                 Value::Error(e)
             }
         };
-        fifo.data.update(dv.clone());
+        fifo.data.update(batch, dv.clone());
         let path = fifo.data.path();
-        self.update_refs(refs, fifo.src.path(), Value::String(value.clone()));
-        self.update_refs(refs, path, dv);
-        Ok(store(&self.formulas, path, &(value, to_chars(fifo.on_write.current())))?)
+        self.update_refs(batch, refs, fifo.src.path(), Value::String(value.clone()));
+        self.update_refs(batch, refs, path, dv);
+        let cur =
+            self.ctx.user.publisher.current(&fifo.on_write.id()).unwrap_or(Value::Null);
+        Ok(store(&self.formulas, path, &(value, to_chars(cur)))?)
     }
 
     fn change_on_write(
         &mut self,
+        batch: &mut UpdateBatch,
         refs: &mut Pooled<Vec<ExprId>>,
         fifo: &Arc<Fifo>,
         value: Chars,
     ) -> Result<()> {
-        fifo.on_write.update(Value::String(value.clone()));
+        fifo.on_write.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.compiled.remove(&expr_id);
         self.ctx.user.unref(*expr_id);
@@ -658,12 +679,17 @@ impl Container {
             }
             Err(_) => (), // CR estokes: log and report to user somehow
         }
-        self.update_refs(refs, fifo.on_write.path(), Value::String(value.clone()));
+        self.update_refs(batch, refs, fifo.on_write.path(), Value::String(value.clone()));
         let path = fifo.data.path();
-        Ok(store(&self.formulas, path, &(to_chars(fifo.src.current()), value))?)
+        let cur = self.ctx.user.publisher.current(&fifo.src.id()).unwrap_or(Value::Null);
+        Ok(store(&self.formulas, path, &(to_chars(cur), value))?)
     }
 
-    fn process_writes(&mut self, mut writes: Pooled<Vec<WriteRequest>>) {
+    fn process_writes(
+        &mut self,
+        batch: &mut UpdateBatch,
+        mut writes: Pooled<Vec<WriteRequest>>,
+    ) {
         let mut refs = REFS.take();
         for req in writes.drain(..) {
             refs.clear();
@@ -673,20 +699,28 @@ impl Container {
                     if let Err(_) = store(&self.data, val.path(), &req.value) {
                         continue;
                     }
-                    val.update(req.value.clone());
+                    val.update(batch, req.value.clone());
                     let path = val.path().clone();
-                    self.update_refs(&mut refs, &path, req.value);
+                    self.update_refs(batch, &mut refs, &path, req.value);
                 }
                 Some(Published::Formula(fifo)) => {
                     let fifo = fifo.clone();
                     if fifo.src.id() == req.id {
                         // CR estokes: log
-                        let _: Result<_, _> =
-                            self.change_formula(&mut refs, &fifo, to_chars(req.value));
+                        let _: Result<_, _> = self.change_formula(
+                            batch,
+                            &mut refs,
+                            &fifo,
+                            to_chars(req.value),
+                        );
                     } else if fifo.on_write.id() == req.id {
                         // CR estokes: log
-                        let _: Result<_, _> =
-                            self.change_on_write(&mut refs, &fifo, to_chars(req.value));
+                        let _: Result<_, _> = self.change_on_write(
+                            batch,
+                            &mut refs,
+                            &fifo,
+                            to_chars(req.value),
+                        );
                     } else if fifo.data.id() == req.id {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
@@ -694,7 +728,7 @@ impl Container {
                             let path = fifo.data.path().clone();
                             let ev = vm::Event::User(UserEv(path, req.value));
                             node.update(&mut self.ctx, &ev);
-                            self.process_var_updates();
+                            self.process_var_updates(batch);
                         }
                     }
                 }
@@ -702,7 +736,12 @@ impl Container {
         }
     }
 
-    fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
+    fn process_publish_request(
+        &mut self,
+        batch: &mut UpdateBatch,
+        path: Path,
+        reply: oneshot::Sender<()>,
+    ) {
         match check_path(&self.cfg.base_path, path) {
             Err(_) => {
                 // this should not be possible, but in case of a bug, just do nothing
@@ -716,6 +755,7 @@ impl Container {
                         // CR estokes: log errors
                         let _: Result<()> = self.publish_formula(
                             path,
+                            batch,
                             Chars::from("null"),
                             Chars::from("null"),
                         );
@@ -728,7 +768,7 @@ impl Container {
         }
     }
 
-    fn delete_path(&mut self, path: Path) -> Result<()> {
+    fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
@@ -759,11 +799,11 @@ impl Container {
                     }
                     let _ = self.data.remove(&*kbuf);
                     self.formulas.remove(&*kbuf)?;
-                    self.update_refs(&mut REFS.take(), &fpath, ref_err.clone());
-                    self.update_refs(&mut REFS.take(), &opath, ref_err.clone());
+                    self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
+                    self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
                 }
             }
-            self.update_refs(&mut REFS.take(), &path, ref_err);
+            self.update_refs(batch, &mut REFS.take(), &path, ref_err);
             Ok(())
         } else {
             bail!("no such path {}", path)
@@ -816,9 +856,9 @@ impl Container {
         self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
     }
 
-    async fn process_bscript_event(&mut self, event: LcEvent) {
+    async fn process_bscript_event(&mut self, batch: &mut UpdateBatch, event: LcEvent) {
         match event {
-            LcEvent::Vars => self.process_var_updates(),
+            LcEvent::Vars => self.process_var_updates(batch),
             LcEvent::RpcReply { name, id, result } => {
                 let mut refs = REFS.take();
                 if let Some(expr_ids) = self.ctx.user.rpc.get(&name) {
@@ -862,24 +902,25 @@ impl Container {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         self.init().await?;
         loop {
+            let mut batch = self.ctx.user.publisher.start_batch();
             select_biased! {
                 r = self.publish_requests.select_next_some() => {
-                    self.process_publish_request(r.0, r.1);
+                    self.process_publish_request(&mut batch, r.0, r.1);
                 }
                 r = self.sub_updates.select_next_some() => {
-                    self.process_subscriptions(r);
+                    self.process_subscriptions(&mut batch, r);
                 }
                 r = self.write_updates_rx.select_next_some() => {
-                    self.process_writes(r);
+                    self.process_writes(&mut batch, r);
                 }
                 r = self.delete_path_rx.select_next_some() => {
-                    let _: Result<_, _> = r.1.send(match self.delete_path(r.0) {
+                    let _: Result<_, _> = r.1.send(match self.delete_path(&mut batch, r.0) {
                         Ok(()) => Value::Ok,
                         Err(e) => Value::Error(Chars::from(format!("{}", e))),
                     });
                 }
                 r = self.bscript_event.select_next_some() => {
-                    self.process_bscript_event(r).await;
+                    self.process_bscript_event(&mut batch, r).await;
                 }
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
@@ -887,7 +928,7 @@ impl Container {
                 complete => break
             }
             let timeout = self.cfg.timeout.map(Duration::from_secs);
-            self.ctx.user.publisher.flush(timeout).await;
+            batch.commit(timeout).await;
         }
         Ok(())
     }

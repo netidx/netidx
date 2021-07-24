@@ -10,7 +10,7 @@ use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
-//mod container;
+mod container;
 mod publisher;
 mod recorder;
 mod resolver;
@@ -121,8 +121,8 @@ enum Sub {
         #[structopt(name = "paths")]
         paths: Vec<String>,
     },
-//    #[structopt(name = "container", about = "a hierarchical database in netidx")]
-//    Container(container::ContainerConfig),
+    #[structopt(name = "container", about = "a hierarchical database in netidx")]
+    Container(container::ContainerConfig),
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
@@ -318,10 +318,10 @@ fn main() {
             let auth = auth(opt.anon, &cfg, opt.upn, None);
             subscriber::run(cfg, no_stdin, oneshot, subscribe_timeout, paths, auth)
         }
-        // Sub::Container(ccfg) => {
-        //     let auth = auth(opt.anon, &cfg, opt.upn, ccfg.spn.clone());
-        //     container::run(cfg, auth, ccfg)
-        // }
+        Sub::Container(ccfg) => {
+            let auth = auth(opt.anon, &cfg, opt.upn, ccfg.spn.clone());
+            container::run(cfg, auth, ccfg)
+        }
         Sub::Record {
             foreground,
             bind,
