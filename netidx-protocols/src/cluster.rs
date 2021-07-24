@@ -42,6 +42,7 @@ pub fn uuid_string(id: Uuid) -> String {
 pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     t: PhantomData<T>,
     ctrack: ChangeTracker,
+    publisher: Publisher,
     subscriber: Subscriber,
     our_path: Path,
     us: Val,
@@ -59,17 +60,27 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         base: Path,
         shards: usize,
     ) -> Result<Cluster<T>> {
+        let publisher = publisher.clone();
         let (tx, cmd) = mpsc::channel(3);
         let id = Uuid::new_v4();
         let our_path = base.append(&uuid_string(id));
         let us = publisher.publish(our_path.clone(), Value::Null)?;
         let ctrack = ChangeTracker::new(base);
         us.writes(tx);
-        publisher.flush(None).await;
+        publisher.flushed().await;
         let others = HashMap::new();
         let t = PhantomData;
-        let mut t =
-            Cluster { t, ctrack, subscriber, our_path, us, cmd, others, primary: true };
+        let mut t = Cluster {
+            t,
+            ctrack,
+            publisher,
+            subscriber,
+            our_path,
+            us,
+            cmd,
+            others,
+            primary: true,
+        };
         while t.subscribed_others() < shards {
             info!("waiting for {} other shards", shards);
             t.poll_members().await?;
@@ -90,7 +101,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     }
 
     pub fn others(&self) -> usize {
-        self.us.subscribed_len()
+        self.publisher.subscribed_len(&self.us.id())
     }
 
     /// Poll the resolvers to see if any new members have joined the

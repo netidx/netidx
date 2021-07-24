@@ -12,7 +12,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::glob::{Glob, GlobSet},
-    publisher::{Id, PublishFlags, Publisher, Val, Value, WriteRequest},
+    publisher::{ClId, Id, PublishFlags, Publisher, Val, Value, WriteRequest},
     subscriber::{Dval, Subscriber, SubscriberId},
 };
 use parking_lot::Mutex;
@@ -20,7 +20,6 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     iter,
-    net::SocketAddr,
     ops::Drop,
     sync::{Arc, Weak},
     time::{Duration, Instant},
@@ -33,7 +32,7 @@ pub mod server {
     /// The rpc handler function type
     pub type Handler = Arc<
         dyn Fn(
-                SocketAddr,
+                ClId,
                 Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
             ) -> BoxFuture<'static, Value>
             + Send
@@ -63,7 +62,7 @@ pub mod server {
         call: Val,
         _doc: Val,
         args: HashMap<Id, Arg, FxBuildHasher>,
-        pending: HashMap<SocketAddr, PendingCall, FxBuildHasher>,
+        pending: HashMap<ClId, PendingCall, FxBuildHasher>,
         handler: Handler,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
@@ -75,7 +74,7 @@ pub mod server {
             static GC_FREQ: Duration = Duration::from_secs(1);
             static GC_THRESHOLD: usize = 128;
             fn gc_pending(
-                pending: &mut HashMap<SocketAddr, PendingCall, FxBuildHasher>,
+                pending: &mut HashMap<ClId, PendingCall, FxBuildHasher>,
                 now: Instant,
             ) {
                 static STALE: Duration = Duration::from_secs(60);
@@ -90,28 +89,29 @@ pub mod server {
                         None => break, // publisher died?
                         Some(mut batch) => for req in batch.drain(..) {
                             if req.id == self.call.id() {
-                                let args = self.pending.remove(&req.addr).map(|pc| pc.args)
+                                let args = self.pending.remove(&req.client).map(|pc| pc.args)
                                     .unwrap_or_else(|| ARGS.take());
                                 let handler = self.handler.clone();
                                 let call = self.call.clone();
                                 let publisher = self.publisher.clone();
                                 task::spawn(async move {
-                                    let t = task::spawn(handler(req.addr, args));
+                                    let t = task::spawn(handler(req.client, args));
                                     let r = match t.await {
                                         Ok(v) => v,
                                         Err(e) => {
                                             Value::Error(Chars::from(format!("{}", e)))
                                         }
                                     };
+                                    let mut batch = publisher.start_batch();
                                     match req.send_result {
-                                        None => call.update_subscriber(&req.addr, r),
+                                        None => call.update_subscriber(&mut batch, req.client, r),
                                         Some(result) => result.send(r)
                                     }
-                                    publisher.flush(None).await
+                                    batch.commit(None).await
                                 });
                             } else {
                                 let mut gc = false;
-                                let pending = self.pending.entry(req.addr)
+                                let pending = self.pending.entry(req.client)
                                     .or_insert_with(|| {
                                         gc = true;
                                         PendingCall {
@@ -186,8 +186,7 @@ pub mod server {
                         }
                     })
                 }),
-            )
-            .await?;
+            )?;
         #   drop(echo);
         #   Ok(())
         # }
@@ -205,7 +204,7 @@ pub mod server {
         were specified
 
          **/
-        pub async fn new(
+        pub fn new(
             publisher: &Publisher,
             name: Path,
             doc: Value,
@@ -262,7 +261,6 @@ pub mod server {
                 inner.run().await;
                 info!("rpc proc {} shutdown", name);
             });
-            publisher.flush(None).await;
             Ok(Proc(tx_stop))
         }
     }
@@ -433,7 +431,6 @@ mod test {
                     })
                 }),
             )
-            .await
             .unwrap();
             let proc: client::Proc =
                 client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
