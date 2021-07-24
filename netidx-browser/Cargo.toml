@@ -1,6 +1,6 @@
 [package]
 name = "netidx-browser"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -29,8 +29,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"
 serde = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 netidx-core = { path = "../netidx-core", version = "0.7" }
-netidx = { path = "../netidx", version = "0.8" , default_features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.8" }
+netidx = { path = "../netidx", version = "0.9" , default_features = false }
+netidx-bscript = { path = "../netidx-bscript", version = "0.9" }
 netidx-protocols = { path = "../netidx-protocols", version = "0.9", default_features = false }
 regex = "1"
 serde_derive = "1.0"

@@ -1,6 +1,6 @@
 [package]
 name = "netidx-bscript"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2018"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -19,7 +19,7 @@ combine = "4"
 fxhash = "0.2"
 lazy_static = "1"
 netidx-core = { path = "../netidx-core", version = "0.7" }
-netidx = { path = "../netidx", version = "0.8" }
+netidx = { path = "../netidx", version = "0.9" }
 regex = "1"
 serde = "1"
 
