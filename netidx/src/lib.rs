@@ -34,12 +34,12 @@
 //!     Path::from("/hw/washu-chan/cpu-temp"),
 //!     Value::F32(get_cpu_temp())
 //! )?;
-//! publisher.flush(None).await;
 //!
 //! loop {
 //!     time::sleep(Duration::from_millis(500)).await;
-//!     temp.update(Value::F32(get_cpu_temp()));
-//!     publisher.flush(None).await;
+//!     let mut batch = publisher.start_batch();
+//!     temp.update(&mut batch, Value::F32(get_cpu_temp()));
+//!     batch.commit(None).await;
 //! }
 //! # Ok(())
 //! # };

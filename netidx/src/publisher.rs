@@ -570,7 +570,7 @@ struct PublisherInner {
     to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
     to_unpublish: Pooled<HashMap<Path, Option<(Id, Subscribed)>>>,
     publish_triggered: bool,
-    trigger_publish: UnboundedSender<()>,
+    trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
     wait_any_client: Vec<oneshot::Sender<()>>,
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
@@ -601,7 +601,7 @@ impl PublisherInner {
     fn trigger_publish(&mut self) {
         if !self.publish_triggered {
             self.publish_triggered = true;
-            let _: Result<_, _> = self.trigger_publish.unbounded_send(());
+            let _: Result<_, _> = self.trigger_publish.unbounded_send(None);
         }
     }
 
@@ -884,6 +884,16 @@ impl Publisher {
     /// given to new subscribers.
     pub fn start_batch(&self) -> UpdateBatch {
         UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take(), lasts: LASTS.take() }
+    }
+
+    /// Wait until all previous publish or unpublish commands have
+    /// been processed by the resolver server. e.g. if you just
+    /// published 100 values, and you want to know when they have been
+    /// uploaded to the resolver, you can call `flushed`.
+    pub async fn flushed(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _: Result<_, _> = self.0.lock().trigger_publish.unbounded_send(Some(tx));
+        let _ = rx.await;
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
@@ -1441,8 +1451,11 @@ async fn accept_loop(
     }
 }
 
-async fn publish_loop(publisher: PublisherWeak, mut trigger_rx: UnboundedReceiver<()>) {
-    while let Some(()) = trigger_rx.next().await {
+async fn publish_loop(
+    publisher: PublisherWeak,
+    mut trigger_rx: UnboundedReceiver<Option<oneshot::Sender<()>>>,
+) {
+    while let Some(reply) = trigger_rx.next().await {
         if let Some(publisher) = publisher.upgrade() {
             let mut to_publish;
             let mut to_publish_default;
@@ -1484,6 +1497,9 @@ async fn publish_loop(publisher: PublisherWeak, mut trigger_rx: UnboundedReceive
                 }
                 batch.commit(None).await;
             }
+        }
+        if let Some(reply) = reply {
+            let _ = reply.send(());
         }
     }
 }

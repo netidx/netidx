@@ -334,13 +334,14 @@ mod publisher {
                 let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
                 let mut dfp: Option<Val> = None;
                 let mut df = publisher.publish_default("/app/q".into()).unwrap();
-                publisher.flush(None).await;
+                publisher.flushed().await;
                 tx.send(()).unwrap();
                 let (tx, mut rx) = mpsc::channel(10);
                 vp.writes(tx);
                 let mut c = 1;
                 loop {
                     time::sleep(Duration::from_millis(100)).await;
+                    let mut batch = publisher.start_batch();
                     while let Ok(r) = df.try_next() {
                         match r {
                             None => panic!("publish default chan closed"),
@@ -352,10 +353,10 @@ mod publisher {
                         }
                     }
                     if let Some(dfp) = &dfp {
-                        dfp.update(Value::True);
+                        dfp.update(&mut batch, Value::True);
                     }
-                    vp.update(Value::U64(314159 + c));
-                    publisher.flush(None).await;
+                    vp.update(&mut batch, Value::U64(314159 + c));
+                    batch.commit(None).await;
                     if let Some(mut batch) = rx.next().await {
                         for req in batch.drain(..) {
                             match req.value {
