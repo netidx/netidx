@@ -307,7 +307,6 @@ impl Drop for ValInner {
                     }
                 }
                 pb.on_event_chans.remove(&self.id);
-                pb.wait_clients.remove(&self.id);
                 pb.to_publish.remove(&self.path);
                 pb.to_unpublish
                     .insert(self.path.clone(), Some((self.id, pbl.subscribed)));
@@ -332,11 +331,11 @@ impl Val {
     /// batch. Multiple updates to multiple Vals can be queued in a
     /// batch before it is committed, and updates may be concurrently
     /// queued in different batches. Queuing updates in a batch has no
-    /// effect until the batch is committed. On commit subscribers
+    /// effect until the batch is committed. On commit, subscribers
     /// will receive all the queued values in the batch in the order
     /// they were queued. If multiple batches have queued values, then
     /// subscribers will receive the queued values in the order the
-    /// batches are committed in.
+    /// batches are committed.
     ///
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
@@ -392,10 +391,11 @@ impl Val {
         }
     }
 
-    /// Register `tx` to receive messages when a client subscribes or
-    /// unsubscribes. If `include_existing` is true, then current
-    /// subscribers will be sent to the channel immediatly, otherwise
-    /// it will only receive new subscribers.
+    /// Register `tx` to receive a message when a client subscribes or
+    /// unsubscribes. If `include_existing` is true, then the current
+    /// set of subscribers will be sent to the channel immediatly as
+    /// if they had just subscribed, otherwise tx will only receive
+    /// subscribe messages about new subscribers.
     pub fn events(&self, include_existing: bool, tx: UnboundedSender<Event>) {
         if let Some(publisher) = self.0.publisher.upgrade() {
             let mut inner = publisher.0.lock();
@@ -771,37 +771,34 @@ impl Publisher {
         path: Path,
         init: Value,
     ) -> Result<Val> {
-        let mut pb = self.0.lock();
         if !Path::is_absolute(&path) {
             bail!("can't publish to relative path")
-        } else if pb.stop.is_none() {
-            bail!("publisher is dead")
-        } else if pb.by_path.contains_key(&path) {
-            bail!("already published")
-        } else {
-            let subscribed = pb
-                .hc_subscribed
-                .entry(BTreeSet::new())
-                .or_insert_with(|| {
-                    Arc::new(HashSet::with_hasher(FxBuildHasher::default()))
-                })
-                .clone();
-            let id = Id::new();
-            let val = Val(Arc::new(ValInner {
-                id,
-                path: path.clone(),
-                publisher: self.downgrade(),
-            }));
-            pb.by_id.insert(id, Published { current: init, subscribed });
-            pb.to_unpublish.remove(&path);
-            pb.to_publish.insert(
-                path.clone(),
-                if flags.is_empty() { None } else { Some(flags.bits) },
-            );
-            pb.by_path.insert(path, id);
-            pb.trigger_publish();
-            Ok(val)
         }
+        let id = Id::new();
+        let mut pb = self.0.lock();
+        if pb.stop.is_none() {
+            bail!("publisher is dead")
+        }
+        if pb.by_path.contains_key(&path) {
+            bail!("already published")
+        }
+        let subscribed = pb
+            .hc_subscribed
+            .entry(BTreeSet::new())
+            .or_insert_with(|| Arc::new(HashSet::with_hasher(FxBuildHasher::default())))
+            .clone();
+        let val = Val(Arc::new(ValInner {
+            id,
+            path: path.clone(),
+            publisher: self.downgrade(),
+        }));
+        pb.by_id.insert(id, Published { current: init, subscribed });
+        pb.to_unpublish.remove(&path);
+        pb.to_publish
+            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
+        pb.by_path.insert(path, id);
+        pb.trigger_publish();
+        Ok(val)
     }
 
     /// Publish `Path` with initial value `init` and no flags. It is
@@ -839,22 +836,20 @@ impl Publisher {
         flags: PublishFlags,
         base: Path,
     ) -> Result<DefaultHandle> {
-        let mut pb = self.0.lock();
         if !Path::is_absolute(base.as_ref()) {
             bail!("can't publish a relative path")
-        } else if pb.stop.is_none() {
-            bail!("publisher is dead")
-        } else {
-            pb.to_unpublish.remove(base.as_ref());
-            pb.to_publish_default.insert(
-                base.clone(),
-                if flags.is_empty() { None } else { Some(flags.bits) },
-            );
-            let (tx, rx) = unbounded();
-            pb.default.insert(base.clone(), tx);
-            pb.trigger_publish();
-            Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
         }
+        let (tx, rx) = unbounded();
+        let mut pb = self.0.lock();
+        if pb.stop.is_none() {
+            bail!("publisher is dead")
+        }
+        pb.to_unpublish.remove(base.as_ref());
+        pb.to_publish_default
+            .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
+        pb.default.insert(base.clone(), tx);
+        pb.trigger_publish();
+        Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
     }
 
     /// Install a default publisher rooted at `base` with no
@@ -881,6 +876,12 @@ impl Publisher {
         self.publish_default_with_flags(PublishFlags::empty(), base)
     }
 
+    /// Start a new update batch. Updates are queued in the batch see
+    /// `Val::update`, and then the batch can be either discarded, or
+    /// committed. If discarded then none of the updates will have any
+    /// effect, otherwise once committed the queued updates will be
+    /// sent out to subscribers and also will effect the current value
+    /// given to new subscribers.
     pub fn start_batch(&self) -> UpdateBatch {
         UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take(), lasts: LASTS.take() }
     }
@@ -916,7 +917,7 @@ impl Publisher {
 
     /// Wait for at least one client to subscribe to the specified
     /// published value. Returns immediatly if there is a client, or
-    /// if the published value is dead.
+    /// if the published value has been dropped.
     pub async fn wait_client(&self, id: Id) {
         let wait = {
             let mut inner = self.0.lock();
@@ -935,17 +936,17 @@ impl Publisher {
         let _ = wait.await;
     }
 
-    /// Retreive the Id of path if it is published, otherwise None
+    /// Retreive the Id of path if it is published
     pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
         self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
     }
 
-    /// Get a copy of the current value
+    /// Get a copy of the current value of a published `Val`
     pub fn current(&self, id: &Id) -> Option<Value> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
     }
 
-    /// Get a list of clients subscribed to this value
+    /// Get a list of clients subscribed to a published `Val`
     pub fn subscribed(&self, id: &Id) -> Vec<ClId> {
         self.0
             .lock()
@@ -955,7 +956,7 @@ impl Publisher {
             .unwrap_or_else(Vec::new)
     }
 
-    /// Get the number of clients subscribed to this value
+    /// Get the number of clients subscribed to a published `Val`
     pub fn subscribed_len(&self, id: &Id) -> usize {
         self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
     }
