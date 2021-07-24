@@ -12,7 +12,7 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::{self, publisher},
     resolver::{Auth, ResolverWrite},
-    utils::{self, Addr, BatchItem, Batched, ChanId, ChanWrap},
+    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
@@ -50,446 +50,6 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task, time,
 };
-
-bitflags! {
-    pub struct PublishFlags: u16 {
-        /// if set, then subscribers will be forced to use an existing
-        /// connection, if it exists, when subscribing to this value.
-        ///
-        /// Because the creation of connections is atomic, this flag
-        /// guarantees that all subscriptions that can will use the
-        /// same connection.
-        ///
-        /// The net effect is that a group of published values that,
-        ///
-        /// 1. all have this flag set
-        /// 2. are published by multiple publishers
-        ///
-        /// will behave differently from the default, in that a
-        /// subscriber that subscribes to all of them will connect to
-        /// exactly one of the publishers.
-        ///
-        /// This can be important for control interfaces, and is used
-        /// by the RPC protocol to ensure that all function parameters
-        /// are written to the same publisher, even if a procedure is
-        /// published by multiple publishers.
-        const USE_EXISTING = 0x01;
-    }
-}
-
-static MAX_CLIENTS: usize = 768;
-
-#[derive(Debug)]
-pub struct WriteRequest {
-    pub id: Id,
-    pub addr: SocketAddr,
-    pub value: Value,
-    pub send_result: Option<SendResult>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Event {
-    Subscribe(Id, SocketAddr),
-    Unsubscribe(Id, SocketAddr),
-}
-
-lazy_static! {
-    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
-    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
-    static ref TOUPUB: Pool<HashMap<Path, Option<(Id, Subscribed)>>> =
-        Pool::new(10, 500_000);
-    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
-    static ref LASTS: Pool<HashMap<Id, Value, FxBuildHasher>> = Pool::new(1000, 500_000);
-    static ref BATCHMSGS: Pool<HashMap<Addr, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
-        Pool::new(100, 10000);
-}
-
-type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
-
-// The set of clients subscribed to a given value is hashconsed.
-// Instead of having a seperate hash table for each published value,
-// we can just keep a pointer to a set shared by other published
-// values. Since in the case where we care about memory usage there
-// are many more published values than clients we can save a lot of
-// memory this way. Roughly the size of a hashmap, plus it's
-// keys/values, replaced by 1 word.
-type Subscribed = Arc<HashSet<Addr, FxBuildHasher>>;
-
-struct ValInner {
-    id: Id,
-    path: Path,
-    publisher: PublisherWeak,
-    subscribed: Mutex<Subscribed>,
-}
-
-impl Drop for ValInner {
-    fn drop(&mut self) {
-        if let Some(t) = self.publisher.upgrade() {
-            let mut pb = t.0.lock();
-            pb.by_path.remove(&self.path);
-            pb.wait_clients.remove(&self.id);
-            if let Some(chans) = pb.on_write.remove(&self.id) {
-                for (_, c) in chans {
-                    match pb.on_write_chans.entry(ChanWrap(c)) {
-                        Entry::Vacant(_) => (),
-                        Entry::Occupied(mut e) => {
-                            e.get_mut().1.remove(&self.id);
-                            if e.get().1.is_empty() {
-                                e.remove();
-                            }
-                        }
-                    }
-                }
-            }
-            pb.to_publish.remove(&self.path);
-            pb.current.remove(&self.id);
-            pb.to_unpublish.insert(
-                self.path.clone(),
-                Some((self.id, self.subscribed.lock().clone())),
-            );
-            pb.trigger_publish();
-        }
-    }
-}
-
-/// Used to signal a write result
-#[derive(Clone, Debug)]
-pub struct SendResult(Arc<Mutex<Option<oneshot::Sender<Value>>>>);
-
-impl SendResult {
-    fn new() -> (Self, oneshot::Receiver<Value>) {
-        let (tx, rx) = oneshot::channel();
-        (SendResult(Arc::new(Mutex::new(Some(tx)))), rx)
-    }
-
-    pub fn send(self, v: Value) {
-        if let Some(s) = self.0.lock().take() {
-            let _ = s.send(v);
-        }
-    }
-}
-
-/// This represents a published value. Internally it is wrapped in an
-/// Arc, so cloning it is free. When all references to a given
-/// published value have been dropped it will be unpublished.
-#[derive(Clone)]
-pub struct Val(Arc<ValInner>);
-
-impl Val {
-    pub fn downgrade(&self) -> ValWeak {
-        ValWeak(Arc::downgrade(&self.0))
-    }
-
-    /// Queue an update to the published value, it will not be sent
-    /// out until you call `flush` on the publisher, however new
-    /// subscribers will receive the last value passed to update when
-    /// they subscribe regardless of flush. Multiple updates can be
-    /// queued before flush is called, in which case on `flush`
-    /// subscribers will receive all the queued values in order. If
-    /// updates are queued on multiple different published values
-    /// before `flush` is called, they will all be sent out as a batch
-    /// and are guarenteed to arrive in the order `update` was called.
-    pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        for addr in self.0.subscribed.lock().iter() {
-            batch
-                .msgs
-                .entry(*addr)
-                .or_insert_with(|| TOCL.take())
-                .push(ToClientMsg::Val(self.0.id, v.clone()))
-        }
-        batch.lasts.insert(self.0.id, v);
-    }
-
-    /// Send `v` as an update ONLY to the specified subscriber, and do
-    /// not update `current`. You can use this to implement a simple
-    /// unicast side channel in parallel with the existing multicast
-    /// `update` mechanism.
-    ///
-    /// One example use for this function is implementing a query
-    /// response value, where the query is encoded in the name of the
-    /// value (perhaps passed via publish_default), and the full
-    /// response set is sent to each client as it subscribes.
-    pub fn update_subscriber(
-        &self,
-        batch: &mut UpdateBatch,
-        subscriber: &SocketAddr,
-        v: Value,
-    ) {
-        if self.0.subscribed.lock().contains(subscriber) {
-            batch
-                .msgs
-                .entry(Addr(*subscriber))
-                .or_insert_with(|| TOCL.take())
-                .push(ToClientMsg::Val(self.0.id, v));
-        }
-    }
-
-    /// Register `tx` to receive writes. You can register multiple
-    /// channels, and you can register the same channel on multiple
-    /// `Val` objects. If no channels are registered to receive writes
-    /// they will return an error to the subscriber.
-    ///
-    /// If the `send_result` struct member of `WriteRequest` is set
-    /// then the client has requested that an explicit reply be made
-    /// to the write. In that case the included `SendReply` object can
-    /// be used to send the reply back to the write client. If the
-    /// `SendReply` object is dropped without any reply being sent
-    /// then `Value::Ok` will be sent. `SendReply::send` may only be
-    /// called once, further calls will be silently ignored.
-    ///
-    /// If you no longer wish to accept writes, simply drop all
-    /// registered channels.
-    pub fn writes(&self, tx: Sender<Pooled<Vec<WriteRequest>>>) {
-        if let Some(publisher) = self.0.publisher.upgrade() {
-            let mut pb = publisher.0.lock();
-            let e = pb
-                .on_write_chans
-                .entry(ChanWrap(tx.clone()))
-                .or_insert_with(|| (ChanId::new(), HashSet::new()));
-            e.1.insert(self.0.id);
-            let id = e.0;
-            let mut gc = Vec::new();
-            let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
-            ow.retain(|(_, c)| {
-                if c.is_closed() {
-                    gc.push(ChanWrap(c.clone()));
-                    false
-                } else {
-                    true
-                }
-            });
-            ow.push((id, tx));
-            for c in gc {
-                pb.on_write_chans.remove(&c);
-            }
-        }
-    }
-
-    /// Register `tx` to receive a message when a client subscribes or
-    /// unsubscribes. If `include_existing` is true, then current
-    /// subscribers will be sent to the channel immediatly, otherwise
-    /// it will only receive new subscribers.
-    pub fn events(&self, include_existing: bool, tx: UnboundedSender<Event>) {
-        if let Some(publisher) = self.0.publisher.upgrade() {
-            let mut inner = publisher.0.lock();
-            inner
-                .on_event_chans
-                .entry(self.0.id)
-                .or_insert_with(Vec::new)
-                .push(tx.clone());
-            if include_existing {
-                for a in self.0.subscribed.lock().iter() {
-                    let e = Event::Subscribe(self.0.id, a.0);
-                    let _: result::Result<_, _> = tx.unbounded_send(e);
-                }
-            }
-        }
-    }
-
-    /// Unsubscribe the specified client.
-    pub fn unsubscribe(&self, batch: &mut UpdateBatch, subscriber: &SocketAddr) {
-        if self.0.subscribed.lock().contains(subscriber) {
-            batch
-                .msgs
-                .entry(Addr(*subscriber))
-                .or_insert_with(|| TOCL.take())
-                .push(ToClientMsg::Unpublish(self.0.id));
-        }
-    }
-
-    /// Get a copy of the current value
-    pub fn current(&self) -> Option<Value> {
-        self.0
-            .publisher
-            .upgrade()
-            .and_then(|p| p.0.lock().current.get(&self.0.id).cloned())
-    }
-
-    /// Get the unique `Id` of this `Val`
-    pub fn id(&self) -> Id {
-        self.0.id
-    }
-
-    /// Get a reference to the `Path` of this published value.
-    pub fn path(&self) -> &Path {
-        &self.0.path
-    }
-
-    pub fn subscribed(&self) -> Vec<SocketAddr> {
-        self.0.subscribed.lock().iter().map(|a| a.0).collect()
-    }
-
-    pub fn subscribed_len(&self) -> usize {
-        self.0.subscribed.lock().len()
-    }
-}
-
-/// A weak reference to a published value.
-#[derive(Clone)]
-pub struct ValWeak(Weak<ValInner>);
-
-impl ValWeak {
-    pub fn upgrade(&self) -> Option<Val> {
-        Weak::upgrade(&self.0).map(Val)
-    }
-}
-
-/// A handle to the channel that will receive notifications about
-/// subscriptions to paths in a subtree with a default publisher.
-pub struct DefaultHandle {
-    chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
-    path: Path,
-    publisher: PublisherWeak,
-}
-
-impl Deref for DefaultHandle {
-    type Target = UnboundedReceiver<(Path, oneshot::Sender<()>)>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.chan
-    }
-}
-
-impl DerefMut for DefaultHandle {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.chan
-    }
-}
-
-impl Drop for DefaultHandle {
-    fn drop(&mut self) {
-        if let Some(t) = self.publisher.upgrade() {
-            let mut pb = t.0.lock();
-            pb.default.remove(self.path.as_ref());
-            pb.to_unpublish.insert(self.path.clone(), None);
-        }
-    }
-}
-
-#[must_use = "update batches do nothing unless committed"]
-pub struct UpdateBatch {
-    origin: Publisher,
-    msgs: Pooled<HashMap<Addr, Pooled<Vec<ToClientMsg>>, FxBuildHasher>>,
-    lasts: Pooled<HashMap<Id, Value, FxBuildHasher>>,
-}
-
-impl UpdateBatch {
-    pub async fn commit(mut self, timeout: Option<Duration>) {
-        let fut = {
-            let mut pb = self.origin.0.lock();
-            for (id, value) in self.lasts.drain() {
-                pb.current.insert(id, value);
-            }
-            future::join_all(
-                self.msgs
-                    .drain()
-                    .filter_map(|(addr, batch)| {
-                        pb.clients
-                            .get(&addr.0)
-                            .map(move |cl| (cl.msg_queue.clone(), batch))
-                    })
-                    .map(|(mut q, batch)| async move {
-                        let _: Result<_, _> = q.send((timeout, batch)).await;
-                    }),
-            )
-        };
-        fut.await;
-    }
-}
-
-#[derive(Debug)]
-enum ToClientMsg {
-    Val(Id, Value),
-    Unpublish(Id),
-}
-
-struct Client {
-    msg_queue: MsgQ,
-    subscribed: HashMap<Id, Permissions, FxBuildHasher>,
-}
-
-struct PublisherInner {
-    addr: SocketAddr,
-    stop: Option<oneshot::Sender<()>>,
-    clients: HashMap<SocketAddr, Client, FxBuildHasher>,
-    hc_subscribed: HashMap<BTreeSet<Addr>, Subscribed, FxBuildHasher>,
-    by_path: HashMap<Path, Id>,
-    by_id: HashMap<Id, ValWeak, FxBuildHasher>,
-    current: HashMap<Id, Value, FxBuildHasher>,
-    on_write_chans: HashMap<
-        ChanWrap<Pooled<Vec<WriteRequest>>>,
-        (ChanId, HashSet<Id>),
-        FxBuildHasher,
-    >,
-    on_event_chans: HashMap<Id, Vec<UnboundedSender<Event>>, FxBuildHasher>,
-    on_write:
-        HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
-    resolver: ResolverWrite,
-    to_publish: Pooled<HashMap<Path, Option<u16>>>,
-    to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
-    to_unpublish: Pooled<HashMap<Path, Option<(Id, Subscribed)>>>,
-    publish_triggered: bool,
-    trigger_publish: UnboundedSender<()>,
-    wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
-    wait_any_client: Vec<oneshot::Sender<()>>,
-    default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
-}
-
-impl PublisherInner {
-    fn cleanup(&mut self) -> bool {
-        match mem::replace(&mut self.stop, None) {
-            None => false,
-            Some(stop) => {
-                let _ = stop.send(());
-                self.clients.clear();
-                self.by_id.clear();
-                true
-            }
-        }
-    }
-
-    fn send_event(&mut self, id: Id, event: Event) {
-        if let Some(chans) = self.on_event_chans.get_mut(&id) {
-            chans.retain(|chan| chan.unbounded_send(event).is_ok());
-            if chans.is_empty() {
-                self.on_event_chans.remove(&id);
-            }
-        }
-    }
-
-    fn trigger_publish(&mut self) {
-        if !self.publish_triggered {
-            self.publish_triggered = true;
-            let _: Result<_, _> = self.trigger_publish.unbounded_send(());
-        }
-    }
-
-    async fn shutdown(&mut self) {
-        if self.cleanup() {
-            let _ = self.resolver.clear().await;
-        }
-    }
-}
-
-impl Drop for PublisherInner {
-    fn drop(&mut self) {
-        if self.cleanup() {
-            let resolver = self.resolver.clone();
-            tokio::spawn(async move {
-                let _ = resolver.clear().await;
-            });
-        }
-    }
-}
-
-#[derive(Clone)]
-struct PublisherWeak(Weak<Mutex<PublisherInner>>);
-
-impl PublisherWeak {
-    fn upgrade(&self) -> Option<Publisher> {
-        Weak::upgrade(&self.0).map(|r| Publisher(r))
-    }
-}
 
 /// Control how the publisher picks a bind address. The address we
 /// give to the resolver server must be uniquely routable back to us,
@@ -632,16 +192,455 @@ impl BindCfg {
     }
 }
 
+atomic_id!(ClId);
+
+static MAX_CLIENTS: usize = 768;
+
+lazy_static! {
+    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
+    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
+    static ref TOUPUB: Pool<HashMap<Path, Option<(Id, Subscribed)>>> =
+        Pool::new(10, 500_000);
+    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
+    static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
+        Pool::new(1000, 500_000);
+    static ref LASTS: Pool<HashMap<Id, Value, FxBuildHasher>> = Pool::new(1000, 500_000);
+    static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
+        Pool::new(100, 10000);
+}
+
+bitflags! {
+    pub struct PublishFlags: u16 {
+        /// if set, then subscribers will be forced to use an existing
+        /// connection, if it exists, when subscribing to this value.
+        ///
+        /// Because the creation of connections is atomic, this flag
+        /// guarantees that all subscriptions that can will use the
+        /// same connection.
+        ///
+        /// The net effect is that a group of published values that,
+        ///
+        /// 1. all have this flag set
+        /// 2. are published by multiple publishers
+        ///
+        /// will behave differently from the default, in that a
+        /// subscriber that subscribes to all of them will connect to
+        /// exactly one of the publishers.
+        ///
+        /// This can be important for control interfaces, and is used
+        /// by the RPC protocol to ensure that all function parameters
+        /// are written to the same publisher, even if a procedure is
+        /// published by multiple publishers.
+        const USE_EXISTING = 0x01;
+    }
+}
+
+/// Used to signal a write result
+#[derive(Clone, Debug)]
+pub struct SendResult(Arc<Mutex<Option<oneshot::Sender<Value>>>>);
+
+impl SendResult {
+    fn new() -> (Self, oneshot::Receiver<Value>) {
+        let (tx, rx) = oneshot::channel();
+        (SendResult(Arc::new(Mutex::new(Some(tx)))), rx)
+    }
+
+    pub fn send(self, v: Value) {
+        if let Some(s) = self.0.lock().take() {
+            let _ = s.send(v);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteRequest {
+    /// the Id of the value being written
+    pub id: Id,
+    /// the unique id of the client requesting the write
+    pub client: ClId,
+    /// the value being written
+    pub value: Value,
+    pub send_result: Option<SendResult>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Event {
+    Subscribe(Id, ClId),
+    Unsubscribe(Id, ClId),
+}
+
+type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
+
+// The set of clients subscribed to a given value is hashconsed.
+// Instead of having a seperate hash table for each published value,
+// we can just keep a pointer to a set shared by other published
+// values. Since in the case where we care about memory usage there
+// are many more published values than clients we can save a lot of
+// memory this way. Roughly the size of a hashmap, plus it's
+// keys/values, replaced by 1 word.
+type Subscribed = Arc<HashSet<ClId, FxBuildHasher>>;
+
+struct ValInner {
+    id: Id,
+    path: Path,
+    publisher: PublisherWeak,
+}
+
+impl Drop for ValInner {
+    fn drop(&mut self) {
+        if let Some(t) = self.publisher.upgrade() {
+            let mut pb = t.0.lock();
+            if let Some(pbl) = pb.by_id.remove(&self.id) {
+                pb.by_path.remove(&self.path);
+                pb.wait_clients.remove(&self.id);
+                if let Some(chans) = pb.on_write.remove(&self.id) {
+                    for (_, c) in chans {
+                        match pb.on_write_chans.entry(ChanWrap(c)) {
+                            Entry::Vacant(_) => (),
+                            Entry::Occupied(mut e) => {
+                                e.get_mut().1.remove(&self.id);
+                                if e.get().1.is_empty() {
+                                    e.remove();
+                                }
+                            }
+                        }
+                    }
+                }
+                pb.on_event_chans.remove(&self.id);
+                pb.wait_clients.remove(&self.id);
+                pb.to_publish.remove(&self.path);
+                pb.to_unpublish
+                    .insert(self.path.clone(), Some((self.id, pbl.subscribed)));
+                pb.trigger_publish();
+            }
+        }
+    }
+}
+
+/// This represents a published value. Internally it is wrapped in an
+/// Arc, so cloning it is free. When all references to a given
+/// published value have been dropped it will be unpublished.
+#[derive(Clone)]
+pub struct Val(Arc<ValInner>);
+
+impl Val {
+    pub fn downgrade(&self) -> ValWeak {
+        ValWeak(Arc::downgrade(&self.0))
+    }
+
+    /// Queue an update to the published value in the specified
+    /// batch. Multiple updates to multiple Vals can be queued in a
+    /// batch before it is committed, and updates may be concurrently
+    /// queued in different batches. Queuing updates in a batch has no
+    /// effect until the batch is committed. On commit subscribers
+    /// will receive all the queued values in the batch in the order
+    /// they were queued. If multiple batches have queued values, then
+    /// subscribers will receive the queued values in the order the
+    /// batches are committed in.
+    ///
+    /// Clients that subscribe after an update is queued, but before
+    /// the batch is committed will still receive the update.
+    pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
+        batch.msgs.push((None, ToClientMsg::Val(self.0.id, v.clone())));
+        batch.lasts.insert(self.0.id, v);
+    }
+
+    /// Queue sending `v` as an update ONLY to the specified
+    /// subscriber, and do not update `current`.
+    pub fn update_subscriber(&self, batch: &mut UpdateBatch, dst: ClId, v: Value) {
+        batch.msgs.push((Some(dst), ToClientMsg::Val(self.0.id, v)));
+    }
+
+    /// Register `tx` to receive writes. You can register multiple
+    /// channels, and you can register the same channel on multiple
+    /// `Val` objects. If no channels are registered to receive writes
+    /// they will return an error to the subscriber.
+    ///
+    /// If the `send_result` struct member of `WriteRequest` is set
+    /// then the client has requested that an explicit reply be made
+    /// to the write. In that case the included `SendReply` object can
+    /// be used to send the reply back to the write client. If the
+    /// `SendReply` object is dropped without any reply being sent
+    /// then `Value::Ok` will be sent. `SendReply::send` may only be
+    /// called once, further calls will be silently ignored.
+    ///
+    /// If you no longer wish to accept writes, simply drop all
+    /// registered channels.
+    pub fn writes(&self, tx: Sender<Pooled<Vec<WriteRequest>>>) {
+        if let Some(publisher) = self.0.publisher.upgrade() {
+            let mut pb = publisher.0.lock();
+            let e = pb
+                .on_write_chans
+                .entry(ChanWrap(tx.clone()))
+                .or_insert_with(|| (ChanId::new(), HashSet::new()));
+            e.1.insert(self.0.id);
+            let id = e.0;
+            let mut gc = Vec::new();
+            let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
+            ow.retain(|(_, c)| {
+                if c.is_closed() {
+                    gc.push(ChanWrap(c.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            ow.push((id, tx));
+            for c in gc {
+                pb.on_write_chans.remove(&c);
+            }
+        }
+    }
+
+    /// Register `tx` to receive messages when a client subscribes or
+    /// unsubscribes. If `include_existing` is true, then current
+    /// subscribers will be sent to the channel immediatly, otherwise
+    /// it will only receive new subscribers.
+    pub fn events(&self, include_existing: bool, tx: UnboundedSender<Event>) {
+        if let Some(publisher) = self.0.publisher.upgrade() {
+            let mut inner = publisher.0.lock();
+            inner
+                .on_event_chans
+                .entry(self.0.id)
+                .or_insert_with(Vec::new)
+                .push(tx.clone());
+            if include_existing {
+                if let Some(pbl) = inner.by_id.get(&self.0.id) {
+                    for cl in pbl.subscribed.iter() {
+                        let e = Event::Subscribe(self.0.id, *cl);
+                        let _: result::Result<_, _> = tx.unbounded_send(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Queue unsubscribing the specified client. Like update, this
+    /// will only take effect when the specified batch is committed.
+    pub fn unsubscribe(&self, batch: &mut UpdateBatch, dst: ClId) {
+        batch.msgs.push((Some(dst), ToClientMsg::Unpublish(self.0.id)));
+    }
+
+    /// Get the unique `Id` of this `Val`
+    pub fn id(&self) -> Id {
+        self.0.id
+    }
+
+    /// Get a reference to the `Path` of this published value.
+    pub fn path(&self) -> &Path {
+        &self.0.path
+    }
+}
+
+/// A weak reference to a published value.
+#[derive(Clone)]
+pub struct ValWeak(Weak<ValInner>);
+
+impl ValWeak {
+    pub fn upgrade(&self) -> Option<Val> {
+        Weak::upgrade(&self.0).map(Val)
+    }
+}
+
+/// A handle to the channel that will receive notifications about
+/// subscriptions to paths in a subtree with a default publisher.
+pub struct DefaultHandle {
+    chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
+    path: Path,
+    publisher: PublisherWeak,
+}
+
+impl Deref for DefaultHandle {
+    type Target = UnboundedReceiver<(Path, oneshot::Sender<()>)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.chan
+    }
+}
+
+impl DerefMut for DefaultHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.chan
+    }
+}
+
+impl Drop for DefaultHandle {
+    fn drop(&mut self) {
+        if let Some(t) = self.publisher.upgrade() {
+            let mut pb = t.0.lock();
+            pb.default.remove(self.path.as_ref());
+            pb.to_unpublish.insert(self.path.clone(), None);
+        }
+    }
+}
+
+/// A batch of updates to Vals
+#[must_use = "update batches do nothing unless committed"]
+pub struct UpdateBatch {
+    origin: Publisher,
+    msgs: Pooled<Vec<(Option<ClId>, ToClientMsg)>>,
+    lasts: Pooled<HashMap<Id, Value, FxBuildHasher>>,
+}
+
+impl UpdateBatch {
+    /// Commit this batch, triggering all queued values to be
+    /// sent. Any subscribe that can't accept all the updates within
+    /// `timeout` will be disconnected.
+    pub async fn commit(mut self, timeout: Option<Duration>) {
+        let fut = {
+            let mut msgs = BATCHMSGS.take();
+            let mut pb = self.origin.0.lock();
+            for (dest, m) in self.msgs.drain(..) {
+                match dest {
+                    None => {
+                        if let Some(pbl) = pb.by_id.get(&m.id()) {
+                            for cl in pbl.subscribed.iter() {
+                                msgs.entry(*cl)
+                                    .or_insert_with(|| TOCL.take())
+                                    .push(m.clone());
+                            }
+                        }
+                    }
+                    Some(cl) => {
+                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m.clone())
+                    }
+                }
+            }
+            for (id, value) in self.lasts.drain() {
+                if let Some(pbl) = pb.by_id.get_mut(&id) {
+                    pbl.current = value;
+                }
+            }
+            future::join_all(
+                msgs.drain()
+                    .filter_map(|(cl, batch)| {
+                        pb.clients.get(&cl).map(move |cl| (cl.msg_queue.clone(), batch))
+                    })
+                    .map(|(mut q, batch)| async move {
+                        let _: Result<_, _> = q.send((timeout, batch)).await;
+                    }),
+            )
+        };
+        fut.await;
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ToClientMsg {
+    Val(Id, Value),
+    Unpublish(Id),
+}
+
+impl ToClientMsg {
+    fn id(&self) -> Id {
+        match self {
+            ToClientMsg::Val(id, _) => *id,
+            ToClientMsg::Unpublish(id) => *id,
+        }
+    }
+}
+
+struct Client {
+    msg_queue: MsgQ,
+    subscribed: HashMap<Id, Permissions, FxBuildHasher>,
+}
+
+struct Published {
+    current: Value,
+    subscribed: Subscribed,
+}
+
+struct PublisherInner {
+    addr: SocketAddr,
+    stop: Option<oneshot::Sender<()>>,
+    clients: HashMap<ClId, Client, FxBuildHasher>,
+    hc_subscribed: HashMap<BTreeSet<ClId>, Subscribed, FxBuildHasher>,
+    by_path: HashMap<Path, Id>,
+    by_id: HashMap<Id, Published, FxBuildHasher>,
+    on_write_chans: HashMap<
+        ChanWrap<Pooled<Vec<WriteRequest>>>,
+        (ChanId, HashSet<Id>),
+        FxBuildHasher,
+    >,
+    on_event_chans: HashMap<Id, Vec<UnboundedSender<Event>>, FxBuildHasher>,
+    on_write:
+        HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
+    resolver: ResolverWrite,
+    to_publish: Pooled<HashMap<Path, Option<u16>>>,
+    to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
+    to_unpublish: Pooled<HashMap<Path, Option<(Id, Subscribed)>>>,
+    publish_triggered: bool,
+    trigger_publish: UnboundedSender<()>,
+    wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
+    wait_any_client: Vec<oneshot::Sender<()>>,
+    default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
+}
+
+impl PublisherInner {
+    fn cleanup(&mut self) -> bool {
+        match mem::replace(&mut self.stop, None) {
+            None => false,
+            Some(stop) => {
+                let _ = stop.send(());
+                self.clients.clear();
+                self.by_id.clear();
+                true
+            }
+        }
+    }
+
+    fn send_event(&mut self, id: Id, event: Event) {
+        if let Some(chans) = self.on_event_chans.get_mut(&id) {
+            chans.retain(|chan| chan.unbounded_send(event).is_ok());
+            if chans.is_empty() {
+                self.on_event_chans.remove(&id);
+            }
+        }
+    }
+
+    fn trigger_publish(&mut self) {
+        if !self.publish_triggered {
+            self.publish_triggered = true;
+            let _: Result<_, _> = self.trigger_publish.unbounded_send(());
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        if self.cleanup() {
+            let _ = self.resolver.clear().await;
+        }
+    }
+}
+
+impl Drop for PublisherInner {
+    fn drop(&mut self) {
+        if self.cleanup() {
+            let resolver = self.resolver.clone();
+            tokio::spawn(async move {
+                let _ = resolver.clear().await;
+            });
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PublisherWeak(Weak<Mutex<PublisherInner>>);
+
+impl PublisherWeak {
+    fn upgrade(&self) -> Option<Publisher> {
+        Weak::upgrade(&self.0).map(|r| Publisher(r))
+    }
+}
+
 fn rand_port(current: u16) -> u16 {
     let mut rng = rand::thread_rng();
     current + rng.gen_range(0u16..10u16)
 }
 
-/// Publish values and centrally flush queued updates. Publisher is
-/// internally wrapped in an Arc, so cloning it is virtually
-/// free. When all references to to the publisher have been dropped
-/// the publisher will shutdown the listener, and remove all published
-/// paths from the resolver server.
+/// Publish values. Publisher is internally wrapped in an Arc, so
+/// cloning it is virtually free. When all references to to the
+/// publisher have been dropped the publisher will shutdown the
+/// listener, and remove all published paths from the resolver server.
 #[derive(Clone)]
 pub struct Publisher(Arc<Mutex<PublisherInner>>);
 
@@ -699,7 +698,6 @@ impl Publisher {
             hc_subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            current: HashMap::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_event_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
@@ -793,10 +791,8 @@ impl Publisher {
                 id,
                 path: path.clone(),
                 publisher: self.downgrade(),
-                subscribed: Mutex::new(subscribed),
             }));
-            pb.by_id.insert(id, val.downgrade());
-            pb.current.insert(id, init);
+            pb.by_id.insert(id, Published { current: init, subscribed });
             pb.to_unpublish.remove(&path);
             pb.to_publish.insert(
                 path.clone(),
@@ -886,7 +882,7 @@ impl Publisher {
     }
 
     pub fn start_batch(&self) -> UpdateBatch {
-        UpdateBatch { origin: self.clone(), msgs: BATCHMSGS.take(), lasts: LASTS.take() }
+        UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take(), lasts: LASTS.take() }
     }
 
     /// Returns the number of subscribers subscribing to at least one value.
@@ -926,17 +922,14 @@ impl Publisher {
             let mut inner = self.0.lock();
             match inner.by_id.get(&id) {
                 None => return,
-                Some(ut) => match ut.upgrade() {
-                    None => return,
-                    Some(ut) => {
-                        if ut.0.subscribed.lock().len() > 0 {
-                            return;
-                        }
-                        let (tx, rx) = oneshot::channel();
-                        inner.wait_clients.entry(id).or_insert_with(Vec::new).push(tx);
-                        rx
+                Some(ut) => {
+                    if ut.subscribed.len() > 0 {
+                        return;
                     }
-                },
+                    let (tx, rx) = oneshot::channel();
+                    inner.wait_clients.entry(id).or_insert_with(Vec::new).push(tx);
+                    rx
+                }
             }
         };
         let _ = wait.await;
@@ -945,6 +938,26 @@ impl Publisher {
     /// Retreive the Id of path if it is published, otherwise None
     pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
         self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
+    }
+
+    /// Get a copy of the current value
+    pub fn current(&self, id: &Id) -> Option<Value> {
+        self.0.lock().by_id.get(&id).map(|p| p.current.clone())
+    }
+
+    /// Get a list of clients subscribed to this value
+    pub fn subscribed(&self, id: &Id) -> Vec<ClId> {
+        self.0
+            .lock()
+            .by_id
+            .get(&id)
+            .map(|p| p.subscribed.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_else(Vec::new)
+    }
+
+    /// Get the number of clients subscribed to this value
+    pub fn subscribed_len(&self, id: &Id) -> usize {
+        self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
     }
 }
 
@@ -955,7 +968,7 @@ type DeferredSubs =
 fn subscribe(
     t: &mut PublisherInner,
     con: &mut Channel<ServerCtx>,
-    addr: SocketAddr,
+    client: ClId,
     path: Path,
     permissions: Permissions,
     deferred_subs: &mut DeferredSubs,
@@ -989,68 +1002,63 @@ fn subscribe(
         }
         Some(id) => {
             let id = *id;
-            if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
-                if let Some(cl) = t.clients.get_mut(&addr) {
+            if let Some(ut) = t.by_id.get_mut(&id) {
+                if let Some(cl) = t.clients.get_mut(&client) {
                     cl.subscribed.insert(id, permissions);
                 }
-                let mut subscribed = ut.0.subscribed.lock();
                 let subs = BTreeSet::from_iter(
-                    iter::once(Addr::from(addr)).chain(subscribed.iter().copied()),
+                    iter::once(client).chain(ut.subscribed.iter().copied()),
                 );
                 match t.hc_subscribed.entry(subs) {
                     Entry::Occupied(e) => {
-                        *subscribed = e.get().clone();
+                        ut.subscribed = Arc::clone(e.get());
                     }
                     Entry::Vacant(e) => {
-                        let mut s = HashSet::clone(&*subscribed);
-                        s.insert(Addr::from(addr));
-                        *subscribed = Arc::new(s);
-                        e.insert(subscribed.clone());
+                        let mut s = HashSet::clone(&ut.subscribed);
+                        s.insert(client);
+                        ut.subscribed = Arc::new(s);
+                        e.insert(Arc::clone(&ut.subscribed));
                     }
                 }
-                if let Some(current) = t.current.get(&id) {
-                    let m = publisher::From::Subscribed(path, id, current.clone());
-                    con.queue_send(&m)?;
-                }
+                let m = publisher::From::Subscribed(path, id, ut.current.clone());
+                con.queue_send(&m)?;
                 if let Some(waiters) = t.wait_clients.remove(&id) {
                     for tx in waiters {
                         let _ = tx.send(());
                     }
                 }
-                t.send_event(id, Event::Subscribe(id, addr));
+                t.send_event(id, Event::Subscribe(id, client));
             }
         }
     }
     Ok(())
 }
 
-fn unsubscribe(t: &mut PublisherInner, addr: &SocketAddr, id: Id) {
-    if let Some(ut) = t.by_id.get(&id).and_then(|v| v.upgrade()) {
-        let addr = Addr::from(*addr);
-        let mut subscribed = ut.0.subscribed.lock();
-        let subs = // CR estokes: use a pooled sorted vec
-            BTreeSet::from_iter(subscribed.iter().filter(|a| *a != &addr).copied());
+fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
+    if let Some(ut) = t.by_id.get_mut(&id) {
+        let subs =
+            BTreeSet::from_iter(ut.subscribed.iter().filter(|a| *a != &client).copied());
         match t.hc_subscribed.entry(subs) {
             Entry::Occupied(e) => {
-                *subscribed = e.get().clone();
+                ut.subscribed = e.get().clone();
             }
             Entry::Vacant(e) => {
-                let mut h = HashSet::clone(&subscribed);
-                h.remove(&addr);
-                *subscribed = Arc::new(h);
-                e.insert(subscribed.clone());
+                let mut h = HashSet::clone(&ut.subscribed);
+                h.remove(&client);
+                ut.subscribed = Arc::new(h);
+                e.insert(Arc::clone(&ut.subscribed));
             }
         }
-        if let Some(cl) = t.clients.get_mut(&addr.0) {
+        if let Some(cl) = t.clients.get_mut(&client) {
             cl.subscribed.remove(&id);
         }
-        t.send_event(id, Event::Unsubscribe(id, addr.0));
+        t.send_event(id, Event::Unsubscribe(id, client));
     }
 }
 
 async fn handle_batch(
     t: &PublisherWeak,
-    addr: &SocketAddr,
+    client: ClId,
     msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel<ServerCtx>,
     write_batches: &mut HashMap<
@@ -1086,7 +1094,7 @@ async fn handle_batch(
                         Auth::Anonymous => subscribe(
                             &mut *pb,
                             con,
-                            *addr,
+                            client,
                             path,
                             Permissions::all(),
                             deferred_subs,
@@ -1129,7 +1137,7 @@ async fn handle_batch(
                                     subscribe(
                                         &mut *pb,
                                         con,
-                                        *addr,
+                                        client,
                                         path,
                                         permissions,
                                         deferred_subs,
@@ -1141,10 +1149,10 @@ async fn handle_batch(
                 }
                 Unsubscribe(id) => {
                     gc = true;
-                    unsubscribe(&mut *pb, addr, id);
+                    unsubscribe(&mut *pb, client, id);
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
-                Write(id, v, r) => match pb.clients.get(&addr) {
+                Write(id, v, r) => match pb.clients.get(&client) {
                     None => qwe(con, id, r, "cannot write to unsubscribed value")?,
                     Some(cl) => match cl.subscribed.get(&id) {
                         None => qwe(con, id, r, "cannot write to unsubscribed value")?,
@@ -1175,7 +1183,7 @@ async fn handle_batch(
                                     for (cid, ch) in ow.iter() {
                                         let req = WriteRequest {
                                             id,
-                                            addr: *addr,
+                                            client,
                                             value: v.clone(),
                                             send_result: send_result.clone(),
                                         };
@@ -1224,6 +1232,7 @@ fn client_arrived(publisher: &PublisherWeak) {
     }
 }
 
+// CR estokes: Implement periodic rekeying to improve security
 async fn hello_client(
     publisher: &PublisherWeak,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -1258,8 +1267,6 @@ async fn hello_client(
             }
         },
         ResolverAuthenticate(id, _) => {
-            // slow down brute force attacks on the hashed secret
-            time::sleep(Duration::from_millis(100)).await;
             info!("hello_client processing listener ownership check from resolver");
             let secret =
                 secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
@@ -1274,7 +1281,7 @@ async fn hello_client(
 async fn client_loop(
     t: PublisherWeak,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
-    addr: SocketAddr,
+    client: ClId,
     updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
     s: TcpStream,
     desired_auth: Auth,
@@ -1317,7 +1324,7 @@ async fn client_loop(
                                     con.queue_send(&m)?
                                 } else {
                                     subscribe(
-                                        &mut *pb, &mut con, addr,
+                                        &mut *pb, &mut con, client,
                                         path, perms, &mut deferred_subs
                                     )?
                                 }
@@ -1334,7 +1341,7 @@ async fn client_loop(
                         .duration_since(SystemTime::UNIX_EPOCH)?
                         .as_secs();
                     handle_batch(
-                        &t, &addr, batch.drain(..), &mut con,
+                        &t, client, batch.drain(..), &mut con,
                         &mut write_batches, &secrets, &desired_auth, now,
                         &mut deferred_subs,
                     ).await?;
@@ -1360,7 +1367,7 @@ async fn client_loop(
                             .duration_since(SystemTime::UNIX_EPOCH)?
                             .as_secs();
                         handle_batch(
-                            &t, &addr, batch.drain(..),
+                            &t, client, batch.drain(..),
                             &mut con, &mut write_batches, &secrets,
                             &desired_auth, now, &mut deferred_subs,
                         ).await?;
@@ -1393,6 +1400,7 @@ async fn accept_loop(
                 Err(e) => info!("accept error {}", e),
                 Ok((s, addr)) => {
                     debug!("accepted client {:?}", addr);
+                    let clid = ClId::new();
                     let t_weak = t.clone();
                     let t = match t.upgrade() {
                         None => return,
@@ -1403,21 +1411,21 @@ async fn accept_loop(
                     if pb.clients.len() < MAX_CLIENTS {
                         let (tx, rx) = channel(3);
                         try_cf!("nodelay", continue, s.set_nodelay(true));
-                        pb.clients.insert(addr, Client {
+                        pb.clients.insert(clid, Client {
                             msg_queue: tx,
                             subscribed: HashMap::with_hasher(FxBuildHasher::default()),
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
                             let r = client_loop(
-                                t_weak.clone(), secrets, addr, rx, s, desired_auth
+                                t_weak.clone(), secrets, clid, rx, s, desired_auth
                             ).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();
-                                if let Some(cl) = pb.clients.remove(&addr) {
+                                if let Some(cl) = pb.clients.remove(&clid) {
                                     for (id, _) in cl.subscribed {
-                                        unsubscribe(&mut *pb, &addr, id);
+                                        unsubscribe(&mut *pb, clid, id);
                                     }
                                     pb.hc_subscribed.retain(|_, v| {
                                         Arc::get_mut(v).is_none()
@@ -1464,12 +1472,8 @@ async fn publish_loop(publisher: PublisherWeak, mut trigger_rx: UnboundedReceive
                 let iter = to_unpublish.drain().map(|(path, subs)| match subs {
                     None => path,
                     Some((id, subs)) => {
-                        for addr in subs.iter() {
-                            batch
-                                .msgs
-                                .entry(*addr)
-                                .or_insert_with(|| TOCL.take())
-                                .push(ToClientMsg::Unpublish(id));
+                        for cl in subs.iter() {
+                            batch.msgs.push((Some(*cl), ToClientMsg::Unpublish(id)));
                         }
                         path
                     }
