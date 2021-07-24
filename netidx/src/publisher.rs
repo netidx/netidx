@@ -204,7 +204,6 @@ lazy_static! {
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
     static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
         Pool::new(1000, 500_000);
-    static ref LASTS: Pool<HashMap<Id, Value, FxBuildHasher>> = Pool::new(1000, 500_000);
     static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
         Pool::new(100, 10000);
 }
@@ -340,8 +339,7 @@ impl Val {
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
     pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.msgs.push((None, ToClientMsg::Val(self.0.id, v.clone())));
-        batch.lasts.insert(self.0.id, v);
+        batch.msgs.push((None, ToClientMsg::Val(self.0.id, v)));
     }
 
     /// Queue sending `v` as an update ONLY to the specified
@@ -479,7 +477,6 @@ impl Drop for DefaultHandle {
 pub struct UpdateBatch {
     origin: Publisher,
     msgs: Pooled<Vec<(Option<ClId>, ToClientMsg)>>,
-    lasts: Pooled<HashMap<Id, Value, FxBuildHasher>>,
 }
 
 impl UpdateBatch {
@@ -493,22 +490,21 @@ impl UpdateBatch {
             for (dest, m) in self.msgs.drain(..) {
                 match dest {
                     None => {
-                        if let Some(pbl) = pb.by_id.get(&m.id()) {
+                        if let Some(pbl) = pb.by_id.get_mut(&m.id()) {
                             for cl in pbl.subscribed.iter() {
                                 msgs.entry(*cl)
                                     .or_insert_with(|| TOCL.take())
                                     .push(m.clone());
+                            }
+                            match m {
+                                ToClientMsg::Val(_, v) => { pbl.current = v; }
+                                ToClientMsg::Unpublish(_) => ()
                             }
                         }
                     }
                     Some(cl) => {
                         msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m.clone())
                     }
-                }
-            }
-            for (id, value) in self.lasts.drain() {
-                if let Some(pbl) = pb.by_id.get_mut(&id) {
-                    pbl.current = value;
                 }
             }
             future::join_all(
@@ -883,7 +879,7 @@ impl Publisher {
     /// sent out to subscribers and also will effect the current value
     /// given to new subscribers.
     pub fn start_batch(&self) -> UpdateBatch {
-        UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take(), lasts: LASTS.take() }
+        UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take() }
     }
 
     /// Wait until all previous publish or unpublish commands have
