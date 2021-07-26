@@ -28,6 +28,8 @@
 
       - 17% faster message rates on ARM (A72) and x86_64 (Skylake)
 
+      - 20% less memory overhead per published value
+
   - Documented the rpc module.
 
   - rpc protocol now allows procedure arguments to be specified
