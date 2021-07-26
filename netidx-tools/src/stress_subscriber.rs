@@ -4,7 +4,7 @@ use netidx::{
     config::Config,
     path::Path,
     resolver::{Auth, ResolverRead},
-    subscriber::{Event, Subscriber, UpdatesFlags},
+    subscriber::{Subscriber, UpdatesFlags},
 };
 use std::time::Duration;
 use tokio::{
