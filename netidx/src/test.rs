@@ -337,7 +337,7 @@ mod publisher {
                 publisher.flushed().await;
                 tx.send(()).unwrap();
                 let (tx, mut rx) = mpsc::channel(10);
-                vp.writes(tx);
+                publisher.writes(vp.id(), tx);
                 let mut c = 1;
                 loop {
                     time::sleep(Duration::from_millis(100)).await;
