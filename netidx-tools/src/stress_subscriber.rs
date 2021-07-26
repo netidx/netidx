@@ -46,22 +46,12 @@ pub(crate) fn run(config: Config, auth: Auth) {
                 now = interval.tick().fuse() => {
                     let elapsed = now - last_stat;
                     let since_start = now - start;
-                    let mut subscribed = 0;
-                    let mut unsubscribed = 0;
-                    for s in subs.iter() {
-                        match s.last() {
-                            Event::Unsubscribed => {
-                                unsubscribed += 1;
-                            }
-                            Event::Update(_) => {
-                                subscribed += 1;
-                            }
-                        }
-                    }
+                    let stats = subscriber.durable_stats();
                     println!(
-                        "sub: {} !sub: {} rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
-                        subscribed,
-                        unsubscribed,
+                        "s: {} p: {} !s: {} rx_i: {:.0} rx_a: {:.0} btch_a: {:.0}",
+                        stats.alive,
+                        stats.pending,
+                        stats.dead,
                         n as f64 / elapsed.as_secs_f64(),
                         total as f64 / since_start.as_secs_f64(),
                         batch_size as f64 / nbatches as f64

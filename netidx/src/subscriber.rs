@@ -530,6 +530,13 @@ impl SubscriberWeak {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DurableStats {
+    pub alive: usize,
+    pub pending: usize,
+    pub dead: usize,
+}
+
 /// create subscriptions
 #[derive(Clone, Debug)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
@@ -560,6 +567,16 @@ impl Subscriber {
     /// this process, but not across processes or machines.
     pub fn id(&self) -> SubscriberId {
         self.0.lock().id
+    }
+
+    /// return stats about durable subscriptions
+    pub fn durable_stats(&self) -> DurableStats {
+        let t = self.0.lock();
+        DurableStats {
+            alive: t.durable_alive.len(),
+            pending: t.durable_pending.len(),
+            dead: t.durable_dead.len(),
+        }
     }
     
     pub fn resolver(&self) -> ResolverRead {
