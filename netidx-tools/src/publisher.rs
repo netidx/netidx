@@ -91,10 +91,11 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
             by_id.lock().insert(id, val.clone());
             Ok(val)
         }
+        let _publisher = publisher.clone();
         task::spawn({
             let by_id = by_id.clone();
             async move {
-                let r = handle_writes_loop(by_id, publisher.clone(), writes_rx).await;
+                let r = handle_writes_loop(by_id, _publisher, writes_rx).await;
                 error!("writes loop terminated {:?}", r);
             }
         });

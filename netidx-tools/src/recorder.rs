@@ -226,31 +226,31 @@ mod publish {
                 session_base.append("control/start/current"),
                 Value::String(Chars::from("Unbounded")),
             )?;
-            start_ctl.writes(control_tx.clone());
+            publisher.writes(start_ctl.id(), control_tx.clone());
             let end_ctl = publisher.publish_with_flags(
                 PublishFlags::USE_EXISTING,
                 session_base.append("control/end/current"),
                 Value::String(Chars::from("Unbounded")),
             )?;
-            end_ctl.writes(control_tx.clone());
+            publisher.writes(end_ctl.id(), control_tx.clone());
             let speed_ctl = publisher.publish_with_flags(
                 PublishFlags::USE_EXISTING,
                 session_base.append("control/speed/current"),
                 Value::F64(1.),
             )?;
-            speed_ctl.writes(control_tx.clone());
+            publisher.writes(speed_ctl.id(), control_tx.clone());
             let state_ctl = publisher.publish_with_flags(
                 PublishFlags::USE_EXISTING,
                 session_base.append("control/state/current"),
                 Value::String(Chars::from("pause")),
             )?;
-            state_ctl.writes(control_tx.clone());
+            publisher.writes(state_ctl.id(), control_tx.clone());
             let pos_ctl = publisher.publish_with_flags(
                 PublishFlags::USE_EXISTING,
                 session_base.append("control/pos/current"),
                 Value::Null,
             )?;
-            pos_ctl.writes(control_tx.clone());
+            publisher.writes(pos_ctl.id(), control_tx.clone());
             publisher.flushed().await;
             Ok(Controls {
                 _start_doc,

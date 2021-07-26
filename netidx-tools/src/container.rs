@@ -61,17 +61,25 @@ impl Refs {
 }
 
 struct Fifo {
+    data_path: Path,
     data: Val,
+    src_path: Path,
     src: Val,
+    on_write_path: Path,
     on_write: Val,
     expr_id: Mutex<ExprId>,
     on_write_expr_id: Mutex<ExprId>,
 }
 
+struct PublishedVal {
+    path: Path,
+    val: Val,
+}
+
 #[derive(Clone)]
 enum Published {
     Formula(Arc<Fifo>),
-    Data(Val),
+    Data(Arc<PublishedVal>),
 }
 
 struct UserEv(Path, Value);
@@ -228,8 +236,8 @@ impl Ref {
                 None => Value::Error(Chars::from("#REF")),
                 Some(id) => match ctx.user.published.get(&id) {
                     None => Value::Error(Chars::from("#REF")),
-                    Some(Published::Data(val)) => {
-                        ctx.user.publisher.current(&val.id()).unwrap_or(Value::Null)
+                    Some(Published::Data(p)) => {
+                        ctx.user.publisher.current(&p.val.id()).unwrap_or(Value::Null)
                     }
                     Some(Published::Formula(fifo)) => {
                         ctx.user.publisher.current(&fifo.data.id()).unwrap_or(Value::Null)
@@ -337,7 +345,7 @@ impl Published {
     fn val(&self) -> &Val {
         match self {
             Published::Formula(fi) => &fi.data,
-            Published::Data(val) => val,
+            Published::Data(p) => &p.val,
         }
     }
 }
@@ -477,25 +485,30 @@ impl Container {
         on_write_txt: Chars,
     ) -> Result<()> {
         let data = self.ctx.user.publisher.publish(path.clone(), Value::Null)?;
+        let src_path = path.append(".formula");
         let src = self
             .ctx
             .user
             .publisher
-            .publish(path.append(".formula"), Value::from(formula_txt.clone()))?;
+            .publish(src_path.clone(), Value::from(formula_txt.clone()))?;
+        let on_write_path = path.append(".on-write");
         let on_write = self
             .ctx
             .user
             .publisher
-            .publish(path.append(".on-write"), Value::from(on_write_txt.clone()))?;
+            .publish(on_write_path.clone(), Value::from(on_write_txt.clone()))?;
         let data_id = data.id();
         let src_id = src.id();
         let on_write_id = on_write.id();
-        data.writes(self.write_updates_tx.clone());
-        src.writes(self.write_updates_tx.clone());
-        on_write.writes(self.write_updates_tx.clone());
+        self.ctx.user.publisher.writes(data.id(), self.write_updates_tx.clone());
+        self.ctx.user.publisher.writes(src.id(), self.write_updates_tx.clone());
+        self.ctx.user.publisher.writes(on_write.id(), self.write_updates_tx.clone());
         let fifo = Arc::new(Fifo {
+            data_path: path.clone(),
             data,
+            src_path,
             src,
+            on_write_path,
             on_write,
             expr_id: Mutex::new(ExprId::new()),
             on_write_expr_id: Mutex::new(ExprId::new()),
@@ -521,10 +534,13 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
-        let val = self.ctx.user.publisher.publish(path, value)?;
+        let val = self.ctx.user.publisher.publish(path.clone(), value)?;
         let id = val.id();
-        val.writes(self.write_updates_tx.clone());
-        self.ctx.user.published.insert(id, Published::Data(val));
+        self.ctx.user.publisher.writes(val.id(), self.write_updates_tx.clone());
+        self.ctx
+            .user
+            .published
+            .insert(id, Published::Data(Arc::new(PublishedVal { path, val })));
         Ok(())
     }
 
@@ -652,8 +668,8 @@ impl Container {
             }
         };
         fifo.data.update(batch, dv.clone());
-        let path = fifo.data.path();
-        self.update_refs(batch, refs, fifo.src.path(), Value::String(value.clone()));
+        let path = &fifo.data_path;
+        self.update_refs(batch, refs, &fifo.src_path, Value::String(value.clone()));
         self.update_refs(batch, refs, path, dv);
         let cur =
             self.ctx.user.publisher.current(&fifo.on_write.id()).unwrap_or(Value::Null);
@@ -679,8 +695,8 @@ impl Container {
             }
             Err(_) => (), // CR estokes: log and report to user somehow
         }
-        self.update_refs(batch, refs, fifo.on_write.path(), Value::String(value.clone()));
-        let path = fifo.data.path();
+        self.update_refs(batch, refs, &fifo.on_write_path, Value::String(value.clone()));
+        let path = &fifo.data_path;
         let cur = self.ctx.user.publisher.current(&fifo.src.id()).unwrap_or(Value::Null);
         Ok(store(&self.formulas, path, &(to_chars(cur), value))?)
     }
@@ -695,12 +711,12 @@ impl Container {
             refs.clear();
             match self.ctx.user.published.get(&req.id) {
                 None => (),
-                Some(Published::Data(val)) => {
-                    if let Err(_) = store(&self.data, val.path(), &req.value) {
+                Some(Published::Data(p)) => {
+                    if let Err(_) = store(&self.data, &p.path, &req.value) {
                         continue;
                     }
-                    val.update(batch, req.value.clone());
-                    let path = val.path().clone();
+                    p.val.update(batch, req.value.clone());
+                    let path = p.path.clone();
                     self.update_refs(batch, &mut refs, &path, req.value);
                 }
                 Some(Published::Formula(fifo)) => {
@@ -725,7 +741,7 @@ impl Container {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
                         {
-                            let path = fifo.data.path().clone();
+                            let path = fifo.data_path.clone();
                             let ev = vm::Event::User(UserEv(path, req.value));
                             node.update(&mut self.ctx, &ev);
                             self.process_var_updates(batch);
