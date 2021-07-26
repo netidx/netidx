@@ -66,7 +66,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         let our_path = base.append(&uuid_string(id));
         let us = publisher.publish(our_path.clone(), Value::Null)?;
         let ctrack = ChangeTracker::new(base);
-        us.writes(tx);
+        publisher.writes(us.id(), tx);
         publisher.flushed().await;
         let others = HashMap::new();
         let t = PhantomData;

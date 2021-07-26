@@ -23,12 +23,10 @@
 
       - 32% faster message rates on OpenPower (POWER 9), I think due
         to decreased use of atomic data structures that are not well
-        optimized for POWER. Now POWER 9 performance lines up much
-        better with other benchmarks vs x86_64.
+        optimized for the platform. Now POWER 9 performance lines up
+        much better with other benchmarks vs x86_64.
 
-      - 18% faster message rates on ARM (A72)
-
-      - 11% faster message rates on x86_64 (Skylake)
+      - 17% faster message rates on ARM (A72) and x86_64 (Skylake)
 
   - Documented the rpc module.
 

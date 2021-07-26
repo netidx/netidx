@@ -199,13 +199,14 @@ static MAX_CLIENTS: usize = 768;
 lazy_static! {
     static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
     static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
-    static ref TOUPUB: Pool<HashMap<Path, Option<(Id, Subscribed)>>> =
-        Pool::new(10, 500_000);
+    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(10, 500_000);
+    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(10, 500_000);
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
     static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
         Pool::new(1000, 500_000);
     static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
         Pool::new(100, 10000);
+    static ref PUBLISHERS: Mutex<Vec<PublisherWeak>> = Mutex::new(Vec::new());
 }
 
 bitflags! {
@@ -231,6 +232,19 @@ bitflags! {
         /// are written to the same publisher, even if a procedure is
         /// published by multiple publishers.
         const USE_EXISTING = 0x01;
+
+        /// if set, then the publisher will destroy it's internal Val
+        /// when the subscriber count transitions from 1 to 0. A
+        /// message will be sent to the events channel signaling the
+        /// destruction. updates to internally destroyed values will
+        /// be silenty ignored. If the path is advertised the
+        /// advertisement will not be removed.
+        ///
+        /// This flag is intended to make it possible to advertise a
+        /// large sparse namespace where the actual values are
+        /// retreivable from e.g. a database and would not all fit in
+        /// memory at the same time.
+        const DESTROY_ON_IDLE = 0x02;
     }
 }
 
@@ -255,6 +269,8 @@ impl SendResult {
 pub struct WriteRequest {
     /// the Id of the value being written
     pub id: Id,
+    /// the path of the value being written
+    pub path: Path,
     /// the unique id of the client requesting the write
     pub client: ClId,
     /// the value being written
@@ -264,6 +280,7 @@ pub struct WriteRequest {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
+    Destroyed(Id),
     Subscribe(Id, ClId),
     Unsubscribe(Id, ClId),
 }
@@ -279,53 +296,23 @@ type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
 // keys/values, replaced by 1 word.
 type Subscribed = Arc<HashSet<ClId, FxBuildHasher>>;
 
-struct ValInner {
-    id: Id,
-    path: Path,
-    publisher: PublisherWeak,
-}
+/// This represents a published value. When it is dropped the value
+/// will be unpublished.
+pub struct Val(Id);
 
-impl Drop for ValInner {
+impl Drop for Val {
     fn drop(&mut self) {
-        if let Some(t) = self.publisher.upgrade() {
-            let mut pb = t.0.lock();
-            if let Some(pbl) = pb.by_id.remove(&self.id) {
-                pb.by_path.remove(&self.path);
-                pb.wait_clients.remove(&self.id);
-                if let Some(chans) = pb.on_write.remove(&self.id) {
-                    for (_, c) in chans {
-                        match pb.on_write_chans.entry(ChanWrap(c)) {
-                            Entry::Vacant(_) => (),
-                            Entry::Occupied(mut e) => {
-                                e.get_mut().1.remove(&self.id);
-                                if e.get().1.is_empty() {
-                                    e.remove();
-                                }
-                            }
-                        }
-                    }
-                }
-                pb.on_event_chans.remove(&self.id);
-                pb.to_publish.remove(&self.path);
-                pb.to_unpublish
-                    .insert(self.path.clone(), Some((self.id, pbl.subscribed)));
-                pb.trigger_publish();
+        PUBLISHERS.lock().retain(|t| match t.upgrade() {
+            None => false,
+            Some(t) => {
+                t.0.lock().destroy_val(self.0);
+                true
             }
-        }
+        })
     }
 }
-
-/// This represents a published value. Internally it is wrapped in an
-/// Arc, so cloning it is free. When all references to a given
-/// published value have been dropped it will be unpublished.
-#[derive(Clone)]
-pub struct Val(Arc<ValInner>);
 
 impl Val {
-    pub fn downgrade(&self) -> ValWeak {
-        ValWeak(Arc::downgrade(&self.0))
-    }
-
     /// Queue an update to the published value in the specified
     /// batch. Multiple updates to multiple Vals can be queued in a
     /// batch before it is committed, and updates may be concurrently
@@ -339,104 +326,24 @@ impl Val {
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
     pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.msgs.push((None, ToClientMsg::Val(self.0.id, v)));
+        batch.msgs.push((None, ToClientMsg::Val(self.0, v)));
     }
 
     /// Queue sending `v` as an update ONLY to the specified
     /// subscriber, and do not update `current`.
     pub fn update_subscriber(&self, batch: &mut UpdateBatch, dst: ClId, v: Value) {
-        batch.msgs.push((Some(dst), ToClientMsg::Val(self.0.id, v)));
-    }
-
-    /// Register `tx` to receive writes. You can register multiple
-    /// channels, and you can register the same channel on multiple
-    /// `Val` objects. If no channels are registered to receive writes
-    /// they will return an error to the subscriber.
-    ///
-    /// If the `send_result` struct member of `WriteRequest` is set
-    /// then the client has requested that an explicit reply be made
-    /// to the write. In that case the included `SendReply` object can
-    /// be used to send the reply back to the write client. If the
-    /// `SendReply` object is dropped without any reply being sent
-    /// then `Value::Ok` will be sent. `SendReply::send` may only be
-    /// called once, further calls will be silently ignored.
-    ///
-    /// If you no longer wish to accept writes, simply drop all
-    /// registered channels.
-    pub fn writes(&self, tx: Sender<Pooled<Vec<WriteRequest>>>) {
-        if let Some(publisher) = self.0.publisher.upgrade() {
-            let mut pb = publisher.0.lock();
-            let e = pb
-                .on_write_chans
-                .entry(ChanWrap(tx.clone()))
-                .or_insert_with(|| (ChanId::new(), HashSet::new()));
-            e.1.insert(self.0.id);
-            let id = e.0;
-            let mut gc = Vec::new();
-            let ow = pb.on_write.entry(self.0.id).or_insert_with(Vec::new);
-            ow.retain(|(_, c)| {
-                if c.is_closed() {
-                    gc.push(ChanWrap(c.clone()));
-                    false
-                } else {
-                    true
-                }
-            });
-            ow.push((id, tx));
-            for c in gc {
-                pb.on_write_chans.remove(&c);
-            }
-        }
-    }
-
-    /// Register `tx` to receive a message when a client subscribes or
-    /// unsubscribes. If `include_existing` is true, then the current
-    /// set of subscribers will be sent to the channel immediatly as
-    /// if they had just subscribed, otherwise tx will only receive
-    /// subscribe messages about new subscribers.
-    pub fn events(&self, include_existing: bool, tx: UnboundedSender<Event>) {
-        if let Some(publisher) = self.0.publisher.upgrade() {
-            let mut inner = publisher.0.lock();
-            inner
-                .on_event_chans
-                .entry(self.0.id)
-                .or_insert_with(Vec::new)
-                .push(tx.clone());
-            if include_existing {
-                if let Some(pbl) = inner.by_id.get(&self.0.id) {
-                    for cl in pbl.subscribed.iter() {
-                        let e = Event::Subscribe(self.0.id, *cl);
-                        let _: result::Result<_, _> = tx.unbounded_send(e);
-                    }
-                }
-            }
-        }
+        batch.msgs.push((Some(dst), ToClientMsg::Val(self.0, v)));
     }
 
     /// Queue unsubscribing the specified client. Like update, this
     /// will only take effect when the specified batch is committed.
     pub fn unsubscribe(&self, batch: &mut UpdateBatch, dst: ClId) {
-        batch.msgs.push((Some(dst), ToClientMsg::Unpublish(self.0.id)));
+        batch.msgs.push((Some(dst), ToClientMsg::Unpublish(self.0)));
     }
 
     /// Get the unique `Id` of this `Val`
     pub fn id(&self) -> Id {
-        self.0.id
-    }
-
-    /// Get a reference to the `Path` of this published value.
-    pub fn path(&self) -> &Path {
-        &self.0.path
-    }
-}
-
-/// A weak reference to a published value.
-#[derive(Clone)]
-pub struct ValWeak(Weak<ValInner>);
-
-impl ValWeak {
-    pub fn upgrade(&self) -> Option<Val> {
-        Weak::upgrade(&self.0).map(Val)
+        self.0
     }
 }
 
@@ -446,6 +353,95 @@ pub struct DefaultHandle {
     chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
     path: Path,
     publisher: PublisherWeak,
+}
+
+impl DefaultHandle {
+    /// Advertising is a middle way between fully publishing and a
+    /// completely sparse namespace.
+    ///
+    /// When a path is advertised it exists in the resolver, just as a
+    /// normally published value, but is not fully published on the
+    /// publisher side, and as such it uses much less memory. When a
+    /// user subscribes to an advertised path the request comes down
+    /// the `DefaultHandle` just like a subscription to a default
+    /// publisher.
+    ///
+    /// # Notes
+    ///
+    /// * Returns an error if the `path` is not under the base path of
+    /// the default publisher.
+    ///
+    /// * DESTROY_ON_IDLE has no effect on advertisements, it is only
+    /// relevant for publish.
+    ///
+    /// * Advertising is idempotent.
+    ///
+    /// * If the path is currently published, then calling advertise
+    /// will merely record that it is now advertised. If the published
+    /// value is destroyed it will not be removed from the resolver
+    /// server. In this case the flags of the original publish will be
+    /// the ones used, the flags passed to advertise will be ignored.
+    pub fn advertise_with_flags(
+        &self,
+        mut flags: PublishFlags,
+        path: Path,
+    ) -> Result<()> {
+        if !path.starts_with(&*self.path) {
+            bail!("advertisements must be under the default publisher path")
+        }
+        if let Some(pb) = self.publisher.upgrade() {
+            let mut pbl = pb.0.lock();
+            let inserted = match pbl.advertised.get_mut(&self.path) {
+                Some(set) => set.insert(path.clone()),
+                None => {
+                    pbl.advertised
+                        .insert(self.path.clone(), iter::once(path.clone()).collect());
+                    true
+                }
+            };
+            if inserted && !pbl.by_path.contains_key(&path) {
+                flags.remove(PublishFlags::DESTROY_ON_IDLE);
+                let flags = if flags.is_empty() { None } else { Some(flags.bits) };
+                pbl.to_unpublish.remove(&path);
+                pbl.to_publish.insert(path, flags);
+                pbl.trigger_publish()
+            }
+        }
+        Ok(())
+    }
+
+    /// Advertise the specified path with an empty set of flags. see
+    /// `advertise_with_flags`.
+    pub fn advertise(&self, path: Path) -> Result<()> {
+        self.advertise_with_flags(PublishFlags::empty(), path)
+    }
+
+    /// Stop advertising the specified path. If the path is currently
+    /// published, this will merely record that it is no longer
+    /// advertised. However if the path is not currently published
+    /// then it will also be removed from the resolver server.
+    ///
+    /// if the path is not advertised then this function does nothing.
+    pub fn remove_advertisement(&self, path: &Path) {
+        if let Some(pb) = self.publisher.upgrade() {
+            let mut pbl = pb.0.lock();
+            let removed = match pbl.advertised.get_mut(&self.path) {
+                None => false,
+                Some(set) => {
+                    let res = set.remove(path);
+                    if set.is_empty() {
+                        pbl.advertised.remove(&self.path);
+                    }
+                    res
+                }
+            };
+            if removed && !pbl.by_path.contains_key(path) {
+                pbl.to_unpublish.insert(path.clone());
+                pbl.to_publish.remove(path);
+                pbl.trigger_publish()
+            }
+        }
+    }
 }
 
 impl Deref for DefaultHandle {
@@ -467,7 +463,7 @@ impl Drop for DefaultHandle {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.default.remove(self.path.as_ref());
-            pb.to_unpublish.insert(self.path.clone(), None);
+            pb.to_unpublish.insert(self.path.clone());
         }
     }
 }
@@ -497,14 +493,14 @@ impl UpdateBatch {
                                     .push(m.clone());
                             }
                             match m {
-                                ToClientMsg::Val(_, v) => { pbl.current = v; }
-                                ToClientMsg::Unpublish(_) => ()
+                                ToClientMsg::Val(_, v) => {
+                                    pbl.current = v;
+                                }
+                                ToClientMsg::Unpublish(_) => (),
                             }
                         }
                     }
-                    Some(cl) => {
-                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m)
-                    }
+                    Some(cl) => msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m),
                 }
             }
             future::join_all(
@@ -544,6 +540,7 @@ struct Client {
 struct Published {
     current: Value,
     subscribed: Subscribed,
+    path: Path,
 }
 
 struct PublisherInner {
@@ -553,6 +550,7 @@ struct PublisherInner {
     hc_subscribed: HashMap<BTreeSet<ClId>, Subscribed, FxBuildHasher>,
     by_path: HashMap<Path, Id>,
     by_id: HashMap<Id, Published, FxBuildHasher>,
+    destroy_on_idle: HashSet<Id, FxBuildHasher>,
     on_write_chans: HashMap<
         ChanWrap<Pooled<Vec<WriteRequest>>>,
         (ChanId, HashSet<Id>),
@@ -562,9 +560,11 @@ struct PublisherInner {
     on_write:
         HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
+    advertised: HashMap<Path, HashSet<Path>>,
     to_publish: Pooled<HashMap<Path, Option<u16>>>,
     to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
-    to_unpublish: Pooled<HashMap<Path, Option<(Id, Subscribed)>>>,
+    to_unpublish: Pooled<HashSet<Path>>,
+    to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
     wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
@@ -582,6 +582,44 @@ impl PublisherInner {
                 self.by_id.clear();
                 true
             }
+        }
+    }
+
+    fn destroy_val(&mut self, id: Id) {
+        if let Some(pbl) = self.by_id.remove(&id) {
+            let path = pbl.path;
+            self.by_path.remove(&path);
+            self.wait_clients.remove(&id);
+            if let Some(chans) = self.on_write.remove(&id) {
+                for (_, c) in chans {
+                    match self.on_write_chans.entry(ChanWrap(c)) {
+                        Entry::Vacant(_) => (),
+                        Entry::Occupied(mut e) => {
+                            e.get_mut().1.remove(&id);
+                            if e.get().1.is_empty() {
+                                e.remove();
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(chans) = self.on_event_chans.remove(&id) {
+                for chan in chans {
+                    let _: Result<_, _> = chan.unbounded_send(Event::Destroyed(id));
+                }
+            }
+            if pbl.subscribed.len() > 0 {
+                self.to_unsubscribe.insert(id, pbl.subscribed);
+            }
+            let is_advertised = self
+                .advertised
+                .iter()
+                .any(|(b, set)| path.starts_with(&**b) && set.contains(&path));
+            if !is_advertised {
+                self.to_publish.remove(&path);
+                self.to_unpublish.insert(path);
+            }
+            self.trigger_publish();
         }
     }
 
@@ -694,13 +732,16 @@ impl Publisher {
             hc_subscribed: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
+            destroy_on_idle: HashSet::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_event_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
+            advertised: HashMap::new(),
             to_publish: TOPUB.take(),
             to_publish_default: TOPUB.take(),
             to_unpublish: TOUPUB.take(),
+            to_unsubscribe: TOUSUB.take(),
             publish_triggered: false,
             trigger_publish: tx_trigger,
             wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
@@ -721,6 +762,7 @@ impl Publisher {
                 info!("publish loop shutdown")
             }
         });
+        PUBLISHERS.lock().push(pb.downgrade());
         Ok(pb)
     }
 
@@ -763,7 +805,7 @@ impl Publisher {
     /// `subscriber`
     pub fn publish_with_flags(
         &self,
-        flags: PublishFlags,
+        mut flags: PublishFlags,
         path: Path,
         init: Value,
     ) -> Result<Val> {
@@ -783,18 +825,17 @@ impl Publisher {
             .entry(BTreeSet::new())
             .or_insert_with(|| Arc::new(HashSet::with_hasher(FxBuildHasher::default())))
             .clone();
-        let val = Val(Arc::new(ValInner {
-            id,
-            path: path.clone(),
-            publisher: self.downgrade(),
-        }));
-        pb.by_id.insert(id, Published { current: init, subscribed });
+        pb.by_id.insert(id, Published { current: init, subscribed, path: path.clone() });
         pb.to_unpublish.remove(&path);
+        if flags.contains(PublishFlags::DESTROY_ON_IDLE) {
+            flags.remove(PublishFlags::DESTROY_ON_IDLE);
+            pb.destroy_on_idle.insert(id);
+        }
         pb.to_publish
             .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
         pb.by_path.insert(path, id);
         pb.trigger_publish();
-        Ok(val)
+        Ok(Val(id))
     }
 
     /// Publish `Path` with initial value `init` and no flags. It is
@@ -827,6 +868,11 @@ impl Publisher {
     /// by appending the escaped query to the base path, with the
     /// added bonus that the result will be automatically cached and
     /// distributed to anyone making the same query again.
+    ///
+    /// # notes
+    ///
+    /// At the moment none of the `PublishFlags` are relevant to
+    /// default publishers.
     pub fn publish_default_with_flags(
         &self,
         flags: PublishFlags,
@@ -872,12 +918,14 @@ impl Publisher {
         self.publish_default_with_flags(PublishFlags::empty(), base)
     }
 
-    /// Start a new update batch. Updates are queued in the batch see
-    /// `Val::update`, and then the batch can be either discarded, or
+    /// Start a new update batch. Updates are queued in the batch (see
+    /// `Val::update`), and then the batch can be either discarded, or
     /// committed. If discarded then none of the updates will have any
     /// effect, otherwise once committed the queued updates will be
     /// sent out to subscribers and also will effect the current value
     /// given to new subscribers.
+    ///
+    /// Multiple batches may be started concurrently.
     pub fn start_batch(&self) -> UpdateBatch {
         UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take() }
     }
@@ -947,6 +995,11 @@ impl Publisher {
         self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
     }
 
+    /// Get the `Path` of a published value.
+    pub fn path(&self, id: Id) -> Option<Path> {
+        self.0.lock().by_id.get(&id).map(|pbl| pbl.path.clone())
+    }
+
     /// Get a copy of the current value of a published `Val`
     pub fn current(&self, id: &Id) -> Option<Value> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
@@ -965,6 +1018,83 @@ impl Publisher {
     /// Get the number of clients subscribed to a published `Val`
     pub fn subscribed_len(&self, id: &Id) -> usize {
         self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
+    }
+
+    /// Register `tx` to receive writes to the specified published
+    /// value. You can register multiple channels, and you can
+    /// register the same channel on multiple ids. If no channels are
+    /// registered to receive writes for an id, then an attempt to
+    /// write to that id will return an error to the subscriber.
+    ///
+    /// If the `send_result` struct member of `WriteRequest` is set
+    /// then the client has requested that an explicit reply be made
+    /// to the write. In that case the included `SendReply` object can
+    /// be used to send the reply back to the write client. If the
+    /// `SendReply` object is dropped without any reply being sent
+    /// then `Value::Ok` will be sent. `SendReply::send` may only be
+    /// called once, further calls will be silently ignored.
+    ///
+    /// If you no longer wish to accept writes for an id you can drop
+    /// all registered channels, or call `stop_writes`.
+    pub fn writes(&self, id: Id, tx: Sender<Pooled<Vec<WriteRequest>>>) {
+        let mut pb = self.0.lock();
+        if pb.by_id.contains_key(&id) {
+            let e = pb
+                .on_write_chans
+                .entry(ChanWrap(tx.clone()))
+                .or_insert_with(|| (ChanId::new(), HashSet::new()));
+            e.1.insert(id);
+            let cid = e.0;
+            let mut gc = Vec::new();
+            let ow = pb.on_write.entry(id).or_insert_with(Vec::new);
+            ow.retain(|(_, c)| {
+                if c.is_closed() {
+                    gc.push(ChanWrap(c.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            ow.push((cid, tx));
+            for c in gc {
+                pb.on_write_chans.remove(&c);
+            }
+        }
+    }
+
+    /// Stop accepting writes to the specified id
+    pub fn stop_writes(&self, id: Id) {
+        let mut pb = self.0.lock();
+        pb.on_write.remove(&id);
+    }
+
+    /// Register `tx` to receive a message about events relevant to
+    /// the specified id. If `include_existing` is true, then the
+    /// current set of subscribers will be sent to the channel
+    /// immediatly as if they had just subscribed, otherwise tx will
+    /// only receive subscribe messages about new subscribers.
+    ///
+    /// if you don't with to receive events anymore you can drop the
+    /// registered channels, or you can call `stop_events`.
+    pub fn events(&self, id: Id, include_existing: bool, tx: UnboundedSender<Event>) {
+        let mut inner = self.0.lock();
+        if inner.by_id.contains_key(&id) {
+            inner.on_event_chans.entry(id).or_insert_with(Vec::new).push(tx.clone());
+            if include_existing {
+                if let Some(pbl) = inner.by_id.get(&id) {
+                    for cl in pbl.subscribed.iter() {
+                        let e = Event::Subscribe(id, *cl);
+                        let _: result::Result<_, _> = tx.unbounded_send(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop receiving events about the specified id
+    pub fn stop_events(&self, id: Id) {
+        let mut inner = self.0.lock();
+        inner.on_event_chans.remove(&id);
     }
 }
 
@@ -1056,11 +1186,88 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
                 e.insert(Arc::clone(&ut.subscribed));
             }
         }
+        let nsubs = ut.subscribed.len();
         if let Some(cl) = t.clients.get_mut(&client) {
             cl.subscribed.remove(&id);
         }
         t.send_event(id, Event::Unsubscribe(id, client));
+        if nsubs == 0 && t.destroy_on_idle.remove(&id) {
+            t.destroy_val(id)
+        }
     }
+}
+
+fn write(
+    t: &mut PublisherInner,
+    con: &mut Channel<ServerCtx>,
+    client: ClId,
+    gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
+    wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
+    write_batches: &mut HashMap<
+        ChanId,
+        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
+        FxBuildHasher,
+    >,
+    id: Id,
+    v: Value,
+    r: bool,
+) -> Result<()> {
+    macro_rules! or_qwe {
+        ($v:expr, $m:expr) => {
+            match $v {
+                Some(v) => v,
+                None => {
+                    if r {
+                        let m = Value::Error(Chars::from($m));
+                        con.queue_send(&From::WriteResult(id, m))?
+                    }
+                    return Ok(());
+                }
+            }
+        };
+    }
+    use protocol::publisher::From;
+    let cl = or_qwe!(t.clients.get(&client), "cannot write to unsubscribed value");
+    let perms = or_qwe!(cl.subscribed.get(&id), "cannot write to unsubscribed value");
+    if !perms.contains(Permissions::WRITE) {
+        or_qwe!(None, "write permission denied")
+    }
+    let ow = or_qwe!(t.on_write.get_mut(&id), "writes not accepted");
+    ow.retain(|(_, c)| {
+        if c.is_closed() {
+            gc_on_write.push(ChanWrap(c.clone()));
+            false
+        } else {
+            true
+        }
+    });
+    if ow.len() == 0 {
+        or_qwe!(None, "writes not accepted");
+    }
+    let send_result = if !r {
+        None
+    } else {
+        let (send_result, wait) = SendResult::new();
+        wait_write_res.push((id, wait));
+        Some(send_result)
+    };
+    for (cid, ch) in ow.iter() {
+        if let Some(pbv) = t.by_id.get(&id) {
+            let req = WriteRequest {
+                id,
+                path: pbv.path.clone(),
+                client,
+                value: v.clone(),
+                send_result: send_result.clone(),
+            };
+            write_batches
+                .entry(*cid)
+                .or_insert_with(|| (BATCHES.take(), ch.clone()))
+                .0
+                .push(req)
+        }
+    }
+    Ok(())
 }
 
 async fn handle_batch(
@@ -1080,13 +1287,6 @@ async fn handle_batch(
 ) -> Result<()> {
     use protocol::publisher::{From, To::*};
     let mut wait_write_res = Vec::new();
-    fn qwe(con: &mut Channel<ServerCtx>, id: Id, r: bool, m: &'static str) -> Result<()> {
-        if r {
-            let m = Value::Error(Chars::from(m));
-            con.queue_send(&From::WriteResult(id, m))?
-        }
-        Ok(())
-    }
     {
         let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
         let mut pb = t_st.0.lock();
@@ -1154,59 +1354,22 @@ async fn handle_batch(
                         },
                     }
                 }
+                Write(id, v, r) => write(
+                    &mut *pb,
+                    con,
+                    client,
+                    &mut gc_on_write,
+                    &mut wait_write_res,
+                    write_batches,
+                    id,
+                    v,
+                    r,
+                )?,
                 Unsubscribe(id) => {
                     gc = true;
                     unsubscribe(&mut *pb, client, id);
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
-                Write(id, v, r) => match pb.clients.get(&client) {
-                    None => qwe(con, id, r, "cannot write to unsubscribed value")?,
-                    Some(cl) => match cl.subscribed.get(&id) {
-                        None => qwe(con, id, r, "cannot write to unsubscribed value")?,
-                        Some(perms) => match perms.contains(Permissions::WRITE) {
-                            false => qwe(con, id, r, "write permission denied")?,
-                            true => match pb.on_write.get_mut(&id) {
-                                None => qwe(con, id, r, "writes not accepted")?,
-                                Some(ow) => {
-                                    let send_result = if !r {
-                                        None
-                                    } else {
-                                        ow.retain(|(_, c)| {
-                                            if c.is_closed() {
-                                                gc_on_write.push(ChanWrap(c.clone()));
-                                                false
-                                            } else {
-                                                true
-                                            }
-                                        });
-                                        if ow.len() == 0 {
-                                            qwe(con, id, r, "writes not accepted")?;
-                                            continue;
-                                        }
-                                        let (send_result, wait) = SendResult::new();
-                                        wait_write_res.push((id, wait));
-                                        Some(send_result)
-                                    };
-                                    for (cid, ch) in ow.iter() {
-                                        let req = WriteRequest {
-                                            id,
-                                            client,
-                                            value: v.clone(),
-                                            send_result: send_result.clone(),
-                                        };
-                                        write_batches
-                                            .entry(*cid)
-                                            .or_insert_with(|| {
-                                                (BATCHES.take(), ch.clone())
-                                            })
-                                            .0
-                                            .push(req)
-                                    }
-                                }
-                            },
-                        },
-                    },
-                },
             }
         }
         if gc {
@@ -1456,12 +1619,14 @@ async fn publish_loop(
             let mut to_publish;
             let mut to_publish_default;
             let mut to_unpublish;
+            let mut to_unsubscribe;
             let resolver = {
                 let mut pb = publisher.0.lock();
                 to_publish = mem::replace(&mut pb.to_publish, TOPUB.take());
                 to_publish_default =
                     mem::replace(&mut pb.to_publish_default, TOPUB.take());
                 to_unpublish = mem::replace(&mut pb.to_unpublish, TOUPUB.take());
+                to_unsubscribe = mem::replace(&mut pb.to_unsubscribe, TOUSUB.take());
                 pb.publish_triggered = false;
                 pb.resolver.clone()
             };
@@ -1478,18 +1643,16 @@ async fn publish_loop(
                 }
             }
             if to_unpublish.len() > 0 {
-                let mut batch = publisher.start_batch();
-                let iter = to_unpublish.drain().map(|(path, subs)| match subs {
-                    None => path,
-                    Some((id, subs)) => {
-                        for cl in subs.iter() {
-                            batch.msgs.push((Some(*cl), ToClientMsg::Unpublish(id)));
-                        }
-                        path
-                    }
-                });
-                if let Err(e) = resolver.unpublish(iter).await {
+                if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
                     error!("failed to unpublish some paths {} will retry", e)
+                }
+            }
+            if to_unsubscribe.len() > 0 {
+                let mut batch = publisher.start_batch();
+                for (id, subs) in to_unsubscribe.drain() {
+                    for cl in subs.iter() {
+                        batch.msgs.push((Some(*cl), ToClientMsg::Unpublish(id)));
+                    }
                 }
                 batch.commit(None).await;
             }

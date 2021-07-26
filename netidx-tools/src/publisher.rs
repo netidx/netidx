@@ -33,10 +33,11 @@ macro_rules! tryc {
     };
 }
 
-type ById = Arc<Mutex<HashMap<Id, Val, FxBuildHasher>>>;
+type ById = Arc<Mutex<HashMap<Id, Arc<Val>, FxBuildHasher>>>;
 
 async fn handle_writes_loop(
     by_id: ById,
+    publisher: Publisher,
     mut rx: Receiver<Pooled<Vec<WriteRequest>>>,
 ) -> Result<()> {
     let mut stdout = stdout();
@@ -52,7 +53,9 @@ async fn handle_writes_loop(
                         None => "none",
                         Some(t) => t.name(),
                     };
-                    write!(buf, "{}|{}|{}\n", val.path(), typ, &req.value)?;
+                    if let Some(path) = publisher.path(val.id()) {
+                        write!(buf, "{}|{}|{}\n", path, typ, &req.value)?;
+                    }
                 }
             }
         }
@@ -66,7 +69,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
-        let mut by_path: HashMap<Path, Val> = HashMap::new();
+        let mut by_path: HashMap<Path, Arc<Val>> = HashMap::new();
         let by_id: ById =
             Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
         let publisher =
@@ -75,14 +78,14 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
         let mut buf = String::new();
         let mut stdin = BufReader::new(stdin());
         fn publish(
-            by_path: &mut HashMap<Path, Val>,
+            by_path: &mut HashMap<Path, Arc<Val>>,
             by_id: &ById,
             publisher: &Publisher,
             path: &str,
             value: Value,
-        ) -> Result<Val> {
+        ) -> Result<Arc<Val>> {
             let path = Path::from(String::from(path));
-            let val = publisher.publish(path.clone(), value)?;
+            let val = Arc::new(publisher.publish(path.clone(), value)?);
             by_path.insert(path, val.clone());
             let id = val.id();
             by_id.lock().insert(id, val.clone());
@@ -91,7 +94,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
         task::spawn({
             let by_id = by_id.clone();
             async move {
-                let r = handle_writes_loop(by_id, writes_rx).await;
+                let r = handle_writes_loop(by_id, publisher.clone(), writes_rx).await;
                 error!("writes loop terminated {:?}", r);
             }
         });
@@ -112,14 +115,14 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 let path = buf.trim_start_matches("WRITE|").trim();
                 match by_path.get(path) {
                     Some(val) => {
-                        val.writes(writes_tx.clone());
+                        publisher.writes(val.id(), writes_tx.clone());
                     }
                     None => {
                         let val = tryc!(
                             "failed to publish",
                             publish(&mut by_path, &by_id, &publisher, path, Value::Null)
                         );
-                        val.writes(writes_tx.clone());
+                        publisher.writes(val.id(), writes_tx.clone());
                     }
                 }
             } else {
