@@ -280,14 +280,16 @@ mod resolver {
 mod publisher {
     use super::*;
     use crate::{
-        publisher::{BindCfg, Publisher, Val},
+        publisher::{BindCfg, Event as PEvent, PublishFlags, Publisher, Val},
         resolver::Auth,
         resolver_server::Server,
         subscriber::{Event, Subscriber, UpdatesFlags, Value},
     };
     use futures::{channel::mpsc, channel::oneshot, prelude::*};
+    use parking_lot::Mutex;
     use std::{
         net::{IpAddr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
     use tokio::{runtime::Runtime, task, time};
@@ -322,7 +324,9 @@ mod publisher {
                 .expect("start server");
             cfg.addrs[0] = *server.local_addr();
             let pcfg = cfg.clone();
+            let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();
+            let default_destroyed_pb = default_destroyed.clone();
             task::spawn(async move {
                 let publisher = Publisher::new(
                     pcfg,
@@ -337,17 +341,35 @@ mod publisher {
                 publisher.flushed().await;
                 tx.send(()).unwrap();
                 let (tx, mut rx) = mpsc::channel(10);
+                let (tx_ev, mut rx_ev) = mpsc::unbounded();
                 publisher.writes(vp.id(), tx);
                 let mut c = 1;
                 loop {
                     time::sleep(Duration::from_millis(100)).await;
                     let mut batch = publisher.start_batch();
+                    while let Ok(ev) = rx_ev.try_next() {
+                        match ev {
+                            None
+                            | Some(PEvent::Subscribe(_, _))
+                            | Some(PEvent::Unsubscribe(_, _)) => (),
+                            Some(PEvent::Destroyed(id)) => {
+                                assert!(id == dfp.unwrap().id());
+                                dfp = None;
+                                *default_destroyed_pb.lock() = true;
+                            }
+                        }
+                    }
                     while let Ok(r) = df.try_next() {
                         match r {
                             None => panic!("publish default chan closed"),
                             Some((p, reply)) => {
                                 assert!(p.starts_with("/app/q"));
-                                dfp = Some(publisher.publish(p, Value::True).unwrap());
+                                let f = PublishFlags::DESTROY_ON_IDLE;
+                                let p = publisher
+                                    .publish_with_flags(f, p, Value::True)
+                                    .unwrap();
+                                publisher.events(p.id(), false, tx_ev.clone());
+                                dfp = Some(p);
                                 let _ = reply.send(());
                             }
                         }
@@ -374,6 +396,7 @@ mod publisher {
             let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
             let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
             assert_eq!(q.last(), Event::Update(Value::True));
+            drop(q);
             let mut i: u64 = 0;
             let mut c: u64 = 0;
             let (tx, mut rx) = mpsc::channel(10);
@@ -403,6 +426,9 @@ mod publisher {
                 if c - i == 100 {
                     break;
                 }
+            }
+            if !*default_destroyed.lock() {
+                panic!("default publisher value was not destroyed on idle")
             }
             drop(server);
         });

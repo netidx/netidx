@@ -30,6 +30,9 @@
 
       - 20% less memory overhead per published value
 
+  - Publisher advertisements, a middle way between a sparse namespace
+    and a fully published one.
+
   - Documented the rpc module.
 
   - rpc protocol now allows procedure arguments to be specified
