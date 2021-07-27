@@ -356,7 +356,7 @@ mod publisher {
                         _adv = Some(publisher.publish(p, Value::False).unwrap());
                         let _ = reply.send(());
                     } else {
-                        let _ = reply.send(());
+                        panic!("unexpected default subscription {}", p);
                     }
                 },
                 mut batch = rx.select_next_some() => {
