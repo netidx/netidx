@@ -285,9 +285,10 @@ mod publisher {
         resolver_server::Server,
         subscriber::{Event, Subscriber, UpdatesFlags, Value},
     };
-    use futures::{channel::mpsc, channel::oneshot, prelude::*};
+    use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
     use parking_lot::Mutex;
     use std::{
+        iter,
         net::{IpAddr, SocketAddr},
         sync::Arc,
         time::Duration,
@@ -313,6 +314,113 @@ mod publisher {
         assert!("ffff:1c00:2700:3c00::".parse::<BindCfg>().is_err());
     }
 
+    async fn run_publisher(
+        cfg: config::Config,
+        default_destroyed: Arc<Mutex<bool>>,
+        tx: oneshot::Sender<()>,
+    ) {
+        let publisher =
+            Publisher::new(cfg, Auth::Anonymous, "127.0.0.1/32".parse().unwrap())
+                .await
+                .unwrap();
+        let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
+        let mut dfp: Option<Val> = None;
+        let mut adv: Option<Val> = None;
+        let mut df = publisher.publish_default("/app/q".into()).unwrap();
+        df.advertise("/app/q/adv".into()).unwrap();
+        publisher.flushed().await;
+        tx.send(()).unwrap();
+        let (tx, mut rx) = mpsc::channel(10);
+        let (tx_ev, mut rx_ev) = mpsc::unbounded();
+        publisher.writes(vp.id(), tx);
+        loop {
+            let mut batch = publisher.start_batch();            
+            if let Some(dfp) = &dfp {
+                dfp.update(&mut batch, Value::True);
+            }
+            if let Some(adv) = &adv {
+                adv.update(&mut batch, Value::False);
+            }
+            batch.commit(None).await;
+            select_biased! {
+                e = rx_ev.select_next_some() => match e {
+                    PEvent::Subscribe(_, _) | PEvent::Unsubscribe(_, _) => (),
+                    PEvent::Destroyed(id) => {
+                        assert!(id == dfp.unwrap().id());
+                        dfp = None;
+                        *default_destroyed.lock() = true;
+                    }
+                },
+                (p, reply) = df.select_next_some() => {
+                    assert!(p.starts_with("/app/q"));
+                    if &*p == "/app/q/foo" {
+                        let f = PublishFlags::DESTROY_ON_IDLE;
+                        let p =
+                            publisher.publish_with_flags(f, p, Value::True).unwrap();
+                        publisher.events(p.id(), false, tx_ev.clone());
+                        dfp = Some(p);
+                        let _ = reply.send(());
+                    } else if &*p == "/app/q/adv" {
+                        adv = Some(publisher.publish(p, Value::False).unwrap());
+                        let _ = reply.send(());
+                    } else {
+                        let _ = reply.send(());
+                    }
+                },
+                mut batch = rx.select_next_some() => {
+                    let mut ub = publisher.start_batch();
+                    for req in batch.drain(..) {
+                        vp.update(&mut ub, req.value);
+                    }
+                    ub.commit(None).await;
+                }
+            }
+        }
+    }
+
+    async fn run_subscriber(cfg: config::Config, default_destroyed: Arc<Mutex<bool>>) {
+        let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
+        let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
+        let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
+        assert_eq!(q.last(), Event::Update(Value::True));
+        let res = subscriber
+            .resolver()
+            .resolve(iter::once("/app/q/adv".into()))
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        let a = subscriber.subscribe_one("/app/q/adv".into(), None).await.unwrap();
+        assert_eq!(a.last(), Event::Update(Value::False));
+        drop(q);
+        drop(a);
+        let mut c: u64 = 0;
+        let (tx, mut rx) = mpsc::channel(10);
+        vs.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
+        loop {
+            match rx.next().await {
+                None => panic!("publisher died"),
+                Some(mut batch) => {
+                    for (_, v) in batch.drain(..) {
+                        match v {
+                            Event::Update(Value::U64(v)) => {
+                                assert_eq!(c, v);
+                                c += 1;
+                                vs.write(Value::U64(c));
+                            }
+                            _ => panic!("unexpected value from publisher"),
+                        }
+                    }
+                }
+            }
+            if c == 100 {
+                break;
+            }
+        }
+        if !*default_destroyed.lock() {
+            panic!("default publisher value was not destroyed on idle")
+        }
+    }
+
     #[test]
     fn publish_subscribe() {
         let rt = Runtime::new().unwrap();
@@ -323,113 +431,11 @@ mod publisher {
                 .await
                 .expect("start server");
             cfg.addrs[0] = *server.local_addr();
-            let pcfg = cfg.clone();
             let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();
-            let default_destroyed_pb = default_destroyed.clone();
-            task::spawn(async move {
-                let publisher = Publisher::new(
-                    pcfg,
-                    Auth::Anonymous,
-                    "127.0.0.1/32".parse().unwrap(),
-                )
-                .await
-                .unwrap();
-                let vp = publisher.publish("/app/v0".into(), Value::U64(314159)).unwrap();
-                let mut dfp: Option<Val> = None;
-                let mut df = publisher.publish_default("/app/q".into()).unwrap();
-                publisher.flushed().await;
-                tx.send(()).unwrap();
-                let (tx, mut rx) = mpsc::channel(10);
-                let (tx_ev, mut rx_ev) = mpsc::unbounded();
-                publisher.writes(vp.id(), tx);
-                let mut c = 1;
-                loop {
-                    time::sleep(Duration::from_millis(100)).await;
-                    let mut batch = publisher.start_batch();
-                    while let Ok(ev) = rx_ev.try_next() {
-                        match ev {
-                            None
-                            | Some(PEvent::Subscribe(_, _))
-                            | Some(PEvent::Unsubscribe(_, _)) => (),
-                            Some(PEvent::Destroyed(id)) => {
-                                assert!(id == dfp.unwrap().id());
-                                dfp = None;
-                                *default_destroyed_pb.lock() = true;
-                            }
-                        }
-                    }
-                    while let Ok(r) = df.try_next() {
-                        match r {
-                            None => panic!("publish default chan closed"),
-                            Some((p, reply)) => {
-                                assert!(p.starts_with("/app/q"));
-                                let f = PublishFlags::DESTROY_ON_IDLE;
-                                let p = publisher
-                                    .publish_with_flags(f, p, Value::True)
-                                    .unwrap();
-                                publisher.events(p.id(), false, tx_ev.clone());
-                                dfp = Some(p);
-                                let _ = reply.send(());
-                            }
-                        }
-                    }
-                    if let Some(dfp) = &dfp {
-                        dfp.update(&mut batch, Value::True);
-                    }
-                    vp.update(&mut batch, Value::U64(314159 + c));
-                    batch.commit(None).await;
-                    if let Some(mut batch) = rx.next().await {
-                        for req in batch.drain(..) {
-                            match req.value {
-                                Value::U64(v) => {
-                                    c = v;
-                                }
-                                v => panic!("unexpected value written {:?}", v),
-                            }
-                        }
-                    }
-                }
-            });
+            task::spawn(run_publisher(cfg.clone(), default_destroyed.clone(), tx));
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
-            let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
-            let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
-            assert_eq!(q.last(), Event::Update(Value::True));
-            drop(q);
-            let mut i: u64 = 0;
-            let mut c: u64 = 0;
-            let (tx, mut rx) = mpsc::channel(10);
-            vs.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
-            loop {
-                match rx.next().await {
-                    None => panic!("publisher died"),
-                    Some(mut batch) => {
-                        for (_, v) in batch.drain(..) {
-                            match v {
-                                Event::Update(Value::U64(v)) => {
-                                    if c == 0 {
-                                        c = v;
-                                        i = v;
-                                        vs.write(Value::U64(2));
-                                    } else {
-                                        assert_eq!(c + 1, v);
-                                        c += 1;
-                                        vs.write(Value::U64(c - i + 2));
-                                    }
-                                }
-                                _ => panic!("unexpected value from publisher"),
-                            }
-                        }
-                    }
-                }
-                if c - i == 100 {
-                    break;
-                }
-            }
-            if !*default_destroyed.lock() {
-                panic!("default publisher value was not destroyed on idle")
-            }
+            run_subscriber(cfg, default_destroyed).await;
             drop(server);
         });
     }
