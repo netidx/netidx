@@ -325,7 +325,7 @@ mod publisher {
                 .unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
         let mut dfp: Option<Val> = None;
-        let mut adv: Option<Val> = None;
+        let mut _adv: Option<Val> = None;
         let mut df = publisher.publish_default("/app/q".into()).unwrap();
         df.advertise("/app/q/adv".into()).unwrap();
         publisher.flushed().await;
@@ -334,14 +334,6 @@ mod publisher {
         let (tx_ev, mut rx_ev) = mpsc::unbounded();
         publisher.writes(vp.id(), tx);
         loop {
-            let mut batch = publisher.start_batch();            
-            if let Some(dfp) = &dfp {
-                dfp.update(&mut batch, Value::True);
-            }
-            if let Some(adv) = &adv {
-                adv.update(&mut batch, Value::False);
-            }
-            batch.commit(None).await;
             select_biased! {
                 e = rx_ev.select_next_some() => match e {
                     PEvent::Subscribe(_, _) | PEvent::Unsubscribe(_, _) => (),
@@ -361,7 +353,7 @@ mod publisher {
                         dfp = Some(p);
                         let _ = reply.send(());
                     } else if &*p == "/app/q/adv" {
-                        adv = Some(publisher.publish(p, Value::False).unwrap());
+                        _adv = Some(publisher.publish(p, Value::False).unwrap());
                         let _ = reply.send(());
                     } else {
                         let _ = reply.send(());
