@@ -197,15 +197,29 @@ atomic_id!(ClId);
 static MAX_CLIENTS: usize = 768;
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(1000, 50_000);
-    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(20, 500_000);
-    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(10, 500_000);
-    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(10, 500_000);
-    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(1000, 500_000);
+    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(100, 10_000);
+    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(10, 10_000);
+    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
+    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
+    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
     static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
-        Pool::new(1000, 500_000);
+        Pool::new(100, 10_000);
     static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
-        Pool::new(100, 10000);
+        Pool::new(100, 100);
+
+    // estokes 2021: This is reasonable because there will never be
+    // that many publishers in a process. Since a publisher wraps
+    // actual expensive OS resources, users will hit other constraints
+    // (e.g. file descriptor exhaustion) long before N^2 drop becomes
+    // a problem.
+    //
+    // Moreover publisher is architected such that there should not be
+    // very many applications that require more than one publisher in
+    // a process.
+    //
+    // The payback on the other hand is saving a word in EVERY
+    // published value, and that adds up quite fast to a lot of saved
+    // memory.
     static ref PUBLISHERS: Mutex<Vec<PublisherWeak>> = Mutex::new(Vec::new());
 }
 
