@@ -11,7 +11,10 @@ use netidx::{
     pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
-    publisher::{BindCfg, DefaultHandle, Id, Publisher, UpdateBatch, Val, WriteRequest},
+    publisher::{
+        BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
+        UpdateBatch, Val, WriteRequest,
+    },
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
@@ -91,6 +94,8 @@ enum LcEvent {
 }
 
 struct Lc {
+    formulas: sled::Tree,
+    data: sled::Tree,
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
@@ -120,6 +125,8 @@ fn remove_eid_from_set<K: Hash + Eq>(
 
 impl Lc {
     fn new(
+        formulas: sled::Tree,
+        data: sled::Tree,
         subscriber: Subscriber,
         publisher: Publisher,
         sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
@@ -131,6 +138,8 @@ impl Lc {
             rpc: HashMap::with_hasher(FxBuildHasher::default()),
             refs: HashMap::with_hasher(FxBuildHasher::default()),
             forward_refs: HashMap::with_hasher(FxBuildHasher::default()),
+            formulas,
+            data,
             subscriber,
             publisher,
             sub_updates,
@@ -233,7 +242,10 @@ impl Ref {
         match path {
             None => Value::Error(Chars::from("#REF")),
             Some(path) => match ctx.user.publisher.id(path) {
-                None => Value::Error(Chars::from("#REF")),
+                None => match lookup::<Value, Chars>(&ctx.user.data, path) {
+                    Ok(Some(v)) => v,
+                    Err(_) | Ok(None) => Value::Error(Chars::from("#REF")),
+                },
                 Some(id) => match ctx.user.published.get(&id) {
                     None => Value::Error(Chars::from("#REF")),
                     Some(Published::Data(p)) => {
@@ -339,6 +351,8 @@ pub(super) struct ContainerConfig {
     compress_level: Option<u32>,
     #[structopt(long = "cache-size", help = "db page cache size in bytes")]
     cache_size: Option<u64>,
+    #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
+    sparse: bool,
 }
 
 impl Published {
@@ -358,13 +372,12 @@ enum Compiled {
 struct Container {
     cfg: ContainerConfig,
     _db: sled::Db,
-    formulas: sled::Tree,
-    data: sled::Tree,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
     write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    publish_events: mpsc::UnboundedReceiver<PEvent>,
     publish_requests: DefaultHandle,
     _delete_path_rpc: Proc,
     delete_path_rx: mpsc::Receiver<(Path, oneshot::Sender<Value>)>,
@@ -420,6 +433,18 @@ fn start_delete_rpc(
     Ok((proc, rx))
 }
 
+fn lookup<V: Pack + 'static, P: Pack + 'static>(
+    tree: &sled::Tree,
+    path: &P,
+) -> Result<Option<Value>> {
+    let mut kbuf = PKBUF.take();
+    path.encode(&mut *kbuf)?;
+    match tree.get(&*kbuf)? {
+        None => Ok(None),
+        Some(ivec) => Ok(Some(Value::decode(&mut &*ivec)?)),
+    }
+}
+
 fn store<V: Pack + 'static>(tree: &sled::Tree, path: &Path, value: &V) -> Result<()> {
     let mut path_buf = PKBUF.take();
     let mut val_buf = PKBUF.take();
@@ -450,25 +475,33 @@ impl Container {
             .open()?;
         let formulas = _db.open_tree("formulas")?;
         let data = _db.open_tree("data")?;
+        let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
+        publisher.events(publish_events_tx);
         let publish_requests = publisher.publish_default(ccfg.base_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let ctx = ExecCtx::new(Lc::new(subscriber, publisher, sub_updates_tx, bs_tx));
+        let ctx = ExecCtx::new(Lc::new(
+            formulas,
+            data,
+            subscriber,
+            publisher,
+            sub_updates_tx,
+            bs_tx,
+        ));
         let (_delete_path_rpc, delete_path_rx) =
             start_delete_rpc(&ctx.user.publisher, &ccfg.base_path)?;
         Ok(Container {
             cfg: ccfg,
             _db,
-            formulas,
-            data,
             ctx,
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
             sub_updates,
             write_updates_tx,
             write_updates_rx,
+            publish_events,
             publish_requests,
             _delete_path_rpc,
             delete_path_rx,
@@ -534,7 +567,11 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
-        let val = self.ctx.user.publisher.publish(path.clone(), value)?;
+        let val = self.ctx.user.publisher.publish_with_flags(
+            PublishFlags::DESTROY_ON_IDLE,
+            path.clone(),
+            value,
+        )?;
         let id = val.id();
         self.ctx.user.publisher.writes(val.id(), self.write_updates_tx.clone());
         self.ctx
@@ -546,13 +583,14 @@ impl Container {
 
     async fn init(&mut self) -> Result<()> {
         let mut batch = self.ctx.user.publisher.start_batch();
-        for res in self.data.iter() {
-            let (path, value) = res?;
-            let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
-            let value = Value::decode(&mut &*value)?;
-            let _: Result<()> = self.publish_data(path, value);
+        if !self.cfg.sparse {
+            for res in self.ctx.user.data.iter() {
+                let (path, _) = res?;
+                let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
+                let _: Result<()> = self.publish_requests.advertise(path);
+            }
         }
-        for res in self.formulas.iter() {
+        for res in self.ctx.user.formulas.iter() {
             let (path, value) = res?;
             let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
             let (formula_txt, on_write_txt) = <(Chars, Chars)>::decode(&mut &*value)?;
@@ -673,7 +711,7 @@ impl Container {
         self.update_refs(batch, refs, path, dv);
         let cur =
             self.ctx.user.publisher.current(&fifo.on_write.id()).unwrap_or(Value::Null);
-        Ok(store(&self.formulas, path, &(value, to_chars(cur)))?)
+        Ok(store(&self.ctx.user.formulas, path, &(value, to_chars(cur)))?)
     }
 
     fn change_on_write(
@@ -698,7 +736,7 @@ impl Container {
         self.update_refs(batch, refs, &fifo.on_write_path, Value::String(value.clone()));
         let path = &fifo.data_path;
         let cur = self.ctx.user.publisher.current(&fifo.src.id()).unwrap_or(Value::Null);
-        Ok(store(&self.formulas, path, &(to_chars(cur), value))?)
+        Ok(store(&self.ctx.user.formulas, path, &(to_chars(cur), value))?)
     }
 
     fn process_writes(
@@ -710,9 +748,9 @@ impl Container {
         for req in writes.drain(..) {
             refs.clear();
             match self.ctx.user.published.get(&req.id) {
-                None => (),
+                None => (), // CR estokes: log
                 Some(Published::Data(p)) => {
-                    if let Err(_) = store(&self.data, &p.path, &req.value) {
+                    if let Err(_) = store(&self.ctx.user.data, &p.path, &req.value) {
                         continue;
                     }
                     p.val.update(batch, req.value.clone());
@@ -767,8 +805,12 @@ impl Container {
                 let name = Path::basename(&path);
                 if name == Some(".formula") || name == Some(".on-write") {
                     if let Some(path) = Path::dirname(&path) {
-                        let path = Path::from(Arc::from(path));
                         // CR estokes: log errors
+                        let path = Path::from(Arc::from(path));
+                        let mut kbuf = PKBUF.take();
+                        if let Ok(()) = path.encode(&mut *kbuf) {
+                            let _: Result<_, _> = self.ctx.user.data.remove(&*kbuf);
+                        }
                         let _: Result<()> = self.publish_formula(
                             path,
                             batch,
@@ -777,26 +819,38 @@ impl Container {
                         );
                     }
                 } else {
-                    let _: Result<()> = self.publish_data(path, Value::Null);
+                    let val = match lookup::<Value, Path>(&self.ctx.user.data, &path) {
+                        Err(_) | Ok(None) => Value::Null,
+                        Ok(Some(v)) => v,
+                    };
+                    let _: Result<()> = self.publish_data(path, val);
                 }
                 let _: Result<_, _> = reply.send(());
             }
         }
     }
 
+    fn process_publish_event(&mut self, e: PEvent) {
+        match e {
+            PEvent::Subscribe(_, _) | PEvent::Unsubscribe(_, _) => (),
+            PEvent::Destroyed(id) => { self.ctx.user.published.remove(&id); }
+        }
+    }
+
     fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
+        let mut kbuf = PKBUF.take();
+        path.encode(&mut *kbuf)?;
         if bn == Some(".formula") || bn == Some(".on-write") {
             bail!("won't delete .formula/.on-write, delete the base instead")
         } else if let Some(id) = self.ctx.user.publisher.id(&path) {
-            let mut kbuf = PKBUF.take();
-            path.encode(&mut *kbuf)?;
             let ref_err = Value::Error(Chars::from("#REF"));
+            self.publish_requests.remove_advertisement(&path);
             match self.ctx.user.published.remove(&id) {
                 None => (),
                 Some(Published::Data(_)) => {
-                    let _ = self.data.remove(&*kbuf);
+                    let _ = self.ctx.user.data.remove(&*kbuf);
                 }
                 Some(Published::Formula(fifo)) => {
                     let fpath = path.append(".formula");
@@ -813,8 +867,8 @@ impl Container {
                     if let Some(id) = self.ctx.user.publisher.id(&opath) {
                         self.ctx.user.published.remove(&id);
                     }
-                    let _ = self.data.remove(&*kbuf);
-                    self.formulas.remove(&*kbuf)?;
+                    let _ = self.ctx.user.data.remove(&*kbuf);
+                    self.ctx.user.formulas.remove(&*kbuf)?;
                     self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
                     self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
                 }
@@ -822,7 +876,9 @@ impl Container {
             self.update_refs(batch, &mut REFS.take(), &path, ref_err);
             Ok(())
         } else {
-            bail!("no such path {}", path)
+            self.publish_requests.remove_advertisement(&path);
+            let _ = self.ctx.user.data.remove(&*kbuf);
+            Ok(())
         }
     }
 
@@ -920,6 +976,9 @@ impl Container {
         loop {
             let mut batch = self.ctx.user.publisher.start_batch();
             select_biased! {
+                r = self.publish_events.select_next_some() => {
+                    self.process_publish_event(r);
+                }
                 r = self.publish_requests.select_next_some() => {
                     self.process_publish_request(&mut batch, r.0, r.1);
                 }

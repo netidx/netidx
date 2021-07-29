@@ -41,7 +41,6 @@ use std::{
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     ops::{Deref, DerefMut},
-    result,
     str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
@@ -570,7 +569,7 @@ struct PublisherInner {
         (ChanId, HashSet<Id>),
         FxBuildHasher,
     >,
-    on_event_chans: HashMap<Id, Vec<UnboundedSender<Event>>, FxBuildHasher>,
+    on_event_chans: Vec<UnboundedSender<Event>>,
     on_write:
         HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
     resolver: ResolverWrite,
@@ -617,11 +616,7 @@ impl PublisherInner {
                     }
                 }
             }
-            if let Some(chans) = self.on_event_chans.remove(&id) {
-                for chan in chans {
-                    let _: Result<_, _> = chan.unbounded_send(Event::Destroyed(id));
-                }
-            }
+            self.send_event(Event::Destroyed(id));
             if pbl.subscribed.len() > 0 {
                 self.to_unsubscribe.insert(id, pbl.subscribed);
             }
@@ -637,13 +632,8 @@ impl PublisherInner {
         }
     }
 
-    fn send_event(&mut self, id: Id, event: Event) {
-        if let Some(chans) = self.on_event_chans.get_mut(&id) {
-            chans.retain(|chan| chan.unbounded_send(event).is_ok());
-            if chans.is_empty() {
-                self.on_event_chans.remove(&id);
-            }
-        }
+    fn send_event(&mut self, event: Event) {
+        self.on_event_chans.retain(|chan| chan.unbounded_send(event).is_ok());
     }
 
     fn trigger_publish(&mut self) {
@@ -748,7 +738,7 @@ impl Publisher {
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             destroy_on_idle: HashSet::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
-            on_event_chans: HashMap::with_hasher(FxBuildHasher::default()),
+            on_event_chans: Vec::new(),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
             advertised: HashMap::new(),
@@ -1082,33 +1072,11 @@ impl Publisher {
         pb.on_write.remove(&id);
     }
 
-    /// Register `tx` to receive a message about events relevant to
-    /// the specified id. If `include_existing` is true, then the
-    /// current set of subscribers will be sent to the channel
-    /// immediatly as if they had just subscribed, otherwise tx will
-    /// only receive subscribe messages about new subscribers.
+    /// Register `tx` to receive a message about publisher events
     ///
-    /// if you don't with to receive events anymore you can drop the
-    /// registered channels, or you can call `stop_events`.
-    pub fn events(&self, id: Id, include_existing: bool, tx: UnboundedSender<Event>) {
-        let mut inner = self.0.lock();
-        if inner.by_id.contains_key(&id) {
-            inner.on_event_chans.entry(id).or_insert_with(Vec::new).push(tx.clone());
-            if include_existing {
-                if let Some(pbl) = inner.by_id.get(&id) {
-                    for cl in pbl.subscribed.iter() {
-                        let e = Event::Subscribe(id, *cl);
-                        let _: result::Result<_, _> = tx.unbounded_send(e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Stop receiving events about the specified id
-    pub fn stop_events(&self, id: Id) {
-        let mut inner = self.0.lock();
-        inner.on_event_chans.remove(&id);
+    /// if you don't with to receive events on a given channel you can drop it.
+    pub fn events(&self, tx: UnboundedSender<Event>) {
+        self.0.lock().on_event_chans.push(tx)
     }
 }
 
@@ -1178,7 +1146,7 @@ fn subscribe(
                         let _ = tx.send(());
                     }
                 }
-                t.send_event(id, Event::Subscribe(id, client));
+                t.send_event(Event::Subscribe(id, client));
             }
         }
     }
@@ -1204,7 +1172,7 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
         if let Some(cl) = t.clients.get_mut(&client) {
             cl.subscribed.remove(&id);
         }
-        t.send_event(id, Event::Unsubscribe(id, client));
+        t.send_event(Event::Unsubscribe(id, client));
         if nsubs == 0 && t.destroy_on_idle.remove(&id) {
             t.destroy_val(id)
         }
