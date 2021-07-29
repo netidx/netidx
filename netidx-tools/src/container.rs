@@ -525,19 +525,53 @@ impl Container {
         formula_txt: Chars,
         on_write_txt: Chars,
     ) -> Result<()> {
-        let data = self.ctx.user.publisher.publish(path.clone(), Value::Null)?;
         let src_path = path.append(".formula");
-        let src = self
-            .ctx
-            .user
-            .publisher
-            .publish(src_path.clone(), Value::from(formula_txt.clone()))?;
         let on_write_path = path.append(".on-write");
-        let on_write = self
-            .ctx
-            .user
-            .publisher
-            .publish(on_write_path.clone(), Value::from(on_write_txt.clone()))?;
+        let (data, src, on_write) = match self.ctx.user.publisher.id(&path) {
+            None => {
+                let data = self.ctx.user.publisher.publish(path.clone(), Value::Null)?;
+                let src = self
+                    .ctx
+                    .user
+                    .publisher
+                    .publish(src_path.clone(), Value::from(formula_txt.clone()))?;
+                let on_write = self
+                    .ctx
+                    .user
+                    .publisher
+                    .publish(on_write_path.clone(), Value::from(on_write_txt.clone()))?;
+                (data, src, on_write)
+            }
+            Some(id) => match self.ctx.user.published.remove(&id) {
+                None => unreachable!(),
+                Some(Published::Data(pv)) => {
+                    let data = match Arc::try_unwrap(pv) {
+                        Ok(pv) => pv.val,
+                        Err(_) => unreachable!(),
+                    };
+                    let src = self
+                        .ctx
+                        .user
+                        .publisher
+                        .publish(src_path.clone(), Value::from(formula_txt.clone()))?;
+                    let on_write = self
+                        .ctx
+                        .user
+                        .publisher
+                        .publish(on_write_path.clone(), Value::from(on_write_txt.clone()))?;
+                    (data, src, on_write)
+                }
+                Some(Published::Formula(fifo)) => {
+                    self.ctx.user.published.remove(&fifo.src.id());
+                    self.ctx.user.published.remove(&fifo.on_write.id());
+                    let fifo = match Arc::try_unwrap(fifo) {
+                        Ok(f) => f,
+                        Err(_) => unreachable!(),
+                    };
+                    (fifo.data, fifo.src, fifo.on_write)
+                }
+            }
+        };
         let data_id = data.id();
         let src_id = src.id();
         let on_write_id = on_write.id();
