@@ -32,6 +32,7 @@ use log::info;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
+    iter,
     net::SocketAddr,
     result,
     sync::Arc,
@@ -303,7 +304,11 @@ impl Shard {
         };
         let mut resp = FROM_WRITE_POOL.take();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
-            ToWrite::Heartbeat | ToWrite::Clear => unreachable!(),
+            ToWrite::Heartbeat => unreachable!(),
+            ToWrite::Clear => {
+                store.clear(&write_addr);
+                (id, FromWrite::Unpublished)
+            }
             ToWrite::Publish(path) => (id, publish(store, path, false, None)),
             ToWrite::PublishDefault(path) => (id, publish(store, path, true, None)),
             ToWrite::PublishWithFlags(path, flags) => {
@@ -568,7 +573,7 @@ impl Store {
         }
     }
 
-    pub(crate) async fn handle_batch_write_no_clear(
+    pub(crate) async fn handle_batch_write(
         &mut self,
         mut con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
@@ -586,7 +591,11 @@ impl Store {
                         break;
                     }
                     Some(ToWrite::Heartbeat) => continue,
-                    Some(ToWrite::Clear) => unreachable!("call process_clear instead"),
+                    Some(ToWrite::Clear) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::Clear));
+                        }
+                    }
                     Some(ToWrite::Publish(path)) => {
                         let s = self.shard(&path);
                         by_shard[s].push((n, ToWrite::Publish(path)));
@@ -606,7 +615,10 @@ impl Store {
                     }
                     Some(ToWrite::PublishDefaultWithFlags(path, flags)) => {
                         for b in by_shard.iter_mut() {
-                            b.push((n, ToWrite::PublishDefaultWithFlags(path.clone(), flags)));
+                            b.push((
+                                n,
+                                ToWrite::PublishDefaultWithFlags(path.clone(), flags),
+                            ));
                         }
                     }
                 }
@@ -661,13 +673,13 @@ impl Store {
         .flat_map(|s| s.unwrap().into_iter().map(ToWrite::Unpublish))
         .collect::<Vec<_>>();
         published_paths.shuffle(&mut thread_rng());
-        self.handle_batch_write_no_clear(
-            None,
-            uifo,
-            write_addr,
-            published_paths.into_iter(),
-        )
-        .await?;
+        let iter = published_paths.into_iter();
+        // clear the vast majority of published paths using resources fairly
+        self.handle_batch_write(None, uifo.clone(), write_addr, iter).await?;
+        // clear out anything left over that was sent to all shards,
+        // e.g. default publishers.
+        self.handle_batch_write(None, uifo, write_addr, iter::once(ToWrite::Clear))
+            .await?;
         Ok(())
     }
 }

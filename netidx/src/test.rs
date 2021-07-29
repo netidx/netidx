@@ -10,8 +10,8 @@ mod resolver {
         resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
         resolver_server::Server,
     };
-    use std::{iter, net::SocketAddr};
-    use tokio::runtime::Runtime;
+    use std::{iter, net::SocketAddr, time::Duration};
+    use tokio::{runtime::Runtime, time};
 
     fn p(p: &'static str) -> Path {
         Path::from(p)
@@ -47,6 +47,36 @@ mod resolver {
             let mut l = r.list(p("/app")).await.unwrap();
             l.sort();
             assert_eq!(&**l, &[p("/app/v0"), p("/app/v1")]);
+            drop(server)
+        });
+    }
+
+    #[test]
+    fn publish_default() {
+        Runtime::new().unwrap().block_on(async {
+            let mut cfg =
+                config::Config::load("../cfg/simple.json").expect("load simple config");
+            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
+                .await
+                .expect("start server");
+            cfg.addrs[0] = *server.local_addr();
+            let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+            let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
+            let r = ResolverRead::new(cfg, Auth::Anonymous);
+            w.publish_default(iter::once(p("/default"))).await.unwrap();
+            let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
+            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
+                assert_eq!(r.addrs.len(), 1);
+                assert_eq!(r.addrs[0].0, paddr);
+            }
+            let l = r.list(p("/")).await.unwrap();
+            assert_eq!(&**l, &[p("/default")]);
+            w.clear().await.unwrap();
+            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
+                assert_eq!(r.addrs.len(), 0);
+            }
+            let l = r.list(p("/")).await.unwrap();
+            assert_eq!(&**l, &[]);
             drop(server)
         });
     }
@@ -228,6 +258,7 @@ mod resolver {
         let w0 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[0]);
         let w1 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[1]);
         w0.publish(paths.iter().cloned()).await.unwrap();
+        time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
@@ -235,6 +266,7 @@ mod resolver {
         check_list(&r_root).await;
         check_resolve(&ctx, &r_root, &paths, &[waddrs[0]][..]).await;
         w1.publish(paths.iter().cloned()).await.unwrap();
+        time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
