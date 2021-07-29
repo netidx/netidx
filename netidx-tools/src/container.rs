@@ -609,6 +609,9 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
+        if !self.cfg.sparse {
+            self.publish_requests.advertise(path.clone())?;
+        }
         let val = self.ctx.user.publisher.publish_with_flags(
             PublishFlags::DESTROY_ON_IDLE,
             path.clone(),
