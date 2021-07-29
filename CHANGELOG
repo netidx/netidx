@@ -1,3 +1,17 @@
+* 0.8.1 netidx, netidx-tools:
+  - fix a bug in the resolver server which would cause it to hang on
+    to default publishers until the process is restarted even if the
+    publisher itself timed out or explicitly sent clear. This bug was
+    caused by the sharding implementation, and would effect the
+    default configuration. Only the resolver server needs to be
+    upgraded to fix this bug, it is backwards compatible with
+    everything 0.8.0 was compatible with. Publishers and subscribers
+    can keep using 0.8.0, nothing changes for them. Parallel
+    programming is hard even in rust, sorry :-(
+
+  - added a test to check default publisher functionality, including
+    that it goes away!
+
 * 0.8.0 netidx, protocols, netproto, tools, browser:
   - The command line publisher can now accept writes, simply say
     WRITE|PATH to enable writes for PATH. Written values will be sent

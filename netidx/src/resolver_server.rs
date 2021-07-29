@@ -173,7 +173,7 @@ async fn client_loop_write(
                         c.flush().await?;
                         batch = Pooled::orphan(rest);
                     }
-                    if let Err(e) = store.handle_batch_write_no_clear(
+                    if let Err(e) = store.handle_batch_write(
                         Some(c),
                         uifo.clone(),
                         write_addr,

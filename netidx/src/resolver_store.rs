@@ -372,6 +372,12 @@ impl Store {
         }
     }
 
+    pub(crate) fn clear(&mut self, addr: &SocketAddr) {
+        for path in self.published_for_addr(addr).drain() {
+            self.unpublish(path, *addr);
+        }
+    }
+
     fn get_flags(&self, path: &str) -> u16 {
         self.by_path_flags.get(path).copied().unwrap_or(0)
     }
