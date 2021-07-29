@@ -642,12 +642,6 @@ impl PublisherInner {
             let _: Result<_, _> = self.trigger_publish.unbounded_send(None);
         }
     }
-
-    async fn shutdown(&mut self) {
-        if self.cleanup() {
-            let _ = self.resolver.clear().await;
-        }
-    }
 }
 
 impl Drop for PublisherInner {
@@ -783,17 +777,13 @@ impl Publisher {
     /// publisher but will continue to run async jobs on the same
     /// Runtime, then there is no need to call this function, you can
     /// just Drop all references to the Publisher.
-    ///
-    /// This function will return an error if other references to the
-    /// publisher exist.
-    pub async fn shutdown(self) -> Result<()> {
-        match Arc::try_unwrap(self.0) {
-            Err(_) => bail!("publisher is not unique"),
-            Ok(mtx) => {
-                let mut inner = Mutex::into_inner(mtx);
-                Ok(inner.shutdown().await)
-            }
-        }
+    pub async fn shutdown(self) {
+        let resolver = {
+            let mut inner = self.0.lock();
+            inner.cleanup();
+            inner.resolver.clone()
+        };
+        let _: Result<_> = resolver.clear().await;
     }
 
     /// get the `SocketAddr` that publisher is bound to

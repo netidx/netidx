@@ -19,6 +19,7 @@ use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
     task,
+    signal,
 };
 
 macro_rules! tryc {
@@ -162,7 +163,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
         };
         warn!("read loop exited {:?}, running until killed", res);
         // run until we are killed even if stdin closes or ends
-        future::pending::<()>().await;
-        drop(publisher);
+        signal::ctrl_c().await.expect("failed to listen for ctrl-c");
+        publisher.shutdown().await;
     });
 }

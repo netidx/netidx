@@ -867,9 +867,6 @@ mod publish {
                 cfg,
             )
             .await;
-            if let Err(e) = publisher.shutdown().await {
-                warn!("session {} publisher failed to shutdown {}", session_id, e);
-            }
             match res {
                 Ok(()) => {
                     info!("session {} existed", session_id)

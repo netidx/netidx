@@ -35,7 +35,7 @@ use std::{
 use structopt::StructOpt;
 use tokio::{
     runtime::Runtime,
-    task,
+    signal, task,
     time::{self, Instant},
 };
 
@@ -371,7 +371,7 @@ enum Compiled {
 
 struct Container {
     cfg: ContainerConfig,
-    _db: sled::Db,
+    db: sled::Db,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
@@ -474,14 +474,14 @@ fn check_path(base_path: &Path, path: Path) -> Result<Path> {
 
 impl Container {
     async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
-        let _db = sled::Config::default()
+        let db = sled::Config::default()
             .use_compression(ccfg.compress)
             .compression_factor(ccfg.compress_level.unwrap_or(5) as i32)
             .cache_capacity(ccfg.cache_size.unwrap_or(16 * 1024 * 1024))
             .path(&ccfg.db)
             .open()?;
-        let formulas = _db.open_tree("formulas")?;
-        let data = _db.open_tree("data")?;
+        let formulas = db.open_tree("formulas")?;
+        let data = db.open_tree("data")?;
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         publisher.events(publish_events_tx);
@@ -490,7 +490,7 @@ impl Container {
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let ctx = ExecCtx::new(Lc::new(
+        let mut ctx = ExecCtx::new(Lc::new(
             formulas,
             data,
             subscriber,
@@ -498,11 +498,12 @@ impl Container {
             sub_updates_tx,
             bs_tx,
         ));
+        Ref::register(&mut ctx);
         let (_delete_path_rpc, delete_path_rx) =
             start_delete_rpc(&ctx.user.publisher, &ccfg.base_path)?;
         Ok(Container {
             cfg: ccfg,
-            _db,
+            db,
             ctx,
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
             sub_updates,
@@ -975,6 +976,7 @@ impl Container {
 
     async fn run(mut self) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
+        let mut ctrl_c = Box::pin(signal::ctrl_c().fuse());
         self.init().await?;
         loop {
             let mut batch = self.ctx.user.publisher.start_batch();
@@ -1003,11 +1005,17 @@ impl Container {
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
                 }
+                r = ctrl_c => match r {
+                    Err(e) => panic!("failed to wait for ctrl_c: {}", e),
+                    Ok(()) => break
+                },
                 complete => break
             }
             let timeout = self.cfg.timeout.map(Duration::from_secs);
             batch.commit(timeout).await;
         }
+        self.ctx.user.publisher.shutdown().await;
+        self.db.flush_async().await?;
         Ok(())
     }
 }
