@@ -31,7 +31,7 @@ mod resolver {
             let r = ResolverRead::new(cfg, Auth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             let flags = Some(PublishFlags::USE_EXISTING.bits());
-            w.publish_with_flags(paths.clone().into_iter().map(|p| (p, flags)))
+            w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags)))
                 .await
                 .unwrap();
             for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
@@ -40,13 +40,13 @@ mod resolver {
             }
             let mut l = r.list(p("/")).await.unwrap();
             l.sort();
-            assert_eq!(&**l, &*vec![p("/app"), p("/foo")]);
+            assert_eq!(&**l, &[p("/app"), p("/foo")]);
             let mut l = r.list(p("/foo")).await.unwrap();
             l.sort();
-            assert_eq!(&**l, &*vec![p("/foo/bar"), p("/foo/baz")]);
+            assert_eq!(&**l, &[p("/foo/bar"), p("/foo/baz")]);
             let mut l = r.list(p("/app")).await.unwrap();
             l.sort();
-            assert_eq!(&**l, &*vec![p("/app/v0"), p("/app/v1")]);
+            assert_eq!(&**l, &[p("/app/v0"), p("/app/v1")]);
             drop(server)
         });
     }
@@ -332,6 +332,7 @@ mod publisher {
         tx.send(()).unwrap();
         let (tx, mut rx) = mpsc::channel(10);
         let (tx_ev, mut rx_ev) = mpsc::unbounded();
+        publisher.events(tx_ev);
         publisher.writes(vp.id(), tx);
         loop {
             select_biased! {
@@ -349,7 +350,6 @@ mod publisher {
                         let f = PublishFlags::DESTROY_ON_IDLE;
                         let p =
                             publisher.publish_with_flags(f, p, Value::True).unwrap();
-                        publisher.events(p.id(), false, tx_ev.clone());
                         dfp = Some(p);
                         let _ = reply.send(());
                     } else if &*p == "/app/q/adv" {
