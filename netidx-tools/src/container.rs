@@ -454,6 +454,13 @@ fn store<V: Pack + 'static>(tree: &sled::Tree, path: &Path, value: &V) -> Result
     Ok(())
 }
 
+fn delete<P: Pack + 'static>(tree: &sled::Tree, path: &P) -> Result<()> {
+    let mut kbuf = PKBUF.take();
+    path.encode(&mut *kbuf)?;
+    let _ = tree.remove(&*kbuf)?;
+    Ok(())
+}
+
 fn to_chars(value: Value) -> Chars {
     value.cast_to::<Chars>().ok().unwrap_or_else(|| Chars::from("null"))
 }
@@ -711,6 +718,7 @@ impl Container {
         self.update_refs(batch, refs, path, dv);
         let cur =
             self.ctx.user.publisher.current(&fifo.on_write.id()).unwrap_or(Value::Null);
+        delete(&self.ctx.user.data, path)?;
         Ok(store(&self.ctx.user.formulas, path, &(value, to_chars(cur)))?)
     }
 
@@ -736,6 +744,7 @@ impl Container {
         self.update_refs(batch, refs, &fifo.on_write_path, Value::String(value.clone()));
         let path = &fifo.data_path;
         let cur = self.ctx.user.publisher.current(&fifo.src.id()).unwrap_or(Value::Null);
+        delete(&self.ctx.user.data, path)?;
         Ok(store(&self.ctx.user.formulas, path, &(to_chars(cur), value))?)
     }
 
@@ -807,10 +816,6 @@ impl Container {
                     if let Some(path) = Path::dirname(&path) {
                         // CR estokes: log errors
                         let path = Path::from(Arc::from(path));
-                        let mut kbuf = PKBUF.take();
-                        if let Ok(()) = path.encode(&mut *kbuf) {
-                            let _: Result<_, _> = self.ctx.user.data.remove(&*kbuf);
-                        }
                         let _: Result<()> = self.publish_formula(
                             path,
                             batch,
@@ -833,15 +838,15 @@ impl Container {
     fn process_publish_event(&mut self, e: PEvent) {
         match e {
             PEvent::Subscribe(_, _) | PEvent::Unsubscribe(_, _) => (),
-            PEvent::Destroyed(id) => { self.ctx.user.published.remove(&id); }
+            PEvent::Destroyed(id) => {
+                self.ctx.user.published.remove(&id);
+            }
         }
     }
 
     fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
-        let mut kbuf = PKBUF.take();
-        path.encode(&mut *kbuf)?;
         if bn == Some(".formula") || bn == Some(".on-write") {
             bail!("won't delete .formula/.on-write, delete the base instead")
         } else if let Some(id) = self.ctx.user.publisher.id(&path) {
@@ -850,7 +855,7 @@ impl Container {
             match self.ctx.user.published.remove(&id) {
                 None => (),
                 Some(Published::Data(_)) => {
-                    let _ = self.ctx.user.data.remove(&*kbuf);
+                    delete(&self.ctx.user.data, &path)?;
                 }
                 Some(Published::Formula(fifo)) => {
                     let fpath = path.append(".formula");
@@ -867,18 +872,16 @@ impl Container {
                     if let Some(id) = self.ctx.user.publisher.id(&opath) {
                         self.ctx.user.published.remove(&id);
                     }
-                    let _ = self.ctx.user.data.remove(&*kbuf);
-                    self.ctx.user.formulas.remove(&*kbuf)?;
                     self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
                     self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
+                    delete(&self.ctx.user.data, &path)?;
                 }
             }
             self.update_refs(batch, &mut REFS.take(), &path, ref_err);
             Ok(())
         } else {
             self.publish_requests.remove_advertisement(&path);
-            let _ = self.ctx.user.data.remove(&*kbuf);
-            Ok(())
+            Ok(delete(&self.ctx.user.data, &path)?)
         }
     }
 
