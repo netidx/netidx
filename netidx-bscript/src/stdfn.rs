@@ -1338,19 +1338,25 @@ pub(crate) struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
     pending: FxHashSet<RpcCallId>,
-    invalid: bool,
+    current: Option<Value>,
 }
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
             let mut t = RpcCall {
-                args: CachedVals::new(from),
-                invalid: true,
+                args: CachedVals::new(match from {
+                    [_, rest @ ..] => rest,
+                    [] => &[],
+                }),
+                current: None,
                 top_id,
                 pending: HashSet::with_hasher(FxBuildHasher::default()),
             };
-            t.maybe_call(ctx);
+            match from {
+                [trigger, ..] if trigger.current().is_some() => t.maybe_call(ctx),
+                _ => (),
+            }
             Box::new(t)
         });
         ctx.functions.insert("call".into(), f);
@@ -1359,12 +1365,7 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
 
 impl<C: Ctx, E> Apply<C, E> for RpcCall {
     fn current(&self) -> Option<Value> {
-        if self.invalid {
-            let m = "call(rpc: string, kwargs): expected at least 1 argument, and an even number of kwargs";
-            Some(Value::Error(Chars::from(m)))
-        } else {
-            None
-        }
+        self.current.clone()
     }
 
     fn update(
@@ -1373,43 +1374,49 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        if self.args.update(ctx, from, event) {
-            self.maybe_call(ctx);
-            Apply::<C, E>::current(self)
-        } else {
-            match event {
-                Event::Netidx(_, _) | Event::Variable(_, _) | Event::User(_) => None,
-                Event::Rpc(id, v) => {
-                    if self.pending.remove(&id) {
-                        Some(v.clone())
-                    } else {
-                        None
+        match event {
+            Event::Rpc(id, v) if self.pending.remove(&id) => Some(v.clone()),
+            event => match from {
+                [trigger, args @ ..] => {
+                    self.args.update(ctx, args, event);
+                    if trigger.update(ctx, event).is_some() {
+                        self.maybe_call(ctx);
                     }
+                    Apply::<C, E>::current(self)
                 }
-            }
+                [] => {
+                    self.invalid();
+                    Apply::<C, E>::current(self)
+                }
+            },
         }
     }
 }
 
 impl RpcCall {
+    fn invalid(&mut self) {
+        let m = "call(trigger, rpc, kwargs): expected at least 2 arguments, and an even number of kwargs";
+        self.current = Some(Value::Error(Chars::from(m)))
+    }
+
     fn get_args(&mut self) -> Option<(Path, Vec<(Chars, Value)>)> {
-        self.invalid = false;
+        self.current = None;
         let len = self.args.0.len();
         if len == 0 || (len > 1 && len.is_power_of_two()) {
-            self.invalid = true;
+            self.invalid();
             None
         } else if self.args.0.iter().any(|v| v.is_none()) {
             None
         } else {
             match &self.args.0[..] {
                 [] => {
-                    self.invalid = true;
+                    self.invalid();
                     None
                 }
                 [path, args @ ..] => {
                     match path.as_ref().unwrap().clone().cast_to::<Chars>() {
                         Err(_) => {
-                            self.invalid = true;
+                            self.invalid();
                             None
                         }
                         Ok(name) => {
@@ -1421,12 +1428,12 @@ impl RpcCall {
                                     Some(Some(name)) => {
                                         match name.clone().cast_to::<Chars>() {
                                             Err(_) => {
-                                                self.invalid = true;
+                                                self.invalid();
                                                 return None;
                                             }
                                             Ok(name) => match iter.next() {
                                                 None | Some(None) => {
-                                                    self.invalid = true;
+                                                    self.invalid();
                                                     return None;
                                                 }
                                                 Some(Some(val)) => {
