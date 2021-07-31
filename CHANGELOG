@@ -1,4 +1,4 @@
-* 0.9.0 netidx, netidx-tools, 0.9.0 netidx-tools:
+* 0.9.0 netidx, netidx-tools, netidx-browser:
 
   - Publisher API reworked unfortunatly these are BREAKING
     changes. The rework is meant to solve three problems with the
@@ -50,6 +50,11 @@
     store. Kinda like a distributed spreadsheet. Kinda like a nosql
     database server. Kinda just it's own thing. Using sled for
     persistant storage.
+
+  - the bscript call function now takes a trigger argument. The rpc
+    will only be called when the trigger argument updates, or once
+    initially if the trigger has a current value. This allows much
+    easier use of the call function in event handlers.
 
 * 0.8.1 netidx, netidx-tools:
   - fix a bug in the resolver server which would cause it to hang on

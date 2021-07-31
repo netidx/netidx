@@ -26,7 +26,7 @@ use netidx_protocols::rpc::{self, server::Proc};
 use parking_lot::Mutex;
 use sled;
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
     hash::Hash,
     mem,
     sync::Arc,
@@ -38,6 +38,8 @@ use tokio::{
     signal, task,
     time::{self, Instant},
 };
+
+mod rpcs;
 
 lazy_static! {
     static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 2048);
@@ -83,6 +85,15 @@ struct PublishedVal {
 enum Published {
     Formula(Arc<Fifo>),
     Data(Arc<PublishedVal>),
+}
+
+impl Published {
+    fn val(&self) -> &Val {
+        match self {
+            Published::Formula(fi) => &fi.data,
+            Published::Data(p) => &p.val,
+        }
+    }
 }
 
 struct UserEv(Path, Value);
@@ -355,15 +366,6 @@ pub(super) struct ContainerConfig {
     sparse: bool,
 }
 
-impl Published {
-    fn val(&self) -> &Val {
-        match self {
-            Published::Formula(fi) => &fi.data,
-            Published::Data(p) => &p.val,
-        }
-    }
-}
-
 enum Compiled {
     Formula { node: Node<Lc, UserEv>, data_id: Id },
     OnWrite(Node<Lc, UserEv>),
@@ -372,6 +374,8 @@ enum Compiled {
 struct Container {
     cfg: ContainerConfig,
     db: sled::Db,
+    locked_db: sled::Tree,
+    locked: BTreeSet<Path>,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
@@ -386,51 +390,6 @@ struct Container {
         Path,
         (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
     >,
-}
-
-fn start_delete_rpc(
-    publisher: &Publisher,
-    base_path: &Path,
-) -> Result<(Proc, mpsc::Receiver<(Path, oneshot::Sender<Value>)>)> {
-    fn e(s: &'static str) -> Value {
-        Value::Error(Chars::from(s))
-    }
-    let (tx, rx) = mpsc::channel(10);
-    let proc = Proc::new(
-        publisher,
-        base_path.append(".api/delete"),
-        Value::from("delete a path from the database"),
-        vec![(Arc::from("path"), (Value::Null, Value::from("the path(s) to delete")))]
-            .into_iter()
-            .collect(),
-        Arc::new(move |_addr, mut args| {
-            let mut tx = tx.clone();
-            Box::pin(async move {
-                match args.remove("path") {
-                    None => e("invalid argument, expected path"),
-                    Some(mut paths) => {
-                        for path in paths.drain(..) {
-                            let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
-                                _ => return e("invalid argument type, expected string"),
-                            };
-                            let (reply_tx, reply_rx) = oneshot::channel();
-                            let _: Result<_, _> = tx.send((path, reply_tx)).await;
-                            match reply_rx.await {
-                                Err(_) => return e("internal error"),
-                                Ok(v) => match v {
-                                    Value::Ok => (),
-                                    v => return v,
-                                },
-                            }
-                        }
-                        Value::Ok
-                    }
-                }
-            })
-        }),
-    )?;
-    Ok((proc, rx))
 }
 
 fn lookup<V: Pack + 'static, P: Pack + 'static>(
@@ -482,6 +441,7 @@ impl Container {
             .open()?;
         let formulas = db.open_tree("formulas")?;
         let data = db.open_tree("data")?;
+        let locked_db = db.open_tree("locked")?;
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         publisher.events(publish_events_tx);
@@ -504,6 +464,8 @@ impl Container {
         Ok(Container {
             cfg: ccfg,
             db,
+            locked_db,
+            locked: BTreeSet::new(),
             ctx,
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
             sub_updates,
@@ -554,11 +516,10 @@ impl Container {
                         .user
                         .publisher
                         .publish(src_path.clone(), Value::from(formula_txt.clone()))?;
-                    let on_write = self
-                        .ctx
-                        .user
-                        .publisher
-                        .publish(on_write_path.clone(), Value::from(on_write_txt.clone()))?;
+                    let on_write = self.ctx.user.publisher.publish(
+                        on_write_path.clone(),
+                        Value::from(on_write_txt.clone()),
+                    )?;
                     (data, src, on_write)
                 }
                 Some(Published::Formula(fifo)) => {
@@ -570,7 +531,7 @@ impl Container {
                     };
                     (fifo.data, fifo.src, fifo.on_write)
                 }
-            }
+            },
         };
         let data_id = data.id();
         let src_id = src.id();
@@ -627,6 +588,11 @@ impl Container {
     }
 
     async fn init(&mut self) -> Result<()> {
+        for res in self.locked_db.iter() {
+            let (path, _) = res?;
+            let path = check_path(&self.cfg.base_path, Path::decode(&mut &*path)?)?;
+            self.locked.insert(path);
+        }
         let mut batch = self.ctx.user.publisher.start_batch();
         if !self.cfg.sparse {
             for res in self.ctx.user.data.iter() {
@@ -837,36 +803,32 @@ impl Container {
         }
     }
 
-    fn process_publish_request(
-        &mut self,
-        batch: &mut UpdateBatch,
-        path: Path,
-        reply: oneshot::Sender<()>,
-    ) {
+    fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
         match check_path(&self.cfg.base_path, path) {
             Err(_) => {
                 // this should not be possible, but in case of a bug, just do nothing
                 let _: Result<_, _> = reply.send(());
             }
             Ok(path) => {
-                let name = Path::basename(&path);
-                if name == Some(".formula") || name == Some(".on-write") {
-                    if let Some(path) = Path::dirname(&path) {
-                        // CR estokes: log errors
-                        let path = Path::from(Arc::from(path));
-                        let _: Result<()> = self.publish_formula(
-                            path,
-                            batch,
-                            Chars::from("null"),
-                            Chars::from("null"),
-                        );
+                let locked = self
+                    .locked
+                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                        Bound::Unbounded,
+                        Bound::Included(path.as_ref()),
+                    ))
+                    .next_back()
+                    .map(|p| Path::is_parent(p, &path))
+                    .unwrap_or(false);
+                if !locked {
+                    let name = Path::basename(&path);
+                    if name != Some(".formula") && name != Some(".on-write") {
+                        let val = match lookup::<Value, Path>(&self.ctx.user.data, &path)
+                        {
+                            Err(_) | Ok(None) => Value::Null,
+                            Ok(Some(v)) => v,
+                        };
+                        let _: Result<()> = self.publish_data(path, val);
                     }
-                } else {
-                    let val = match lookup::<Value, Path>(&self.ctx.user.data, &path) {
-                        Err(_) | Ok(None) => Value::Null,
-                        Ok(Some(v)) => v,
-                    };
-                    let _: Result<()> = self.publish_data(path, val);
                 }
                 let _: Result<_, _> = reply.send(());
             }
@@ -1022,7 +984,7 @@ impl Container {
                     self.process_publish_event(r);
                 }
                 r = self.publish_requests.select_next_some() => {
-                    self.process_publish_request(&mut batch, r.0, r.1);
+                    self.process_publish_request(r.0, r.1);
                 }
                 r = self.sub_updates.select_next_some() => {
                     self.process_subscriptions(&mut batch, r);
