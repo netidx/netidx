@@ -566,7 +566,41 @@ impl Container {
         Ok(())
     }
 
-    fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
+    fn publish_data(
+        &mut self,
+        batch: &mut UpdateBatch,
+        path: Path,
+        value: Value,
+    ) -> Result<()> {
+        match self.ctx.user.publisher.id(&path) {
+            None => (),
+            Some(id) => match self.ctx.user.published.get(&id) {
+                None => (), // it's advertised
+                Some(Published::Data(pb)) => {
+                    pb.val.update(batch, value);
+                    return Ok(());
+                }
+                Some(Published::Formula(fifo)) => {
+                    let fifo = fifo.clone();
+                    let src = fifo.src.id();
+                    let ow_src = fifo.on_write.id();
+                    self.ctx.user.published.remove(&id);
+                    self.ctx.user.published.remove(&src);
+                    self.ctx.user.published.remove(&ow_src);
+                    let fifo = match Arc::try_unwrap(fifo) {
+                        Err(_) => unreachable!(),
+                        Ok(fifo) => fifo,
+                    };
+                    fifo.data.update(batch, value);
+                    let pb = PublishedVal { path: fifo.data_path, val: fifo.data };
+                    if !self.cfg.sparse {
+                        self.publish_requests.advertise(path.clone())?;
+                    }
+                    self.ctx.user.published.insert(id, Published::Data(Arc::new(pb)));
+                    return Ok(());
+                }
+            },
+        }
         if !self.cfg.sparse {
             self.publish_requests.advertise(path.clone())?;
         }
@@ -800,7 +834,12 @@ impl Container {
         }
     }
 
-    fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
+    fn process_publish_request(
+        &mut self,
+        batch: &mut UpdateBatch,
+        path: Path,
+        reply: oneshot::Sender<()>,
+    ) {
         match check_path(&self.cfg.base_path, path) {
             Err(_) => {
                 // this should not be possible, but in case of a bug, just do nothing
@@ -821,10 +860,14 @@ impl Container {
                     if name != Some(".formula") && name != Some(".on-write") {
                         let val = match lookup::<Value, Path>(&self.ctx.user.data, &path)
                         {
-                            Err(_) | Ok(None) => Value::Null,
                             Ok(Some(v)) => v,
+                            Err(_) | Ok(None) => {
+                                let _: Result<_, _> =
+                                    store(&self.ctx.user.data, &path, &Value::Null);
+                                Value::Null
+                            }
                         };
-                        let _: Result<()> = self.publish_data(path, val);
+                        let _: Result<()> = self.publish_data(batch, path, val);
                     }
                 }
                 let _: Result<_, _> = reply.send(());
@@ -1006,6 +1049,29 @@ impl Container {
         Ok(())
     }
 
+    fn set_data(
+        &mut self,
+        batch: &mut UpdateBatch,
+        path: Path,
+        value: Value,
+    ) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        delete(&self.ctx.user.formulas, &path)?;
+        store(&self.ctx.user.data, &path, &value)?;
+        match self.ctx.user.publisher.id(&path) {
+            Some(id) => match self.ctx.user.published.get(&id) {
+                None => (),
+                Some(_) => self.publish_data(batch, path, value)?,
+            },
+            None => {
+                if !self.cfg.sparse {
+                    self.publish_requests.advertise(path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn process_rpc_request(&mut self, batch: &mut UpdateBatch, req: RpcRequest) {
         fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
             let _: Result<_, _> = tx.send(match res {
@@ -1026,7 +1092,9 @@ impl Container {
             RpcRequestKind::UnlockSubtree(path) => {
                 reply(req.reply, self.unlock_subtree(path))
             }
-            RpcRequestKind::SetData { .. } => (),
+            RpcRequestKind::SetData { path, value } => {
+                reply(req.reply, self.set_data(batch, path, value))
+            }
             RpcRequestKind::SetFormula { .. } => (),
             RpcRequestKind::CreateSheet { .. } => (),
             RpcRequestKind::CreateTable { .. } => (),
@@ -1044,7 +1112,7 @@ impl Container {
                     self.process_publish_event(r);
                 }
                 r = self.publish_requests.select_next_some() => {
-                    self.process_publish_request(r.0, r.1);
+                    self.process_publish_request(&mut batch, r.0, r.1);
                 }
                 r = self.sub_updates.select_next_some() => {
                     self.process_subscriptions(&mut batch, r);
