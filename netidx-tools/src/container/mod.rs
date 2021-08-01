@@ -526,6 +526,8 @@ impl Container {
                         Ok(f) => f,
                         Err(_) => unreachable!(),
                     };
+                    fifo.src.update(batch, Value::from(formula_txt.clone()));
+                    fifo.on_write.update(batch, Value::from(on_write_txt.clone()));
                     (fifo.data, fifo.src, fifo.on_write)
                 }
             },
@@ -539,9 +541,9 @@ impl Container {
         let fifo = Arc::new(Fifo {
             data_path: path.clone(),
             data,
-            src_path,
+            src_path: src_path.clone(),
             src,
-            on_write_path,
+            on_write_path: on_write_path.clone(),
             on_write,
             expr_id: Mutex::new(ExprId::new()),
             on_write_expr_id: Mutex::new(ExprId::new()),
@@ -556,13 +558,20 @@ impl Container {
         let on_write_expr_id = on_write_expr.id;
         let formula_node = Node::compile(&mut self.ctx, expr);
         let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
-        if let Some(value) = formula_node.current() {
-            fifo.data.update(batch, value);
-        }
+        let value = formula_node.current().unwrap_or(Value::Null);
         self.compiled.insert(expr_id, Compiled::Formula { node: formula_node, data_id });
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
         *fifo.expr_id.lock() = expr_id;
         *fifo.on_write_expr_id.lock() = on_write_expr_id;
+        fifo.data.update(batch, value.clone());
+        self.update_refs(batch, &mut REFS.take(), &path, value);
+        self.update_refs(batch, &mut REFS.take(), &src_path, Value::from(formula_txt));
+        self.update_refs(
+            batch,
+            &mut REFS.take(),
+            &on_write_path,
+            Value::from(on_write_txt),
+        );
         Ok(())
     }
 
@@ -577,7 +586,8 @@ impl Container {
             Some(id) => match self.ctx.user.published.get(&id) {
                 None => (), // it's advertised
                 Some(Published::Data(pb)) => {
-                    pb.val.update(batch, value);
+                    pb.val.update(batch, value.clone());
+                    self.update_refs(batch, &mut REFS.take(), &path, value);
                     return Ok(());
                 }
                 Some(Published::Formula(fifo)) => {
@@ -591,12 +601,13 @@ impl Container {
                         Err(_) => unreachable!(),
                         Ok(fifo) => fifo,
                     };
-                    fifo.data.update(batch, value);
+                    fifo.data.update(batch, value.clone());
                     let pb = PublishedVal { path: fifo.data_path, val: fifo.data };
                     if !self.cfg.sparse {
                         self.publish_requests.advertise(path.clone())?;
                     }
                     self.ctx.user.published.insert(id, Published::Data(Arc::new(pb)));
+                    self.update_refs(batch, &mut REFS.take(), &path, value);
                     return Ok(());
                 }
             },
@@ -607,14 +618,15 @@ impl Container {
         let val = self.ctx.user.publisher.publish_with_flags(
             PublishFlags::DESTROY_ON_IDLE,
             path.clone(),
-            value,
+            value.clone(),
         )?;
         let id = val.id();
         self.ctx.user.publisher.writes(val.id(), self.write_updates_tx.clone());
-        self.ctx
-            .user
-            .published
-            .insert(id, Published::Data(Arc::new(PublishedVal { path, val })));
+        self.ctx.user.published.insert(
+            id,
+            Published::Data(Arc::new(PublishedVal { path: path.clone(), val })),
+        );
+        self.update_refs(batch, &mut REFS.take(), &path, value);
         Ok(())
     }
 
@@ -720,6 +732,18 @@ impl Container {
         self.process_var_updates(batch);
     }
 
+    fn remove_compiled_formula(&mut self, fifo: &Fifo) {
+        let id = fifo.expr_id.lock();
+        self.ctx.user.unref(*id);
+        self.compiled.remove(&id);
+    }
+
+    fn remove_compiled_on_write(&mut self, fifo: &Fifo) {
+        let id = fifo.on_write_expr_id.lock();
+        self.ctx.user.unref(*id);
+        self.compiled.remove(&id);
+    }
+
     fn change_formula(
         &mut self,
         batch: &mut UpdateBatch,
@@ -728,11 +752,10 @@ impl Container {
         value: Chars,
     ) -> Result<()> {
         fifo.src.update(batch, Value::String(value.clone()));
-        let mut expr_id = fifo.expr_id.lock();
-        self.compiled.remove(&expr_id);
-        self.ctx.user.unref(*expr_id);
+        self.remove_compiled_formula(&fifo);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
+                let mut expr_id = fifo.expr_id.lock();
                 *expr_id = expr.id;
                 let node = Node::compile(&mut self.ctx, expr);
                 let dv = node.current().unwrap_or(Value::Null);
@@ -765,11 +788,10 @@ impl Container {
         value: Chars,
     ) -> Result<()> {
         fifo.on_write.update(batch, Value::String(value.clone()));
-        let mut expr_id = fifo.on_write_expr_id.lock();
-        self.compiled.remove(&expr_id);
-        self.ctx.user.unref(*expr_id);
+        self.remove_compiled_on_write(&fifo);
         match value.parse::<Expr>() {
             Ok(expr) => {
+                let mut expr_id = fifo.expr_id.lock();
                 *expr_id = expr.id;
                 let node = Node::compile(&mut self.ctx, expr);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
@@ -986,14 +1008,10 @@ impl Container {
                     delete(&self.ctx.user.data, &path)?;
                 }
                 Some(Published::Formula(fifo)) => {
+                    self.remove_compiled_formula(&fifo);
+                    self.remove_compiled_on_write(&fifo);
                     let fpath = path.append(".formula");
                     let opath = path.append(".on-write");
-                    let id = fifo.expr_id.lock();
-                    self.ctx.user.unref(*id);
-                    self.compiled.remove(&id);
-                    let id = fifo.on_write_expr_id.lock();
-                    self.ctx.user.unref(*id);
-                    self.compiled.remove(&id);
                     if let Some(id) = self.ctx.user.publisher.id(&fpath) {
                         self.ctx.user.published.remove(&id);
                     }
@@ -1060,10 +1078,11 @@ impl Container {
         store(&self.ctx.user.data, &path, &value)?;
         match self.ctx.user.publisher.id(&path) {
             Some(id) => match self.ctx.user.published.get(&id) {
-                None => (),
+                None => self.update_refs(batch, &mut REFS.take(), &path, value),
                 Some(_) => self.publish_data(batch, path, value)?,
             },
             None => {
+                self.update_refs(batch, &mut REFS.take(), &path, value);
                 if !self.cfg.sparse {
                     self.publish_requests.advertise(path)?;
                 }
