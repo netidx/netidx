@@ -22,7 +22,7 @@ use netidx_bscript::{
     expr::{Expr, ExprId},
     vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId},
 };
-use netidx_protocols::rpc::{self, server::Proc};
+use netidx_protocols::rpc;
 use parking_lot::Mutex;
 use sled;
 use std::{
@@ -366,32 +366,6 @@ pub(super) struct ContainerConfig {
     sparse: bool,
 }
 
-enum Compiled {
-    Formula { node: Node<Lc, UserEv>, data_id: Id },
-    OnWrite(Node<Lc, UserEv>),
-}
-
-struct Container {
-    cfg: ContainerConfig,
-    db: sled::Db,
-    locked_db: sled::Tree,
-    locked: BTreeSet<Path>,
-    ctx: ExecCtx<Lc, UserEv>,
-    compiled: FxHashMap<ExprId, Compiled>,
-    sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
-    write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-    write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
-    publish_events: mpsc::UnboundedReceiver<PEvent>,
-    publish_requests: DefaultHandle,
-    _delete_path_rpc: Proc,
-    delete_path_rx: mpsc::Receiver<(Path, oneshot::Sender<Value>)>,
-    bscript_event: mpsc::UnboundedReceiver<LcEvent>,
-    rpcs: FxHashMap<
-        Path,
-        (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
-    >,
-}
-
 fn lookup<V: Pack + 'static, P: Pack + 'static>(
     tree: &sled::Tree,
     path: &P,
@@ -431,6 +405,31 @@ fn check_path(base_path: &Path, path: Path) -> Result<Path> {
     Ok(path)
 }
 
+enum Compiled {
+    Formula { node: Node<Lc, UserEv>, data_id: Id },
+    OnWrite(Node<Lc, UserEv>),
+}
+
+struct Container {
+    cfg: ContainerConfig,
+    db: sled::Db,
+    locked_db: sled::Tree,
+    locked: BTreeSet<Path>,
+    ctx: ExecCtx<Lc, UserEv>,
+    compiled: FxHashMap<ExprId, Compiled>,
+    sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
+    write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    publish_events: mpsc::UnboundedReceiver<PEvent>,
+    publish_requests: DefaultHandle,
+    api: rpcs::RpcApi,
+    bscript_event: mpsc::UnboundedReceiver<LcEvent>,
+    rpcs: FxHashMap<
+        Path,
+        (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
+    >,
+}
+
 impl Container {
     async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
         let db = sled::Config::default()
@@ -450,6 +449,7 @@ impl Container {
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
+        let api = rpcs::RpcApi::new(&publisher, &ccfg.base_path)?;
         let mut ctx = ExecCtx::new(Lc::new(
             formulas,
             data,
@@ -459,8 +459,6 @@ impl Container {
             bs_tx,
         ));
         Ref::register(&mut ctx);
-        let (_delete_path_rpc, delete_path_rx) =
-            start_delete_rpc(&ctx.user.publisher, &ccfg.base_path)?;
         Ok(Container {
             cfg: ccfg,
             db,
@@ -473,8 +471,7 @@ impl Container {
             write_updates_rx,
             publish_events,
             publish_requests,
-            _delete_path_rpc,
-            delete_path_rx,
+            api,
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
         })
@@ -992,11 +989,8 @@ impl Container {
                 r = self.write_updates_rx.select_next_some() => {
                     self.process_writes(&mut batch, r);
                 }
-                r = self.delete_path_rx.select_next_some() => {
-                    let _: Result<_, _> = r.1.send(match self.delete_path(&mut batch, r.0) {
-                        Ok(()) => Value::Ok,
-                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
-                    });
+                _ = self.api.rx.select_next_some() => {
+                    ()
                 }
                 r = self.bscript_event.select_next_some() => {
                     self.process_bscript_event(&mut batch, r).await;

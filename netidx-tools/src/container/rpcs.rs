@@ -25,19 +25,59 @@ pub(super) struct RpcRequest {
     pub(super) reply: oneshot::Sender<Value>,
 }
 
+pub(super) struct RpcApi {
+    _delete_path_rpc: Proc,
+    _delete_subtree_rpc: Proc,
+    _lock_subtree_rpc: Proc,
+    _unlock_subtree_rpc: Proc,
+    _set_data_rpc: Proc,
+    _set_formula_rpc: Proc,
+    _create_sheet_rpc: Proc,
+    _create_table_rpc: Proc,
+    pub(super) rx: mpsc::Receiver<RpcRequest>,
+}
+
+impl RpcApi {
+    pub(super) fn new(publisher: &Publisher, base_path: &Path) -> Result<RpcApi> {
+        let (tx, rx) = mpsc::channel(10);
+        let _delete_path_rpc = start_delete_rpc(&publisher, &base_path, tx.clone())?;
+        let _delete_subtree_rpc =
+            start_delete_subtree_rpc(&publisher, &base_path, tx.clone())?;
+        let _lock_subtree_rpc =
+            start_lock_subtree_rpc(&publisher, &base_path, tx.clone())?;
+        let _unlock_subtree_rpc =
+            start_unlock_subtree_rpc(&publisher, &base_path, tx.clone())?;
+        let _set_data_rpc = start_set_data_rpc(&publisher, &base_path, tx.clone())?;
+        let _set_formula_rpc = start_set_formula_rpc(&publisher, &base_path, tx.clone())?;
+        let _create_sheet_rpc =
+            start_create_sheet_rpc(&publisher, &base_path, tx.clone())?;
+        let _create_table_rpc =
+            start_create_table_rpc(&publisher, &base_path, tx.clone())?;
+        Ok(RpcApi {
+            _delete_path_rpc,
+            _delete_subtree_rpc,
+            _lock_subtree_rpc,
+            _unlock_subtree_rpc,
+            _set_data_rpc,
+            _set_formula_rpc,
+            _create_sheet_rpc,
+            _create_table_rpc,
+            rx,
+        })
+    }
+}
+
 fn err(s: &'static str) -> Value {
     Value::Error(Chars::from(s))
 }
 
-pub(super) fn start_path_arg_rpc<
-    F: Fn(Path) -> RpcRequestKind + Send + Sync + 'static,
->(
+fn start_path_arg_rpc(
     publisher: &Publisher,
     base_path: &Path,
     name: &'static str,
     doc: &'static str,
     argdoc: &'static str,
-    f: F,
+    f: fn(Path) -> RpcRequestKind,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
     Ok(Proc::new(
@@ -79,7 +119,7 @@ pub(super) fn start_path_arg_rpc<
     )?)
 }
 
-fn start_delete_rpc(
+pub(super) fn start_delete_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -95,7 +135,7 @@ fn start_delete_rpc(
     )
 }
 
-fn start_delete_subtree_rpc(
+pub(super) fn start_delete_subtree_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -111,7 +151,7 @@ fn start_delete_subtree_rpc(
     )
 }
 
-fn start_lock_subtree_rpc(
+pub(super) fn start_lock_subtree_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -127,7 +167,7 @@ fn start_lock_subtree_rpc(
     )
 }
 
-fn start_unlock_subtree_rpc(
+pub(super) fn start_unlock_subtree_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -143,7 +183,7 @@ fn start_unlock_subtree_rpc(
     )
 }
 
-fn start_set_data_rpc(
+pub(super) fn start_set_data_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -170,7 +210,7 @@ fn start_set_data_rpc(
                         let mut value = args
                             .remove("value")
                             .unwrap_or_else(|| Pooled::orphan(vec![]));
-                        let value = value.drain(..);
+                        let mut value = value.drain(..);
                         for path in paths.drain(..) {
                             let path = match path {
                                 Value::String(path) => Path::from(Arc::from(&*path)),
@@ -199,7 +239,7 @@ fn start_set_data_rpc(
     )?)
 }
 
-fn start_set_formula_rpc(
+pub(super) fn start_set_formula_rpc(
     publisher: &Publisher,
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
@@ -447,8 +487,12 @@ pub(super) fn start_create_table_rpc(
                                 }
                             };
                             let (reply, reply_rx) = oneshot::channel();
-                            let kind =
-                                RpcRequestKind::CreateTable { path, rows, columns, lock };
+                            let kind = RpcRequestKind::CreateTable {
+                                path,
+                                rows: rows.clone(),
+                                columns: columns.clone(),
+                                lock,
+                            };
                             let _: Result<_, _> =
                                 tx.send(RpcRequest { kind, reply }).await;
                             match reply_rx.await {
