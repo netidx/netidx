@@ -1,3 +1,4 @@
+mod rpcs;
 use anyhow::Result;
 use futures::{
     channel::{mpsc, oneshot},
@@ -24,6 +25,7 @@ use netidx_bscript::{
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
+use rpcs::{RpcRequest, RpcRequestKind};
 use sled;
 use std::{
     collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
@@ -38,8 +40,6 @@ use tokio::{
     signal, task,
     time::{self, Instant},
 };
-
-mod rpcs;
 
 lazy_static! {
     static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 2048);
@@ -841,47 +841,6 @@ impl Container {
         }
     }
 
-    fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
-        let bn = Path::basename(&path);
-        if bn == Some(".formula") || bn == Some(".on-write") {
-            bail!("won't delete .formula/.on-write, delete the base instead")
-        } else if let Some(id) = self.ctx.user.publisher.id(&path) {
-            let ref_err = Value::Error(Chars::from("#REF"));
-            self.publish_requests.remove_advertisement(&path);
-            match self.ctx.user.published.remove(&id) {
-                None => (),
-                Some(Published::Data(_)) => {
-                    delete(&self.ctx.user.data, &path)?;
-                }
-                Some(Published::Formula(fifo)) => {
-                    let fpath = path.append(".formula");
-                    let opath = path.append(".on-write");
-                    let id = fifo.expr_id.lock();
-                    self.ctx.user.unref(*id);
-                    self.compiled.remove(&id);
-                    let id = fifo.on_write_expr_id.lock();
-                    self.ctx.user.unref(*id);
-                    self.compiled.remove(&id);
-                    if let Some(id) = self.ctx.user.publisher.id(&fpath) {
-                        self.ctx.user.published.remove(&id);
-                    }
-                    if let Some(id) = self.ctx.user.publisher.id(&opath) {
-                        self.ctx.user.published.remove(&id);
-                    }
-                    self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
-                    self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
-                    delete(&self.ctx.user.data, &path)?;
-                }
-            }
-            self.update_refs(batch, &mut REFS.take(), &path, ref_err);
-            Ok(())
-        } else {
-            self.publish_requests.remove_advertisement(&path);
-            Ok(delete(&self.ctx.user.data, &path)?)
-        }
-    }
-
     fn get_rpc_proc(
         &mut self,
         name: &Path,
@@ -970,6 +929,110 @@ impl Container {
         }
     }
 
+    fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        let bn = Path::basename(&path);
+        if bn == Some(".formula") || bn == Some(".on-write") {
+            bail!("won't delete .formula/.on-write, delete the base instead")
+        } else if let Some(id) = self.ctx.user.publisher.id(&path) {
+            let ref_err = Value::Error(Chars::from("#REF"));
+            self.publish_requests.remove_advertisement(&path);
+            match self.ctx.user.published.remove(&id) {
+                None => (),
+                Some(Published::Data(_)) => {
+                    delete(&self.ctx.user.data, &path)?;
+                }
+                Some(Published::Formula(fifo)) => {
+                    let fpath = path.append(".formula");
+                    let opath = path.append(".on-write");
+                    let id = fifo.expr_id.lock();
+                    self.ctx.user.unref(*id);
+                    self.compiled.remove(&id);
+                    let id = fifo.on_write_expr_id.lock();
+                    self.ctx.user.unref(*id);
+                    self.compiled.remove(&id);
+                    if let Some(id) = self.ctx.user.publisher.id(&fpath) {
+                        self.ctx.user.published.remove(&id);
+                    }
+                    if let Some(id) = self.ctx.user.publisher.id(&opath) {
+                        self.ctx.user.published.remove(&id);
+                    }
+                    self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
+                    self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
+                    delete(&self.ctx.user.data, &path)?;
+                }
+            }
+            self.update_refs(batch, &mut REFS.take(), &path, ref_err);
+            Ok(())
+        } else {
+            self.publish_requests.remove_advertisement(&path);
+            Ok(delete(&self.ctx.user.data, &path)?)
+        }
+    }
+
+    fn delete_subtree(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        let mut pfx = PKBUF.take();
+        path.encode(&mut *pfx)?;
+        let data_iter = self.ctx.user.data.scan_prefix(&*pfx).keys();
+        let formula_iter = self.ctx.user.formulas.scan_prefix(&*pfx).keys();
+        for res in data_iter.chain(formula_iter) {
+            let key = res?;
+            if &*key != &*pfx {
+                let path = Path::decode(&mut &*key)?;
+                self.delete_path(batch, path)?
+            }
+        }
+        Ok(())
+    }
+
+    fn lock_subtree(&mut self, path: Path) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        store(&self.locked_db, &path, &Value::Null)?;
+        self.locked.insert(path);
+        Ok(())
+    }
+
+    fn unlock_subtree(&mut self, path: Path) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        let mut pfx = PKBUF.take();
+        path.encode(&mut *pfx)?;
+        for req in self.locked_db.scan_prefix(&*pfx).keys() {
+            let key = req?;
+            let path = Path::decode(&mut &*key)?;
+            self.locked_db.remove(&*key)?;
+            self.locked.remove(&path);
+        }
+        Ok(())
+    }
+
+    async fn process_rpc_request(&mut self, batch: &mut UpdateBatch, req: RpcRequest) {
+        fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
+            let _: Result<_, _> = tx.send(match res {
+                Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                Ok(()) => Value::Ok,
+            });
+        }
+        match req.kind {
+            RpcRequestKind::Delete(path) => {
+                reply(req.reply, self.delete_path(batch, path))
+            }
+            RpcRequestKind::DeleteSubtree(path) => {
+                reply(req.reply, self.delete_subtree(batch, path))
+            }
+            RpcRequestKind::LockSubtree(path) => {
+                reply(req.reply, self.lock_subtree(path))
+            }
+            RpcRequestKind::UnlockSubtree(path) => {
+                reply(req.reply, self.unlock_subtree(path))
+            }
+            RpcRequestKind::SetData { .. } => (),
+            RpcRequestKind::SetFormula { .. } => (),
+            RpcRequestKind::CreateSheet { .. } => (),
+            RpcRequestKind::CreateTable { .. } => (),
+        }
+    }
+
     async fn run(mut self) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut ctrl_c = Box::pin(signal::ctrl_c().fuse());
@@ -989,8 +1052,8 @@ impl Container {
                 r = self.write_updates_rx.select_next_some() => {
                     self.process_writes(&mut batch, r);
                 }
-                _ = self.api.rx.select_next_some() => {
-                    ()
+                r = self.api.rx.select_next_some() => {
+                    self.process_rpc_request(&mut batch, r);
                 }
                 r = self.bscript_event.select_next_some() => {
                     self.process_bscript_event(&mut batch, r).await;
