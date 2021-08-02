@@ -1,4 +1,6 @@
 mod rpcs;
+mod db;
+
 use anyhow::Result;
 use futures::{
     channel::{mpsc, oneshot},
@@ -42,9 +44,9 @@ use tokio::{
 };
 
 lazy_static! {
-    static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(5, 2048);
-    static ref REFS: Pool<Vec<ExprId>> = Pool::new(5, 2048);
-    static ref PKBUF: Pool<Vec<u8>> = Pool::new(5, 16384);
+    static ref VAR_UPDATES: Pool<Vec<(Chars, Value)>> = Pool::new(8, 2048);
+    static ref REFS: Pool<Vec<ExprId>> = Pool::new(8, 2048);
+    static ref PKBUF: Pool<Vec<u8>> = Pool::new(8, 16384);
 }
 
 struct Refs {
@@ -364,34 +366,6 @@ pub(super) struct ContainerConfig {
     cache_size: Option<u64>,
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
     sparse: bool,
-}
-
-fn lookup<V: Pack + 'static, P: Pack + 'static>(
-    tree: &sled::Tree,
-    path: &P,
-) -> Result<Option<Value>> {
-    let mut kbuf = PKBUF.take();
-    path.encode(&mut *kbuf)?;
-    match tree.get(&*kbuf)? {
-        None => Ok(None),
-        Some(ivec) => Ok(Some(Value::decode(&mut &*ivec)?)),
-    }
-}
-
-fn store<V: Pack + 'static>(tree: &sled::Tree, path: &Path, value: &V) -> Result<()> {
-    let mut path_buf = PKBUF.take();
-    let mut val_buf = PKBUF.take();
-    path.encode(&mut *path_buf)?;
-    value.encode(&mut *val_buf)?;
-    tree.insert(&**path_buf, &**val_buf)?;
-    Ok(())
-}
-
-fn delete<P: Pack + 'static>(tree: &sled::Tree, path: &P) -> Result<()> {
-    let mut kbuf = PKBUF.take();
-    path.encode(&mut *kbuf)?;
-    let _ = tree.remove(&*kbuf)?;
-    Ok(())
 }
 
 fn to_chars(value: Value) -> Chars {
