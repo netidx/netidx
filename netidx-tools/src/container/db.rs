@@ -35,7 +35,7 @@ impl Update {
     }
 }
 
-fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: &P) -> Result<Option<Value>> {
+fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: P) -> Result<Option<Value>> {
     match tree.get(path.as_ref())? {
         None => Ok(None),
         Some(v) => Ok(Some(Value::decode(&mut &*v)?)),
@@ -49,6 +49,10 @@ fn iter_vals(tree: &sled::Tree) -> impl Iterator<Item = Result<(Path, Value)>> +
         let value = Value::decode(&mut &*val)?;
         Ok((path, value))
     })
+}
+
+fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static {
+    tree.iter().keys().map(|res| Ok(Path::from(Arc::from(str::from_utf8(&res?)?))))
 }
 
 pub(super) struct Db {
@@ -90,7 +94,23 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn set_data(&mut self, path: Path, value: Value) -> Result<()> {
+    pub(super) fn remove_subtree(&mut self, path: Path) -> Result<()> {
+        let data = self.data.scan_prefix(path.as_ref()).keys();
+        let formulas = self.formulas.scan_prefix(path.as_ref()).keys();
+        let on_writes = self.on_writes.scan_prefix(path.as_ref()).keys();
+        for res in data.chain(formulas).chain(on_writes) {
+            let path = Path::from(Arc::from(str::from_utf8(&res?)?));
+            self.remove(path)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_data(
+        &mut self,
+        update: bool,
+        path: Path,
+        value: Value,
+    ) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
         value.encode(&mut *val)?;
@@ -102,7 +122,9 @@ impl Db {
             self.pending.on_write.push((path.clone(), None));
             self.on_writes.remove(key)?;
         }
-        self.pending.data.push((path, Some(value)));
+        if update {
+            self.pending.data.push((path, Some(value)));
+        }
         self.data.insert(key, &**val)?;
         Ok(())
     }
@@ -151,29 +173,30 @@ impl Db {
         mem::replace(&mut self.pending, Update::new())
     }
 
-    pub(super) fn lookup_data<P: AsRef<[u8]>>(&self, path: &P) -> Result<Option<Value>> {
+    pub(super) fn lookup_data<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Value>> {
         lookup_value(&self.data, path)
     }
 
     pub(super) fn lookup_formula<P: AsRef<[u8]>>(
         &self,
-        path: &P,
+        path: P,
     ) -> Result<Option<Value>> {
         lookup_value(&self.formulas, path)
     }
 
     pub(super) fn lookup_on_write<P: AsRef<[u8]>>(
         &self,
-        path: &P,
+        path: P,
     ) -> Result<Option<Value>> {
         lookup_value(&self.on_writes, path)
     }
 
     pub(super) fn data_paths(&self) -> impl Iterator<Item = Result<Path>> + 'static {
-        self.data
-            .iter()
-            .keys()
-            .map(|res| Ok(Path::from(Arc::from(str::from_utf8(&res?)?))))
+        iter_paths(&self.data)
+    }
+
+    pub(super) fn locked(&self) -> impl Iterator<Item = Result<Path>> + 'static {
+        iter_paths(&self.locked)
     }
 
     pub(super) fn formulas(
