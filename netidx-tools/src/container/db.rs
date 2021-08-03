@@ -1,6 +1,7 @@
 use super::ContainerConfig;
 use anyhow::Result;
 use netidx::{
+    chars::Chars,
     pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
@@ -94,6 +95,11 @@ impl Db {
         Ok(())
     }
 
+    pub(super) async fn flush_async(&self) -> Result<()> {
+        self.db.flush_async().await?;
+        Ok(())
+    }
+
     pub(super) fn remove_subtree(&mut self, path: Path) -> Result<()> {
         let data = self.data.scan_prefix(path.as_ref()).keys();
         let formulas = self.formulas.scan_prefix(path.as_ref()).keys();
@@ -135,7 +141,13 @@ impl Db {
         value.encode(&mut *val)?;
         self.data.remove(key)?;
         self.formulas.insert(key, &**val)?;
-        self.pending.formula.push((path, Some(value)));
+        self.pending.formula.push((path.clone(), Some(value)));
+        if !self.on_writes.contains_key(key)? {
+            let v = Value::from(Chars::from("null"));
+            v.encode(&mut *val)?;
+            self.on_writes.insert(key, &**val)?;
+            self.pending.on_write.push((path, Some(v)));
+        }
         Ok(())
     }
 
@@ -146,6 +158,12 @@ impl Db {
         self.data.remove(key)?;
         self.on_writes.insert(key, &**val)?;
         self.pending.on_write.push((path, Some(value)));
+        if !self.formulas.contains_key(key)? {
+            let v = Value::from(Chars::from("null"));
+            v.encode(&mut *val)?;
+            self.formulas.insert(key, &**val)?;
+            self.pending.formula.push((path, Some(v)));
+        }
         Ok(())
     }
 

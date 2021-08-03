@@ -943,14 +943,25 @@ impl Container {
         Ok(())
     }
 
-    fn set_data(
-        &mut self,
-        batch: &mut UpdateBatch,
-        path: Path,
-        value: Value,
-    ) -> Result<()> {
+    fn set_data(&mut self, path: Path, value: Value) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         self.ctx.user.db.set_data(true, path, value)?;
+        Ok(())
+    }
+
+    fn set_formula(
+        &mut self,
+        path: Path,
+        formula: Option<Chars>,
+        on_write: Option<Chars>,
+    ) -> Result<()> {
+        let path = check_path(&self.cfg.base_path, path)?;
+        if let Some(formula) = formula {
+            self.ctx.user.db.set_formula(path.clone(), Value::from(formula))?;
+        }
+        if let Some(on_write) = on_write {
+            self.ctx.user.db.set_on_write(path, Value::from(on_write))?;
+        }
         Ok(())
     }
 
@@ -975,9 +986,11 @@ impl Container {
                 reply(req.reply, self.unlock_subtree(path))
             }
             RpcRequestKind::SetData { path, value } => {
-                reply(req.reply, self.set_data(batch, path, value))
+                reply(req.reply, self.set_data(path, value))
             }
-            RpcRequestKind::SetFormula { .. } => (),
+            RpcRequestKind::SetFormula { path, formula, on_write } => {
+                reply(req.reply, self.set_formula(path, formula, on_write))
+            },
             RpcRequestKind::CreateSheet { .. } => (),
             RpcRequestKind::CreateTable { .. } => (),
         }
@@ -1021,7 +1034,7 @@ impl Container {
             batch.commit(timeout).await;
         }
         self.ctx.user.publisher.shutdown().await;
-        self.db.flush_async().await?;
+        self.ctx.user.db.flush_async().await?;
         Ok(())
     }
 }
