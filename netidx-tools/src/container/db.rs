@@ -12,14 +12,20 @@ use std::{mem, str, sync::Arc};
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
-    static ref PDPAIR: Pool<Vec<(Path, Option<Value>)>> = Pool::new(16, 8124);
+    static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(16, 8124);
     static ref PATHS: Pool<Vec<Path>> = Pool::new(16, 8124);
 }
 
+pub(super) enum UpdateKind {
+    Deleted,
+    Inserted(Value),
+    Updated(Value),
+}
+
 pub(super) struct Update {
-    pub(super) data: Pooled<Vec<(Path, Option<Value>)>>,
-    pub(super) formula: Pooled<Vec<(Path, Option<Value>)>>,
-    pub(super) on_write: Pooled<Vec<(Path, Option<Value>)>>,
+    pub(super) data: Pooled<Vec<(Path, UpdateKind)>>,
+    pub(super) formula: Pooled<Vec<(Path, UpdateKind)>>,
+    pub(super) on_write: Pooled<Vec<(Path, UpdateKind)>>,
     pub(super) locked: Pooled<Vec<Path>>,
     pub(super) unlocked: Pooled<Vec<Path>>,
 }
@@ -84,13 +90,13 @@ impl Db {
     pub(super) fn remove(&mut self, path: Path) -> Result<()> {
         let key = path.as_bytes();
         if let Some(_) = self.data.remove(key)? {
-            self.pending.data.push((path.clone(), None));
+            self.pending.data.push((path.clone(), UpdateKind::Deleted));
         }
         if let Some(_) = self.formulas.remove(key)? {
-            self.pending.formula.push((path.clone(), None));
+            self.pending.formula.push((path.clone(), UpdateKind::Deleted));
         }
         if let Some(_) = self.on_writes.remove(key)? {
-            self.pending.on_write.push((path, None));
+            self.pending.on_write.push((path, UpdateKind::Deleted));
         }
         Ok(())
     }
@@ -120,18 +126,15 @@ impl Db {
         let key = path.as_bytes();
         let mut val = BUF.take();
         value.encode(&mut *val)?;
-        if self.formulas.contains_key(key)? {
-            self.pending.formula.push((path.clone(), None));
-            self.formulas.remove(key)?;
-        }
-        if self.on_writes.contains_key(key)? {
-            self.pending.on_write.push((path.clone(), None));
-            self.on_writes.remove(key)?;
-        }
+        self.formulas.remove(key)?;
+        self.on_writes.remove(key)?;
+        let up = match self.data.insert(key, &**val)? {
+            None => UpdateKind::Inserted(value),
+            Some(_) => UpdateKind::Updated(value),
+        };
         if update {
-            self.pending.data.push((path, Some(value)));
+            self.pending.data.push((path, up));
         }
-        self.data.insert(key, &**val)?;
         Ok(())
     }
 
@@ -140,13 +143,15 @@ impl Db {
         let mut val = BUF.take();
         value.encode(&mut *val)?;
         self.data.remove(key)?;
-        self.formulas.insert(key, &**val)?;
-        self.pending.formula.push((path.clone(), Some(value)));
+        let up = match self.formulas.insert(key, &**val)? {
+            None => UpdateKind::Inserted(value),
+            Some(_) => UpdateKind::Updated(value),
+        };
+        self.pending.formula.push((path.clone(), up));
         if !self.on_writes.contains_key(key)? {
             let v = Value::from(Chars::from("null"));
             v.encode(&mut *val)?;
             self.on_writes.insert(key, &**val)?;
-            self.pending.on_write.push((path, Some(v)));
         }
         Ok(())
     }
@@ -156,13 +161,15 @@ impl Db {
         let mut val = BUF.take();
         value.encode(&mut *val)?;
         self.data.remove(key)?;
-        self.on_writes.insert(key, &**val)?;
-        self.pending.on_write.push((path, Some(value)));
+        let up = match self.on_writes.insert(key, &**val)? {
+            None => UpdateKind::Inserted(value),
+            Some(_) => UpdateKind::Updated(value),
+        };
+        self.pending.on_write.push((path.clone(), up));
         if !self.formulas.contains_key(key)? {
             let v = Value::from(Chars::from("null"));
             v.encode(&mut *val)?;
             self.formulas.insert(key, &**val)?;
-            self.pending.formula.push((path, Some(v)));
         }
         Ok(())
     }

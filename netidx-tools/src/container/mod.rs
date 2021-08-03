@@ -11,7 +11,6 @@ use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use netidx::{
     chars::Chars,
     config,
-    pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
@@ -28,7 +27,6 @@ use netidx_bscript::{
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
 use rpcs::{RpcRequest, RpcRequestKind};
-use sled;
 use std::{
     collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
     hash::Hash,
@@ -475,8 +473,8 @@ impl Container {
         self.ctx.user.by_path.insert(src_path.clone(), published.clone());
         self.ctx.user.by_id.insert(on_write_id, published.clone());
         self.ctx.user.by_path.insert(on_write_path.clone(), published);
-        let expr = formula_txt.cast_to::<Chars>()?.parse::<Expr>()?;
-        let on_write_expr = on_write_txt.cast_to::<Chars>()?.parse::<Expr>()?;
+        let expr = formula_txt.clone().cast_to::<Chars>()?.parse::<Expr>()?;
+        let on_write_expr = on_write_txt.clone().cast_to::<Chars>()?.parse::<Expr>()?;
         let expr_id = expr.id;
         let on_write_expr_id = on_write_expr.id;
         let formula_node = Node::compile(&mut self.ctx, expr);
@@ -625,18 +623,6 @@ impl Container {
         self.process_var_updates(batch);
     }
 
-    fn remove_compiled_formula(&mut self, fifo: &Fifo) {
-        let id = fifo.expr_id.lock();
-        self.ctx.user.unref(*id);
-        self.compiled.remove(&id);
-    }
-
-    fn remove_compiled_on_write(&mut self, fifo: &Fifo) {
-        let id = fifo.on_write_expr_id.lock();
-        self.ctx.user.unref(*id);
-        self.compiled.remove(&id);
-    }
-
     fn change_formula(
         &mut self,
         batch: &mut UpdateBatch,
@@ -645,10 +631,11 @@ impl Container {
         value: Chars,
     ) -> Result<()> {
         fifo.src.update(batch, Value::String(value.clone()));
-        self.remove_compiled_formula(&fifo);
+        let mut expr_id = fifo.expr_id.lock();
+        self.ctx.user.unref(*expr_id);
+        self.compiled.remove(&expr_id);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
-                let mut expr_id = fifo.expr_id.lock();
                 *expr_id = expr.id;
                 let node = Node::compile(&mut self.ctx, expr);
                 let dv = node.current().unwrap_or(Value::Null);
@@ -667,8 +654,6 @@ impl Container {
         let path = &fifo.data_path;
         self.update_refs(batch, refs, &fifo.src_path, Value::String(value.clone()));
         self.update_refs(batch, refs, path, dv);
-        let cur =
-            self.ctx.user.publisher.current(&fifo.on_write.id()).unwrap_or(Value::Null);
         Ok(())
     }
 
@@ -680,10 +665,11 @@ impl Container {
         value: Chars,
     ) -> Result<()> {
         fifo.on_write.update(batch, Value::String(value.clone()));
-        self.remove_compiled_on_write(&fifo);
+        let mut expr_id = fifo.on_write_expr_id.lock();
+        self.ctx.user.unref(*expr_id);
+        self.compiled.remove(&expr_id);
         match value.parse::<Expr>() {
             Ok(expr) => {
-                let mut expr_id = fifo.expr_id.lock();
                 *expr_id = expr.id;
                 let node = Node::compile(&mut self.ctx, expr);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
@@ -691,8 +677,6 @@ impl Container {
             Err(_) => (), // CR estokes: log and report to user somehow
         }
         self.update_refs(batch, refs, &fifo.on_write_path, Value::String(value.clone()));
-        let path = &fifo.data_path;
-        let cur = self.ctx.user.publisher.current(&fifo.src.id()).unwrap_or(Value::Null);
         Ok(())
     }
 
@@ -766,8 +750,11 @@ impl Container {
                         let val = match self.ctx.user.db.lookup_data(path.as_ref()) {
                             Ok(Some(v)) => v,
                             Err(_) | Ok(None) => {
-                                let _: Result<_, _> =
-                                    self.ctx.user.db.set_data(false, path, Value::Null);
+                                let _: Result<_, _> = self.ctx.user.db.set_data(
+                                    false,
+                                    path.clone(),
+                                    Value::Null,
+                                );
                                 Value::Null
                             }
                         };
@@ -888,31 +875,7 @@ impl Container {
         }
     }
 
-    /*
-                match self.ctx.user.by_id.remove(&id) {
-                    None => (),
-                    Some(Published::Data(p)) => {
-                        delete(&self.ctx.user.data, &path)?;
-                    }
-                    Some(Published::Formula(fifo)) => {
-                        self.remove_compiled_formula(&fifo);
-                        self.remove_compiled_on_write(&fifo);
-                        let fpath = path.append(".formula");
-                        let opath = path.append(".on-write");
-                        if let Some(id) = self.ctx.user.publisher.id(&fpath) {
-                            self.ctx.user.published.remove(&id);
-                        }
-                        if let Some(id) = self.ctx.user.publisher.id(&opath) {
-                            self.ctx.user.published.remove(&id);
-                        }
-                        self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
-                        self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
-                        delete(&self.ctx.user.data, &path)?;
-                    }
-                }
-                self.update_refs(batch, &mut REFS.take(), &path, ref_err);
-    */
-    fn delete_path(&mut self, batch: &mut UpdateBatch, path: Path) -> Result<()> {
+    fn delete_path(&mut self, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
@@ -965,7 +928,7 @@ impl Container {
         Ok(())
     }
 
-    async fn process_rpc_request(&mut self, batch: &mut UpdateBatch, req: RpcRequest) {
+    fn process_rpc_request(&mut self, req: RpcRequest) {
         fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
             let _: Result<_, _> = tx.send(match res {
                 Err(e) => Value::Error(Chars::from(format!("{}", e))),
@@ -974,7 +937,7 @@ impl Container {
         }
         match req.kind {
             RpcRequestKind::Delete(path) => {
-                reply(req.reply, self.delete_path(batch, path))
+                reply(req.reply, self.delete_path(path))
             }
             RpcRequestKind::DeleteSubtree(path) => {
                 reply(req.reply, self.delete_subtree(path))
@@ -990,9 +953,126 @@ impl Container {
             }
             RpcRequestKind::SetFormula { path, formula, on_write } => {
                 reply(req.reply, self.set_formula(path, formula, on_write))
-            },
+            }
             RpcRequestKind::CreateSheet { .. } => (),
             RpcRequestKind::CreateTable { .. } => (),
+        }
+    }
+
+    fn remove_deleted_published(&mut self, batch: &mut UpdateBatch, path: &Path) {
+        let ref_err = Value::Error(Chars::from("#REF"));
+        self.publish_requests.remove_advertisement(&path);
+        match self.ctx.user.by_path.remove(path) {
+            None => (),
+            Some(Published::Data(p)) => {
+                self.ctx.user.by_id.remove(&p.val.id());
+            }
+            Some(Published::Formula(fifo)) => {
+                let expr_id = fifo.expr_id.lock();
+                let on_write_expr_id = fifo.on_write_expr_id.lock();
+                self.ctx.user.unref(*expr_id);
+                self.ctx.user.unref(*on_write_expr_id);
+                self.compiled.remove(&expr_id);
+                self.compiled.remove(&on_write_expr_id);
+                let fpath = path.append(".formula");
+                let opath = path.append(".on-write");
+                self.ctx.user.by_id.remove(&fifo.data.id());
+                self.ctx.user.by_path.remove(&fpath);
+                self.ctx.user.by_id.remove(&fifo.src.id());
+                self.ctx.user.by_path.remove(&opath);
+                self.ctx.user.by_id.remove(&fifo.on_write.id());
+                self.update_refs(batch, &mut REFS.take(), &fpath, ref_err.clone());
+                self.update_refs(batch, &mut REFS.take(), &opath, ref_err.clone());
+            }
+        }
+        self.update_refs(batch, &mut REFS.take(), path, ref_err);
+    }
+
+    fn advertise_path(&self, path: Path) {
+        if !self.cfg.sparse {
+            let _: Result<_> = self.publish_requests.advertise(path);
+        }
+    }
+
+    fn process_update(&mut self, batch: &mut UpdateBatch, mut update: db::Update) {
+        use db::UpdateKind;
+        for (path, value) in update.data.drain(..) {
+            match value {
+                UpdateKind::Updated(v) => {
+                    match self.ctx.user.by_path.get(&path) {
+                        None => (),
+                        Some(Published::Data(p)) => p.val.update(batch, v.clone()),
+                        Some(Published::Formula(_)) => unreachable!(),
+                    }
+                    self.update_refs(batch, &mut REFS.take(), &path, v);
+                }
+                UpdateKind::Inserted(v) => {
+                    if self.ctx.user.by_path.contains_key(&path) {
+                        self.remove_deleted_published(batch, &path);
+                    }
+                    self.update_refs(batch, &mut REFS.take(), &path, v);
+                    self.advertise_path(path);
+                }
+                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+            }
+        }
+        for (path, value) in update.formula.drain(..) {
+            match value {
+                UpdateKind::Updated(v) => match self.ctx.user.by_path.get(&path) {
+                    None => unreachable!(),
+                    Some(Published::Data(_)) => unreachable!(),
+                    Some(Published::Formula(fifo)) => {
+                        let fifo = fifo.clone();
+                        // CR estokes: log
+                        let _: Result<_> = self.change_formula(
+                            batch,
+                            &mut REFS.take(),
+                            &fifo,
+                            to_chars(v),
+                        );
+                    }
+                },
+                UpdateKind::Inserted(v) => {
+                    if self.ctx.user.by_path.contains_key(&path) {
+                        self.remove_deleted_published(batch, &path);
+                    }
+                    // CR estokes: log
+                    let _: Result<_> = self.publish_formula(path, batch, v, Value::Null);
+                }
+                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+            }
+        }
+        for (path, value) in update.on_write.drain(..) {
+            match value {
+                UpdateKind::Updated(v) => match self.ctx.user.by_path.get(&path) {
+                    None => unreachable!(),
+                    Some(Published::Data(_)) => unreachable!(),
+                    Some(Published::Formula(fifo)) => {
+                        let fifo = fifo.clone();
+                        // CR estokes: log
+                        let _: Result<_> = self.change_on_write(
+                            batch,
+                            &mut REFS.take(),
+                            &fifo,
+                            to_chars(v),
+                        );
+                    }
+                }
+                UpdateKind::Inserted(v) => {
+                    if self.ctx.user.by_path.contains_key(&path) {
+                        self.remove_deleted_published(batch, &path);
+                    }
+                    // CR estokes: log
+                    let _: Result<_> = self.publish_formula(path, batch, Value::Null, v);
+                }
+                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+            }
+        }
+        for path in update.locked.drain(..) {
+            self.locked.insert(path);
+        }
+        for path in update.unlocked.drain(..) {
+            self.locked.remove(&path);
         }
     }
 
@@ -1016,7 +1096,7 @@ impl Container {
                     self.process_writes(&mut batch, r);
                 }
                 r = self.api.rx.select_next_some() => {
-                    self.process_rpc_request(&mut batch, r);
+                    self.process_rpc_request(r);
                 }
                 r = self.bscript_event.select_next_some() => {
                     self.process_bscript_event(&mut batch, r).await;
@@ -1030,6 +1110,8 @@ impl Container {
                 },
                 complete => break
             }
+            let update = self.ctx.user.db.finish();
+            self.process_update(&mut batch, update);
             let timeout = self.cfg.timeout.map(Duration::from_secs);
             batch.commit(timeout).await;
         }
