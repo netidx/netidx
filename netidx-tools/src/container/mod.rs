@@ -944,6 +944,26 @@ impl Container {
         Ok(())
     }
 
+    fn create_sheet(
+        &mut self,
+        _path: Path,
+        _rows: usize,
+        _columns: usize,
+        _lock: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn create_table(
+        &mut self,
+        _path: Path,
+        _rows: Vec<Chars>,
+        _columns: Vec<Chars>,
+        lock: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn process_rpc_request(&mut self, req: RpcRequest) {
         fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
             let _: Result<_, _> = tx.send(match res {
@@ -968,8 +988,12 @@ impl Container {
             RpcRequestKind::SetFormula { path, formula, on_write } => {
                 reply(req.reply, self.set_formula(path, formula, on_write))
             }
-            RpcRequestKind::CreateSheet { .. } => (),
-            RpcRequestKind::CreateTable { .. } => (),
+            RpcRequestKind::CreateSheet { path, rows, columns, lock } => {
+                reply(req.reply, self.create_sheet(path, rows, columns, lock))
+            }
+            RpcRequestKind::CreateTable { path, rows, columns, lock } => {
+                reply(req.reply, self.create_table(path, rows, columns, lock))
+            }
         }
     }
 

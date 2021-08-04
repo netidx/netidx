@@ -110,15 +110,6 @@ fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: P) -> Result<Option<Dat
     }
 }
 
-fn iter_vals(tree: &sled::Tree) -> impl Iterator<Item = Result<(Path, Datum)>> + 'static {
-    tree.iter().map(|res| {
-        let (key, val) = res?;
-        let path = Path::from(Arc::from(str::from_utf8(&key)?));
-        let value = Datum::decode(&mut &*val)?;
-        Ok((path, value))
-    })
-}
-
 fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static {
     tree.iter().keys().map(|res| Ok(Path::from(Arc::from(str::from_utf8(&res?)?))))
 }
@@ -200,7 +191,7 @@ impl Db {
         let mut val = BUF.take();
         let up = match self.data.get(key)? {
             None => {
-                let d = Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
+                Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
                 UpdateKind::Inserted(value.clone())
             }
             Some(data) => match DatumKind::decode(&mut &*data) {
@@ -229,7 +220,7 @@ impl Db {
         let mut val = BUF.take();
         let up = match self.data.get(key)? {
             None => {
-                let d = Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
+                Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
                 UpdateKind::Inserted(value)
             }
             Some(data) => match DatumKind::decode(&mut &*data) {
