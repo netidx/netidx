@@ -849,7 +849,7 @@ impl Container {
         self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
     }
 
-    async fn process_bscript_event(&mut self, batch: &mut UpdateBatch, event: LcEvent) {
+    fn process_bscript_event(&mut self, batch: &mut UpdateBatch, event: LcEvent) {
         match event {
             LcEvent::Vars => self.process_var_updates(batch),
             LcEvent::RpcReply { name, id, result } => {
@@ -946,21 +946,23 @@ impl Container {
 
     fn create_sheet(
         &mut self,
-        _path: Path,
-        _rows: usize,
-        _columns: usize,
-        _lock: bool,
+        path: Path,
+        rows: usize,
+        columns: usize,
+        lock: bool,
     ) -> Result<()> {
+        self.ctx.user.db.create_sheet(path, rows, columns, lock)?;
         Ok(())
     }
 
     fn create_table(
         &mut self,
-        _path: Path,
-        _rows: Vec<Chars>,
-        _columns: Vec<Chars>,
+        path: Path,
+        rows: Vec<Chars>,
+        columns: Vec<Chars>,
         lock: bool,
     ) -> Result<()> {
+        self.ctx.user.db.create_table(path, rows, columns, lock)?;
         Ok(())
     }
 
@@ -1122,22 +1124,22 @@ impl Container {
             let mut batch = self.ctx.user.publisher.start_batch();
             select_biased! {
                 r = self.publish_events.select_next_some() => {
-                    self.process_publish_event(r);
+                    task::block_in_place(|| self.process_publish_event(r));
                 }
                 r = self.publish_requests.select_next_some() => {
-                    self.process_publish_request(&mut batch, r.0, r.1);
+                    task::block_in_place(|| self.process_publish_request(&mut batch, r.0, r.1));
                 }
                 r = self.sub_updates.select_next_some() => {
-                    self.process_subscriptions(&mut batch, r);
+                    task::block_in_place(|| self.process_subscriptions(&mut batch, r));
                 }
                 r = self.write_updates_rx.select_next_some() => {
-                    self.process_writes(&mut batch, r);
+                    task::block_in_place(|| self.process_writes(&mut batch, r));
                 }
                 r = self.api.rx.select_next_some() => {
-                    self.process_rpc_request(r);
+                    task::block_in_place(|| self.process_rpc_request(r));
                 }
                 r = self.bscript_event.select_next_some() => {
-                    self.process_bscript_event(&mut batch, r).await;
+                    task::block_in_place(|| self.process_bscript_event(&mut batch, r));
                 }
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
@@ -1148,8 +1150,10 @@ impl Container {
                 },
                 complete => break
             }
-            let update = self.ctx.user.db.finish();
-            self.process_update(&mut batch, update);
+            task::block_in_place(|| {
+                let update = self.ctx.user.db.finish();
+                self.process_update(&mut batch, update);
+            });
             let timeout = self.cfg.timeout.map(Duration::from_secs);
             batch.commit(timeout).await;
         }

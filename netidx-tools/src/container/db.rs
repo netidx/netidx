@@ -2,13 +2,14 @@ use super::ContainerConfig;
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use netidx::{
+    chars::Chars,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     subscriber::Value,
 };
 use sled;
-use std::{mem, str, sync::Arc};
+use std::{fmt::Write, mem, str, sync::Arc};
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
@@ -241,6 +242,56 @@ impl Db {
         };
         self.data.insert(key, &**val)?;
         self.pending.on_write.push((path, up));
+        Ok(())
+    }
+
+    pub(super) fn create_sheet(
+        &mut self,
+        base: Path,
+        rows: usize,
+        cols: usize,
+        lock: bool,
+    ) -> Result<()> {
+        let mut buf = String::new();
+        for i in 0..rows {
+            for j in 0..cols {
+                buf.clear();
+                write!(buf, "{}/{}", i, j)?;
+                let path = base.append(buf.as_str());
+                if !self.data.contains_key(path.as_bytes())? {
+                    self.set_data(true, path, Value::Null)?;
+                }
+            }
+        }
+        if lock {
+            self.set_locked(base)?
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_table(
+        &mut self,
+        base: Path,
+        rows: Vec<Chars>,
+        cols: Vec<Chars>,
+        lock: bool,
+    ) -> Result<()> {
+        let mut buf = String::new();
+        let cols: Vec<String> =
+            cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
+        for row in rows.iter() {
+            for col in cols.iter() {
+                buf.clear();
+                write!(buf, "{}/{}", Path::escape(row), col)?;
+                let path = base.append(buf.as_str());
+                if !self.data.contains_key(path.as_bytes())? {
+                    self.set_data(true, path, Value::Null)?;
+                }
+            }
+        }
+        if lock {
+            self.set_locked(base)?
+        }
         Ok(())
     }
 
