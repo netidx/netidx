@@ -1,8 +1,8 @@
 use super::ContainerConfig;
 use anyhow::Result;
+use bytes::{Buf, BufMut};
 use netidx::{
-    chars::Chars,
-    pack::Pack,
+    pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     subscriber::Value,
@@ -42,18 +42,79 @@ impl Update {
     }
 }
 
-fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: P) -> Result<Option<Value>> {
-    match tree.get(path.as_ref())? {
-        None => Ok(None),
-        Some(v) => Ok(Some(Value::decode(&mut &*v)?)),
+pub(super) enum DatumKind {
+    Data,
+    Formula,
+    Invalid,
+}
+
+impl DatumKind {
+    fn decode(buf: &mut impl Buf) -> DatumKind {
+        match buf.get_u8() {
+            0 => DatumKind::Data,
+            1 => DatumKind::Formula,
+            _ => DatumKind::Invalid,
+        }
     }
 }
 
-fn iter_vals(tree: &sled::Tree) -> impl Iterator<Item = Result<(Path, Value)>> + 'static {
+#[derive(Debug, Clone)]
+pub(super) enum Datum {
+    Data(Value),
+    Formula(Value, Value),
+}
+
+impl Pack for Datum {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Datum::Data(v) => v.encoded_len(),
+            Datum::Formula(f, w) => f.encoded_len() + w.encoded_len(),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self {
+            Datum::Data(v) => {
+                buf.put_u8(0);
+                Pack::encode(v, buf)
+            }
+            Datum::Formula(f, w) => {
+                buf.put_u8(1);
+                Pack::encode(f, buf)?;
+                Pack::encode(w, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() == 0 {
+            Err(PackError::InvalidFormat)
+        } else {
+            match buf.get_u8() {
+                0 => Ok(Datum::Data(Value::decode(buf)?)),
+                1 => {
+                    let f = Value::decode(buf)?;
+                    let w = Value::decode(buf)?;
+                    Ok(Datum::Formula(f, w))
+                }
+                _ => Err(PackError::UnknownTag),
+            }
+        }
+    }
+}
+
+fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: P) -> Result<Option<Datum>> {
+    match tree.get(path.as_ref())? {
+        None => Ok(None),
+        Some(v) => Ok(Some(Datum::decode(&mut &*v)?)),
+    }
+}
+
+fn iter_vals(tree: &sled::Tree) -> impl Iterator<Item = Result<(Path, Datum)>> + 'static {
     tree.iter().map(|res| {
         let (key, val) = res?;
         let path = Path::from(Arc::from(str::from_utf8(&key)?));
-        let value = Value::decode(&mut &*val)?;
+        let value = Datum::decode(&mut &*val)?;
         Ok((path, value))
     })
 }
@@ -65,8 +126,6 @@ fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static
 pub(super) struct Db {
     db: sled::Db,
     data: sled::Tree,
-    formulas: sled::Tree,
-    on_writes: sled::Tree,
     locked: sled::Tree,
     pending: Update,
 }
@@ -80,23 +139,22 @@ impl Db {
             .path(&cfg.db)
             .open()?;
         let data = db.open_tree("data")?;
-        let formulas = db.open_tree("formulas")?;
-        let on_writes = db.open_tree("on_writes")?;
         let locked = db.open_tree("locked")?;
         let pending = Update::new();
-        Ok(Db { db, data, formulas, on_writes, locked, pending })
+        Ok(Db { db, data, locked, pending })
     }
 
     pub(super) fn remove(&mut self, path: Path) -> Result<()> {
         let key = path.as_bytes();
-        if let Some(_) = self.data.remove(key)? {
-            self.pending.data.push((path.clone(), UpdateKind::Deleted));
-        }
-        if let Some(_) = self.formulas.remove(key)? {
-            self.pending.formula.push((path.clone(), UpdateKind::Deleted));
-        }
-        if let Some(_) = self.on_writes.remove(key)? {
-            self.pending.on_write.push((path, UpdateKind::Deleted));
+        if let Some(data) = self.data.remove(key)? {
+            match DatumKind::decode(&mut &*data) {
+                DatumKind::Data => self.pending.data.push((path, UpdateKind::Deleted)),
+                DatumKind::Formula => {
+                    self.pending.formula.push((path.clone(), UpdateKind::Deleted));
+                    self.pending.on_write.push((path, UpdateKind::Deleted));
+                }
+                DatumKind::Invalid => (),
+            }
         }
         Ok(())
     }
@@ -107,10 +165,7 @@ impl Db {
     }
 
     pub(super) fn remove_subtree(&mut self, path: Path) -> Result<()> {
-        let data = self.data.scan_prefix(path.as_ref()).keys();
-        let formulas = self.formulas.scan_prefix(path.as_ref()).keys();
-        let on_writes = self.on_writes.scan_prefix(path.as_ref()).keys();
-        for res in data.chain(formulas).chain(on_writes) {
+        for res in self.data.scan_prefix(path.as_ref()).keys() {
             let path = Path::from(Arc::from(str::from_utf8(&res?)?));
             self.remove(path)?;
         }
@@ -125,12 +180,14 @@ impl Db {
     ) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
-        value.encode(&mut *val)?;
-        self.formulas.remove(key)?;
-        self.on_writes.remove(key)?;
+        let datum = Datum::Data(value.clone());
+        datum.encode(&mut *val)?;
         let up = match self.data.insert(key, &**val)? {
             None => UpdateKind::Inserted(value),
-            Some(_) => UpdateKind::Updated(value),
+            Some(data) => match DatumKind::decode(&mut &*data) {
+                DatumKind::Data => UpdateKind::Updated(value),
+                DatumKind::Formula | DatumKind::Invalid => UpdateKind::Inserted(value),
+            },
         };
         if update {
             self.pending.data.push((path, up));
@@ -141,36 +198,58 @@ impl Db {
     pub(super) fn set_formula(&mut self, path: Path, value: Value) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
-        value.encode(&mut *val)?;
-        self.data.remove(key)?;
-        let up = match self.formulas.insert(key, &**val)? {
-            None => UpdateKind::Inserted(value),
-            Some(_) => UpdateKind::Updated(value),
+        let up = match self.data.get(key)? {
+            None => {
+                let d = Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
+                UpdateKind::Inserted(value.clone())
+            }
+            Some(data) => match DatumKind::decode(&mut &*data) {
+                DatumKind::Data | DatumKind::Invalid => {
+                    Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
+                    UpdateKind::Inserted(value.clone())
+                }
+                DatumKind::Formula => {
+                    match Datum::decode(&mut &*data)? {
+                        Datum::Data(_) => unreachable!(),
+                        Datum::Formula(_, w) => {
+                            Datum::Formula(value.clone(), w).encode(&mut *val)?
+                        }
+                    }
+                    UpdateKind::Updated(value)
+                }
+            },
         };
-        self.pending.formula.push((path.clone(), up));
-        if !self.on_writes.contains_key(key)? {
-            let v = Value::from(Chars::from("null"));
-            v.encode(&mut *val)?;
-            self.on_writes.insert(key, &**val)?;
-        }
+        self.data.insert(key, &**val)?;
+        self.pending.formula.push((path, up));
         Ok(())
     }
 
     pub(super) fn set_on_write(&mut self, path: Path, value: Value) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
-        value.encode(&mut *val)?;
-        self.data.remove(key)?;
-        let up = match self.on_writes.insert(key, &**val)? {
-            None => UpdateKind::Inserted(value),
-            Some(_) => UpdateKind::Updated(value),
+        let up = match self.data.get(key)? {
+            None => {
+                let d = Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
+                UpdateKind::Inserted(value)
+            }
+            Some(data) => match DatumKind::decode(&mut &*data) {
+                DatumKind::Data | DatumKind::Invalid => {
+                    Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
+                    UpdateKind::Inserted(value)
+                }
+                DatumKind::Formula => {
+                    match Datum::decode(&mut &*data)? {
+                        Datum::Data(_) => unreachable!(),
+                        Datum::Formula(f, _) => {
+                            Datum::Formula(f, value.clone()).encode(&mut *val)?
+                        }
+                    }
+                    UpdateKind::Updated(value)
+                }
+            },
         };
-        self.pending.on_write.push((path.clone(), up));
-        if !self.formulas.contains_key(key)? {
-            let v = Value::from(Chars::from("null"));
-            v.encode(&mut *val)?;
-            self.formulas.insert(key, &**val)?;
-        }
+        self.data.insert(key, &**val)?;
+        self.pending.on_write.push((path, up));
         Ok(())
     }
 
@@ -198,41 +277,22 @@ impl Db {
         mem::replace(&mut self.pending, Update::new())
     }
 
-    pub(super) fn lookup_data<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Value>> {
+    pub(super) fn lookup<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Datum>> {
         lookup_value(&self.data, path)
     }
 
-    pub(super) fn lookup_formula<P: AsRef<[u8]>>(
+    pub(super) fn iter(
         &self,
-        path: P,
-    ) -> Result<Option<Value>> {
-        lookup_value(&self.formulas, path)
-    }
-
-    pub(super) fn lookup_on_write<P: AsRef<[u8]>>(
-        &self,
-        path: P,
-    ) -> Result<Option<Value>> {
-        lookup_value(&self.on_writes, path)
-    }
-
-    pub(super) fn data_paths(&self) -> impl Iterator<Item = Result<Path>> + 'static {
-        iter_paths(&self.data)
+    ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
+        self.data.iter().map(|res| {
+            let (key, val) = res?;
+            let path = Path::from(Arc::from(str::from_utf8(&key)?));
+            let value = DatumKind::decode(&mut &*val);
+            Ok((path, value, val))
+        })
     }
 
     pub(super) fn locked(&self) -> impl Iterator<Item = Result<Path>> + 'static {
         iter_paths(&self.locked)
-    }
-
-    pub(super) fn formulas(
-        &self,
-    ) -> impl Iterator<Item = Result<(Path, Value)>> + 'static {
-        iter_vals(&self.formulas)
-    }
-
-    pub(super) fn on_writes(
-        &self,
-    ) -> impl Iterator<Item = Result<(Path, Value)>> + 'static {
-        iter_vals(&self.on_writes)
     }
 }

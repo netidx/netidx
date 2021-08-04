@@ -2,6 +2,7 @@ mod db;
 mod rpcs;
 
 use anyhow::Result;
+use db::{Datum, DatumKind};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -11,6 +12,7 @@ use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use netidx::{
     chars::Chars,
     config,
+    pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
@@ -249,23 +251,35 @@ impl Ref {
     }
 
     fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<Chars>) -> Value {
-        match path {
-            None => Value::Error(Chars::from("#REF")),
-            Some(path) => {
-                if path.ends_with(".formula") {
-                    match ctx.user.db.lookup_formula(path.as_ref()) {
-                        Err(_) | Ok(None) => Value::Error(Chars::from("#REF")),
-                        Ok(Some(v)) => v,
-                    }
-                } else if path.ends_with(".on-write") {
-                    match ctx.user.db.lookup_on_write(path.as_ref()) {
-                        Err(_) | Ok(None) => Value::Error(Chars::from("#REF")),
-                        Ok(Some(v)) => v,
-                    }
+        macro_rules! or_ref {
+            ($e:expr) => {
+                match $e {
+                    Some(e) => e,
+                    None => return Value::Error(Chars::from("#REF")),
+                }
+            };
+        }
+        let path = or_ref!(path);
+        let is_fpath = path.ends_with(".formula");
+        let is_wpath = path.ends_with(".on-write");
+        let dbpath = if is_fpath || is_wpath {
+            or_ref!(Path::basename(path))
+        } else {
+            path.as_ref()
+        };
+        match or_ref!(ctx.user.db.lookup(dbpath).ok().flatten()) {
+            Datum::Data(v) => v,
+            Datum::Formula(fv, wv) => {
+                if is_fpath {
+                    fv
+                } else if is_wpath {
+                    wv
                 } else {
-                    match ctx.user.db.lookup_data(path.as_ref()) {
-                        Err(_) | Ok(None) => Value::Error(Chars::from("#REF")),
-                        Ok(Some(v)) => v,
+                    match or_ref!(ctx.user.by_path.get(dbpath)) {
+                        Published::Data(_) => return Value::Error(Chars::from("#REF")),
+                        Published::Formula(fifo) => {
+                            or_ref!(ctx.user.publisher.current(&fifo.data.id()))
+                        }
                     }
                 }
             }
@@ -421,7 +435,6 @@ impl Container {
             cfg: ccfg,
             locked: BTreeSet::new(),
             ctx,
-            compiled: HashMap::with_hasher(FxBuildHasher::default()),
             sub_updates,
             write_updates_tx,
             write_updates_rx,
@@ -430,6 +443,7 @@ impl Container {
             api,
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
+            compiled: HashMap::with_hasher(FxBuildHasher::default()),
         })
     }
 
@@ -480,7 +494,8 @@ impl Container {
         let formula_node = Node::compile(&mut self.ctx, expr);
         let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
         let value = formula_node.current().unwrap_or(Value::Null);
-        self.compiled.insert(expr_id, Compiled::Formula { node: formula_node, data_id });
+        let c = Compiled::Formula { node: formula_node, data_id };
+        self.compiled.insert(expr_id, c);
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
         *fifo.expr_id.lock() = expr_id;
         *fifo.on_write_expr_id.lock() = on_write_expr_id;
@@ -526,22 +541,24 @@ impl Container {
             self.locked.insert(path);
         }
         let mut batch = self.ctx.user.publisher.start_batch();
-        if !self.cfg.sparse {
-            for res in self.ctx.user.db.data_paths() {
-                let path = check_path(&self.cfg.base_path, res?)?;
-                let _: Result<()> = self.publish_requests.advertise(path);
+        for res in self.ctx.user.db.iter() {
+            let (path, kind, raw) = res?;
+            let path = check_path(&self.cfg.base_path, path)?;
+            match kind {
+                DatumKind::Data => {
+                    if !self.cfg.sparse {
+                        let _: Result<()> = self.publish_requests.advertise(path);
+                    }
+                }
+                DatumKind::Formula => match Datum::decode(&mut &*raw)? {
+                    Datum::Data(_) => unreachable!(),
+                    Datum::Formula(fv, wv) => {
+                        let _: Result<()> =
+                            self.publish_formula(path, &mut batch, fv, wv);
+                    }
+                },
+                DatumKind::Invalid => (),
             }
-        }
-        for (fres, ores) in self.ctx.user.db.formulas().zip(self.ctx.user.db.on_writes())
-        {
-            let (fpath, fvalue) = fres?;
-            let (opath, ovalue) = ores?;
-            if fpath != opath {
-                bail!("mismatching formula/on-write pair")
-            }
-            let path = check_path(&self.cfg.base_path, fpath)?;
-            // CR estokes: log errors
-            let _: Result<()> = self.publish_formula(path, &mut batch, fvalue, ovalue);
         }
         Ok(batch.commit(self.cfg.timeout.map(Duration::from_secs)).await)
     }
@@ -639,10 +656,8 @@ impl Container {
                 *expr_id = expr.id;
                 let node = Node::compile(&mut self.ctx, expr);
                 let dv = node.current().unwrap_or(Value::Null);
-                self.compiled.insert(
-                    *expr_id,
-                    Compiled::Formula { node, data_id: fifo.data.id() },
-                );
+                let c = Compiled::Formula { node, data_id: fifo.data.id() };
+                self.compiled.insert(*expr_id, c);
                 dv
             }
             Err(e) => {
@@ -747,8 +762,9 @@ impl Container {
                 if !locked {
                     let name = Path::basename(&path);
                     if name != Some(".formula") && name != Some(".on-write") {
-                        let val = match self.ctx.user.db.lookup_data(path.as_ref()) {
-                            Ok(Some(v)) => v,
+                        let val = match self.ctx.user.db.lookup(path.as_ref()) {
+                            Ok(Some(Datum::Data(v))) => v,
+                            Ok(Some(Datum::Formula(_, _))) => unreachable!(),
                             Err(_) | Ok(None) => {
                                 let _: Result<_, _> = self.ctx.user.db.set_data(
                                     false,
@@ -936,9 +952,7 @@ impl Container {
             });
         }
         match req.kind {
-            RpcRequestKind::Delete(path) => {
-                reply(req.reply, self.delete_path(path))
-            }
+            RpcRequestKind::Delete(path) => reply(req.reply, self.delete_path(path)),
             RpcRequestKind::DeleteSubtree(path) => {
                 reply(req.reply, self.delete_subtree(path))
             }
@@ -1057,7 +1071,7 @@ impl Container {
                             to_chars(v),
                         );
                     }
-                }
+                },
                 UpdateKind::Inserted(v) => {
                     if self.ctx.user.by_path.contains_key(&path) {
                         self.remove_deleted_published(batch, &path);
