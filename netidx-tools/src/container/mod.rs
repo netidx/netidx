@@ -98,6 +98,7 @@ impl Published {
     }
 }
 
+#[derive(Debug)]
 struct UserEv(Path, Value);
 
 enum LcEvent {
@@ -238,6 +239,7 @@ impl Ctx for Lc {
 }
 
 struct Ref {
+    id: ExprId,
     path: Option<Chars>,
     current: Value,
 }
@@ -301,14 +303,48 @@ impl Ref {
             | vm::Event::Variable(_, _) => None,
         }
     }
+
+    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Chars>) {
+        if let Some(path) = self.path.take() {
+            let path = Path::from(path);
+            ctx.user
+                .refs
+                .entry(path.clone())
+                .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+                .remove(&self.id);
+            ctx.user
+                .forward_refs
+                .entry(self.id)
+                .or_insert_with(Refs::new)
+                .refs
+                .remove(&path);
+        }
+        if let Some(path) = path.clone() {
+            let path = Path::from(path);
+            ctx.user
+                .refs
+                .entry(path.clone())
+                .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+                .insert(self.id);
+            ctx.user
+                .forward_refs
+                .entry(self.id)
+                .or_insert_with(Refs::new)
+                .refs
+                .insert(path.clone());
+        }
+        self.path = path;
+    }
 }
 
 impl Register<Lc, UserEv> for Ref {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _| {
+        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
             let path = Ref::get_path(from);
             let current = Ref::get_current(ctx, &path);
-            Box::new(Ref { path, current })
+            let mut t = Box::new(Ref { id, path: None, current });
+            t.set_ref(ctx, path);
+            t
         });
         ctx.functions.insert("ref".into(), f);
     }
@@ -330,7 +366,7 @@ impl Apply<Lc, UserEv> for Ref {
                 None => self.apply_ev(event),
                 Some(new_path) => {
                     if new_path != self.path {
-                        self.path = new_path;
+                        self.set_ref(ctx, new_path);
                         match self.apply_ev(event) {
                             v @ Some(_) => v,
                             None => {

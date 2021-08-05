@@ -74,6 +74,7 @@ impl DbgCtx {
     }
 }
 
+#[derive(Debug)]
 pub enum Event<E> {
     Variable(Chars, Value),
     Netidx(SubId, Value),
