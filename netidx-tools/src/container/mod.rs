@@ -126,6 +126,7 @@ struct Lc {
     publisher: Publisher,
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     var_updates: Pooled<Vec<(Chars, Value)>>,
+    ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
     by_path: HashMap<Path, Published>,
     events: mpsc::UnboundedSender<LcEvent>,
@@ -164,6 +165,7 @@ impl Lc {
             publisher,
             sub_updates,
             var_updates: VARS.take(),
+            ref_updates: REFS.take(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             events,
@@ -453,7 +455,6 @@ struct Container {
     publish_events: mpsc::UnboundedReceiver<PEvent>,
     publish_requests: DefaultHandle,
     api: rpcs::RpcApi,
-    changed: Pooled<Vec<(Path, Value)>>,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
     rpcs: FxHashMap<
         Path,
@@ -486,7 +487,6 @@ impl Container {
             publish_events,
             publish_requests,
             api,
-            changed: REFS.take(),
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
@@ -539,16 +539,18 @@ impl Container {
         let on_write_expr_id = on_write_expr.id;
         let formula_node = Node::compile(&mut self.ctx, expr);
         let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
-        let value = formula_node.current().unwrap_or(Value::Null);
+        let value = formula_node.current();
         let c = Compiled::Formula { node: formula_node, data_id };
         self.compiled.insert(expr_id, c);
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
         *fifo.expr_id.lock() = expr_id;
         *fifo.on_write_expr_id.lock() = on_write_expr_id;
-        fifo.data.update(batch, value.clone());
-        self.changed.push((path, value));
-        self.changed.push((src_path, Value::from(formula_txt)));
-        self.changed.push((on_write_path, Value::from(on_write_txt)));
+        if let Some(value) = value {
+            fifo.data.update(batch, value.clone());
+            self.ctx.user.ref_updates.push((path, value));
+        }
+        self.ctx.user.ref_updates.push((src_path, Value::from(formula_txt)));
+        self.ctx.user.ref_updates.push((on_write_path, Value::from(on_write_txt)));
         self.update_refs(batch);
         Ok(())
     }
@@ -615,7 +617,7 @@ impl Container {
                     if let Some(value) = node.update(&mut self.ctx, &event) {
                         if let Some(val) = self.ctx.user.by_id.get(data_id) {
                             val.val().update(batch, value.clone());
-                            self.changed.push((val.path().clone(), value));
+                            self.ctx.user.ref_updates.push((val.path().clone(), value));
                         }
                     }
                 }
@@ -627,9 +629,13 @@ impl Container {
         use mem::replace;
         let mut refs = REFIDS.take();
         let mut n = 0;
-        while n < 10 && !self.changed.is_empty() {
+        while n < 10
+            && (!self.ctx.user.ref_updates.is_empty()
+                || !self.ctx.user.var_updates.is_empty())
+        {
             // update ref() formulas
-            for (path, value) in replace(&mut self.changed, REFS.take()).drain(..) {
+            let r = REFS.take();
+            for (path, value) in replace(&mut self.ctx.user.ref_updates, r).drain(..) {
                 if let Some(expr_ids) = self.ctx.user.refs.get(&path) {
                     refs.extend(expr_ids.iter().copied());
                 }
@@ -649,7 +655,8 @@ impl Container {
             }
             n += 1;
         }
-        if !self.changed.is_empty() || !self.ctx.user.var_updates.is_empty() {
+        if !self.ctx.user.ref_updates.is_empty() || !self.ctx.user.var_updates.is_empty()
+        {
             let _: Result<_, _> = self.ctx.user.events.unbounded_send(LcEvent::Refs);
         }
     }
@@ -696,8 +703,9 @@ impl Container {
             }
         };
         fifo.data.update(batch, dv.clone());
-        self.changed.push((fifo.data_path.clone(), dv));
-        self.changed.push((fifo.src_path.clone(), Value::String(value.clone())));
+        self.ctx.user.ref_updates.push((fifo.data_path.clone(), dv));
+        let v = Value::String(value.clone());
+        self.ctx.user.ref_updates.push((fifo.src_path.clone(), v));
         Ok(self.update_refs(batch))
     }
 
@@ -719,7 +727,8 @@ impl Container {
             }
             Err(_) => (), // CR estokes: log and report to user somehow
         }
-        self.changed.push((fifo.on_write_path.clone(), Value::String(value.clone())));
+        let v = Value::String(value.clone());
+        self.ctx.user.ref_updates.push((fifo.on_write_path.clone(), v));
         Ok(self.update_refs(batch))
     }
 
@@ -1035,11 +1044,11 @@ impl Container {
                 self.ctx.user.by_id.remove(&fifo.src.id());
                 self.ctx.user.by_path.remove(&opath);
                 self.ctx.user.by_id.remove(&fifo.on_write.id());
-                self.changed.push((fpath, ref_err.clone()));
-                self.changed.push((opath, ref_err.clone()));
+                self.ctx.user.ref_updates.push((fpath, ref_err.clone()));
+                self.ctx.user.ref_updates.push((opath, ref_err.clone()));
             }
         }
-        self.changed.push((path.clone(), ref_err));
+        self.ctx.user.ref_updates.push((path.clone(), ref_err));
         self.update_refs(batch)
     }
 
@@ -1059,13 +1068,13 @@ impl Container {
                         Some(Published::Data(p)) => p.val.update(batch, v.clone()),
                         Some(Published::Formula(_)) => unreachable!(),
                     }
-                    self.changed.push((path, v));
+                    self.ctx.user.ref_updates.push((path, v));
                 }
                 UpdateKind::Inserted(v) => {
                     if self.ctx.user.by_path.contains_key(&path) {
                         self.remove_deleted_published(batch, &path);
                     }
-                    self.changed.push((path.clone(), v));
+                    self.ctx.user.ref_updates.push((path.clone(), v));
                     self.advertise_path(path);
                 }
                 UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
