@@ -750,31 +750,33 @@ impl Container {
                 let _: Result<_, _> = reply.send(());
             }
             Ok(path) => {
-                let locked = self
-                    .locked
-                    .range::<str, (Bound<&str>, Bound<&str>)>((
-                        Bound::Unbounded,
-                        Bound::Included(path.as_ref()),
-                    ))
-                    .next_back()
-                    .map(|p| Path::is_parent(p, &path))
-                    .unwrap_or(false);
-                if !locked {
-                    let name = Path::basename(&path);
-                    if name != Some(".formula") && name != Some(".on-write") {
-                        let val = match self.ctx.user.db.lookup(path.as_ref()) {
-                            Ok(Some(Datum::Data(v))) => v,
-                            Ok(Some(Datum::Formula(_, _))) => unreachable!(),
-                            Err(_) | Ok(None) => {
+                let name = Path::basename(&path);
+                if name != Some(".formula") && name != Some(".on-write") {
+                    match self.ctx.user.db.lookup(path.as_ref()) {
+                        Ok(Some(Datum::Data(v))) => {
+                            let _: Result<()> = self.publish_data(batch, path, v);
+                        }
+                        Ok(Some(Datum::Formula(_, _))) => unreachable!(),
+                        Err(_) | Ok(None) => {
+                            let locked = self
+                                .locked
+                                .range::<str, (Bound<&str>, Bound<&str>)>((
+                                    Bound::Unbounded,
+                                    Bound::Included(path.as_ref()),
+                                ))
+                                .next_back()
+                                .map(|p| Path::is_parent(p, &path))
+                                .unwrap_or(false);
+                            if !locked {
                                 let _: Result<_, _> = self.ctx.user.db.set_data(
                                     false,
                                     path.clone(),
                                     Value::Null,
                                 );
-                                Value::Null
+                                let _: Result<()> =
+                                    self.publish_data(batch, path, Value::Null);
                             }
-                        };
-                        let _: Result<()> = self.publish_data(batch, path, val);
+                        }
                     }
                 }
                 let _: Result<_, _> = reply.send(());
@@ -1127,19 +1129,29 @@ impl Container {
                     task::block_in_place(|| self.process_publish_event(r));
                 }
                 r = self.publish_requests.select_next_some() => {
-                    task::block_in_place(|| self.process_publish_request(&mut batch, r.0, r.1));
+                    task::block_in_place(|| {
+                        self.process_publish_request(&mut batch, r.0, r.1)
+                    });
                 }
                 r = self.sub_updates.select_next_some() => {
-                    task::block_in_place(|| self.process_subscriptions(&mut batch, r));
+                    task::block_in_place(|| {
+                        self.process_subscriptions(&mut batch, r)
+                    });
                 }
                 r = self.write_updates_rx.select_next_some() => {
-                    task::block_in_place(|| self.process_writes(&mut batch, r));
+                    task::block_in_place(|| {
+                        self.process_writes(&mut batch, r)
+                    });
                 }
                 r = self.api.rx.select_next_some() => {
-                    task::block_in_place(|| self.process_rpc_request(r));
+                    task::block_in_place(|| {
+                        self.process_rpc_request(r)
+                    });
                 }
                 r = self.bscript_event.select_next_some() => {
-                    task::block_in_place(|| self.process_bscript_event(&mut batch, r));
+                    task::block_in_place(|| {
+                        self.process_bscript_event(&mut batch, r)
+                    });
                 }
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
