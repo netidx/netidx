@@ -351,7 +351,7 @@ impl Register<Lc, UserEv> for Ref {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
             let path = Ref::get_path(from);
-            let current = dbg!(Ref::get_current(ctx, dbg!(&path)));
+            let current = Ref::get_current(ctx, &path);
             let mut t = Box::new(Ref { id, path: None, current });
             t.set_ref(ctx, path);
             t
