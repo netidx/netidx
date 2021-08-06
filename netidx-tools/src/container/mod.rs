@@ -351,7 +351,7 @@ impl Register<Lc, UserEv> for Ref {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
             let path = Ref::get_path(from);
-            let current = Ref::get_current(ctx, &path);
+            let current = dbg!(Ref::get_current(ctx, dbg!(&path)));
             let mut t = Box::new(Ref { id, path: None, current });
             t.set_ref(ctx, path);
             t
@@ -500,9 +500,26 @@ impl Container {
         formula_txt: Value,
         on_write_txt: Value,
     ) -> Result<()> {
+        let expr = formula_txt
+            .clone()
+            .cast_to::<Chars>()
+            .map_err(|e| anyhow!(e))
+            .and_then(|c| c.parse::<Expr>());
+        let on_write_expr = on_write_txt
+            .clone()
+            .cast_to::<Chars>()
+            .map_err(|e| anyhow!(e))
+            .and_then(|c| c.parse::<Expr>());
+        let expr_id = expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
+        let on_write_expr_id =
+            on_write_expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
+        let formula_node = expr.map(|e| Node::compile(&mut self.ctx, e));
+        let on_write_node = on_write_expr.map(|e| Node::compile(&mut self.ctx, e));
+        let value =
+            formula_node.as_ref().ok().and_then(|n| n.current()).unwrap_or(Value::Null);
         let src_path = path.append(".formula");
         let on_write_path = path.append(".on-write");
-        let data = self.ctx.user.publisher.publish(path.clone(), Value::Null)?;
+        let data = self.ctx.user.publisher.publish(path.clone(), value.clone())?;
         let src =
             self.ctx.user.publisher.publish(src_path.clone(), formula_txt.clone())?;
         let on_write = self
@@ -523,8 +540,8 @@ impl Container {
             src,
             on_write_path: on_write_path.clone(),
             on_write,
-            expr_id: Mutex::new(ExprId::new()),
-            on_write_expr_id: Mutex::new(ExprId::new()),
+            expr_id: Mutex::new(expr_id),
+            on_write_expr_id: Mutex::new(expr_id),
         });
         let published = Published::Formula(fifo.clone());
         self.ctx.user.by_id.insert(data_id, published.clone());
@@ -533,22 +550,15 @@ impl Container {
         self.ctx.user.by_path.insert(src_path.clone(), published.clone());
         self.ctx.user.by_id.insert(on_write_id, published.clone());
         self.ctx.user.by_path.insert(on_write_path.clone(), published);
-        let expr = formula_txt.clone().cast_to::<Chars>()?.parse::<Expr>()?;
-        let on_write_expr = on_write_txt.clone().cast_to::<Chars>()?.parse::<Expr>()?;
-        let expr_id = expr.id;
-        let on_write_expr_id = on_write_expr.id;
-        let formula_node = Node::compile(&mut self.ctx, expr);
-        let on_write_node = Node::compile(&mut self.ctx, on_write_expr);
-        let value = formula_node.current();
+        let formula_node = formula_node?;
+        let on_write_node = on_write_node?;
         let c = Compiled::Formula { node: formula_node, data_id };
         self.compiled.insert(expr_id, c);
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
         *fifo.expr_id.lock() = expr_id;
         *fifo.on_write_expr_id.lock() = on_write_expr_id;
-        if let Some(value) = value {
-            fifo.data.update(batch, value.clone());
-            self.ctx.user.ref_updates.push((path, value));
-        }
+        fifo.data.update(batch, value.clone());
+        self.ctx.user.ref_updates.push((path, value));
         self.ctx.user.ref_updates.push((src_path, Value::from(formula_txt)));
         self.ctx.user.ref_updates.push((on_write_path, Value::from(on_write_txt)));
         self.update_refs(batch);
