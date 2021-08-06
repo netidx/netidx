@@ -475,7 +475,7 @@ impl Drop for DefaultHandle {
     fn drop(&mut self) {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
-            pb.default.remove(self.path.as_ref());
+            pb.default.remove(&self.path);
             pb.to_unpublish.insert(self.path.clone());
         }
     }
@@ -880,7 +880,7 @@ impl Publisher {
         if pb.stop.is_none() {
             bail!("publisher is dead")
         }
-        pb.to_unpublish.remove(base.as_ref());
+        pb.to_unpublish.remove(&base);
         pb.to_publish_default
             .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
         pb.default.insert(base.clone(), tx);
@@ -985,8 +985,8 @@ impl Publisher {
     }
 
     /// Retreive the Id of path if it is published
-    pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
-        self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
+    pub fn id(&self, path: &Path) -> Option<Id> {
+        self.0.lock().by_path.get(path).map(|id| *id)
     }
 
     /// Get the `Path` of a published value.
@@ -1084,9 +1084,9 @@ fn subscribe(
 ) -> Result<()> {
     match t.by_path.get(&path) {
         None => {
-            let mut r = t.default.range_mut::<str, (Bound<&str>, Bound<&str>)>((
+            let mut r = t.default.range_mut::<Path, (Bound<&Path>, Bound<&Path>)>((
                 Bound::Unbounded,
-                Bound::Included(path.as_ref()),
+                Bound::Included(&path),
             ));
             loop {
                 match r.next_back() {
@@ -1461,7 +1461,7 @@ async fn client_loop(
                         {
                             let mut pb = t.0.lock();
                             for (path, perms) in deferred_subs_batch.drain(..) {
-                                if !pb.by_path.contains_key(path.as_ref()) {
+                                if !pb.by_path.contains_key(&path) {
                                     let m = publisher::From::NoSuchValue(path);
                                     con.queue_send(&m)?
                                 } else {
