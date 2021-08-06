@@ -142,57 +142,57 @@ impl Store {
         t
     }
 
-    fn remove_parents(&mut self, mut p: &str) {
+    fn remove_parents(&mut self, mut p: Path) {
         let mut save = false;
         loop {
-            let n = Path::levels(p);
+            let n = Path::levels(&p);
             if !save {
-                save = p == "/"
-                    || self.by_path.contains_key(p)
-                    || self.children.contains_key(p)
+                save = &*p == "/"
+                    || self.by_path.contains_key(&p)
+                    || self.children.contains_key(&p)
                     || self
                         .by_level
                         .get(&(n + 1))
                         .map(|l| {
-                            let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
-                                Excluded(p),
+                            let mut r = l.range::<Path, (Bound<&Path>, Bound<&Path>)>((
+                                Excluded(&p),
                                 Unbounded,
                             ));
-                            r.next().map(|(o, _)| Path::is_parent(p, o)).unwrap_or(false)
+                            r.next().map(|(o, _)| Path::is_parent(&*p, o)).unwrap_or(false)
                         })
                         .unwrap_or(false);
             }
             if save {
                 let m = self.by_level.entry(n).or_insert_with(BTreeMap::new);
-                if let Some(cn) = m.get_mut(p) {
+                if let Some(cn) = m.get_mut(&p) {
                     **cn += 1;
                 }
             } else {
                 self.by_level.get_mut(&n).into_iter().for_each(|l| {
-                    l.remove(p);
+                    l.remove(&p);
                 })
             }
-            if p == "/" {
+            if &*p == "/" {
                 break;
             }
-            p = Path::dirname(p).unwrap_or("/");
+            p = Path::from(Path::dirname(&*p).unwrap_or("/"));
         }
     }
 
-    fn add_parents(&mut self, mut p: &str) {
+    fn add_parents(&mut self, mut p: Path) {
         loop {
-            p = Path::dirname(p).unwrap_or("/");
-            let n = Path::levels(p);
+            p = Path::from(Path::dirname(&*p).unwrap_or("/"));
+            let n = Path::levels(&*p);
             let l = self.by_level.entry(n).or_insert_with(BTreeMap::new);
-            match l.get_mut(p) {
+            match l.get_mut(&p) {
                 Some(cn) => {
                     **cn += 1;
                 }
                 None => {
-                    l.insert(Path::from(String::from(p)), Z64(1));
+                    l.insert(p.clone(), Z64(1));
                 }
             }
-            if p == "/" {
+            if &*p == "/" {
                 break;
             }
         }
