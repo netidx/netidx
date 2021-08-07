@@ -12,7 +12,7 @@ use crate::{
     utils::{self, Addr},
 };
 use bytes::Bytes;
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use immutable_chunkmap::set::Set;
 use log::debug;
 use std::{
@@ -29,8 +29,7 @@ use std::{
 };
 
 lazy_static! {
-    static ref SPN_POOL: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>> =
-        Pool::new(256, 100);
+    static ref SPN_POOL: Pool<FxHashMap<SocketAddr, Chars>> = Pool::new(256, 100);
     static ref SIGNED_ADDRS_POOL: Pool<Vec<(SocketAddr, Bytes)>> = Pool::new(256, 100);
     pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
     pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
@@ -47,7 +46,7 @@ pub(crate) const GC_THRESHOLD: usize = 100_000;
 #[derive(Debug)]
 struct HCAddrs {
     ops: usize,
-    addrs: HashMap<Set<Addr>, (), FxBuildHasher>,
+    addrs: FxHashMap<Set<Addr>, ()>,
 }
 
 impl HCAddrs {
@@ -103,11 +102,11 @@ fn column_path_parts(path: &Path) -> Option<(Path, Path)> {
 
 #[derive(Debug)]
 pub(crate) struct Store {
-    by_path: HashMap<Path, Set<Addr>>,
-    by_path_flags: HashMap<Path, u16>,
-    by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
-    by_level: HashMap<usize, BTreeMap<Path, Z64>, FxBuildHasher>,
-    columns: HashMap<Path, HashMap<Path, Z64>>,
+    by_path: FxHashMap<Path, Set<Addr>>,
+    by_path_flags: FxHashMap<Path, u16>,
+    by_addr: FxHashMap<SocketAddr, FxHashSet<Path>>,
+    by_level: FxHashMap<usize, BTreeMap<Path, Z64>>,
+    columns: FxHashMap<Path, FxHashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
@@ -120,11 +119,11 @@ impl Store {
         children: BTreeMap<Path, Referral>,
     ) -> Self {
         let mut t = Store {
-            by_path: HashMap::new(),
-            by_path_flags: HashMap::new(),
+            by_path: HashMap::with_hasher(FxBuildHasher::default()),
+            by_path_flags: HashMap::with_hasher(FxBuildHasher::default()),
             by_addr: HashMap::with_hasher(FxBuildHasher::default()),
             by_level: HashMap::with_hasher(FxBuildHasher::default()),
-            columns: HashMap::new(),
+            columns: HashMap::with_hasher(FxBuildHasher::default()),
             defaults: BTreeSet::new(),
             parent,
             children,
@@ -295,7 +294,10 @@ impl Store {
         default: bool,
         flags: Option<u16>,
     ) {
-        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
+        self.by_addr
+            .entry(addr)
+            .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+            .insert(path.clone());
         let addrs = self.by_path.entry(path.clone()).or_insert_with(Set::new);
         let len = addrs.len();
         *addrs = self.addrs.add_address(addrs, Addr(addr));
@@ -309,10 +311,7 @@ impl Store {
             self.add_column(&path);
             self.add_parents(path.clone());
             let n = Path::levels(&path);
-            self.by_level
-                .entry(n)
-                .or_insert_with(BTreeMap::new)
-                .insert(path, Z64(1));
+            self.by_level.entry(n).or_insert_with(BTreeMap::new).insert(path, Z64(1));
         }
     }
 
@@ -356,9 +355,9 @@ impl Store {
         }
     }
 
-    pub(crate) fn published_for_addr(&self, addr: &SocketAddr) -> HashSet<Path> {
+    pub(crate) fn published_for_addr(&self, addr: &SocketAddr) -> FxHashSet<Path> {
         match self.by_addr.get(addr) {
-            None => HashSet::new(),
+            None => HashSet::with_hasher(FxBuildHasher::default()),
             Some(paths) => paths.clone(),
         }
     }

@@ -7,6 +7,7 @@ use futures::{
     select_biased,
     stream::StreamExt,
 };
+use fxhash::{FxHashMap, FxBuildHasher};
 use glib;
 use log::{info, warn};
 use netidx::{
@@ -107,8 +108,10 @@ struct CtxInner {
     view_path: Option<Path>,
     rx_view: Option<mpsc::Receiver<RawBatch>>,
     dv_view: Option<Dval>,
-    rpcs:
-        HashMap<Path, (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>)>,
+    rpcs: FxHashMap<
+        Path,
+        (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
+    >,
     changed: Pooled<Vec<(SubId, Value)>>,
     refreshing: bool,
 }
@@ -131,7 +134,7 @@ impl CtxInner {
             view_path: None,
             rx_view: None,
             dv_view: None,
-            rpcs: HashMap::new(),
+            rpcs: HashMap::with_hasher(FxBuildHasher::default()),
             changed: UPDATES.take(),
             refreshing: false,
         };

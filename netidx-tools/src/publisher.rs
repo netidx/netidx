@@ -3,7 +3,7 @@ use futures::{
     channel::mpsc::{self, Receiver},
     prelude::*,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap};
 use log::{error, warn};
 use netidx::{
     config::Config,
@@ -33,7 +33,7 @@ macro_rules! tryc {
     };
 }
 
-type ById = Arc<Mutex<HashMap<Id, Arc<Val>, FxBuildHasher>>>;
+type ById = Arc<Mutex<FxHashMap<Id, Arc<Val>>>>;
 
 async fn handle_writes_loop(
     by_id: ById,
@@ -69,7 +69,8 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = timeout.map(Duration::from_secs);
-        let mut by_path: HashMap<Path, Arc<Val>> = HashMap::new();
+        let mut by_path: FxHashMap<Path, Arc<Val>> =
+            HashMap::with_hasher(FxBuildHasher::default());
         let by_id: ById =
             Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
         let publisher =
@@ -78,7 +79,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
         let mut buf = String::new();
         let mut stdin = BufReader::new(stdin());
         fn publish(
-            by_path: &mut HashMap<Path, Arc<Val>>,
+            by_path: &mut FxHashMap<Path, Arc<Val>>,
             by_id: &ById,
             publisher: &Publisher,
             path: Path,

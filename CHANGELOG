@@ -1,5 +1,28 @@
 * 0.9.0 netidx, netidx-tools, netidx-browser:
 
+  - Paths are now globally hashconsed. This has a couple of
+    implications.
+
+    - hashing and equality now operate on the pointer and not the
+      actual characters. As a result lookups of paths in
+      HashMaps/HashSets is 5-10x faster than it was before, and it is
+      safe to use FxHash for paths even if they might come from a
+      malicious source. The hashconsing uses siphash to prevent
+      hashtable collision attacks.
+
+    - There will only ever be one allocation for any given path in a
+      process. This was mostly true before, however now it is
+      universally true. As a result there may be some minor memory
+      savings.
+
+    - Path::from takes a lock. Initially a read lock, and if the path
+      is novel, then it upgrades to a write lock.
+
+    - Path no longer implements Borrow<str>, and it is no longer
+      possible to look things up in HashMap<Path, T> with a &str
+      key. In this case you must use &Path, and in some cases that
+      means you must call Path::from.
+
   - Publisher API reworked unfortunatly these are BREAKING
     changes. The rework is meant to solve three problems with the
     previous api.

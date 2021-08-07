@@ -27,7 +27,7 @@ use futures::{
     select_biased,
     stream::SelectAll,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
@@ -197,13 +197,13 @@ static MAX_CLIENTS: usize = 768;
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(100, 10_000);
-    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(10, 10_000);
-    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
-    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
+    static ref TOPUB: Pool<FxHashMap<Path, Option<u16>>> = Pool::new(10, 10_000);
+    static ref TOUPUB: Pool<FxHashSet<Path>> = Pool::new(5, 10_000);
+    static ref TOUSUB: Pool<FxHashMap<Id, Subscribed>> = Pool::new(5, 10_000);
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
     static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
         Pool::new(100, 10_000);
-    static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
+    static ref BATCHMSGS: Pool<FxHashMap<ClId, Pooled<Vec<ToClientMsg>>>> =
         Pool::new(100, 100);
 
     // estokes 2021: This is reasonable because there will never be
@@ -547,7 +547,7 @@ impl ToClientMsg {
 
 struct Client {
     msg_queue: MsgQ,
-    subscribed: HashMap<Id, Permissions, FxBuildHasher>,
+    subscribed: FxHashMap<Id, Permissions>,
 }
 
 struct Published {
@@ -559,28 +559,23 @@ struct Published {
 struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
-    clients: HashMap<ClId, Client, FxBuildHasher>,
+    clients: FxHashMap<ClId, Client>,
     hc_subscribed: HashMap<BTreeSet<ClId>, Subscribed, FxBuildHasher>,
-    by_path: HashMap<Path, Id>,
-    by_id: HashMap<Id, Published, FxBuildHasher>,
-    destroy_on_idle: HashSet<Id, FxBuildHasher>,
-    on_write_chans: HashMap<
-        ChanWrap<Pooled<Vec<WriteRequest>>>,
-        (ChanId, HashSet<Id>),
-        FxBuildHasher,
-    >,
+    by_path: FxHashMap<Path, Id>,
+    by_id: FxHashMap<Id, Published>,
+    destroy_on_idle: FxHashSet<Id>,
+    on_write_chans: FxHashMap<ChanWrap<Pooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
     on_event_chans: Vec<UnboundedSender<Event>>,
-    on_write:
-        HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
+    on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
-    advertised: HashMap<Path, HashSet<Path>>,
-    to_publish: Pooled<HashMap<Path, Option<u16>>>,
-    to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
-    to_unpublish: Pooled<HashSet<Path>>,
-    to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
+    advertised: FxHashMap<Path, HashSet<Path>>,
+    to_publish: Pooled<FxHashMap<Path, Option<u16>>>,
+    to_publish_default: Pooled<FxHashMap<Path, Option<u16>>>,
+    to_unpublish: Pooled<FxHashSet<Path>>,
+    to_unsubscribe: Pooled<FxHashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
-    wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
+    wait_clients: FxHashMap<Id, Vec<oneshot::Sender<()>>>,
     wait_any_client: Vec<oneshot::Sender<()>>,
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
 }
@@ -728,16 +723,16 @@ impl Publisher {
             stop: Some(stop),
             clients: HashMap::with_hasher(FxBuildHasher::default()),
             hc_subscribed: HashMap::with_hasher(FxBuildHasher::default()),
-            by_path: HashMap::new(),
+            by_path: HashMap::with_hasher(FxBuildHasher::default()),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
             destroy_on_idle: HashSet::with_hasher(FxBuildHasher::default()),
             on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
             on_event_chans: Vec::new(),
             on_write: HashMap::with_hasher(FxBuildHasher::default()),
             resolver,
-            advertised: HashMap::new(),
+            advertised: HashMap::with_hasher(FxBuildHasher::default()),
             to_publish: TOPUB.take(),
-            to_publish_default: TOPUB.take(),
+            to_publish_default: TOPUB.take(), 
             to_unpublish: TOUPUB.take(),
             to_unsubscribe: TOUSUB.take(),
             publish_triggered: false,
@@ -1175,10 +1170,9 @@ fn write(
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
-    write_batches: &mut HashMap<
+    write_batches: &mut FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
     >,
     id: Id,
     v: Value,
@@ -1247,12 +1241,11 @@ async fn handle_batch(
     client: ClId,
     msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel<ServerCtx>,
-    write_batches: &mut HashMap<
+    write_batches: &mut FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
     >,
-    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     auth: &Auth,
     now: u64,
     deferred_subs: &mut DeferredSubs,
@@ -1377,7 +1370,7 @@ fn client_arrived(publisher: &PublisherWeak) {
 // CR estokes: Implement periodic rekeying to improve security
 async fn hello_client(
     publisher: &PublisherWeak,
-    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     con: &mut Channel<ServerCtx>,
     auth: &Auth,
 ) -> Result<()> {
@@ -1422,7 +1415,7 @@ async fn hello_client(
 
 async fn client_loop(
     t: PublisherWeak,
-    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     client: ClId,
     updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
     s: TcpStream,
@@ -1430,10 +1423,9 @@ async fn client_loop(
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::To> = Vec::new();
-    let mut write_batches: HashMap<
+    let mut write_batches: FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
     > = HashMap::with_hasher(FxBuildHasher::default());
     let mut updates = updates.fuse();
     let mut hb = time::interval(HB);

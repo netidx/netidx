@@ -27,10 +27,10 @@ use futures::{
     prelude::*,
     select,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxHashMap, FxHashSet, FxBuildHasher};
 use log::info;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     hash::{BuildHasher, Hash, Hasher},
     iter,
     net::SocketAddr,
@@ -50,8 +50,8 @@ lazy_static! {
     static ref FROM_READ_POOL: Pool<ReadR> = Pool::new(640, 150000);
     static ref TO_WRITE_POOL: Pool<WriteB> = Pool::new(640, 15000);
     static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640, 15000);
-    static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10000);
-    static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10000);
+    static ref COLS_HPOOL: Pool<FxHashMap<Path, Z64>> = Pool::new(32, 10000);
+    static ref PATH_HPOOL: Pool<FxHashSet<Path>> = Pool::new(32, 10000);
     static ref PATH_BPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(32, 1024);
     static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000, 1024);
     static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000, 1024);
@@ -72,7 +72,7 @@ struct WriteRequest {
 struct Shard {
     read: UnboundedSender<(ReadRequest, oneshot::Sender<Pooled<ReadR>>)>,
     write: UnboundedSender<(WriteRequest, oneshot::Sender<Pooled<WriteR>>)>,
-    internal: UnboundedSender<(SocketAddr, oneshot::Sender<HashSet<Path>>)>,
+    internal: UnboundedSender<(SocketAddr, oneshot::Sender<FxHashSet<Path>>)>,
 }
 
 impl Shard {

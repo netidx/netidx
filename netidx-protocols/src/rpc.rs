@@ -61,8 +61,8 @@ pub mod server {
         publisher: Publisher,
         call: Arc<Val>,
         _doc: Val,
-        args: HashMap<Id, Arg, FxBuildHasher>,
-        pending: HashMap<ClId, PendingCall, FxBuildHasher>,
+        args: FxHashMap<Id, Arg>,
+        pending: FxHashMap<ClId, PendingCall>,
         handler: Handler,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
@@ -74,7 +74,7 @@ pub mod server {
             static GC_FREQ: Duration = Duration::from_secs(1);
             static GC_THRESHOLD: usize = 128;
             fn gc_pending(
-                pending: &mut HashMap<ClId, PendingCall, FxBuildHasher>,
+                pending: &mut FxHashMap<ClId, PendingCall>,
                 now: Instant,
             ) {
                 static STALE: Duration = Duration::from_secs(60);
@@ -162,6 +162,7 @@ pub mod server {
 
         # Example
         ```no_run
+        use fxhash::FxHashMap;
         use netidx::{path::Path, subscriber::Value, chars::Chars};
         use netidx_protocols::rpc::server::Proc;
         use std::{sync::Arc, collections::HashMap};
@@ -174,7 +175,7 @@ pub mod server {
                 Value::from("echos it's argument"),
                 vec![(Arc::from("arg"), (Value::Null, Value::from("argument to echo")))]
                     .into_iter()
-                    .collect::<HashMap<_, _>>(),
+                    .collect::<FxHashMap<_, _>>(),
                 Arc::new(move |_, mut args| {
                     Box::pin(async move {
                         match args.remove("arg") {
@@ -208,7 +209,7 @@ pub mod server {
             publisher: &Publisher,
             name: Path,
             doc: Value,
-            args: HashMap<Arc<str>, (Value, Value)>,
+            args: FxHashMap<Arc<str>, (Value, Value)>,
             handler: Handler,
         ) -> Result<Proc> {
             let (tx_ev, rx_ev) = mpsc::channel(3);
@@ -245,7 +246,7 @@ pub mod server {
                     )?;
                     Ok((_value.id(), Arg { name: arg, _value, _doc }))
                 })
-                .collect::<Result<HashMap<Id, Arg, FxBuildHasher>>>()?;
+                .collect::<Result<FxHashMap<Id, Arg>>>()?;
             let inner = ProcInner {
                 publisher: publisher.clone(),
                 call,
@@ -284,7 +285,7 @@ pub mod client {
         sid: SubscriberId,
         lock: Option<Arc<AsyncMutex<()>>>,
         call: Dval,
-        args: HashMap<String, Dval>,
+        args: FxHashMap<String, Dval>,
     }
 
     impl Drop for ProcInner {
@@ -336,7 +337,7 @@ pub mod client {
                 true,
                 iter::once(Glob::new(Chars::from(format!("{}/*/val", name.clone())))?),
             )?;
-            let mut args = HashMap::new();
+            let mut args = HashMap::with_hasher(FxBuildHasher::default());
             let mut batches = subscriber.resolver().list_matching(&pat).await?;
             for mut batch in batches.drain(..) {
                 for arg_path in batch.drain(..) {

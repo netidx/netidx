@@ -4,7 +4,7 @@ use super::{
 };
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
@@ -49,8 +49,8 @@ struct RaeifiedTableInner {
     style: StyleContext,
     selected_path: Label,
     store: ListStore,
-    by_id: RefCell<HashMap<SubId, Subscription>>,
-    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
+    by_id: RefCell<FxHashMap<SubId, Subscription>>,
+    subscribed: RefCell<FxHashMap<String, FxHashSet<u32>>>,
     focus_column: RefCell<Option<TreeViewColumn>>,
     focus_row: RefCell<Option<String>>,
     descriptor: resolver::Table,
@@ -216,7 +216,7 @@ fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
     match mode {
         ColumnMode::Hide => filter_cols(cols, descr, |x| x),
         ColumnMode::Exactly => {
-            let order: HashMap<Path, usize> = HashMap::from_iter(
+            let order: FxHashMap<Path, usize> = HashMap::from_iter(
                 cols.iter().cloned().map(Path::from).enumerate().map(|(i, c)| (c, i)),
             );
             filter_cols(&cols, descr, |x| !x);
@@ -301,8 +301,8 @@ impl RaeifiedTable {
             on_select,
             on_activate,
             on_edit,
-            by_id: RefCell::new(HashMap::new()),
-            subscribed: RefCell::new(HashMap::new()),
+            by_id: RefCell::new(HashMap::with_hasher(FxBuildHasher::default())),
+            subscribed: RefCell::new(HashMap::with_hasher(FxBuildHasher::default())),
             focus_column: RefCell::new(None),
             focus_row: RefCell::new(None),
             sort_column: Cell::new(None),
@@ -653,7 +653,10 @@ impl RaeifiedTable {
         let maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
             let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
-                subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
+                subscribed
+                    .entry(row_name.into())
+                    .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+                    .insert(id);
                 let p = self.0.path.append(row_name);
                 let p = if self.0.vector_mode {
                     p
