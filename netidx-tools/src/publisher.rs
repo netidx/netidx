@@ -18,8 +18,7 @@ use std::{collections::HashMap, convert::From, sync::Arc, time::Duration};
 use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
-    task,
-    signal,
+    signal, task,
 };
 
 macro_rules! tryc {
@@ -82,10 +81,9 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
             by_path: &mut HashMap<Path, Arc<Val>>,
             by_id: &ById,
             publisher: &Publisher,
-            path: &str,
+            path: Path,
             value: Value,
         ) -> Result<Arc<Val>> {
-            let path = Path::from(String::from(path));
             let val = Arc::new(publisher.publish(path.clone(), value)?);
             by_path.insert(path, val.clone());
             let id = val.id();
@@ -109,13 +107,13 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 Ok(_) => (),
             }
             if buf.starts_with("DROP|") {
-                let path = buf.trim_start_matches("DROP|").trim();
-                if let Some(val) = by_path.remove(path) {
+                let path = Path::from(buf.trim_start_matches("DROP|").trim());
+                if let Some(val) = by_path.remove(&path) {
                     by_id.lock().remove(&val.id());
                 }
             } else if buf.starts_with("WRITE|") {
-                let path = buf.trim_start_matches("WRITE|").trim();
-                match by_path.get(path) {
+                let path = Path::from(buf.trim_start_matches("WRITE|").trim());
+                match by_path.get(&path) {
                     Some(val) => {
                         publisher.writes(val.id(), writes_tx.clone());
                     }
@@ -129,10 +127,10 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                 }
             } else {
                 let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
-                let path = tryc!(
+                let path = Path::from(tryc!(
                     "missing path",
                     m.next().ok_or_else(|| anyhow!("missing path"))
-                );
+                ));
                 let typ_or_null = tryc!(
                     "missing type",
                     m.next().ok_or_else(|| anyhow!("missing type"))
@@ -147,7 +145,7 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                     );
                     tryc!("parse val", typ.parse(v))
                 };
-                match by_path.get(path) {
+                match by_path.get(&path) {
                     Some(p) => {
                         p.update(&mut batch, val);
                     }

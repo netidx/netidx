@@ -1031,17 +1031,16 @@ mod record {
         fn new(globs: &Vec<Glob>) -> CTS {
             let mut btm = BTreeMap::new();
             for glob in globs {
-                let base = glob.base();
+                let base = Path::from(glob.base());
                 match btm
-                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                    .range::<Path, (Bound<&Path>, Bound<&Path>)>((
                         Bound::Unbounded,
-                        Bound::Excluded(base),
+                        Bound::Excluded(&base),
                     ))
                     .next_back()
                 {
-                    Some((p, _)) if Path::is_parent(p, base) => (),
+                    Some((p, _)) if Path::is_parent(p, &base) => (),
                     None | Some(_) => {
-                        let base = Path::from(Arc::from(base));
                         let ct = ChangeTracker::new(base.clone());
                         btm.insert(base, ct);
                     }

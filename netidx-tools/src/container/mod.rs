@@ -250,19 +250,19 @@ impl Ctx for Lc {
 
 struct Ref {
     id: ExprId,
-    path: Option<Chars>,
+    path: Option<Path>,
     current: Value,
 }
 
 impl Ref {
-    fn get_path(from: &[Node<Lc, UserEv>]) -> Option<Chars> {
+    fn get_path(from: &[Node<Lc, UserEv>]) -> Option<Path> {
         match from {
-            [path] => path.current().and_then(|v| v.get_as::<Chars>()),
+            [path] => path.current().and_then(|v| v.get_as::<Chars>()).map(Path::from),
             _ => None,
         }
     }
 
-    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<Chars>) -> Value {
+    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<Path>) -> Value {
         macro_rules! or_ref {
             ($e:expr) => {
                 match $e {
@@ -275,11 +275,11 @@ impl Ref {
         let is_fpath = path.ends_with(".formula");
         let is_wpath = path.ends_with(".on-write");
         let dbpath = if is_fpath || is_wpath {
-            or_ref!(Path::basename(path))
+            Path::from(or_ref!(Path::basename(path)))
         } else {
-            path.as_ref()
+            path.clone()
         };
-        match or_ref!(ctx.user.db.lookup(dbpath).ok().flatten()) {
+        match or_ref!(ctx.user.db.lookup(dbpath.as_ref()).ok().flatten()) {
             Datum::Data(v) => v,
             Datum::Formula(fv, wv) => {
                 if is_fpath {
@@ -287,7 +287,7 @@ impl Ref {
                 } else if is_wpath {
                     wv
                 } else {
-                    match or_ref!(ctx.user.by_path.get(dbpath)) {
+                    match or_ref!(ctx.user.by_path.get(&dbpath)) {
                         Published::Data(_) => return Value::Error(Chars::from("#REF")),
                         Published::Formula(fifo) => {
                             or_ref!(ctx.user.publisher.current(&fifo.data.id()))
@@ -314,9 +314,8 @@ impl Ref {
         }
     }
 
-    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Chars>) {
+    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Path>) {
         if let Some(path) = self.path.take() {
-            let path = Path::from(path);
             ctx.user
                 .refs
                 .entry(path.clone())
@@ -372,23 +371,26 @@ impl Apply<Lc, UserEv> for Ref {
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
         match from {
-            [path] => match path.update(ctx, event).map(|p| p.get_as::<Chars>()) {
-                None => self.apply_ev(event),
-                Some(new_path) => {
-                    if new_path != self.path {
-                        self.set_ref(ctx, new_path);
-                        match self.apply_ev(event) {
-                            v @ Some(_) => v,
-                            None => {
-                                self.current = Ref::get_current(ctx, &self.path);
-                                Some(self.current.clone())
+            [path] => {
+                match path.update(ctx, event).map(|p| p.get_as::<Chars>().map(Path::from))
+                {
+                    None => self.apply_ev(event),
+                    Some(new_path) => {
+                        if new_path != self.path {
+                            self.set_ref(ctx, new_path);
+                            match self.apply_ev(event) {
+                                v @ Some(_) => v,
+                                None => {
+                                    self.current = Ref::get_current(ctx, &self.path);
+                                    Some(self.current.clone())
+                                }
                             }
+                        } else {
+                            self.apply_ev(event)
                         }
-                    } else {
-                        self.apply_ev(event)
                     }
                 }
-            },
+            }
             from => {
                 for n in from {
                     n.update(ctx, event);
@@ -802,9 +804,9 @@ impl Container {
                         Err(_) | Ok(None) => {
                             let locked = self
                                 .locked
-                                .range::<str, (Bound<&str>, Bound<&str>)>((
+                                .range::<Path, (Bound<&Path>, Bound<&Path>)>((
                                     Bound::Unbounded,
-                                    Bound::Included(path.as_ref()),
+                                    Bound::Included(&path),
                                 ))
                                 .next_back()
                                 .map(|p| Path::is_parent(p, &path))

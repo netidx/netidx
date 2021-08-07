@@ -1,4 +1,9 @@
-use crate::{config, os::Mapper, path::Path, protocol::{glob::Scope, resolver::Referral}};
+use crate::{
+    config,
+    os::Mapper,
+    path::Path,
+    protocol::{glob::Scope, resolver::Referral},
+};
 use anyhow::{anyhow, Error, Result};
 use std::{
     collections::{BTreeMap, Bound, HashMap},
@@ -159,7 +164,7 @@ impl PMap {
 
     pub(crate) fn allowed(
         &self,
-        path: &str,
+        path: &Path,
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
@@ -169,14 +174,14 @@ impl PMap {
 
     pub(crate) fn allowed_in_scope(
         &self,
-        base_path: &str,
+        base_path: &Path,
         scope: &Scope,
         desired_rights: Permissions,
         user: &UserInfo,
     ) -> bool {
         let rights_at_base = self.permissions(base_path, user);
         let mut rights = rights_at_base;
-        let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
+        let mut iter = self.0.range::<Path, (Bound<&Path>, Bound<&Path>)>((
             Bound::Excluded(base_path),
             Bound::Unbounded,
         ));
@@ -201,23 +206,25 @@ impl PMap {
         rights & desired_rights == desired_rights
     }
 
-    pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
-        Path::dirnames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
-            None => p,
-            Some(set) => {
-                let init = (p, Permissions::empty());
-                let (ap, dp) =
-                    user.entities().fold(init, |(ap, dp), e| match set.get(e) {
-                        None => (ap, dp),
-                        Some(p_) => {
-                            if p_.contains(Permissions::DENY) {
-                                (ap, dp | *p_)
-                            } else {
-                                (ap | *p_, dp)
+    pub(crate) fn permissions(&self, path: &Path, user: &UserInfo) -> Permissions {
+        Path::dirnames(path).fold(Permissions::empty(), |p, s| {
+            match self.0.get(&Path::from(s)) {
+                None => p,
+                Some(set) => {
+                    let init = (p, Permissions::empty());
+                    let (ap, dp) =
+                        user.entities().fold(init, |(ap, dp), e| match set.get(e) {
+                            None => (ap, dp),
+                            Some(p_) => {
+                                if p_.contains(Permissions::DENY) {
+                                    (ap, dp | *p_)
+                                } else {
+                                    (ap | *p_, dp)
+                                }
                             }
-                        }
-                    });
-                ap & !dp
+                        });
+                    ap & !dp
+                }
             }
         })
     }
