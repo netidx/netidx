@@ -28,10 +28,15 @@
 
       - 17% faster message rates on ARM (A72) and x86_64 (Skylake)
 
-      - 20% less memory overhead per published value
+      - 20% less memory per published value
 
   - Publisher advertisements, a middle way between a sparse namespace
     and a fully published one.
+
+  - Paths are now based by ArcStr instead of Arc<str>, this saves at
+    least 1 word per path, and makes Path::clone slightly
+    cheaper. This can add up to a significant memory savings in the
+    resolver server or a large publisher/subscriber.
 
   - Documented the rpc module.
 
