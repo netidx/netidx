@@ -393,7 +393,7 @@ pub mod client {
 mod test {
     use super::*;
     use netidx::{config, resolver::Auth, resolver_server::Server};
-    use tokio::runtime::Runtime;
+    use tokio::{time, runtime::Runtime};
 
     #[test]
     fn call_proc() {
@@ -432,6 +432,7 @@ mod test {
                 }),
             )
             .unwrap();
+            time::sleep(Duration::from_millis(100)).await;
             let proc: client::Proc =
                 client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
             let args = vec![("arg1", Value::from("hello rpc"))];

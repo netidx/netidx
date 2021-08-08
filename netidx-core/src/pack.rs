@@ -229,10 +229,12 @@ impl Pack for ArcStr {
         if len > buf.remaining() {
             Err(PackError::TooBig)
         } else {
-            match str::from_utf8(&buf.chunk()[0..len]) {
+            let res = match str::from_utf8(&buf.chunk()[0..len]) {
                 Ok(s) => Ok(ArcStr::from(s)),
                 Err(_) => Err(PackError::InvalidFormat)
-            }
+            };
+            buf.advance(len);
+            res
         }
     }
 }
