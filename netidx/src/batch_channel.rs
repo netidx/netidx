@@ -1,8 +1,8 @@
 use crate::pool::{Pool, Pooled};
-use parking_lot::Mutex;
-use std::sync::{Arc, Weak};
-use std::{mem, ops::Drop, clone::Clone, result};
 use futures::channel::oneshot;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::{clone::Clone, mem, ops::Drop, result};
 
 #[derive(Debug)]
 struct BatchChannelInner<T: Send + Sync + 'static> {
@@ -14,31 +14,26 @@ struct BatchChannelInner<T: Send + Sync + 'static> {
 }
 
 #[derive(Debug)]
-struct Sentinal<T: Send + Sync + 'static>(Weak<Mutex<BatchChannelInner<T>>>);
+struct BatchSenderInner<T: Send + Sync + 'static>(Arc<Mutex<BatchChannelInner<T>>>);
 
-impl<T: Send + Sync + 'static> Drop for Sentinal<T> {
+impl<T: Send + Sync + 'static> Drop for BatchSenderInner<T> {
     fn drop(&mut self) {
-        if let Some(sender) = Weak::upgrade(&self.0) {
-            sender.lock().send_closed = true;
-        }
+        self.0.lock().send_closed = true;
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct BatchSender<T: Send + Sync + 'static>(
-    Arc<Mutex<BatchChannelInner<T>>>,
-    Arc<Sentinal<T>>,
-);
+pub(crate) struct BatchSender<T: Send + Sync + 'static>(Arc<BatchSenderInner<T>>);
 
 impl<T: Send + Sync + 'static> Clone for BatchSender<T> {
     fn clone(&self) -> Self {
-        BatchSender(Arc::clone(&self.0), Arc::clone(&self.1))
+        BatchSender(Arc::clone(&self.0))
     }
 }
 
 impl<T: Send + Sync + 'static> BatchSender<T> {
     pub(crate) fn send(&self, m: T) -> bool {
-        let mut inner = self.0.lock();
+        let mut inner = self.0 .0.lock();
         if inner.recv_closed {
             false
         } else {
@@ -94,8 +89,7 @@ impl<T: Send + Sync + 'static> BatchReceiver<T> {
     }
 }
 
-pub(crate) fn channel<T: Send + Sync + 'static>(
-) -> (BatchSender<T>, BatchReceiver<T>) {
+pub(crate) fn channel<T: Send + Sync + 'static>() -> (BatchSender<T>, BatchReceiver<T>) {
     let pool = Pool::new(1, 1000000);
     let inner = Arc::new(Mutex::new(BatchChannelInner {
         send_closed: false,
@@ -104,8 +98,7 @@ pub(crate) fn channel<T: Send + Sync + 'static>(
         queue: pool.take(),
         pool,
     }));
-    let sentinal = Arc::new(Sentinal(Arc::downgrade(&inner)));
-    let sender = BatchSender(inner.clone(), sentinal);
+    let sender = BatchSender(Arc::new(BatchSenderInner(inner.clone())));
     let receiver = BatchReceiver(inner);
     (sender, receiver)
 }

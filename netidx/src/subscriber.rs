@@ -73,6 +73,7 @@ impl error::Error for NoSuchValue {}
 
 atomic_id!(SubId);
 atomic_id!(SubscriberId);
+atomic_id!(ConId);
 
 bitflags! {
     pub struct SubscribeFlags: u32 {
@@ -171,7 +172,7 @@ impl Pack for Event {
 struct ValInner {
     sub_id: SubId,
     id: Id,
-    addr: SocketAddr,
+    conid: ConId,
     connection: BatchSender<ToCon>,
     last: Arc<Mutex<Event>>,
 }
@@ -1110,7 +1111,7 @@ fn unsubscribe(
     by_chan: &mut ByChan,
     sub: Sub,
     id: Id,
-    addr: SocketAddr,
+    conid: ConId,
 ) {
     for (sub_id, chan_id, c) in sub.streams.iter() {
         by_chan
@@ -1145,7 +1146,7 @@ fn unsubscribe(
                     e.remove();
                 }
                 Some(s) => {
-                    if s.0.id == id && s.0.addr == addr {
+                    if s.0.id == id && s.0.conid == conid {
                         e.remove();
                     }
                 }
@@ -1239,7 +1240,7 @@ async fn process_batch(
     pending_writes: &mut HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher>,
     con: &mut WriteChannel<ClientCtx>,
     subscriber: &Subscriber,
-    addr: SocketAddr,
+    conid: ConId,
 ) -> Result<()> {
     for m in batch.drain(..) {
         match m {
@@ -1284,7 +1285,7 @@ async fn process_batch(
             From::Unsubscribed(id) => {
                 if let Some(s) = subscriptions.remove(&id) {
                     let mut t = subscriber.0.lock();
-                    unsubscribe(&mut *t, by_chan, s, id, addr);
+                    unsubscribe(&mut *t, by_chan, s, id, conid);
                 }
             }
             From::Subscribed(p, id, m) => match pending.remove(&p) {
@@ -1295,7 +1296,7 @@ async fn process_batch(
                     let s = Ok(Val(Arc::new(ValInner {
                         sub_id,
                         id,
-                        addr,
+                        conid,
                         connection: req.con,
                         last: last.clone(),
                     })));
@@ -1376,6 +1377,7 @@ async fn connection(
         HashMap::with_hasher(FxBuildHasher::default());
     let mut msg_recvd = false;
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
+    let conid = ConId::new();
     soc.set_nodelay(true)?;
     let mut con = Channel::new(soc);
     hello_publisher(&mut con, &auth, &target_spn).await?;
@@ -1514,7 +1516,7 @@ async fn connection(
                             &mut pending_writes,
                             &mut write_con,
                             &subscriber,
-                            addr).await);
+                            conid).await);
                         try_cf!(try_flush(&mut write_con));
                         if subscriptions.is_empty() && pending.is_empty() {
                             let mut inner = subscriber.0.lock();
@@ -1541,7 +1543,7 @@ async fn connection(
             &mut pending_writes,
             &mut write_con,
             &subscriber,
-            addr,
+            conid,
         )
         .await;
         for (_, req) in pending {
