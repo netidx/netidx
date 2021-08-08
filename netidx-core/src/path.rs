@@ -19,28 +19,27 @@ use std::{
 };
 
 use hashbrown::{hash_map::RawEntryMut, HashMap};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use parking_lot::Mutex;
 
 lazy_static! {
-    static ref HC: RwLock<HashMap<Arc<str>, ()>> = RwLock::new(HashMap::new());
+    static ref HC: Mutex<HashMap<Arc<str>, ()>> = Mutex::new(HashMap::new());
 }
 
 fn hashcons(s: &str) -> Arc<str> {
-    let table = HC.upgradable_read();
-    match table.get_key_value(s) {
-        Some((k, ())) => k.clone(),
-        None => {
+    let mut table = HC.lock();
+    match table.raw_entry_mut().from_key(s) {
+        RawEntryMut::Occupied(e) => e.key().clone(),
+        RawEntryMut::Vacant(e) => {
             let k = Arc::from(s);
-            let k1 = Arc::clone(&k);
-            RwLockUpgradableReadGuard::upgrade(table).insert(k, ());
-            k1
+            e.insert(Arc::clone(&k), ());
+            k
         }
     }
 }
 
 fn drop(s: &Arc<str>) {
     if Arc::strong_count(s) <= 2 {
-        let mut table = HC.write();
+        let mut table = HC.lock();
         match table.raw_entry_mut().from_key(s) {
             RawEntryMut::Occupied(e) => {
                 if Arc::strong_count(e.key()) == 2 {
@@ -54,7 +53,7 @@ fn drop(s: &Arc<str>) {
 
 #[cfg(test)]
 pub(crate) fn count() -> usize {
-    HC.read().len()
+    HC.lock().len()
 }
 
 pub static ESC: char = '\\';
