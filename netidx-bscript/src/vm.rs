@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
 };
-use fxhash::{FxHashMap, FxBuildHasher};
+use fxhash::FxBuildHasher;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -110,7 +110,7 @@ pub trait Ctx {
     fn ref_var(&mut self, name: Chars, ref_by: ExprId);
     fn set_var(
         &mut self,
-        variables: &mut FxHashMap<Chars, Value>,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     );
@@ -128,8 +128,8 @@ pub trait Ctx {
 }
 
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
-    pub functions: FxHashMap<String, InitFn<C, E>>,
-    pub variables: FxHashMap<Chars, Value>,
+    pub functions: HashMap<String, InitFn<C, E>>,
+    pub variables: HashMap<Chars, Value>,
     pub dbg_ctx: DbgCtx,
     pub user: C,
 }
@@ -143,8 +143,8 @@ impl<C: Ctx, E> ExecCtx<C, E> {
 
     pub fn no_std(user: C) -> Self {
         ExecCtx {
-            functions: HashMap::with_hasher(FxBuildHasher::default()),
-            variables: HashMap::with_hasher(FxBuildHasher::default()),
+            functions: HashMap::new(),
+            variables: HashMap::new(),
             dbg_ctx: DbgCtx::new(),
             user,
         }

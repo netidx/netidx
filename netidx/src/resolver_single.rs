@@ -1,8 +1,8 @@
 use crate::{
     channel::Channel,
     chars::Chars,
-    os::{self, ClientCtx, Krb5Ctx},
     path::Path,
+    os::{self, ClientCtx, Krb5Ctx},
     pool::{Pool, Pooled},
     protocol::resolver::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
@@ -19,12 +19,16 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
-    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
+    cmp::max,
+    collections::HashMap,
+    fmt::Debug,
+    net::SocketAddr,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -263,8 +267,8 @@ async fn connect_write(
     resolver: &Referral,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: &Arc<RwLock<FxHashMap<Path, ToWrite>>>,
-    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
+    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     security_context: &mut Option<ClientCtx>,
     desired_auth: &Auth,
     degraded: &mut bool,
@@ -391,9 +395,9 @@ async fn connection_write(
     resolver: Arc<Referral>,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
-    published: Arc<RwLock<FxHashMap<Path, ToWrite>>>,
+    published: Arc<RwLock<HashMap<Path, ToWrite>>>,
     desired_auth: Auth,
-    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
     let mut receiver = receiver.fuse();
     let mut degraded = false;
@@ -564,11 +568,10 @@ async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
     resolver: Arc<Referral>,
     desired_auth: Auth,
-    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
-    let published: Arc<RwLock<FxHashMap<Path, ToWrite>>> =
-        Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
+    let published: Arc<RwLock<HashMap<Path, ToWrite>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut senders = {
         let mut senders = Vec::new();
         for addr in resolver.addrs.iter() {
@@ -635,7 +638,7 @@ impl ResolverWrite {
         resolver: Arc<Referral>,
         desired_auth: Auth,
         write_addr: SocketAddr,
-        secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> ResolverWrite {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {

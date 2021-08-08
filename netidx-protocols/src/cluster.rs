@@ -1,7 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
-use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use log::{info, warn};
 use netidx::{
     path::Path,
@@ -11,7 +10,11 @@ use netidx::{
     subscriber::{Dval, Event, Subscriber},
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::{collections::HashMap, iter, marker::PhantomData};
+use std::{
+    collections::{HashMap, HashSet},
+    iter,
+    marker::PhantomData,
+};
 use tokio::time;
 use uuid::{adapter::SimpleRef, Uuid};
 
@@ -43,7 +46,7 @@ pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     subscriber: Subscriber,
     our_path: Path,
     us: Val,
-    others: FxHashMap<Path, Dval>,
+    others: HashMap<Path, Dval>,
     cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
     primary: bool,
 }
@@ -65,7 +68,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         let ctrack = ChangeTracker::new(base);
         publisher.writes(us.id(), tx);
         publisher.flushed().await;
-        let others = HashMap::with_hasher(FxBuildHasher::default());
+        let others = HashMap::new();
         let t = PhantomData;
         let mut t = Cluster {
             t,
@@ -110,8 +113,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
         } else {
             let path = self.ctrack.path().clone();
             let mut l = self.subscriber.resolver().list(path).await?;
-            let all =
-                l.drain(..).filter(|p| p != &self.our_path).collect::<FxHashSet<_>>();
+            let all = l.drain(..).filter(|p| p != &self.our_path).collect::<HashSet<_>>();
             self.others.retain(|p, _| all.contains(p));
             for path in all {
                 if !self.others.contains_key(&path) {

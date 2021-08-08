@@ -14,7 +14,6 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
 };
-use fxhash::{FxHashMap, FxBuildHasher};
 use std::{
     collections::HashMap,
     io::Write,
@@ -104,9 +103,9 @@ impl<'a> Out<'a> {
 
 struct Ctx {
     sender_updates: Sender<Pooled<Vec<(SubId, Event)>>>,
-    paths: FxHashMap<SubId, Path>,
-    subscriptions: FxHashMap<Path, Dval>,
-    subscribe_ts: FxHashMap<Path, Instant>,
+    paths: HashMap<SubId, Path>,
+    subscriptions: HashMap<Path, Dval>,
+    subscribe_ts: HashMap<Path, Instant>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = Result<String>> + Unpin>,
     updates: Batched<Receiver<Pooled<Vec<(SubId, Event)>>>>,
@@ -130,10 +129,10 @@ impl Ctx {
         let (sender_updates, updates) = mpsc::channel(100);
         Ctx {
             sender_updates,
-            paths: HashMap::with_hasher(FxBuildHasher::default()),
+            paths: HashMap::new(),
             subscriber,
-            subscriptions: HashMap::with_hasher(FxBuildHasher::default()),
-            subscribe_ts: HashMap::with_hasher(FxBuildHasher::default()),
+            subscriptions: HashMap::new(),
+            subscribe_ts: HashMap::new(),
             subscribe_timeout: subscribe_timeout.map(Duration::from_secs),
             requests: {
                 let init = stream::iter(paths).map(|mut p| {

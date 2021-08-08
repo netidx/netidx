@@ -28,7 +28,7 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 use log::{info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -482,12 +482,12 @@ fn pick(n: usize) -> usize {
 struct SubscriberInner {
     id: SubscriberId,
     resolver: ResolverRead,
-    connections: FxHashMap<SocketAddr, BatchSender<ToCon>>,
-    recently_failed: FxHashMap<SocketAddr, Instant>,
-    subscribed: FxHashMap<Path, SubStatus>,
-    durable_dead: FxHashMap<Path, DvalWeak>,
-    durable_pending: FxHashMap<Path, DvalWeak>,
-    durable_alive: FxHashMap<Path, DvalWeak>,
+    connections: HashMap<SocketAddr, BatchSender<ToCon>, FxBuildHasher>,
+    recently_failed: HashMap<SocketAddr, Instant, FxBuildHasher>,
+    subscribed: HashMap<Path, SubStatus>,
+    durable_dead: HashMap<Path, DvalWeak>,
+    durable_pending: HashMap<Path, DvalWeak>,
+    durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: Auth,
 }
@@ -552,10 +552,10 @@ impl Subscriber {
             desired_auth,
             connections: HashMap::with_hasher(FxBuildHasher::default()),
             recently_failed: HashMap::with_hasher(FxBuildHasher::default()),
-            subscribed: HashMap::with_hasher(FxBuildHasher::default()),
-            durable_dead: HashMap::with_hasher(FxBuildHasher::default()),
-            durable_pending: HashMap::with_hasher(FxBuildHasher::default()),
-            durable_alive: HashMap::with_hasher(FxBuildHasher::default()),
+            subscribed: HashMap::new(),
+            durable_dead: HashMap::new(),
+            durable_pending: HashMap::new(),
+            durable_alive: HashMap::new(),
             trigger_resub: tx,
         })));
         t.start_resub_task(rx);
@@ -578,7 +578,7 @@ impl Subscriber {
             dead: t.durable_dead.len(),
         }
     }
-
+    
     pub fn resolver(&self) -> ResolverRead {
         self.0.lock().resolver.clone()
     }
@@ -823,8 +823,7 @@ impl Subscriber {
         }
         let now = Instant::now();
         let paths = batch.into_iter().collect::<Vec<_>>();
-        let mut pending: FxHashMap<Path, St> =
-            HashMap::with_hasher(FxBuildHasher::default());
+        let mut pending: HashMap<Path, St> = HashMap::new();
         // Init
         let r = {
             let mut t = self.0.lock();
@@ -1100,8 +1099,11 @@ struct Sub {
     collect_last: bool,
 }
 
-type ByChan =
-    FxHashMap<ChanId, (Sender<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>)>;
+type ByChan = HashMap<
+    ChanId,
+    (Sender<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
+    FxBuildHasher,
+>;
 
 fn unsubscribe(
     subscriber: &mut SubscriberInner,
@@ -1206,7 +1208,7 @@ lazy_static! {
 async fn process_updates_batch(
     by_chan: &mut ByChan,
     mut batch: Pooled<Vec<From>>,
-    subscriptions: &mut FxHashMap<Id, Sub>,
+    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
 ) {
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
@@ -1232,9 +1234,9 @@ async fn process_updates_batch(
 async fn process_batch(
     mut batch: Pooled<Vec<From>>,
     by_chan: &mut ByChan,
-    subscriptions: &mut FxHashMap<Id, Sub>,
-    pending: &mut FxHashMap<Path, SubscribeValRequest>,
-    pending_writes: &mut FxHashMap<Id, VecDeque<oneshot::Sender<Value>>>,
+    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+    pending: &mut HashMap<Path, SubscribeValRequest>,
+    pending_writes: &mut HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher>,
     con: &mut WriteChannel<ClientCtx>,
     subscriber: &Subscriber,
     addr: SocketAddr,
@@ -1369,9 +1371,8 @@ async fn connection(
     from_sub: BatchReceiver<ToCon>,
     auth: Auth,
 ) -> Result<()> {
-    let mut pending: FxHashMap<Path, SubscribeValRequest> =
-        HashMap::with_hasher(FxBuildHasher::default());
-    let mut subscriptions: FxHashMap<Id, Sub> =
+    let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
+    let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut msg_recvd = false;
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
@@ -1380,12 +1381,12 @@ async fn connection(
     hello_publisher(&mut con, &auth, &target_spn).await?;
     let (read_con, mut write_con) = con.split();
     let (tx_stop, rx_stop) = oneshot::channel();
-    let mut pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>> =
+    let mut pending_writes: HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher> =
         HashMap::with_hasher(FxBuildHasher::default());
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
-    let mut by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
-        HashMap::with_hasher(FxBuildHasher::default());
+    let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
+        HashMap::new();
     let mut by_chan: ByChan = HashMap::with_hasher(FxBuildHasher::default());
     let res = 'main: loop {
         select_biased! {

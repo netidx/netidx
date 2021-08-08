@@ -12,7 +12,6 @@ mod table;
 mod util;
 mod widgets;
 
-use fxhash::FxHashMap;
 use anyhow::Result;
 use bscript::LocalEvent;
 use editor::Editor;
@@ -182,7 +181,7 @@ impl vm::Ctx for WidgetCtx {
 
     fn set_var(
         &mut self,
-        variables: &mut FxHashMap<Chars, Value>,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     ) {

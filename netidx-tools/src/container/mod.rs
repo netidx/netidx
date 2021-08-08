@@ -128,7 +128,7 @@ struct Lc {
     var_updates: Pooled<Vec<(Chars, Value)>>,
     ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
-    by_path: FxHashMap<Path, Published>,
+    by_path: HashMap<Path, Published>,
     events: mpsc::UnboundedSender<LcEvent>,
 }
 
@@ -167,7 +167,7 @@ impl Lc {
             var_updates: VARS.take(),
             ref_updates: REFS.take(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            by_path: HashMap::with_hasher(FxBuildHasher::default()),
+            by_path: HashMap::new(),
             events,
         }
     }
@@ -219,7 +219,7 @@ impl Ctx for Lc {
 
     fn set_var(
         &mut self,
-        variables: &mut FxHashMap<Chars, Value>,
+        variables: &mut HashMap<Chars, Value>,
         name: Chars,
         value: Value,
     ) {

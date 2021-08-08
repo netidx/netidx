@@ -6,7 +6,7 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
@@ -300,7 +300,7 @@ mod publish {
     struct T {
         controls: Controls,
         publisher: Publisher,
-        published: FxHashMap<Id, Val>,
+        published: HashMap<Id, Val, FxBuildHasher>,
         cursor: Cursor,
         speed: Speed,
         state: State,
@@ -546,7 +546,7 @@ mod publish {
             cluster: &Cluster<ClusterCmd>,
             mut batch: Pooled<Vec<WriteRequest>>,
         ) -> Result<()> {
-            let mut inst = HashMap::with_hasher(FxBuildHasher::default());
+            let mut inst = HashMap::new();
             let mut cbatch = self.publisher.start_batch();
             for req in batch.drain(..) {
                 inst.insert(req.id, req);
@@ -793,7 +793,7 @@ mod publish {
         max_total: usize,
         max_by_client: usize,
         total: usize,
-        by_client: FxHashMap<ClId, usize>,
+        by_client: HashMap<ClId, usize, FxBuildHasher>,
     }
 
     #[derive(Clone)]
@@ -909,7 +909,7 @@ mod publish {
                 (Arc::from("play_after"), (Value::Null, Value::from(PLAY_AFTER_DOC))),
             ]
             .into_iter()
-            .collect::<FxHashMap<_, _>>(),
+            .collect::<HashMap<_, _>>(),
             Arc::new(move |cl, args| {
                 let cfg = NewSessionConfig::new(cl, args);
                 let mut control_tx = control_tx.clone();
@@ -1141,12 +1141,11 @@ mod record {
         let (tx_batch, rx_batch) = mpsc::channel(10);
         let (tx_list, rx_list) = mpsc::unbounded();
         let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10);
-        let mut by_subid: FxHashMap<SubId, Id> =
+        let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut image: FxHashMap<SubId, Event> =
+        let mut image: HashMap<SubId, Event, FxBuildHasher> =
             HashMap::with_hasher(FxBuildHasher::default());
-        let mut subscribed: FxHashMap<Path, Dval> =
-            HashMap::with_hasher(FxBuildHasher::default());
+        let mut subscribed: HashMap<Path, Dval> = HashMap::new();
         let subscriber = Subscriber::new(resolver, desired_auth)?;
         let flush_frequency = flush_frequency.map(|f| archive.block_size() * f);
         let mut bcast_rx = bcast.subscribe();
