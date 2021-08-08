@@ -5,56 +5,16 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
-    hash::{Hash, Hasher},
     iter::Iterator,
-    ops::{Deref, Drop},
-    ptr,
+    ops::Deref,
     result::Result,
     str::{self, FromStr},
     sync::Arc,
 };
-
-use hashbrown::{hash_map::RawEntryMut, HashMap};
-use parking_lot::Mutex;
-
-lazy_static! {
-    static ref HC: Mutex<HashMap<Arc<str>, ()>> = Mutex::new(HashMap::new());
-}
-
-fn hashcons(s: &str) -> Arc<str> {
-    let mut table = HC.lock();
-    match table.raw_entry_mut().from_key(s) {
-        RawEntryMut::Occupied(e) => e.key().clone(),
-        RawEntryMut::Vacant(e) => {
-            let k = Arc::from(s);
-            e.insert(Arc::clone(&k), ());
-            k
-        }
-    }
-}
-
-fn drop(s: &Arc<str>) {
-    if Arc::strong_count(s) <= 2 {
-        let mut table = HC.lock();
-        match table.raw_entry_mut().from_key(s) {
-            RawEntryMut::Occupied(e) => {
-                if Arc::strong_count(e.key()) == 2 {
-                    e.remove();
-                }
-            }
-            RawEntryMut::Vacant(_) => (),
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn count() -> usize {
-    HC.lock().len()
-}
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -91,31 +51,8 @@ fn canonize(s: &str) -> String {
 /// unicode character may be used. Path lengths are not limited on the
 /// local machine, but may be restricted by maximum message size on
 /// the wire.
-#[derive(Debug, Clone, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Path(Arc<str>);
-
-impl Drop for Path {
-    fn drop(&mut self) {
-        drop(&self.0)
-    }
-}
-
-impl Hash for Path {
-    fn hash<H>(&self, state: &mut H)
-    where
-        H: Hasher,
-    {
-        ptr::hash(self.0.as_ptr(), state)
-    }
-}
-
-impl PartialEq for Path {
-    fn eq(&self, rhs: &Path) -> bool {
-        self.0.as_ptr() == rhs.0.as_ptr()
-    }
-}
-
-impl Eq for Path {}
 
 impl Pack for Path {
     fn encoded_len(&self) -> usize {
@@ -143,6 +80,12 @@ impl AsRef<str> for Path {
     }
 }
 
+impl Borrow<str> for Path {
+    fn borrow(&self) -> &str {
+        &*self.0
+    }
+}
+
 impl Deref for Path {
     type Target = str;
 
@@ -154,9 +97,9 @@ impl Deref for Path {
 impl From<Chars> for Path {
     fn from(c: Chars) -> Path {
         if is_canonical(&c) {
-            Path(hashcons(c.as_ref()))
+            Path(Arc::from(c.as_ref()))
         } else {
-            Path(hashcons(&canonize(&c)))
+            Path(Arc::from(canonize(&c)))
         }
     }
 }
@@ -164,39 +107,39 @@ impl From<Chars> for Path {
 impl From<String> for Path {
     fn from(s: String) -> Path {
         if is_canonical(&s) {
-            Path(hashcons(&s))
+            Path(Arc::from(s))
         } else {
-            Path(hashcons(&canonize(&s)))
+            Path(Arc::from(canonize(&s)))
         }
     }
 }
 
-impl From<&str> for Path {
-    fn from(s: &str) -> Path {
+impl From<&'static str> for Path {
+    fn from(s: &'static str) -> Path {
         if is_canonical(s) {
-            Path(hashcons(s))
+            Path(Arc::from(s))
         } else {
-            Path(hashcons(&canonize(s)))
+            Path(Arc::from(canonize(s)))
         }
     }
 }
 
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {
-        if is_canonical(s) {
-            Path(hashcons(s))
+        if is_canonical(s.as_str()) {
+            Path(Arc::from(s.clone()))
         } else {
-            Path(hashcons(&canonize(s)))
+            Path(Arc::from(canonize(s.as_str())))
         }
     }
 }
 
 impl From<Arc<str>> for Path {
     fn from(s: Arc<str>) -> Path {
-        if is_canonical(&s) {
-            Path(hashcons(&s))
+        if is_canonical(&*s) {
+            Path(s)
         } else {
-            Path(hashcons(&canonize(&s)))
+            Path(Arc::from(canonize(&*s)))
         }
     }
 }
@@ -206,9 +149,9 @@ impl FromStr for Path {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if is_canonical(s) {
-            Ok(Path(hashcons(s)))
+            Ok(Path(Arc::from(s)))
         } else {
-            Ok(Path(hashcons(&canonize(s))))
+            Ok(Path(Arc::from(canonize(s))))
         }
     }
 }
@@ -277,10 +220,10 @@ impl Path {
     ) -> bool {
         let parent = parent.as_ref();
         let other = other.as_ref();
-        parent == "/"
-            || (other.starts_with(parent)
-                && (other.len() == parent.len()
-                    || other.as_bytes()[parent.len()] == SEP as u8))
+        parent == "/" ||
+            (other.starts_with(parent)
+             && (other.len() == parent.len()
+                 || other.as_bytes()[parent.len()] == SEP as u8))
     }
 
     /// This will escape the path seperator and the escape character
