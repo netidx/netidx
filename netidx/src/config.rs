@@ -220,8 +220,8 @@ impl Config {
                 if Path::levels(&*p) <= Path::levels(&*root) {
                     bail!("child paths must be deeper than the root {}", p);
                 }
-                let mut res = children.range::<Path, (Bound<&Path>, Bound<&Path>)>((
-                    Excluded(&r.path),
+                let mut res = children.range::<str, (Bound<&str>, Bound<&str>)>((
+                    Excluded(r.path.as_ref()),
                     Unbounded,
                 ));
                 match res.next() {

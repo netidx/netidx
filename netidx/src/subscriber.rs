@@ -962,7 +962,7 @@ impl Subscriber {
                 St::Subscribed(raw) => (path, Ok(raw)),
                 St::Error(e) => {
                     let mut t = sub.0.lock();
-                    if let Some(sub) = t.subscribed.remove(&path) {
+                    if let Some(sub) = t.subscribed.remove(path.as_ref()) {
                         match sub {
                             SubStatus::Subscribed(_) => unreachable!(),
                             SubStatus::Pending(waiters) => {

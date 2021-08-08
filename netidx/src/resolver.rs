@@ -91,9 +91,10 @@ impl Router {
             match v.path() {
                 None => batches.entry(None).or_insert_with(|| pool.take()).push((id, v)),
                 Some(path) => {
-                    let mut r = self.cached.range::<Path, (Bound<&Path>, Bound<&Path>)>(
-                        (Unbounded, Included(path)),
-                    );
+                    let mut r = self.cached.range::<str, (Bound<&str>, Bound<&str>)>((
+                        Unbounded,
+                        Included(path.as_ref()),
+                    ));
                     loop {
                         match r.next_back() {
                             None => {
@@ -129,7 +130,7 @@ impl Router {
             id += 1;
         }
         for p in gc {
-            self.cached.remove(&p);
+            self.cached.remove(p.as_ref());
         }
         batches.into_iter().map(|(p, batch)| match p {
             None => (None, batch),
@@ -588,12 +589,7 @@ impl ResolverWrite {
         self.0.send(batch).await
     }
 
-    async fn send_expect<V, F, I>(
-        &self,
-        batch: I,
-        expected: FromWrite,
-        f: F,
-    ) -> Result<()>
+    async fn send_expect<V, F, I>(&self, batch: I, expected: FromWrite, f: F) -> Result<()>
     where
         F: Fn(V) -> ToWrite,
         I: IntoIterator<Item = V>,
@@ -623,9 +619,8 @@ impl ResolverWrite {
     ) -> Result<()> {
         self.send_expect(batch, FromWrite::Published, |(path, flags)| match flags {
             Some(flags) => ToWrite::PublishWithFlags(path, flags),
-            None => ToWrite::Publish(path),
-        })
-        .await
+            None => ToWrite::Publish(path)
+        }).await
     }
 
     pub async fn publish_default<I: IntoIterator<Item = Path>>(
@@ -635,17 +630,14 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Published, ToWrite::PublishDefault).await
     }
 
-    pub async fn publish_default_with_flags<
-        I: IntoIterator<Item = (Path, Option<u16>)>,
-    >(
+    pub async fn publish_default_with_flags<I: IntoIterator<Item = (Path, Option<u16>)>>(
         &self,
         batch: I,
     ) -> Result<()> {
         self.send_expect(batch, FromWrite::Published, |(path, flags)| match flags {
             Some(flags) => ToWrite::PublishDefaultWithFlags(path, flags),
-            None => ToWrite::PublishDefault(path),
-        })
-        .await
+            None => ToWrite::PublishDefault(path)
+        }).await
     }
 
     pub async fn unpublish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {

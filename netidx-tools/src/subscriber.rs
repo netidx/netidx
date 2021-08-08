@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     io::Write,
     str::FromStr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -167,7 +168,7 @@ impl Ctx {
         }
     }
 
-    fn remove_subscription(&mut self, path: &Path) {
+    fn remove_subscription(&mut self, path: &str) {
         if let Some(dv) = self.subscriptions.remove(path) {
             self.subscribe_ts.remove(path);
             self.paths.remove(&dv.id());
@@ -216,14 +217,15 @@ impl Ctx {
                     match l.parse::<In>() {
                         Err(e) => eprintln!("parse error: {}", e),
                         Ok(In::Add(p)) => self.add_subscription(Path::from(p)),
-                        Ok(In::Drop(p)) => self.remove_subscription(&Path::from(p)),
+                        Ok(In::Drop(p)) => self.remove_subscription(&*p),
                         Ok(In::Write(p, v)) => {
-                            let p = Path::from(p);
-                            let dv = match self.subscriptions.get(&p) {
+                            let dv = match self.subscriptions.get(p.as_str()) {
                                 Some(dv) => dv,
                                 None => {
-                                    self.add_subscription(p.clone());
-                                    &self.subscriptions[&p]
+                                    self.add_subscription(Path::from(Arc::from(
+                                        p.as_str(),
+                                    )));
+                                    &self.subscriptions[p.as_str()]
                                 }
                             };
                             if !dv.write(v.into()) {

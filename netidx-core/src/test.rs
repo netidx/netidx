@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn test_path_hc() {
     {
-        const SIZE: usize = 10_000;
+        const SIZE: usize = 1_000_000;
         const ITER: usize = 100;
         let mut expected_total = 0;
         let mut paths = (0..SIZE)

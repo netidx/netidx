@@ -164,7 +164,7 @@ impl Shard {
                             (id, FromRead::Resolved(a))
                         }
                         Some(ref secstore) => {
-                            let perm = secstore.pmap().permissions(&path, &*uifo);
+                            let perm = secstore.pmap().permissions(&*path, &*uifo);
                             if !perm.contains(Permissions::SUBSCRIBE) {
                                 (id, FromRead::Denied)
                             } else {
@@ -193,7 +193,7 @@ impl Shard {
                     (id, FromRead::Referral(r))
                 } else {
                     let allowed = secstore
-                        .map(|s| s.pmap().allowed(&path, Permissions::LIST, &*uifo))
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if allowed {
                         (id, FromRead::List(store.list(&path)))
@@ -208,7 +208,7 @@ impl Shard {
                         let pmap = s.pmap();
                         set.iter().all(|g| {
                             pmap.allowed_in_scope(
-                                &Path::from(g.base()),
+                                g.base(),
                                 g.scope(),
                                 Permissions::LIST,
                                 &*uifo,
@@ -237,7 +237,7 @@ impl Shard {
             }
             ToRead::GetChangeNr(path) => {
                 let allowed = secstore
-                    .map(|s| s.pmap().allowed(&path, Permissions::LIST, &*uifo))
+                    .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                     .unwrap_or(true);
                 if !allowed {
                     (id, FromRead::Denied)
@@ -256,7 +256,7 @@ impl Shard {
                     (id, FromRead::Referral(r))
                 } else {
                     let allowed = secstore
-                        .map(|s| s.pmap().allowed(&path, Permissions::LIST, &*uifo))
+                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if !allowed {
                         (id, FromRead::Denied)
@@ -293,7 +293,7 @@ impl Shard {
                 } else {
                     Permissions::PUBLISH
                 };
-                if secstore.map(|s| s.pmap().allowed(&path, perm, uifo)).unwrap_or(true)
+                if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true)
                 {
                     s.publish(path, write_addr, default, flags);
                     FromWrite::Published
@@ -318,7 +318,7 @@ impl Shard {
                 (id, publish(store, path, true, Some(flags)))
             }
             ToWrite::Unpublish(path) => {
-                if !Path::is_absolute(&path) {
+                if !Path::is_absolute(&*path) {
                     (id, FromWrite::Error("absolute paths required".into()))
                 } else if let Some(r) = store.check_referral(&path) {
                     (id, FromWrite::Referral(r))
