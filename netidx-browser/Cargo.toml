@@ -54,3 +54,4 @@ cairo-rs = "0.9"
 plotters = { version = "0.3", default_features = false, features = ["datetime", "line_series", "ttf"] }
 plotters-cairo = "0.3"
 lazy_static = "1"
+arcstr = { version = "1", features = ["serde"] }

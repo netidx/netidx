@@ -14,7 +14,9 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
+    str,
 };
+use arcstr::ArcStr;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PackError {
@@ -209,6 +211,32 @@ impl Pack for Arc<str> {
     }
 }
 
+impl Pack for ArcStr {
+    fn encoded_len(&self) -> usize {
+        let s: &str = &*self;
+        let len = s.len();
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        let s: &str = &*self;
+        encode_varint(s.len() as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            match str::from_utf8(&buf.chunk()[0..len]) {
+                Ok(s) => Ok(ArcStr::from(s)),
+                Err(_) => Err(PackError::InvalidFormat)
+            }
+        }
+    }
+}
+    
 pub fn varint_len(value: u64) -> usize {
     ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
 }

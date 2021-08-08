@@ -42,6 +42,7 @@ use tokio::{
     signal, task,
     time::{self, Instant},
 };
+use arcstr::ArcStr;
 
 lazy_static! {
     static ref VARS: Pool<Vec<(Chars, Value)>> = Pool::new(8, 2048);
@@ -929,7 +930,7 @@ impl Container {
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
             if let Some(path) = Path::dirname(&path) {
-                self.ctx.user.db.remove(Path::from(Arc::from(path)))?;
+                self.ctx.user.db.remove(Path::from(ArcStr::from(path)))?;
             }
         } else {
             self.ctx.user.db.remove(path)?;

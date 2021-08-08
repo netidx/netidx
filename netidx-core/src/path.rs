@@ -13,8 +13,8 @@ use std::{
     ops::Deref,
     result::Result,
     str::{self, FromStr},
-    sync::Arc,
 };
+use arcstr::ArcStr;
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -52,19 +52,19 @@ fn canonize(s: &str) -> String {
 /// local machine, but may be restricted by maximum message size on
 /// the wire.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Path(Arc<str>);
+pub struct Path(ArcStr);
 
 impl Pack for Path {
     fn encoded_len(&self) -> usize {
-        <Arc<str> as Pack>::encoded_len(&self.0)
+        <ArcStr as Pack>::encoded_len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        <Arc<str> as Pack>::encode(&self.0, buf)
+        <ArcStr as Pack>::encode(&self.0, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(Path::from(<Arc<str> as Pack>::decode(buf)?))
+        Ok(Path::from(<ArcStr as Pack>::decode(buf)?))
     }
 }
 
@@ -97,9 +97,9 @@ impl Deref for Path {
 impl From<Chars> for Path {
     fn from(c: Chars) -> Path {
         if is_canonical(&c) {
-            Path(Arc::from(c.as_ref()))
+            Path(ArcStr::from(c.as_ref()))
         } else {
-            Path(Arc::from(canonize(&c)))
+            Path(ArcStr::from(canonize(&c)))
         }
     }
 }
@@ -107,9 +107,9 @@ impl From<Chars> for Path {
 impl From<String> for Path {
     fn from(s: String) -> Path {
         if is_canonical(&s) {
-            Path(Arc::from(s))
+            Path(ArcStr::from(s))
         } else {
-            Path(Arc::from(canonize(&s)))
+            Path(ArcStr::from(canonize(&s)))
         }
     }
 }
@@ -117,9 +117,9 @@ impl From<String> for Path {
 impl From<&'static str> for Path {
     fn from(s: &'static str) -> Path {
         if is_canonical(s) {
-            Path(Arc::from(s))
+            Path(ArcStr::from(s))
         } else {
-            Path(Arc::from(canonize(s)))
+            Path(ArcStr::from(canonize(s)))
         }
     }
 }
@@ -127,19 +127,19 @@ impl From<&'static str> for Path {
 impl<'a> From<&'a String> for Path {
     fn from(s: &String) -> Path {
         if is_canonical(s.as_str()) {
-            Path(Arc::from(s.clone()))
+            Path(ArcStr::from(s.clone()))
         } else {
-            Path(Arc::from(canonize(s.as_str())))
+            Path(ArcStr::from(canonize(s.as_str())))
         }
     }
 }
 
-impl From<Arc<str>> for Path {
-    fn from(s: Arc<str>) -> Path {
+impl From<ArcStr> for Path {
+    fn from(s: ArcStr) -> Path {
         if is_canonical(&*s) {
             Path(s)
         } else {
-            Path(Arc::from(canonize(&*s)))
+            Path(ArcStr::from(canonize(&*s)))
         }
     }
 }
@@ -149,9 +149,9 @@ impl FromStr for Path {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if is_canonical(s) {
-            Ok(Path(Arc::from(s)))
+            Ok(Path(ArcStr::from(s)))
         } else {
-            Ok(Path(Arc::from(canonize(s))))
+            Ok(Path(ArcStr::from(canonize(s))))
         }
     }
 }

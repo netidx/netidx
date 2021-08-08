@@ -6,8 +6,9 @@ use netidx::{
     protocol::glob::{Glob, GlobSet},
     resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
 };
-use std::{collections::HashSet, iter, sync::Arc, time::Duration};
+use std::{collections::HashSet, iter, time::Duration};
 use tokio::{runtime::Runtime, time};
+use arcstr::ArcStr;
 
 pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
     let rt = Runtime::new().expect("failed to init runtime");
@@ -28,7 +29,7 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                 let resolver = ResolverRead::new(config, auth);
                 let pat = {
                     let path =
-                        path.map(|p| Path::from(Arc::from(p))).unwrap_or(Path::root());
+                        path.map(|p| Path::from(ArcStr::from(p))).unwrap_or(Path::root());
                     if !Glob::is_glob(&*path) {
                         path.append("*")
                     } else {
@@ -36,7 +37,7 @@ pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
                     }
                 };
                 let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
-                let mut ct = ChangeTracker::new(Path::from(Arc::from(glob.base())));
+                let mut ct = ChangeTracker::new(Path::from(ArcStr::from(glob.base())));
                 let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
                 let mut paths = HashSet::new();
                 loop {

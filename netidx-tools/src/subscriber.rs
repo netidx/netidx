@@ -18,7 +18,6 @@ use std::{
     collections::HashMap,
     io::Write,
     str::FromStr,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -26,6 +25,7 @@ use tokio::{
     runtime::Runtime,
     time,
 };
+use arcstr::ArcStr;
 
 #[derive(Debug, Clone)]
 enum In {
@@ -222,7 +222,7 @@ impl Ctx {
                             let dv = match self.subscriptions.get(p.as_str()) {
                                 Some(dv) => dv,
                                 None => {
-                                    self.add_subscription(Path::from(Arc::from(
+                                    self.add_subscription(Path::from(ArcStr::from(
                                         p.as_str(),
                                     )));
                                     &self.subscriptions[p.as_str()]

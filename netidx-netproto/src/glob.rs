@@ -14,6 +14,7 @@ use std::{
     result,
     sync::Arc,
 };
+use arcstr::ArcStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -99,7 +100,7 @@ impl Glob {
             }
         };
         let lvl = Path::levels(base);
-        let base = Path::from(Arc::from(base));
+        let base = Path::from(ArcStr::from(base));
         let scope =
             if Path::dirnames(&raw).skip(lvl).any(|p| Path::basename(p) == Some("**")) {
                 Scope::Subtree

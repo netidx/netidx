@@ -47,6 +47,7 @@ use std::{
 };
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
+use arcstr::ArcStr;
 
 type BSNode = Node<WidgetCtx, LocalEvent>;
 type BSCtx = Rc<RefCell<ExecCtx<WidgetCtx, LocalEvent>>>;
@@ -108,9 +109,9 @@ impl str::FromStr for ViewLoc {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if Path::is_absolute(s) {
-            Ok(ViewLoc::Netidx(Path::from(Arc::from(s))))
+            Ok(ViewLoc::Netidx(Path::from(ArcStr::from(s))))
         } else if s.starts_with("netidx:") && Path::is_absolute(&s[7..]) {
-            Ok(ViewLoc::Netidx(Path::from(Arc::from(&s[7..]))))
+            Ok(ViewLoc::Netidx(Path::from(ArcStr::from(&s[7..]))))
         } else if s.starts_with("file:") {
             let mut buf = PathBuf::new();
             buf.push(&s[5..]);

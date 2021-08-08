@@ -1,5 +1,6 @@
 use super::ContainerConfig;
 use anyhow::Result;
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use netidx::{
     chars::Chars,
@@ -9,7 +10,7 @@ use netidx::{
     subscriber::Value,
 };
 use sled;
-use std::{fmt::Write, mem, str, sync::Arc};
+use std::{fmt::Write, mem, str};
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
@@ -112,7 +113,7 @@ fn lookup_value<P: AsRef<[u8]>>(tree: &sled::Tree, path: P) -> Result<Option<Dat
 }
 
 fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static {
-    tree.iter().keys().map(|res| Ok(Path::from(Arc::from(str::from_utf8(&res?)?))))
+    tree.iter().keys().map(|res| Ok(Path::from(ArcStr::from(str::from_utf8(&res?)?))))
 }
 
 pub(super) struct Db {
@@ -158,7 +159,7 @@ impl Db {
 
     pub(super) fn remove_subtree(&mut self, path: Path) -> Result<()> {
         for res in self.data.scan_prefix(path.as_ref()).keys() {
-            let path = Path::from(Arc::from(str::from_utf8(&res?)?));
+            let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
             self.remove(path)?;
         }
         Ok(())
@@ -309,7 +310,7 @@ impl Db {
         for res in self.locked.scan_prefix(key).keys() {
             let key = res?;
             self.locked.remove(&key)?;
-            let path = Path::from(Arc::from(str::from_utf8(&key)?));
+            let path = Path::from(ArcStr::from(str::from_utf8(&key)?));
             self.pending.unlocked.push(path);
         }
         Ok(())
@@ -328,7 +329,7 @@ impl Db {
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
         self.data.iter().map(|res| {
             let (key, val) = res?;
-            let path = Path::from(Arc::from(str::from_utf8(&key)?));
+            let path = Path::from(ArcStr::from(str::from_utf8(&key)?));
             let value = DatumKind::decode(&mut &*val);
             Ok((path, value, val))
         })

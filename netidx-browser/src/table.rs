@@ -32,8 +32,8 @@ use std::{
     rc::{Rc, Weak},
     result,
     str::FromStr,
-    sync::Arc,
 };
+use arcstr::ArcStr;
 
 struct Subscription {
     _sub: Dval,
@@ -469,7 +469,7 @@ impl RaeifiedTable {
         if &*selected == "" {
             err_modal(&window, "Select a cell before write");
         } else {
-            let path = Path::from(Arc::from(&*selected));
+            let path = Path::from(ArcStr::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
             let dv =
                 self.0.ctx.borrow_mut().user.backend.subscriber.durable_subscribe(path);
@@ -788,7 +788,7 @@ impl Table {
     pub(super) fn new(ctx: BSCtx, spec: view::Table, selected_path: Label) -> Table {
         let path_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.path);
         let path = RefCell::new(path_expr.current().and_then(|v| match v {
-            Value::String(path) => Some(Path::from(Arc::from(&*path))),
+            Value::String(path) => Some(Path::from(ArcStr::from(&*path))),
             _ => None,
         }));
         let default_sort_column_expr =
@@ -886,7 +886,7 @@ impl Table {
     ) {
         if let Some(path) = self.path_expr.update(ctx, event) {
             let new_path = match path {
-                Value::String(p) => Some(Path::from(Arc::from(&*p))),
+                Value::String(p) => Some(Path::from(ArcStr::from(&*p))),
                 _ => None,
             };
             if &*self.path.borrow() != &new_path {

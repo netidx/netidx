@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arcstr::ArcStr;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -95,7 +96,7 @@ fn start_path_arg_rpc(
                     Some(mut paths) => {
                         for path in paths.drain(..) {
                             let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
                                 _ => {
                                     return err("invalid argument type, expected string")
                                 }
@@ -213,7 +214,7 @@ pub(super) fn start_set_data_rpc(
                         let mut value = value.drain(..);
                         for path in paths.drain(..) {
                             let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
                                 _ => {
                                     return err("invalid argument type, expected string")
                                 }
@@ -290,7 +291,7 @@ pub(super) fn start_set_formula_rpc(
                         };
                         for path in paths.drain(..) {
                             let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
                                 _ => {
                                     return err("invalid argument type, expected string")
                                 }
@@ -378,7 +379,7 @@ pub(super) fn start_create_sheet_rpc(
                         };
                         for path in paths.drain(..) {
                             let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
                                 _ => {
                                     return err("invalid argument type, expected string")
                                 }
@@ -481,7 +482,7 @@ pub(super) fn start_create_table_rpc(
                         };
                         for path in paths.drain(..) {
                             let path = match path {
-                                Value::String(path) => Path::from(Arc::from(&*path)),
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
                                 _ => {
                                     return err("invalid argument type, expected string")
                                 }

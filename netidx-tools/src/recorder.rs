@@ -43,6 +43,7 @@ use std::{
 };
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adapter::SimpleRef, Uuid};
+use arcstr::ArcStr;
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
@@ -1041,7 +1042,7 @@ mod record {
                 {
                     Some((p, _)) if Path::is_parent(p, base) => (),
                     None | Some(_) => {
-                        let base = Path::from(Arc::from(base));
+                        let base = Path::from(ArcStr::from(base));
                         let ct = ChangeTracker::new(base.clone());
                         btm.insert(base, ct);
                     }
