@@ -784,12 +784,21 @@ impl Subscriber {
         }
         let subscriber = self.downgrade();
         task::spawn(async move {
-            let mut incoming = Batched::new(incoming.fuse(), 100_000);
+            let mut incoming = Batched::new(incoming.fuse(), 1_000_000_000);
             let mut subscriptions = VecDeque::new();
             let mut subscription_batch = Vec::new();
             let mut retry: Option<Instant> = None;
             loop {
                 select_biased! {
+                    m = incoming.next() => match m {
+                        None => break,
+                        Some(BatchItem::InBatch(())) => (),
+                        Some(BatchItem::EndBatch) => {
+                            if let Some(set) = do_resub(&subscriber, &mut retry).await {
+                                subscriptions.push_back(Batched::new(set, 100_000));
+                            }
+                        }
+                    },
                     m = next_subscription_result(&mut subscriptions).fuse() => match m {
                         BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
                         BatchItem::EndBatch => {
@@ -810,15 +819,6 @@ impl Subscriber {
                     _ = wait_retry(retry).fuse() => {
                         if let Some(set) = do_resub(&subscriber, &mut retry).await {
                             subscriptions.push_back(Batched::new(set, 100_000));
-                        }
-                    },
-                    m = incoming.next() => match m {
-                        None => break,
-                        Some(BatchItem::InBatch(())) => (),
-                        Some(BatchItem::EndBatch) => {
-                            if let Some(set) = do_resub(&subscriber, &mut retry).await {
-                                subscriptions.push_back(Batched::new(set, 100_000));
-                            }
                         }
                     },
                 }
