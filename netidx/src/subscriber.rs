@@ -34,7 +34,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use std::{
     cmp::{max, Eq, PartialEq},
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     error, fmt,
     hash::Hash,
     iter, mem,
@@ -48,6 +48,12 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+
+lazy_static! {
+    static ref HCSTREAMS: Mutex<HashSet<StreamsInner>> = Mutex::new(HashSet::new());
+    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);
+    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(64, 16384);
+}
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -114,6 +120,7 @@ bitflags! {
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
+    sub_id: SubId,
     timestamp: u64,
     permissions: u32,
     token: Bytes,
@@ -494,6 +501,15 @@ struct SubscriberInner {
 }
 
 impl SubscriberInner {
+    fn durable_id(&self, path: &Path) -> Option<SubId> {
+        self.durable_dead
+            .get(path)
+            .or_else(|| self.durable_pending.get(path))
+            .or_else(|| self.durable_alive.get(path))
+            .and_then(|w| w.upgrade())
+            .map(|d| d.id())
+    }
+
     fn choose_addr(&mut self, resolved: &Resolved) -> (SocketAddr, Bytes) {
         use rand::seq::IteratorRandom;
         let flags = unsafe { PublishFlags::from_bits_unchecked(resolved.flags) };
@@ -579,7 +595,7 @@ impl Subscriber {
             dead: t.durable_dead.len(),
         }
     }
-    
+
     pub fn resolver(&self) -> ResolverRead {
         self.0.lock().resolver.clone()
     }
@@ -596,25 +612,28 @@ impl Subscriber {
             }
         }
         fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Instant>) {
-            *retry = subscriber
-                .durable_dead
-                .values()
-                .filter_map(|w| w.upgrade())
-                .map(|ds| match &ds.0.lock().sub {
-                    DvState::Dead(dead) => dead.next_try,
-                    DvState::Subscribed(_) => unreachable!(),
-                })
-                .fold(None, |min, v| match min {
-                    None => Some(v),
-                    Some(min) => {
-                        if v < min {
-                            Some(v)
-                        } else {
-                            Some(min)
+            let now = Instant::now();
+            task::block_in_place(|| {
+                for w in subscriber.durable_dead.values() {
+                    if let Some(dv) = w.upgrade() {
+                        let next_try = match &dv.0.lock().sub {
+                            DvState::Dead(dead) => dead.next_try,
+                            DvState::Subscribed(_) => unreachable!(),
+                        };
+                        match retry {
+                            None => { *retry = Some(next_try); }
+                            Some(retry) => {
+                                if next_try < *retry {
+                                    *retry = next_try;
+                                }
+                            }
+                        }
+                        if next_try <= now {
+                            break
                         }
                     }
-                })
-                .map(|t| t + Duration::from_secs(1));
+                }
+            })
         }
         async fn do_resub(
             subscriber: &SubscriberWeak,
@@ -624,30 +643,42 @@ impl Subscriber {
             info!("doing resubscriptions");
             let now = Instant::now();
             let (batch, timeout) = {
+                let mut dead = Vec::new();
                 let mut batch = Vec::new();
                 let mut subscriber = subscriber.0.lock();
                 let subscriber = &mut *subscriber;
                 let durable_dead = &mut subscriber.durable_dead;
                 let durable_pending = &mut subscriber.durable_pending;
                 let mut max_tries = 1;
-                durable_dead.retain(|p, w| match w.upgrade() {
-                    None => false,
-                    Some(s) => {
-                        let (next_try, tries) = {
-                            let dv = s.0.lock();
-                            match &dv.sub {
-                                DvState::Dead(d) => (d.next_try, d.tries),
-                                DvState::Subscribed(_) => unreachable!(),
+                let mut total_retries = 0;
+                task::block_in_place(|| {
+                    for (p, w) in durable_dead.iter() {
+                        match w.upgrade() {
+                            None => {
+                                dead.push(p.clone());
                             }
-                        };
-                        if next_try > now {
-                            true
-                        } else {
-                            batch.push(p.clone());
-                            durable_pending.insert(p.clone(), w.clone());
-                            max_tries = max(max_tries, tries);
-                            false
+                            Some(s) => {
+                                let (next_try, tries) = {
+                                    let mut dv = s.0.lock();
+                                    match &mut dv.sub {
+                                        DvState::Dead(d) => (d.next_try, d.tries),
+                                        DvState::Subscribed(_) => unreachable!(),
+                                    }
+                                };
+                                if next_try <= now {
+                                    batch.push(p.clone());
+                                    durable_pending.insert(p.clone(), w.clone());
+                                    max_tries = max(max_tries, tries);
+                                    total_retries += 1;
+                                    if total_retries >= 100_000 {
+                                        break;
+                                    }
+                                }
+                            }
                         }
+                    }
+                    for p in dead.iter().chain(batch.iter()) {
+                        durable_dead.remove(p);
                     }
                 });
                 let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
@@ -756,6 +787,23 @@ impl Subscriber {
             let mut retry: Option<Instant> = None;
             loop {
                 select_biased! {
+                    m = next_subscription_result(&mut subscriptions).fuse() => match m {
+                        BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
+                        BatchItem::EndBatch => {
+                            finish_resubscription_batch(
+                                &subscriber,
+                                &mut subscription_batch,
+                                &mut retry
+                            );
+                            if let Some(t) = retry {
+                                if Instant::now() >= t {
+                                    if let Some(set) = do_resub(&subscriber, &mut retry).await {
+                                        subscriptions.push_back(Batched::new(set, 100_000));
+                                    }
+                                }
+                            }
+                        }
+                    },
                     _ = wait_retry(retry).fuse() => {
                         if let Some(set) = do_resub(&subscriber, &mut retry).await {
                             subscriptions.push_back(Batched::new(set, 100_000));
@@ -770,16 +818,6 @@ impl Subscriber {
                             }
                         }
                     },
-                    m = next_subscription_result(&mut subscriptions).fuse() => match m {
-                        BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
-                        BatchItem::EndBatch => {
-                            finish_resubscription_batch(
-                                &subscriber,
-                                &mut subscription_batch,
-                                &mut retry
-                            );
-                        }
-                    }
                 }
             }
         });
@@ -891,6 +929,7 @@ impl Subscriber {
                             pending.insert(p, St::Error(anyhow!("path not found")));
                         } else {
                             let addr = t.choose_addr(&resolved);
+                            let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
                             let con = t.connections.entry(addr.0).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let target_spn = match resolved.krb5_spns.get(&addr.0) {
@@ -935,6 +974,7 @@ impl Subscriber {
                             let con_ = con.clone();
                             let r = con.send(ToCon::Subscribe(SubscribeValRequest {
                                 path: p.clone(),
+                                sub_id,
                                 timestamp: resolved.timestamp,
                                 permissions: resolved.permissions as u32,
                                 token: addr.1,
@@ -1093,16 +1133,65 @@ impl Subscriber {
     }
 }
 
+type StreamsInner = Arc<Vec<(ChanId, ChanWrap<Pooled<Vec<(SubId, Event)>>>)>>;
+
+struct Streams(StreamsInner);
+
+impl Streams {
+    fn new() -> Streams {
+        let mut inner = HCSTREAMS.lock();
+        match inner.get(&vec![]) {
+            Some(empty) => Streams(empty.clone()),
+            None => {
+                let r = Arc::new(vec![]);
+                inner.insert(r.clone());
+                Streams(r)
+            }
+        }
+    }
+
+    fn add(
+        &self,
+        chanid: ChanId,
+        chan: ChanWrap<Pooled<Vec<(SubId, Event)>>>,
+    ) -> Streams {
+        let mut dead = false;
+        let mut vec = Vec::clone(&self.0);
+        vec.retain(|(_, c)| {
+            if c.0.is_closed() {
+                dead = true;
+                false
+            } else {
+                true
+            }
+        });
+        vec.push((chanid, chan));
+        vec.sort_by_key(|(id, _)| *id);
+        let mut inner = HCSTREAMS.lock();
+        if dead {
+            inner.remove(&self.0);
+        }
+        match inner.get(&vec) {
+            Some(cur) => Streams(Arc::clone(cur)),
+            None => {
+                let t = Arc::new(vec);
+                inner.insert(t.clone());
+                Streams(t)
+            }
+        }
+    }
+}
+
 struct Sub {
     path: Path,
-    streams: Vec<(SubId, ChanId, Sender<Pooled<Vec<(SubId, Event)>>>)>,
-    last: Arc<Mutex<Event>>,
-    collect_last: bool,
+    sub_id: SubId,
+    streams: Streams,
+    last: Option<Arc<Mutex<Event>>>,
 }
 
 type ByChan = HashMap<
     ChanId,
-    (Sender<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
+    (ChanWrap<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
     FxBuildHasher,
 >;
 
@@ -1113,14 +1202,16 @@ fn unsubscribe(
     id: Id,
     conid: ConId,
 ) {
-    for (sub_id, chan_id, c) in sub.streams.iter() {
+    for (chan_id, c) in sub.streams.0.iter() {
         by_chan
             .entry(*chan_id)
             .or_insert_with(|| (c.clone(), BATCHES.take()))
             .1
-            .push((*sub_id, Event::Unsubscribed))
+            .push((sub.sub_id, Event::Unsubscribed))
     }
-    *sub.last.lock() = Event::Unsubscribed;
+    if let Some(last) = &sub.last {
+        *last.lock() = Event::Unsubscribed;
+    }
     if let Some(dsw) = subscriber
         .durable_alive
         .remove(&sub.path)
@@ -1198,11 +1289,6 @@ async fn hello_publisher(
 
 const PERIOD: Duration = Duration::from_secs(100);
 
-lazy_static! {
-    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(1000, 100000);
-    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(1000, 100000);
-}
-
 // This is the fast path for the common case where the batch contains
 // only updates. As of 2020-04-30, sending to an mpsc channel is
 // pretty slow, about 250ns, so we go to great lengths to avoid it.
@@ -1214,21 +1300,21 @@ async fn process_updates_batch(
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
             if let Some(sub) = subscriptions.get_mut(&i) {
-                for (sub_id, chan_id, c) in sub.streams.iter() {
+                for (chan_id, c) in sub.streams.0.iter() {
                     by_chan
                         .entry(*chan_id)
                         .or_insert_with(|| (c.clone(), BATCHES.take()))
                         .1
-                        .push((*sub_id, Event::Update(m.clone())))
+                        .push((sub.sub_id, Event::Update(m.clone())))
                 }
-                if sub.collect_last {
-                    *sub.last.lock() = Event::Update(m);
+                if let Some(last) = &sub.last {
+                    *last.lock() = Event::Update(m);
                 }
             }
         }
     }
     for (_, (mut c, batch)) in by_chan.drain() {
-        let _ = c.send(batch).await;
+        let _ = c.0.send(batch).await;
     }
 }
 
@@ -1246,15 +1332,15 @@ async fn process_batch(
         match m {
             From::Update(i, m) => match subscriptions.get_mut(&i) {
                 Some(sub) => {
-                    for (sub_id, chan_id, c) in sub.streams.iter_mut() {
+                    for (chan_id, c) in sub.streams.0.iter() {
                         by_chan
                             .entry(*chan_id)
                             .or_insert_with(|| (c.clone(), BATCHES.take()))
                             .1
-                            .push((*sub_id, Event::Update(m.clone())));
+                            .push((sub.sub_id, Event::Update(m.clone())));
                     }
-                    if sub.collect_last {
-                        *sub.last.lock() = Event::Update(m);
+                    if let Some(last) = &sub.last {
+                        *last.lock() = Event::Update(m);
                     }
                 }
                 None => con.queue_send(&To::Unsubscribe(i))?,
@@ -1291,10 +1377,9 @@ async fn process_batch(
             From::Subscribed(p, id, m) => match pending.remove(&p) {
                 None => con.queue_send(&To::Unsubscribe(id))?,
                 Some(req) => {
-                    let sub_id = SubId::new();
                     let last = Arc::new(Mutex::new(Event::Update(m)));
                     let s = Ok(Val(Arc::new(ValInner {
-                        sub_id,
+                        sub_id: req.sub_id,
                         id,
                         conid,
                         connection: req.con,
@@ -1307,9 +1392,9 @@ async fn process_batch(
                                 id,
                                 Sub {
                                     path: req.path,
-                                    last,
-                                    streams: Vec::new(),
-                                    collect_last: true,
+                                    sub_id: req.sub_id,
+                                    last: Some(last),
+                                    streams: Streams::new(),
                                 },
                             );
                         }
@@ -1319,7 +1404,7 @@ async fn process_batch(
         }
     }
     for (_, (mut c, batch)) in by_chan.drain() {
-        let _ = c.send(batch).await;
+        let _ = c.0.send(batch).await;
     }
     Ok(())
 }
@@ -1444,33 +1529,33 @@ async fn connection(
                             ToCon::Stream { id, sub_id, mut tx, flags } => {
                                 if let Some(sub) = subscriptions.get_mut(&id) {
                                     if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
-                                        sub.collect_last = false;
+                                        sub.last = None;
                                     }
-                                    sub.streams.retain(|(_, _, c)| {
-                                        if c.is_closed() {
-                                            by_receiver.remove(&ChanWrap(c.clone()));
-                                            false
-                                        } else {
-                                            true
+                                    let mut already_have = false;
+                                    for (_, c) in sub.streams.0.iter() {
+                                        if tx.same_receiver(&c.0) {
+                                            already_have = true;
                                         }
-                                    });
+                                        if c.0.is_closed() {
+                                            by_receiver.remove(&c);
+                                        }
+                                    }
                                     if flags.contains(UpdatesFlags::BEGIN_WITH_LAST) {
-                                        let m = sub.last.lock().clone();
-                                        let mut b = BATCHES.take();
-                                        b.push((sub_id, m));
-                                        match tx.send(b).await {
-                                            Err(_) => continue,
-                                            Ok(()) => ()
+                                        if let Some(last) = &sub.last {
+                                            let m = last.lock().clone();
+                                            let mut b = BATCHES.take();
+                                            b.push((sub_id, m));
+                                            match tx.send(b).await {
+                                                Err(_) => continue,
+                                                Ok(()) => ()
+                                            }
                                         }
                                     }
-                                    let already_have =
-                                        sub.streams
-                                            .iter()
-                                            .any(|(_, _, s)| tx.same_receiver(s));
                                     if !already_have {
-                                        let id = by_receiver.entry(ChanWrap(tx.clone()))
+                                        let tx = ChanWrap(tx);
+                                        let id = by_receiver.entry(tx.clone())
                                             .or_insert_with(ChanId::new);
-                                        sub.streams.push((sub_id, *id, tx));
+                                        sub.streams = sub.streams.add(*id, tx);
                                     }
                                 }
                             }
