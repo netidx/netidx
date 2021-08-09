@@ -614,6 +614,7 @@ impl Subscriber {
         fn update_retry(subscriber: &mut SubscriberInner, retry: &mut Option<Instant>) {
             let now = Instant::now();
             task::block_in_place(|| {
+                *retry = None;
                 for w in subscriber.durable_dead.values() {
                     if let Some(dv) = w.upgrade() {
                         let next_try = match &dv.0.lock().sub {
@@ -621,7 +622,9 @@ impl Subscriber {
                             DvState::Subscribed(_) => unreachable!(),
                         };
                         match retry {
-                            None => { *retry = Some(next_try); }
+                            None => {
+                                *retry = Some(next_try);
+                            }
                             Some(retry) => {
                                 if next_try < *retry {
                                     *retry = next_try;
@@ -629,7 +632,7 @@ impl Subscriber {
                             }
                         }
                         if next_try <= now {
-                            break
+                            break;
                         }
                     }
                 }
