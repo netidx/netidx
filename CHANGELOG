@@ -10,7 +10,8 @@
     behind. Resubscribing to 10 million things is now much smoother.
 
   - Subscriber message rates are about 24% faster unencrypted, and
-    about 10% faster encrypted on x86_64 (Skylake).
+    about 12% faster encrypted on x86_64 (Skylake). 18% faster
+    encrypted on OpenPOWER.
 
   - Publisher API reworked unfortunatly these are BREAKING
     changes. The rework is meant to solve three problems with the
