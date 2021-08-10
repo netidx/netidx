@@ -1312,7 +1312,7 @@ async fn process_updates_batch(
 ) {
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
-            if let Some(sub) = subscriptions.get_mut(&i) {
+            if let Some(sub) = subscriptions.get(&i) {
                 for (chan_id, c) in sub.streams.0.iter() {
                     by_chan
                         .entry(*chan_id)
@@ -1343,7 +1343,7 @@ async fn process_batch(
 ) -> Result<()> {
     for m in batch.drain(..) {
         match m {
-            From::Update(i, m) => match subscriptions.get_mut(&i) {
+            From::Update(i, m) => match subscriptions.get(&i) {
                 Some(sub) => {
                     for (chan_id, c) in sub.streams.0.iter() {
                         by_chan
