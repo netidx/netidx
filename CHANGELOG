@@ -7,8 +7,10 @@
   - Subscriber durable resubscriptions reworked, now we will
     resubscribe in batches of up to 100K instead of just unleashing a
     horde of resubscriptions if the publishers get
-    behind. Resubscribing to 10 million things is now much smoother
-    (and possible on a reasonable machine).
+    behind. Resubscribing to 10 million things is now much smoother.
+
+  - Subscriber message rates are about 24% faster unencrypted, and
+    about 10% faster encrypted on x86_64 (Skylake).
 
   - Publisher API reworked unfortunatly these are BREAKING
     changes. The rework is meant to solve three problems with the
