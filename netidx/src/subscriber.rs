@@ -48,12 +48,72 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+use triomphe::Arc as TArc;
+
+type StreamsInner<T> = Arc<Vec<(T, ChanWrap<Pooled<Vec<(SubId, Event)>>>)>>;
 
 lazy_static! {
-    static ref HCSTREAMS: Mutex<HashSet<StreamsInner>> = Mutex::new(HashSet::new());
+    static ref HCSTREAMS: Mutex<HashSet<StreamsInner<ChanId>>> = Mutex::new(HashSet::new());
+    static ref HCDVSTREAMS: Mutex<HashSet<StreamsInner<UpdatesFlags>>> =
+        Mutex::new(HashSet::new());
     static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);
     static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(64, 16384);
 }
+
+macro_rules! hcstreams {
+    ($name:ident, $static:ident, $typ:ty) => {
+        #[derive(Debug)]
+        struct $name(StreamsInner<$typ>);
+
+        impl $name {
+            fn new() -> $name {
+                let mut inner = $static.lock();
+                match inner.get(&vec![]) {
+                    Some(empty) => $name(empty.clone()),
+                    None => {
+                        let r = Arc::new(vec![]);
+                        inner.insert(r.clone());
+                        $name(r)
+                    }
+                }
+            }
+
+            fn add(
+                &self,
+                chanid: $typ,
+                chan: ChanWrap<Pooled<Vec<(SubId, Event)>>>,
+            ) -> $name {
+                let mut dead = false;
+                let mut vec = Vec::clone(&self.0);
+                vec.retain(|(_, c)| {
+                    if c.0.is_closed() {
+                        dead = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                vec.push((chanid, chan));
+                vec.sort_by_key(|(id, _)| *id);
+                let mut inner = $static.lock();
+                if dead {
+                    inner.remove(&self.0);
+                }
+                match inner.get(&vec) {
+                    Some(cur) => $name(Arc::clone(cur)),
+                    None => {
+                        let t = Arc::new(vec);
+                        inner.insert(t.clone());
+                        $name(t)
+                    }
+                }
+            }
+        }
+    };
+}
+
+hcstreams!(Streams, HCSTREAMS, ChanId);
+hcstreams!(DvStreams, HCDVSTREAMS, UpdatesFlags);
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -181,7 +241,7 @@ struct ValInner {
     id: Id,
     conid: ConId,
     connection: BatchSender<ToCon>,
-    last: Arc<Mutex<Event>>,
+    last: TArc<Mutex<Event>>,
 }
 
 impl Drop for ValInner {
@@ -281,7 +341,7 @@ enum DvState {
 struct DvalInner {
     sub_id: SubId,
     sub: DvState,
-    streams: Vec<(UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+    streams: DvStreams,
 }
 
 #[derive(Debug, Clone)]
@@ -359,9 +419,9 @@ impl Dval {
         tx: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) {
         let mut t = self.0.lock();
-        t.streams.retain(|(_, c)| !c.is_closed());
-        if !t.streams.iter().any(|(_, s)| tx.same_receiver(s)) {
-            t.streams.push((flags, tx.clone()));
+        let c = ChanWrap(tx.clone());
+        if !t.streams.0.iter().any(|(_, s)| &c == s) {
+            t.streams = t.streams.add(flags, c);
         }
         if let DvState::Subscribed(ref sub) = t.sub {
             let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
@@ -727,10 +787,9 @@ impl Subscriber {
                             },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
-                                dv.streams.retain(|(_, c)| !c.is_closed());
-                                for (flags, tx) in dv.streams.iter().cloned() {
+                                for (flags, tx) in dv.streams.0.iter().cloned() {
                                     sub.0.connection.send(ToCon::Stream {
-                                        tx,
+                                        tx: tx.0,
                                         sub_id: dv.sub_id,
                                         id: sub.0.id,
                                         flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
@@ -1106,7 +1165,7 @@ impl Subscriber {
                 tries: 0,
                 next_try: Instant::now(),
             })),
-            streams: Vec::new(),
+            streams: DvStreams::new(),
         })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
@@ -1136,60 +1195,11 @@ impl Subscriber {
     }
 }
 
-type StreamsInner = Arc<Vec<(ChanId, ChanWrap<Pooled<Vec<(SubId, Event)>>>)>>;
-
-struct Streams(StreamsInner);
-
-impl Streams {
-    fn new() -> Streams {
-        let mut inner = HCSTREAMS.lock();
-        match inner.get(&vec![]) {
-            Some(empty) => Streams(empty.clone()),
-            None => {
-                let r = Arc::new(vec![]);
-                inner.insert(r.clone());
-                Streams(r)
-            }
-        }
-    }
-
-    fn add(
-        &self,
-        chanid: ChanId,
-        chan: ChanWrap<Pooled<Vec<(SubId, Event)>>>,
-    ) -> Streams {
-        let mut dead = false;
-        let mut vec = Vec::clone(&self.0);
-        vec.retain(|(_, c)| {
-            if c.0.is_closed() {
-                dead = true;
-                false
-            } else {
-                true
-            }
-        });
-        vec.push((chanid, chan));
-        vec.sort_by_key(|(id, _)| *id);
-        let mut inner = HCSTREAMS.lock();
-        if dead {
-            inner.remove(&self.0);
-        }
-        match inner.get(&vec) {
-            Some(cur) => Streams(Arc::clone(cur)),
-            None => {
-                let t = Arc::new(vec);
-                inner.insert(t.clone());
-                Streams(t)
-            }
-        }
-    }
-}
-
 struct Sub {
     path: Path,
     sub_id: SubId,
     streams: Streams,
-    last: Option<Arc<Mutex<Event>>>,
+    last: Option<TArc<Mutex<Event>>>,
 }
 
 type ByChan = HashMap<
@@ -1380,7 +1390,7 @@ async fn process_batch(
             From::Subscribed(p, id, m) => match pending.remove(&p) {
                 None => con.queue_send(&To::Unsubscribe(id))?,
                 Some(req) => {
-                    let last = Arc::new(Mutex::new(Event::Update(m)));
+                    let last = TArc::new(Mutex::new(Event::Update(m)));
                     let s = Ok(Val(Arc::new(ValInner {
                         sub_id: req.sub_id,
                         id,

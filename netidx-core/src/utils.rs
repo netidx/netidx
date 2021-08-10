@@ -317,7 +317,7 @@ pub fn bytes(t: &[u8]) -> Bytes {
     bytesmut(t).freeze()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChanWrap<T>(pub mpsc::Sender<T>);
 
 impl<T> PartialEq for ChanWrap<T> {
