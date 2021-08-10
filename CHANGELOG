@@ -1,5 +1,15 @@
 * 0.9.0 netidx, netidx-tools, netidx-browser:
 
+  - Subscriber uses much less memory, a durable subscription now costs
+    about 2x a publish of the same value, which is a lot better than
+    it has been in the past.
+
+  - Subscriber durable resubscriptions reworked, now we will
+    resubscribe in batches of up to 100K instead of just unleashing a
+    horde of resubscriptions if the publishers get
+    behind. Resubscribing to 10 million things is now much smoother
+    (and possible on a reasonable machine).
+
   - Publisher API reworked unfortunatly these are BREAKING
     changes. The rework is meant to solve three problems with the
     previous api.
