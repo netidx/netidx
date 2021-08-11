@@ -168,6 +168,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Filter::register(&mut t);
         stdfn::Cast::register(&mut t);
         stdfn::Isa::register(&mut t);
+        stdfn::IsErr::register(&mut t);
         stdfn::StartsWith::register(&mut t);
         stdfn::EndsWith::register(&mut t);
         stdfn::Contains::register(&mut t);
