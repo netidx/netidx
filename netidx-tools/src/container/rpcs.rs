@@ -414,7 +414,7 @@ fn collect_chars_vec(
     name: &str,
 ) -> Result<Vec<Chars>> {
     match args.remove(name) {
-        None => bail!("required argument rows is missing"),
+        None => bail!("required argument {} is missing", name),
         Some(mut rows) => {
             let mut res = Vec::new();
             for v in rows.drain(..) {
@@ -467,7 +467,7 @@ pub(super) fn start_create_table_rpc(
                             Err(e) => return Value::from(format!("{}", e)),
                             Ok(rows) => rows,
                         };
-                        let columns = match collect_chars_vec(&mut args, "columns") {
+                        let columns = match collect_chars_vec(&mut args, "column") {
                             Err(e) => return Value::from(format!("{}", e)),
                             Ok(columns) => columns,
                         };

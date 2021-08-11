@@ -393,7 +393,7 @@ pub mod client {
 mod test {
     use super::*;
     use netidx::{config, resolver::Auth, resolver_server::Server};
-    use tokio::{time, runtime::Runtime};
+    use tokio::{runtime::Runtime, time};
 
     #[test]
     fn call_proc() {
