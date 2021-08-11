@@ -69,6 +69,35 @@ impl<C: Ctx, E> Apply<C, E> for Any {
     }
 }
 
+pub struct Do;
+
+impl<C: Ctx, E> Register<C, E> for Do {
+    fn register(ctx: &mut ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
+            Box::new(Any(from.iter().find_map(|s| s.current())))
+        });
+        ctx.functions.insert("do".into(), f);
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Do {
+    fn current(&self) -> Option<Value> {
+        None
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        for src in from {
+            src.update(ctx, event);
+        }
+        None
+    }
+}
+
 pub trait CachedCurEval {
     fn eval(from: &CachedVals) -> Option<Value>;
     fn name() -> &'static str;
@@ -326,6 +355,213 @@ impl CachedCurEval for NotEv {
 }
 
 pub type Not = CachedCur<NotEv>;
+
+// CR estokes: document
+pub struct IsErrEv;
+
+impl CachedCurEval for IsErrEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [v] => v.as_ref().map(|v| match v {
+                Value::Error(_) => Value::True,
+                _ => Value::False,
+            }),
+            _ => Some(Value::Error(Chars::from("is_error expected 1 argument"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "is_error"
+    }
+}
+
+pub type IsErr = CachedCur<IsErrEv>;
+
+// CR estokes: document
+pub struct StartsWithEv;
+
+impl CachedCurEval for StartsWithEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(pfx)), Some(Value::String(val))] => {
+                if val.starts_with(&**pfx) {
+                    Some(Value::True)
+                } else {
+                    Some(Value::False)
+                }
+            }
+            _ => Some(Value::Error(Chars::from("starts_with expected 2 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "starts_with"
+    }
+}
+
+pub type StartsWith = CachedCur<StartsWithEv>;
+
+// CR estokes: document
+pub struct EndsWithEv;
+
+impl CachedCurEval for EndsWithEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(sfx)), Some(Value::String(val))] => {
+                if val.ends_with(&**sfx) {
+                    Some(Value::True)
+                } else {
+                    Some(Value::False)
+                }
+            }
+            _ => Some(Value::Error(Chars::from("ends_with expected 2 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "ends_with"
+    }
+}
+
+pub type EndsWith = CachedCur<EndsWithEv>;
+
+// CR estokes: document
+pub struct ContainsEv;
+
+impl CachedCurEval for ContainsEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(chs)), Some(Value::String(val))] => {
+                if val.contains(&**chs) {
+                    Some(Value::True)
+                } else {
+                    Some(Value::False)
+                }
+            }
+            _ => Some(Value::Error(Chars::from("contains expected 2 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "contains"
+    }
+}
+
+pub type Contains = CachedCur<ContainsEv>;
+
+pub struct StripPrefixEv;
+
+impl CachedCurEval for StripPrefixEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(pfx)), Some(Value::String(val))] => val
+                .strip_prefix(&**pfx)
+                .map(|s| Value::String(Chars::from(String::from(s)))),
+            _ => Some(Value::Error(Chars::from("strip_prefix expected 2 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "strip_prefix"
+    }
+}
+
+pub type StripPrefix = CachedCur<StripPrefixEv>;
+
+pub struct StripSuffixEv;
+
+impl CachedCurEval for StripSuffixEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(sfx)), Some(Value::String(val))] => val
+                .strip_suffix(&**sfx)
+                .map(|s| Value::String(Chars::from(String::from(s)))),
+            _ => Some(Value::Error(Chars::from("strip_suffix expected 2 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "strip_suffix"
+    }
+}
+
+pub type StripSuffix = CachedCur<StripSuffixEv>;
+
+pub struct TrimEv;
+
+impl CachedCurEval for TrimEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(val))] => {
+                Some(Value::String(Chars::from(String::from(val.trim()))))
+            }
+            _ => Some(Value::Error(Chars::from("trim expected 1 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "trim"
+    }
+}
+
+pub type Trim = CachedCur<TrimEv>;
+
+pub struct TrimStartEv;
+
+impl CachedCurEval for TrimStartEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(val))] => {
+                Some(Value::String(Chars::from(String::from(val.trim_start()))))
+            }
+            _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "trim_start"
+    }
+}
+
+pub type TrimStart = CachedCur<TrimStartEv>;
+
+pub struct TrimEndEv;
+
+impl CachedCurEval for TrimEndEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(val))] => {
+                Some(Value::String(Chars::from(String::from(val.trim_end()))))
+            }
+            _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "trim_end"
+    }
+}
+
+pub type TrimEnd = CachedCur<TrimEndEv>;
+
+pub struct ReplaceEv;
+
+impl CachedCurEval for ReplaceEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(pat)), Some(Value::String(rep)), Some(Value::String(val))] => {
+                Some(Value::String(Chars::from(String::from(val.replace(&**pat, &**rep)))))
+            }
+            _ => Some(Value::Error(Chars::from("replace expected 3 arguments"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "replace"
+    }
+}
+
+pub type Replace = CachedCur<ReplaceEv>;
 
 pub struct CmpEv;
 

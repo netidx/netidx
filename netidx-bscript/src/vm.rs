@@ -153,6 +153,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn new(user: C) -> Self {
         let mut t = ExecCtx::no_std(user);
         stdfn::Any::register(&mut t);
+        stdfn::Do::register(&mut t);
         stdfn::All::register(&mut t);
         stdfn::Sum::register(&mut t);
         stdfn::Product::register(&mut t);
@@ -167,6 +168,15 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Filter::register(&mut t);
         stdfn::Cast::register(&mut t);
         stdfn::Isa::register(&mut t);
+        stdfn::StartsWith::register(&mut t);
+        stdfn::EndsWith::register(&mut t);
+        stdfn::Contains::register(&mut t);
+        stdfn::StripPrefix::register(&mut t);
+        stdfn::StripSuffix::register(&mut t);
+        stdfn::Trim::register(&mut t);
+        stdfn::TrimStart::register(&mut t);
+        stdfn::TrimEnd::register(&mut t);
+        stdfn::Replace::register(&mut t);
         stdfn::StringJoin::register(&mut t);
         stdfn::StringConcat::register(&mut t);
         stdfn::Eval::register(&mut t);
