@@ -49,6 +49,7 @@ lazy_static! {
     static ref REFS: Pool<Vec<(Path, Value)>> = Pool::new(8, 16384);
     static ref REFIDS: Pool<Vec<ExprId>> = Pool::new(8, 2048);
     static ref PKBUF: Pool<Vec<u8>> = Pool::new(8, 16384);
+    static ref RELS: Pool<FxHashSet<Path>> = Pool::new(8, 2048);
 }
 
 struct Refs {
@@ -126,7 +127,7 @@ struct Lc {
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
     refs: FxHashMap<Path, FxHashSet<ExprId>>,
-    rels: FxHashSet<ExprId>,
+    rels: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
     subscriber: Subscriber,
     publisher: Publisher,
@@ -166,7 +167,7 @@ impl Lc {
             sub: HashMap::with_hasher(FxBuildHasher::default()),
             rpc: HashMap::with_hasher(FxBuildHasher::default()),
             refs: HashMap::with_hasher(FxBuildHasher::default()),
-            rels: HashSet::with_hasher(FxBuildHasher::default()),
+            rels: HashMap::with_hasher(FxBuildHasher::default()),
             forward_refs: HashMap::with_hasher(FxBuildHasher::default()),
             db,
             subscriber,
@@ -193,6 +194,21 @@ impl Lc {
             }
             for name in refs.vars {
                 remove_eid_from_set(&mut self.var, name, &expr_id);
+            }
+        }
+    }
+
+    fn remove_rel(&mut self, path: &Path, id: ExprId) {
+        if let Some(table) = Path::dirname(path).and_then(Path::dirname) {
+            let remove = match self.rels.get_mut(table) {
+                None => false,
+                Some(rels) => {
+                    rels.remove(&id);
+                    rels.is_empty()
+                }
+            };
+            if remove {
+                self.rels.remove(table);
             }
         }
     }
@@ -432,15 +448,11 @@ impl Rel {
             let loc = &self.loc;
             let loc = match row {
                 None | Some(0) => Some(loc.clone()),
-                Some(offset) => {
-                    ctx.user.db.relative_row(&loc, offset).ok().flatten()
-                }
+                Some(offset) => ctx.user.db.relative_row(&loc, offset).ok().flatten(),
             };
             let loc = loc.and_then(|loc| match col {
                 None | Some(0) => Some(loc),
-                Some(offset) => {
-                    ctx.user.db.relative_column(&loc, offset).ok().flatten()
-                }
+                Some(offset) => ctx.user.db.relative_column(&loc, offset).ok().flatten(),
             });
             match loc {
                 None => Value::Error(Chars::from("#LOC")),
@@ -453,11 +465,15 @@ impl Rel {
 impl Register<Lc, UserEv> for Rel {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
-            ctx.user.rels.insert(id);
-            let mut t = Rel {
-                loc: ctx.user.current_path.clone(),
-                current: Value::Error(Chars::from("#LOC")),
-            };
+            let loc = ctx.user.current_path.clone();
+            if let Some(table) = Path::dirname(&loc).and_then(Path::dirname) {
+                ctx.user
+                    .rels
+                    .entry(Path::from(ArcStr::from(table)))
+                    .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+                    .insert(id);
+            }
+            let mut t = Rel { loc, current: Value::Error(Chars::from("#LOC")) };
             t.current = t.eval(ctx, from);
             Box::new(t)
         });
@@ -761,9 +777,13 @@ impl Container {
         }
     }
 
-    fn update_rels(&mut self, batch: &mut UpdateBatch) {
+    fn update_rels(&mut self, mut rels: Pooled<FxHashSet<Path>>, batch: &mut UpdateBatch) {
         let mut refs = REFIDS.take();
-        refs.extend(self.ctx.user.rels.iter().copied());
+        for table in rels.drain() {
+            if let Some(rels) = self.ctx.user.rels.get(&table) {
+                refs.extend(rels.iter().copied());
+            }
+        }
         self.update_expr_ids(batch, &mut refs, &vm::Event::User(UserEv::Rel));
     }
 
@@ -793,7 +813,7 @@ impl Container {
         fifo.src.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.expr_id.lock();
         self.ctx.user.unref(*expr_id);
-        self.ctx.user.rels.remove(&expr_id);
+        self.ctx.user.remove_rel(&fifo.data_path, *expr_id);
         self.compiled.remove(&expr_id);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
@@ -826,7 +846,7 @@ impl Container {
         fifo.on_write.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.ctx.user.unref(*expr_id);
-        self.ctx.user.rels.remove(&expr_id);
+        self.ctx.user.remove_rel(&fifo.data_path, *expr_id);
         self.compiled.remove(&expr_id);
         match value.parse::<Expr>() {
             Ok(expr) => {
@@ -1149,8 +1169,8 @@ impl Container {
                 self.compiled.remove(&on_write_expr_id);
                 let fpath = path.append(".formula");
                 let opath = path.append(".on-write");
-                self.ctx.user.rels.remove(&expr_id);
-                self.ctx.user.rels.remove(&on_write_expr_id);
+                self.ctx.user.remove_rel(path, *expr_id);
+                self.ctx.user.remove_rel(path, *on_write_expr_id);
                 self.ctx.user.by_id.remove(&fifo.data.id());
                 self.ctx.user.by_path.remove(&fpath);
                 self.ctx.user.by_id.remove(&fifo.src.id());
@@ -1172,7 +1192,14 @@ impl Container {
 
     fn process_update(&mut self, batch: &mut UpdateBatch, mut update: db::Update) {
         use db::UpdateKind;
-        let mut update_rels = false;
+        let mut rels = RELS.take();
+        fn add_rel(rels: &mut Pooled<FxHashSet<Path>>, rel: &Path) {
+            if let Some(table) = Path::dirname(rel).and_then(Path::dirname) {
+                if !rels.contains(table) {
+                    rels.insert(Path::from(ArcStr::from(table)));
+                }
+            }
+        }
         for (path, value) in update.data.drain(..) {
             match value {
                 UpdateKind::Updated(v) => {
@@ -1188,12 +1215,12 @@ impl Container {
                         self.remove_deleted_published(batch, &path);
                     }
                     self.ctx.user.ref_updates.push((path.clone(), v));
+                    add_rel(&mut rels, &path);
                     self.advertise_path(path);
-                    update_rels = true;
                 }
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
-                    update_rels = true;
+                    add_rel(&mut rels, &path);
                 }
             }
         }
@@ -1213,12 +1240,12 @@ impl Container {
                         self.remove_deleted_published(batch, &path);
                     }
                     // CR estokes: log
+                    add_rel(&mut rels, &path);
                     let _: Result<_> = self.publish_formula(path, batch, v, Value::Null);
-                    update_rels = true;
                 }
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
-                    update_rels = true;
+                    add_rel(&mut rels, &path);
                 }
             }
         }
@@ -1239,12 +1266,12 @@ impl Container {
                         self.remove_deleted_published(batch, &path);
                     }
                     // CR estokes: log
+                    add_rel(&mut rels, &path);
                     let _: Result<_> = self.publish_formula(path, batch, Value::Null, v);
-                    update_rels = true;
                 }
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
-                    update_rels = true;
+                    add_rel(&mut rels, &path);
                 }
             }
         }
@@ -1255,8 +1282,8 @@ impl Container {
             self.locked.remove(&path);
         }
         self.update_refs(batch);
-        if update_rels {
-            self.update_rels(batch);
+        if !rels.is_empty() {
+            self.update_rels(rels, batch);
         }
     }
 
