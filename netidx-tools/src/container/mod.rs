@@ -441,6 +441,12 @@ impl Rel {
             }
             _ => (None, None, true),
         };
+        let invalid = match (row, col) {
+            (None, None) => invalid,
+            (Some(r), Some(c)) => invalid || r.abs() > 255 || c.abs() > 255,
+            (Some(r), None) => invalid || r.abs() > 255,
+            (None, Some(c)) => invalid || c.abs() > 255,
+        };
         if invalid {
             let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
             Value::Error(Chars::from(e))
