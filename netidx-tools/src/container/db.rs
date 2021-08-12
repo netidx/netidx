@@ -302,7 +302,7 @@ impl Db {
         offset: i32,
     ) -> Result<Option<Path>> {
         use std::ops::Bound::{self, *};
-        let rowbase = Path::basename(base).ok_or_else(|| anyhow!("no row"))?;
+        let rowbase = Path::dirname(base).ok_or_else(|| anyhow!("no row"))?;
         let mut i = 0;
         if offset == 0 {
             Ok(Some(base.clone()))
@@ -314,7 +314,7 @@ impl Db {
             while let Some(r) = iter.next_back() {
                 let r = r?;
                 let path = str::from_utf8(&r)?;
-                if Path::basename(path) == Some(rowbase) {
+                if Path::dirname(path) == Some(rowbase) {
                     i -= 1;
                     if i == offset {
                         return Ok(Some(Path::from(ArcStr::from(path))));
@@ -332,7 +332,7 @@ impl Db {
             for r in iter {
                 let r = r?;
                 let path = str::from_utf8(&r)?;
-                if Path::basename(path) == Some(rowbase) {
+                if Path::dirname(path) == Some(rowbase) {
                     i += 1;
                     if i == offset {
                         return Ok(Some(Path::from(ArcStr::from(path))));

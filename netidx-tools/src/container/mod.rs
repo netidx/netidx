@@ -120,6 +120,7 @@ enum LcEvent {
 }
 
 struct Lc {
+    current_path: Path,
     db: db::Db,
     var: FxHashMap<Chars, FxHashSet<ExprId>>,
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
@@ -133,7 +134,6 @@ struct Lc {
     var_updates: Pooled<Vec<(Chars, Value)>>,
     ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
-    by_exprid: FxHashMap<ExprId, Arc<Fifo>>,
     by_path: HashMap<Path, Published>,
     events: mpsc::UnboundedSender<LcEvent>,
 }
@@ -161,6 +161,7 @@ impl Lc {
         events: mpsc::UnboundedSender<LcEvent>,
     ) -> Self {
         Self {
+            current_path: Path::from("/"),
             var: HashMap::with_hasher(FxBuildHasher::default()),
             sub: HashMap::with_hasher(FxBuildHasher::default()),
             rpc: HashMap::with_hasher(FxBuildHasher::default()),
@@ -174,7 +175,6 @@ impl Lc {
             var_updates: VARS.take(),
             ref_updates: REFS.take(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            by_exprid: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             events,
         }
@@ -409,7 +409,7 @@ impl Apply<Lc, UserEv> for Ref {
 }
 
 struct Rel {
-    id: ExprId,
+    loc: Path,
     current: Value,
 }
 
@@ -425,21 +425,21 @@ impl Rel {
             }
             _ => (None, None, true),
         };
-        let loc = ctx.user.by_exprid.get(&self.id).map(|f| f.data_path.clone());
         if invalid {
             let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
             Value::Error(Chars::from(e))
         } else {
-            let loc = match dbg!(row) {
-                None | Some(0) => loc,
-                Some(offset) => loc.and_then(|loc| {
-                    dbg!(ctx.user.db.relative_row(&loc, offset)).ok().flatten()
-                }),
+            let loc = &self.loc;
+            let loc = match row {
+                None | Some(0) => Some(loc.clone()),
+                Some(offset) => {
+                    ctx.user.db.relative_row(&loc, offset).ok().flatten()
+                }
             };
-            let loc = loc.and_then(|loc| match dbg!(col) {
+            let loc = loc.and_then(|loc| match col {
                 None | Some(0) => Some(loc),
                 Some(offset) => {
-                    dbg!(ctx.user.db.relative_column(&loc, offset)).ok().flatten()
+                    ctx.user.db.relative_column(&loc, offset).ok().flatten()
                 }
             });
             match loc {
@@ -454,7 +454,10 @@ impl Register<Lc, UserEv> for Rel {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
             ctx.user.rels.insert(id);
-            let mut t = Rel { id, current: Value::Error(Chars::from("#LOC")) };
+            let mut t = Rel {
+                loc: ctx.user.current_path.clone(),
+                current: Value::Error(Chars::from("#LOC")),
+            };
             t.current = t.eval(ctx, from);
             Box::new(t)
         });
@@ -601,6 +604,7 @@ impl Container {
         let expr_id = expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
         let on_write_expr_id =
             on_write_expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
+        self.ctx.user.current_path = path.clone();
         let formula_node = expr.map(|e| Node::compile(&mut self.ctx, e));
         let on_write_node = on_write_expr.map(|e| Node::compile(&mut self.ctx, e));
         let value =
@@ -632,8 +636,6 @@ impl Container {
             on_write_expr_id: Mutex::new(on_write_expr_id),
         });
         let published = Published::Formula(fifo.clone());
-        self.ctx.user.by_exprid.insert(expr_id, fifo.clone());
-        self.ctx.user.by_exprid.insert(on_write_expr_id, fifo.clone());
         self.ctx.user.by_id.insert(data_id, published.clone());
         self.ctx.user.by_path.insert(path.clone(), published.clone());
         self.ctx.user.by_id.insert(src_id, published.clone());
@@ -791,13 +793,12 @@ impl Container {
         fifo.src.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.expr_id.lock();
         self.ctx.user.unref(*expr_id);
-        self.ctx.user.by_exprid.remove(&expr_id);
         self.ctx.user.rels.remove(&expr_id);
         self.compiled.remove(&expr_id);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
                 *expr_id = expr.id;
-                self.ctx.user.by_exprid.insert(*expr_id, fifo.clone());
+                self.ctx.user.current_path = fifo.data_path.clone();
                 let node = Node::compile(&mut self.ctx, expr);
                 let dv = node.current().unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
@@ -825,13 +826,12 @@ impl Container {
         fifo.on_write.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.ctx.user.unref(*expr_id);
-        self.ctx.user.by_exprid.remove(&expr_id);
         self.ctx.user.rels.remove(&expr_id);
         self.compiled.remove(&expr_id);
         match value.parse::<Expr>() {
             Ok(expr) => {
                 *expr_id = expr.id;
-                self.ctx.user.by_exprid.insert(*expr_id, fifo.clone());
+                self.ctx.user.current_path = fifo.data_path.clone();
                 let node = Node::compile(&mut self.ctx, expr);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
             }
@@ -1149,9 +1149,7 @@ impl Container {
                 self.compiled.remove(&on_write_expr_id);
                 let fpath = path.append(".formula");
                 let opath = path.append(".on-write");
-                self.ctx.user.by_exprid.remove(&expr_id);
                 self.ctx.user.rels.remove(&expr_id);
-                self.ctx.user.by_exprid.remove(&on_write_expr_id);
                 self.ctx.user.rels.remove(&on_write_expr_id);
                 self.ctx.user.by_id.remove(&fifo.data.id());
                 self.ctx.user.by_path.remove(&fpath);
@@ -1196,7 +1194,7 @@ impl Container {
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
                     update_rels = true;
-                },
+                }
             }
         }
         for (path, value) in update.formula.drain(..) {
@@ -1221,7 +1219,7 @@ impl Container {
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
                     update_rels = true;
-                },
+                }
             }
         }
         for (path, value) in update.on_write.drain(..) {
@@ -1247,7 +1245,7 @@ impl Container {
                 UpdateKind::Deleted => {
                     self.remove_deleted_published(batch, &path);
                     update_rels = true;
-                },
+                }
             }
         }
         for path in update.locked.drain(..) {
