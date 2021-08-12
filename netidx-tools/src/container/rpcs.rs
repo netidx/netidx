@@ -267,8 +267,7 @@ pub(super) fn start_set_formula_rpc(
                 match args.remove("path") {
                     None => err("invalid argument, expected path"),
                     Some(mut paths) => {
-                        let formula = match args
-                            .remove("formula")
+                        let formula = match args.remove("formula")
                             .and_then(|mut v| v.pop())
                             .map(|v| v.get_as::<Chars>())
                         {

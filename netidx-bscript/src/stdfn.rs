@@ -1409,7 +1409,7 @@ impl<C: Ctx, E> Apply<C, E> for Load {
             Load::err()
         } else {
             self.cur.as_ref().and_then(|dv| match dv.last() {
-                subscriber::Event::Unsubscribed => None,
+                subscriber::Event::Unsubscribed => Some(Value::Error(Chars::from("#LOST"))),
                 subscriber::Event::Update(v) => Some(v),
             })
         }

@@ -308,7 +308,7 @@ impl CtxInner {
             match ev {
                 Event::Update(v) => self.changed.push((id, v)),
                 Event::Unsubscribed => {
-                    self.changed.push((id, Value::String(Chars::from("#LOST"))))
+                    self.changed.push((id, Value::Error(Chars::from("#LOST"))))
                 }
             }
         }
