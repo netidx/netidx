@@ -402,21 +402,61 @@ impl Apply<Lc, UserEv> for Ref {
     }
 }
 
-/*
-struct Rel {
-    loc: Path,
-    row: Option<i32>,
-    col: Option<i32>,
-}
+struct Rel(Value);
 
 impl Register<Lc, UserEv> for Rel {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
-            let path = ctx.user.
-        })
+            let loc = ctx.user.by_exprid[&id].data_path.clone();
+            let (row, col, invalid) = match from {
+                [] => (None, None, false),
+                [v] => (None, v.current().and_then(|v| v.cast_to::<i32>().ok()), false),
+                [v0, v1] => {
+                    let row = v0.current().and_then(|v| v.cast_to::<i32>().ok());
+                    let col = v1.current().and_then(|v| v.cast_to::<i32>().ok());
+                    (row, col, false)
+                }
+                _ => (None, None, true),
+            };
+            let val = if invalid {
+                let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
+                Value::Error(Chars::from(e))
+            } else {
+                let loc = match row {
+                    None | Some(0) => Some(loc),
+                    Some(offset) => ctx.user.db.relative_row(&loc, offset).ok().flatten(),
+                };
+                let loc = loc.and_then(|loc| match col {
+                    None | Some(0) => Some(loc),
+                    Some(offset) => {
+                        ctx.user.db.relative_column(&loc, offset).ok().flatten()
+                    }
+                });
+                match loc {
+                    None => Value::Error(Chars::from("#LOC")),
+                    Some(p) => Value::String(Chars::from(String::from(p.as_ref()))),
+                }
+            };
+            Box::new(Rel(val))
+        });
+        ctx.functions.insert("rel".into(), f);
     }
 }
-*/
+
+impl Apply<Lc, UserEv> for Rel {
+    fn current(&self) -> Option<Value> {
+        Some(self.0.clone())
+    }
+
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<Lc, UserEv>,
+        _from: &mut [Node<Lc, UserEv>],
+        _event: &vm::Event<UserEv>,
+    ) -> Option<Value> {
+        None
+    }
+}
 
 #[derive(StructOpt, Debug)]
 pub(super) struct ContainerConfig {
@@ -496,6 +536,7 @@ impl Container {
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
+        Rel::register(&mut ctx);
         Ok(Container {
             cfg: ccfg,
             locked: BTreeSet::new(),
