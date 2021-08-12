@@ -296,6 +296,128 @@ impl Db {
         Ok(())
     }
 
+    pub(super) fn relative_column(
+        &self,
+        base: &Path,
+        offset: i32,
+    ) -> Result<Option<Path>> {
+        use std::ops::Bound::{self, *};
+        let rowbase = Path::basename(base).ok_or_else(|| anyhow!("no row"))?;
+        let mut i = 0;
+        if offset == 0 {
+            Ok(Some(base.clone()))
+        } else if offset < 0 {
+            let mut iter = self
+                .data
+                .range::<&str, (Bound<&str>, Bound<&str>)>((Unbounded, Excluded(&**base)))
+                .keys();
+            while let Some(r) = iter.next_back() {
+                let r = r?;
+                let path = str::from_utf8(&r)?;
+                if Path::basename(path) == Some(rowbase) {
+                    i -= 1;
+                    if i == offset {
+                        return Ok(Some(Path::from(ArcStr::from(path))));
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            Ok(None)
+        } else {
+            let iter = self
+                .data
+                .range::<&str, (Bound<&str>, Bound<&str>)>((Excluded(&**base), Unbounded))
+                .keys();
+            for r in iter {
+                let r = r?;
+                let path = str::from_utf8(&r)?;
+                if Path::basename(path) == Some(rowbase) {
+                    i += 1;
+                    if i == offset {
+                        return Ok(Some(Path::from(ArcStr::from(path))));
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    pub(super) fn relative_row(&self, base: &Path, offset: i32) -> Result<Option<Path>> {
+        use std::ops::Bound::{self, *};
+        macro_rules! or_none {
+            ($e:expr) => {
+                match $e {
+                    Some(p) => p,
+                    None => return Ok(None),
+                }
+            };
+        }
+        let column = or_none!(Path::basename(base));
+        let mut rowbase = ArcStr::from(or_none!(Path::dirname(base)));
+        let tablebase = ArcStr::from(or_none!(Path::dirname(rowbase.as_str())));
+        let mut i = 0;
+        if offset == 0 {
+            Ok(Some(base.clone()))
+        } else if offset < 0 {
+            let mut iter = self
+                .data
+                .range::<&str, (Bound<&str>, Bound<&str>)>((Unbounded, Excluded(&**base)))
+                .keys();
+            while let Some(r) = iter.next_back() {
+                let r = r?;
+                let path = str::from_utf8(&r)?;
+                let path_column = or_none!(Path::basename(path));
+                let path_row = or_none!(Path::dirname(path));
+                let path_table = or_none!(Path::dirname(path_row));
+                if path_table == tablebase {
+                    if path_row != rowbase.as_str() {
+                        i -= 1;
+                        rowbase = ArcStr::from(path_row);
+                    }
+                    if i == offset && path_column == column {
+                        return Ok(Some(Path::from(ArcStr::from(path))));
+                    }
+                    if i < offset {
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            Ok(None)
+        } else {
+            let iter = self
+                .data
+                .range::<&str, (Bound<&str>, Bound<&str>)>((Excluded(&**base), Unbounded))
+                .keys();
+            for r in iter {
+                let r = r?;
+                let path = str::from_utf8(&r)?;
+                let path_column = or_none!(Path::basename(path));
+                let path_row = or_none!(Path::dirname(path));
+                let path_table = or_none!(Path::dirname(path_row));
+                if path_table == tablebase {
+                    if path_row != rowbase.as_str() {
+                        i += 1;
+                        rowbase = ArcStr::from(path_row);
+                    }
+                    if i == offset && path_column == column {
+                        return Ok(Some(Path::from(ArcStr::from(path))));
+                    }
+                    if i > offset {
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            Ok(None)
+        }
+    }
+
     pub(super) fn set_locked(&mut self, path: Path) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();

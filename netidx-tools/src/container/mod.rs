@@ -2,6 +2,7 @@ mod db;
 mod rpcs;
 
 use anyhow::Result;
+use arcstr::ArcStr;
 use db::{Datum, DatumKind};
 use futures::{
     channel::{mpsc, oneshot},
@@ -42,7 +43,6 @@ use tokio::{
     signal, task,
     time::{self, Instant},
 };
-use arcstr::ArcStr;
 
 lazy_static! {
     static ref VARS: Pool<Vec<(Chars, Value)>> = Pool::new(8, 2048);
@@ -129,6 +129,7 @@ struct Lc {
     var_updates: Pooled<Vec<(Chars, Value)>>,
     ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
+    by_exprid: FxHashMap<ExprId, Arc<Fifo>>,
     by_path: HashMap<Path, Published>,
     events: mpsc::UnboundedSender<LcEvent>,
 }
@@ -168,6 +169,7 @@ impl Lc {
             var_updates: VARS.take(),
             ref_updates: REFS.take(),
             by_id: HashMap::with_hasher(FxBuildHasher::default()),
+            by_exprid: HashMap::with_hasher(FxBuildHasher::default()),
             by_path: HashMap::new(),
             events,
         }
@@ -400,6 +402,22 @@ impl Apply<Lc, UserEv> for Ref {
     }
 }
 
+/*
+struct Rel {
+    loc: Path,
+    row: Option<i32>,
+    col: Option<i32>,
+}
+
+impl Register<Lc, UserEv> for Rel {
+    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
+        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
+            let path = ctx.user.
+        })
+    }
+}
+*/
+
 #[derive(StructOpt, Debug)]
 pub(super) struct ContainerConfig {
     #[structopt(
@@ -542,9 +560,11 @@ impl Container {
             on_write_path: on_write_path.clone(),
             on_write,
             expr_id: Mutex::new(expr_id),
-            on_write_expr_id: Mutex::new(expr_id),
+            on_write_expr_id: Mutex::new(on_write_expr_id),
         });
         let published = Published::Formula(fifo.clone());
+        self.ctx.user.by_exprid.insert(expr_id, fifo.clone());
+        self.ctx.user.by_exprid.insert(on_write_expr_id, fifo.clone());
         self.ctx.user.by_id.insert(data_id, published.clone());
         self.ctx.user.by_path.insert(path.clone(), published.clone());
         self.ctx.user.by_id.insert(src_id, published.clone());
@@ -556,8 +576,6 @@ impl Container {
         let c = Compiled::Formula { node: formula_node, data_id };
         self.compiled.insert(expr_id, c);
         self.compiled.insert(on_write_expr_id, Compiled::OnWrite(on_write_node));
-        *fifo.expr_id.lock() = expr_id;
-        *fifo.on_write_expr_id.lock() = on_write_expr_id;
         fifo.data.update(batch, value.clone());
         self.ctx.user.ref_updates.push((path, value));
         self.ctx.user.ref_updates.push((src_path, Value::from(formula_txt)));
@@ -698,10 +716,12 @@ impl Container {
         fifo.src.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.expr_id.lock();
         self.ctx.user.unref(*expr_id);
+        self.ctx.user.by_exprid.remove(&expr_id);
         self.compiled.remove(&expr_id);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
                 *expr_id = expr.id;
+                self.ctx.user.by_exprid.insert(*expr_id, fifo.clone());
                 let node = Node::compile(&mut self.ctx, expr);
                 let dv = node.current().unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
@@ -729,14 +749,16 @@ impl Container {
         fifo.on_write.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.ctx.user.unref(*expr_id);
+        self.ctx.user.by_exprid.remove(&expr_id);
         self.compiled.remove(&expr_id);
         match value.parse::<Expr>() {
             Ok(expr) => {
                 *expr_id = expr.id;
+                self.ctx.user.by_exprid.insert(*expr_id, fifo.clone());
                 let node = Node::compile(&mut self.ctx, expr);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
             }
-            Err(_) => (), // CR estokes: log and report to user somehow
+            Err(_) => (), // CR estokes: log and report to user
         }
         let v = Value::String(value.clone());
         self.ctx.user.ref_updates.push((fifo.on_write_path.clone(), v));
@@ -1050,6 +1072,8 @@ impl Container {
                 self.compiled.remove(&on_write_expr_id);
                 let fpath = path.append(".formula");
                 let opath = path.append(".on-write");
+                self.ctx.user.by_exprid.remove(&expr_id);
+                self.ctx.user.by_exprid.remove(&on_write_expr_id);
                 self.ctx.user.by_id.remove(&fifo.data.id());
                 self.ctx.user.by_path.remove(&fpath);
                 self.ctx.user.by_id.remove(&fifo.src.id());
