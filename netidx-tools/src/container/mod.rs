@@ -108,7 +108,10 @@ impl Published {
 }
 
 #[derive(Debug)]
-struct UserEv(Path, Value);
+enum UserEv {
+    Ref(Path, Value),
+    Rel,
+}
 
 enum LcEvent {
     Refs,
@@ -122,6 +125,7 @@ struct Lc {
     sub: FxHashMap<SubId, FxHashSet<ExprId>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
     refs: FxHashMap<Path, FxHashSet<ExprId>>,
+    rels: FxHashSet<ExprId>,
     forward_refs: FxHashMap<ExprId, Refs>,
     subscriber: Subscriber,
     publisher: Publisher,
@@ -161,6 +165,7 @@ impl Lc {
             sub: HashMap::with_hasher(FxBuildHasher::default()),
             rpc: HashMap::with_hasher(FxBuildHasher::default()),
             refs: HashMap::with_hasher(FxBuildHasher::default()),
+            rels: HashSet::with_hasher(FxBuildHasher::default()),
             forward_refs: HashMap::with_hasher(FxBuildHasher::default()),
             db,
             subscriber,
@@ -303,7 +308,7 @@ impl Ref {
 
     fn apply_ev(&mut self, ev: &vm::Event<UserEv>) -> Option<Value> {
         match ev {
-            vm::Event::User(UserEv(path, value)) => {
+            vm::Event::User(UserEv::Ref(path, value)) => {
                 if Some(path.as_ref()) == self.path.as_ref().map(|c| c.as_ref()) {
                     self.current = value.clone();
                     Some(self.current.clone())
@@ -311,7 +316,8 @@ impl Ref {
                     None
                 }
             }
-            vm::Event::Netidx(_, _)
+            vm::Event::User(UserEv::Rel)
+            | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
             | vm::Event::Variable(_, _) => None,
         }
@@ -402,42 +408,55 @@ impl Apply<Lc, UserEv> for Ref {
     }
 }
 
-struct Rel(Value);
+struct Rel {
+    id: ExprId,
+    current: Value,
+}
+
+impl Rel {
+    fn eval(&self, ctx: &ExecCtx<Lc, UserEv>, from: &[Node<Lc, UserEv>]) -> Value {
+        let (row, col, invalid) = match from {
+            [] => (None, None, false),
+            [v] => (None, v.current().and_then(|v| v.cast_to::<i32>().ok()), false),
+            [v0, v1] => {
+                let row = v0.current().and_then(|v| v.cast_to::<i32>().ok());
+                let col = v1.current().and_then(|v| v.cast_to::<i32>().ok());
+                (row, col, false)
+            }
+            _ => (None, None, true),
+        };
+        let loc = ctx.user.by_exprid.get(&self.id).map(|f| f.data_path.clone());
+        if invalid {
+            let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
+            Value::Error(Chars::from(e))
+        } else {
+            let loc = match dbg!(row) {
+                None | Some(0) => loc,
+                Some(offset) => loc.and_then(|loc| {
+                    dbg!(ctx.user.db.relative_row(&loc, offset)).ok().flatten()
+                }),
+            };
+            let loc = loc.and_then(|loc| match dbg!(col) {
+                None | Some(0) => Some(loc),
+                Some(offset) => {
+                    dbg!(ctx.user.db.relative_column(&loc, offset)).ok().flatten()
+                }
+            });
+            match loc {
+                None => Value::Error(Chars::from("#LOC")),
+                Some(p) => Value::String(Chars::from(String::from(p.as_ref()))),
+            }
+        }
+    }
+}
 
 impl Register<Lc, UserEv> for Rel {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
-            let loc = ctx.user.by_exprid[&id].data_path.clone();
-            let (row, col, invalid) = match from {
-                [] => (None, None, false),
-                [v] => (None, v.current().and_then(|v| v.cast_to::<i32>().ok()), false),
-                [v0, v1] => {
-                    let row = v0.current().and_then(|v| v.cast_to::<i32>().ok());
-                    let col = v1.current().and_then(|v| v.cast_to::<i32>().ok());
-                    (row, col, false)
-                }
-                _ => (None, None, true),
-            };
-            let val = if invalid {
-                let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
-                Value::Error(Chars::from(e))
-            } else {
-                let loc = match row {
-                    None | Some(0) => Some(loc),
-                    Some(offset) => ctx.user.db.relative_row(&loc, offset).ok().flatten(),
-                };
-                let loc = loc.and_then(|loc| match col {
-                    None | Some(0) => Some(loc),
-                    Some(offset) => {
-                        ctx.user.db.relative_column(&loc, offset).ok().flatten()
-                    }
-                });
-                match loc {
-                    None => Value::Error(Chars::from("#LOC")),
-                    Some(p) => Value::String(Chars::from(String::from(p.as_ref()))),
-                }
-            };
-            Box::new(Rel(val))
+            ctx.user.rels.insert(id);
+            let mut t = Rel { id, current: Value::Error(Chars::from("#LOC")) };
+            t.current = t.eval(ctx, from);
+            Box::new(t)
         });
         ctx.functions.insert("rel".into(), f);
     }
@@ -445,16 +464,25 @@ impl Register<Lc, UserEv> for Rel {
 
 impl Apply<Lc, UserEv> for Rel {
     fn current(&self) -> Option<Value> {
-        Some(self.0.clone())
+        Some(self.current.clone())
     }
 
     fn update(
         &mut self,
-        _ctx: &mut ExecCtx<Lc, UserEv>,
-        _from: &mut [Node<Lc, UserEv>],
-        _event: &vm::Event<UserEv>,
+        ctx: &mut ExecCtx<Lc, UserEv>,
+        from: &mut [Node<Lc, UserEv>],
+        event: &vm::Event<UserEv>,
     ) -> Option<Value> {
-        None
+        for s in from.iter_mut() {
+            s.update(ctx, event);
+        }
+        let v = self.eval(ctx, from);
+        if v != self.current {
+            self.current = v.clone();
+            Some(v)
+        } else {
+            None
+        }
     }
 }
 
@@ -712,7 +740,7 @@ impl Container {
                 self.update_expr_ids(
                     batch,
                     &mut refs,
-                    &vm::Event::User(UserEv(path, value)),
+                    &vm::Event::User(UserEv::Ref(path, value)),
                 );
             }
             // update variable references
@@ -729,6 +757,12 @@ impl Container {
         {
             let _: Result<_, _> = self.ctx.user.events.unbounded_send(LcEvent::Refs);
         }
+    }
+
+    fn update_rels(&mut self, batch: &mut UpdateBatch) {
+        let mut refs = REFIDS.take();
+        refs.extend(self.ctx.user.rels.iter().copied());
+        self.update_expr_ids(batch, &mut refs, &vm::Event::User(UserEv::Rel));
     }
 
     fn process_subscriptions(
@@ -758,6 +792,7 @@ impl Container {
         let mut expr_id = fifo.expr_id.lock();
         self.ctx.user.unref(*expr_id);
         self.ctx.user.by_exprid.remove(&expr_id);
+        self.ctx.user.rels.remove(&expr_id);
         self.compiled.remove(&expr_id);
         let dv = match value.parse::<Expr>() {
             Ok(expr) => {
@@ -791,6 +826,7 @@ impl Container {
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.ctx.user.unref(*expr_id);
         self.ctx.user.by_exprid.remove(&expr_id);
+        self.ctx.user.rels.remove(&expr_id);
         self.compiled.remove(&expr_id);
         match value.parse::<Expr>() {
             Ok(expr) => {
@@ -839,7 +875,7 @@ impl Container {
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
                         {
                             let path = fifo.data_path.clone();
-                            let ev = vm::Event::User(UserEv(path, req.value));
+                            let ev = vm::Event::User(UserEv::Ref(path, req.value));
                             node.update(&mut self.ctx, &ev);
                             self.update_refs(batch);
                         }
@@ -1114,7 +1150,9 @@ impl Container {
                 let fpath = path.append(".formula");
                 let opath = path.append(".on-write");
                 self.ctx.user.by_exprid.remove(&expr_id);
+                self.ctx.user.rels.remove(&expr_id);
                 self.ctx.user.by_exprid.remove(&on_write_expr_id);
+                self.ctx.user.rels.remove(&on_write_expr_id);
                 self.ctx.user.by_id.remove(&fifo.data.id());
                 self.ctx.user.by_path.remove(&fpath);
                 self.ctx.user.by_id.remove(&fifo.src.id());
@@ -1136,6 +1174,7 @@ impl Container {
 
     fn process_update(&mut self, batch: &mut UpdateBatch, mut update: db::Update) {
         use db::UpdateKind;
+        let mut update_rels = false;
         for (path, value) in update.data.drain(..) {
             match value {
                 UpdateKind::Updated(v) => {
@@ -1152,8 +1191,12 @@ impl Container {
                     }
                     self.ctx.user.ref_updates.push((path.clone(), v));
                     self.advertise_path(path);
+                    update_rels = true;
                 }
-                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+                UpdateKind::Deleted => {
+                    self.remove_deleted_published(batch, &path);
+                    update_rels = true;
+                },
             }
         }
         for (path, value) in update.formula.drain(..) {
@@ -1173,8 +1216,12 @@ impl Container {
                     }
                     // CR estokes: log
                     let _: Result<_> = self.publish_formula(path, batch, v, Value::Null);
+                    update_rels = true;
                 }
-                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+                UpdateKind::Deleted => {
+                    self.remove_deleted_published(batch, &path);
+                    update_rels = true;
+                },
             }
         }
         for (path, value) in update.on_write.drain(..) {
@@ -1195,8 +1242,12 @@ impl Container {
                     }
                     // CR estokes: log
                     let _: Result<_> = self.publish_formula(path, batch, Value::Null, v);
+                    update_rels = true;
                 }
-                UpdateKind::Deleted => self.remove_deleted_published(batch, &path),
+                UpdateKind::Deleted => {
+                    self.remove_deleted_published(batch, &path);
+                    update_rels = true;
+                },
             }
         }
         for path in update.locked.drain(..) {
@@ -1205,7 +1256,10 @@ impl Container {
         for path in update.unlocked.drain(..) {
             self.locked.remove(&path);
         }
-        self.update_refs(batch)
+        self.update_refs(batch);
+        if update_rels {
+            self.update_rels(batch);
+        }
     }
 
     async fn run(mut self) -> Result<()> {
