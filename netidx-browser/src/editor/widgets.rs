@@ -105,6 +105,7 @@ pub(super) struct Table {
     dbg_default_sort_column_direction: DbgExpr,
     dbg_column_mode: DbgExpr,
     dbg_column_list: DbgExpr,
+    dbg_row_filter: DbgExpr,
     dbg_editable: DbgExpr,
     dbg_on_activate: DbgExpr,
     dbg_on_select: DbgExpr,
@@ -165,6 +166,16 @@ impl Table {
             }),
         );
         root.add((l, e));
+        let (l, e, dbg_row_filter) = expr(
+            ctx,
+            "Row Filter:",
+            &spec.borrow().row_filter,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().row_filter = e;
+                on_change()
+            }),
+        );
+        root.add((l, e));
         let (l, e, dbg_editable) = expr(
             ctx,
             "Editable:",
@@ -213,6 +224,7 @@ impl Table {
             dbg_default_sort_column_direction,
             dbg_column_mode,
             dbg_column_list,
+            dbg_row_filter,
             dbg_editable,
             dbg_on_activate,
             dbg_on_select,
