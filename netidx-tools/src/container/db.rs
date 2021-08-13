@@ -271,8 +271,9 @@ impl Db {
         let mut col_name = String::with_capacity(16);
         let mut buf = String::with_capacity(128);
         for _ in 0..rows {
+            next_sheet_name(&mut row_name);
+            col_name.clear();
             for _ in 0..cols {
-                next_sheet_name(&mut row_name);
                 next_sheet_name(&mut col_name);
                 buf.clear();
                 write!(buf, "{}/{}", row_name, col_name)?;
