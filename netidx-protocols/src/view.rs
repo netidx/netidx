@@ -47,6 +47,13 @@ pub struct Table {
     ///
     /// json form: ["col1", "col2", "col,3", "col4"]
     pub column_list: Expr,
+    /// csv or json list of rows to hide
+    ///
+    /// csv form: row1,row2,row\,3,row4 note the escaped
+    /// comma
+    ///
+    /// json form: ["row1", "row2", "row,3", "row4"]
+    pub row_filter: Expr,
     /// either a boolean, which effects the entire table, or a csv or
     /// json list of columns that that are editable.
     pub editable: Expr,

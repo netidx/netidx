@@ -3,6 +3,7 @@ use super::{
     BSCtx, BSCtxRef, BSNode,
 };
 use crate::bscript::LocalEvent;
+use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::FxBuildHasher;
 use gdk::{keys, EventKey, RGBA};
@@ -33,7 +34,6 @@ use std::{
     result,
     str::FromStr,
 };
-use arcstr::ArcStr;
 
 struct Subscription {
     _sub: Dval,
@@ -90,6 +90,8 @@ pub(super) struct Table {
     column_mode: RefCell<ColumnMode>,
     column_list_expr: BSNode,
     column_list: RefCell<Vec<String>>,
+    row_filter_expr: BSNode,
+    row_filter: RefCell<Vec<String>>,
     editable_expr: BSNode,
     editable: RefCell<EditMode>,
     on_select: Rc<RefCell<BSNode>>,
@@ -197,7 +199,12 @@ fn cols_from_val(v: Value) -> Vec<String> {
     }
 }
 
-fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
+fn apply_spec(
+    mode: ColumnMode,
+    cols: &[String],
+    row_filter: Vec<String>,
+    descr: &mut resolver::Table,
+) {
     fn filter_cols(
         cols: &[String],
         descr: &mut resolver::Table,
@@ -224,6 +231,11 @@ fn apply_spec(mode: ColumnMode, cols: &[String], descr: &mut resolver::Table) {
         }
         _ => (),
     }
+    let row_filter: HashSet<String> = row_filter.into_iter().collect();
+    descr.rows.retain(|row| match Path::basename(&row) {
+        None => true,
+        Some(row) => !row_filter.contains(row),
+    })
 }
 
 impl clone::Downgrade for RaeifiedTable {
@@ -251,6 +263,7 @@ impl RaeifiedTable {
         default_sort_column_direction: SortDir,
         column_mode: ColumnMode,
         column_list: Vec<String>,
+        row_filter: Vec<String>,
         editable: EditMode,
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
@@ -258,7 +271,7 @@ impl RaeifiedTable {
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
-        apply_spec(column_mode, &column_list, &mut descriptor);
+        apply_spec(column_mode, &column_list, row_filter, &mut descriptor);
         let view = TreeView::new();
         root.add(&view);
         let nrows = descriptor.rows.len();
@@ -811,6 +824,9 @@ impl Table {
         let column_list = RefCell::new(cols_from_val(
             column_list_expr.current().unwrap_or(Value::Null),
         ));
+        let row_filter_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.row_filter);
+        let row_filter =
+            RefCell::new(cols_from_val(row_filter_expr.current().unwrap_or(Value::Null)));
         let editable_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.editable);
         let editable =
             RefCell::new(EditMode::new(editable_expr.current().unwrap_or(Value::Null)));
@@ -847,6 +863,8 @@ impl Table {
             column_mode,
             column_list_expr,
             column_list,
+            row_filter_expr,
+            row_filter,
             editable_expr,
             editable,
         }
@@ -925,6 +943,13 @@ impl Table {
                 self.refresh();
             }
         }
+        if let Some(row_filter) = self.row_filter_expr.update(ctx, event) {
+            let new_lst = cols_from_val(row_filter);
+            if &*self.row_filter.borrow() != &new_lst {
+                *self.row_filter.borrow_mut() = new_lst;
+                self.refresh();
+            }
+        }
         if let Some(v) = self.editable_expr.update(ctx, event) {
             let new_mode = EditMode::new(v);
             if &*self.editable.borrow() != &new_mode {
@@ -958,6 +983,7 @@ impl Table {
                                 self.default_sort_column_direction.borrow().clone(),
                                 self.column_mode.borrow().clone(),
                                 self.column_list.borrow().clone(),
+                                self.row_filter.borrow().clone(),
                                 self.editable.borrow().clone(),
                                 self.on_select.clone(),
                                 self.on_activate.clone(),

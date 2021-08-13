@@ -13,6 +13,7 @@ mod util;
 mod widgets;
 
 use anyhow::Result;
+use arcstr::ArcStr;
 use bscript::LocalEvent;
 use editor::Editor;
 use futures::channel::oneshot;
@@ -47,7 +48,6 @@ use std::{
 };
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
-use arcstr::ArcStr;
 
 type BSNode = Node<WidgetCtx, LocalEvent>;
 type BSCtx = Rc<RefCell<ExecCtx<WidgetCtx, LocalEvent>>>;
@@ -72,6 +72,7 @@ fn default_view(path: Path) -> view::View {
                 .to_expr(),
                 column_mode: ExprKind::Constant(Value::from("auto")).to_expr(),
                 column_list: ExprKind::Constant(Value::from("")).to_expr(),
+                row_filter: ExprKind::Constant(Value::Null).to_expr(),
                 editable: ExprKind::Constant(Value::False).to_expr(),
                 on_select: ExprKind::Constant(Value::Null).to_expr(),
                 on_edit: ExprKind::Constant(Value::Null).to_expr(),
