@@ -18,6 +18,20 @@ lazy_static! {
     static ref PATHS: Pool<Vec<Path>> = Pool::new(16, 8124);
 }
 
+fn next_sheet_name(s: &mut String) {
+    match s.pop() {
+        None => s.push('A'),
+        Some(c) => {
+            if c < 'Z' {
+                s.push((c as u8 + 1).into());
+            } else {
+                next_sheet_name(s);
+                s.push('A');
+            }
+        }
+    }
+}
+
 pub(super) enum UpdateKind {
     Deleted,
     Inserted(Value),
@@ -253,11 +267,15 @@ impl Db {
         cols: usize,
         lock: bool,
     ) -> Result<()> {
-        let mut buf = String::new();
-        for i in 0..rows {
-            for j in 0..cols {
+        let mut row_name = String::with_capacity(16);
+        let mut col_name = String::with_capacity(16);
+        let mut buf = String::with_capacity(128);
+        for _ in 0..rows {
+            for _ in 0..cols {
+                next_sheet_name(&mut row_name);
+                next_sheet_name(&mut col_name);
                 buf.clear();
-                write!(buf, "{}/{}", i, j)?;
+                write!(buf, "{}/{}", row_name, col_name)?;
                 let path = base.append(buf.as_str());
                 if !self.data.contains_key(path.as_bytes())? {
                     self.set_data(true, path, Value::Null)?;
