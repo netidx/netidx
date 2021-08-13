@@ -135,12 +135,8 @@ impl<C: Ctx, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
             None
         } else {
             let cur = T::eval(&self.cached);
-            if cur == self.current {
-                None
-            } else {
-                self.current = cur.clone();
-                cur
-            }
+            self.current = cur.clone();
+            cur
         }
     }
 }
