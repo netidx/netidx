@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Error, Result};
+use arcstr::ArcStr;
 use bytes::BytesMut;
 use futures::{
     channel::mpsc::{self, Receiver, Sender},
@@ -12,10 +13,11 @@ use netidx::{
     pool::Pooled,
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
-    utils::{BatchItem, Batched},
+    utils::{split_escaped, splitn_escaped, BatchItem, Batched},
 };
+use netidx_protocols::rpc::client::Proc;
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     io::Write,
     str::FromStr,
     time::{Duration, Instant},
@@ -25,13 +27,13 @@ use tokio::{
     runtime::Runtime,
     time,
 };
-use arcstr::ArcStr;
 
 #[derive(Debug, Clone)]
 enum In {
-    Add(String),
-    Drop(String),
-    Write(String, Value),
+    Add(Path),
+    Drop(Path),
+    Write(Path, Value),
+    Call(Path, Vec<(String, Value)>),
 }
 
 impl FromStr for In {
@@ -39,14 +41,13 @@ impl FromStr for In {
 
     fn from_str(s: &str) -> Result<Self> {
         if s.starts_with("DROP|") && s.len() > 5 {
-            Ok(In::Drop(String::from(&s[5..])))
+            Ok(In::Drop(Path::from(ArcStr::from(&s[5..]))))
         } else if s.starts_with("ADD|") && s.len() > 4 {
-            Ok(In::Add(String::from(&s[4..])))
+            Ok(In::Add(Path::from(ArcStr::from(&s[4..]))))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
             let mut parts = s[6..].splitn(3, "|");
-            let path = String::from(
-                parts.next().ok_or_else(|| anyhow!("expected | before path"))?,
-            );
+            let path = parts.next().ok_or_else(|| anyhow!("expected | before path"))?;
+            let path = Path::from(ArcStr::from(path));
             let typ = parts
                 .next()
                 .ok_or_else(|| anyhow!("expected | before type"))?
@@ -54,8 +55,39 @@ impl FromStr for In {
             let val =
                 typ.parse(parts.next().ok_or_else(|| anyhow!("expected value"))?)?;
             Ok(In::Write(path, val))
+        } else if s.starts_with("CALL|") && s.len() > 5 {
+            let mut parts = s[5..].splitn(2, "|");
+            let path = parts.next().ok_or_else(|| anyhow!("expected| before path"))?;
+            let path = Path::from(ArcStr::from(path));
+            let args = match parts.next() {
+                None => vec![],
+                Some(s) => {
+                    let mut args = vec![];
+                    for arg in split_escaped(s, '\\', ',') {
+                        let mut arg = splitn_escaped(arg.trim(), 2, '\\', '=');
+                        let key =
+                            arg.next().ok_or_else(|| anyhow!("expected keyword"))?;
+                        let val = arg.next().ok_or_else(|| anyhow!("expected value"))?;
+                        let val = if val == "null" {
+                            Value::Null
+                        } else {
+                            let mut val = splitn_escaped(val, 2, '\\', ':');
+                            let typ = val
+                                .next()
+                                .ok_or_else(|| anyhow!("expected typ:val"))?
+                                .parse::<Typ>()?;
+                            let val =
+                                val.next().ok_or_else(|| anyhow!("expected typ:val"))?;
+                            typ.parse(val)?
+                        };
+                        args.push((String::from(key), val));
+                    }
+                    args
+                }
+            };
+            Ok(In::Call(path, args))
         } else {
-            bail!("parse error, expected ADD, DROP, or WRITE")
+            bail!("parse error, expected ADD, DROP, WRITE, or CALL")
         }
     }
 }
@@ -106,6 +138,7 @@ struct Ctx {
     sender_updates: Sender<Pooled<Vec<(SubId, Event)>>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
+    rpcs: HashMap<Path, Proc>,
     subscribe_ts: HashMap<Path, Instant>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = Result<String>> + Unpin>,
@@ -133,6 +166,7 @@ impl Ctx {
             paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
+            rpcs: HashMap::new(),
             subscribe_ts: HashMap::new(),
             subscribe_timeout: subscribe_timeout.map(Duration::from_secs),
             requests: {
@@ -175,7 +209,7 @@ impl Ctx {
         }
     }
 
-    fn add_subscription(&mut self, path: Path) {
+    fn add_subscription(&mut self, path: &Path) -> &Dval {
         let subscriptions = &mut self.subscriptions;
         let subscribe_ts = &mut self.subscribe_ts;
         let subscribe_timeout = self.subscribe_timeout.is_some();
@@ -193,7 +227,7 @@ impl Ctx {
                 subscribe_ts.insert(path.clone(), Instant::now());
             }
             s
-        });
+        })
     }
 
     async fn process_request(&mut self, r: Option<Result<String>>) -> Result<()> {
@@ -216,18 +250,15 @@ impl Ctx {
                 if !l.trim().is_empty() {
                     match l.parse::<In>() {
                         Err(e) => eprintln!("parse error: {}", e),
-                        Ok(In::Add(p)) => self.add_subscription(Path::from(p)),
-                        Ok(In::Drop(p)) => self.remove_subscription(&*p),
+                        Ok(In::Add(p)) => {
+                            self.add_subscription(&p);
+                        }
+                        Ok(In::Drop(p)) => {
+                            self.remove_subscription(&p);
+                            self.rpcs.remove(&p);
+                        }
                         Ok(In::Write(p, v)) => {
-                            let dv = match self.subscriptions.get(p.as_str()) {
-                                Some(dv) => dv,
-                                None => {
-                                    self.add_subscription(Path::from(ArcStr::from(
-                                        p.as_str(),
-                                    )));
-                                    &self.subscriptions[p.as_str()]
-                                }
-                            };
+                            let dv = self.add_subscription(&p);
                             if !dv.write(v.into()) {
                                 eprintln!(
                                     "WARNING: {} queued writes to {}",
@@ -235,6 +266,25 @@ impl Ctx {
                                     p
                                 )
                             }
+                        }
+                        Ok(In::Call(p, args)) => {
+                            let proc = match self.rpcs.get(&p) {
+                                Some(proc) => proc,
+                                None => {
+                                    let proc =
+                                        Proc::new(&self.subscriber, p.clone()).await;
+                                    let proc = match proc {
+                                        Ok(proc) => proc,
+                                        Err(e) => {
+                                            eprintln!("CALL error: {}", e);
+                                            return Ok(());
+                                        }
+                                    };
+                                    self.rpcs.insert(p.clone(), proc);
+                                    &self.rpcs[&p]
+                                }
+                            };                            
+                            println!("CALLED|{}|{:?}", p, proc.call(args).await)
                         }
                     }
                 }
