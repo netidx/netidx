@@ -17,7 +17,7 @@ use netidx::{
 };
 use netidx_protocols::rpc::client::Proc;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::HashMap,
     io::Write,
     str::FromStr,
     time::{Duration, Instant},
@@ -283,7 +283,7 @@ impl Ctx {
                                     self.rpcs.insert(p.clone(), proc);
                                     &self.rpcs[&p]
                                 }
-                            };                            
+                            };
                             println!("CALLED|{}|{:?}", p, proc.call(args).await)
                         }
                     }
