@@ -132,18 +132,20 @@ fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static
 struct TxDb<'a> {
     data: &'a TransactionalTree,
     locked: &'a TransactionalTree,
-    pending: &'a mut Update,
+    pending: Update,
 }
 
 impl<'a> TxDb<'a> {
-    pub(super) fn remove(&mut self, path: Path) -> Result<()> {
+    pub(super) fn remove(&mut self, path: &Path) -> Result<()> {
         let key = path.as_bytes();
         if let Some(data) = self.data.remove(key)? {
             match DatumKind::decode(&mut &*data) {
-                DatumKind::Data => self.pending.data.push((path, UpdateKind::Deleted)),
+                DatumKind::Data => {
+                    self.pending.data.push((path.clone(), UpdateKind::Deleted))
+                }
                 DatumKind::Formula => {
                     self.pending.formula.push((path.clone(), UpdateKind::Deleted));
-                    self.pending.on_write.push((path, UpdateKind::Deleted));
+                    self.pending.on_write.push((path.clone(), UpdateKind::Deleted));
                 }
                 DatumKind::Invalid => (),
             }
@@ -154,27 +156,29 @@ impl<'a> TxDb<'a> {
     pub(super) fn set_data(
         &mut self,
         update: bool,
-        path: Path,
-        value: Value,
+        path: &Path,
+        value: &Value,
     ) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
         let datum = Datum::Data(value.clone());
         datum.encode(&mut *val)?;
         let up = match self.data.insert(key, &**val)? {
-            None => UpdateKind::Inserted(value),
+            None => UpdateKind::Inserted(value.clone()),
             Some(data) => match DatumKind::decode(&mut &*data) {
-                DatumKind::Data => UpdateKind::Updated(value),
-                DatumKind::Formula | DatumKind::Invalid => UpdateKind::Inserted(value),
+                DatumKind::Data => UpdateKind::Updated(value.clone()),
+                DatumKind::Formula | DatumKind::Invalid => {
+                    UpdateKind::Inserted(value.clone())
+                }
             },
         };
         if update {
-            self.pending.data.push((path, up));
+            self.pending.data.push((path.clone(), up));
         }
         Ok(())
     }
 
-    pub(super) fn set_formula(&mut self, path: Path, value: Value) -> Result<()> {
+    pub(super) fn set_formula(&mut self, path: &Path, value: &Value) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
         let up = match self.data.get(key)? {
@@ -194,27 +198,27 @@ impl<'a> TxDb<'a> {
                             Datum::Formula(value.clone(), w).encode(&mut *val)?
                         }
                     }
-                    UpdateKind::Updated(value)
+                    UpdateKind::Updated(value.clone())
                 }
             },
         };
         self.data.insert(key, &**val)?;
-        self.pending.formula.push((path, up));
+        self.pending.formula.push((path.clone(), up));
         Ok(())
     }
 
-    pub(super) fn set_on_write(&mut self, path: Path, value: Value) -> Result<()> {
+    pub(super) fn set_on_write(&mut self, path: &Path, value: &Value) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
         let up = match self.data.get(key)? {
             None => {
                 Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
-                UpdateKind::Inserted(value)
+                UpdateKind::Inserted(value.clone())
             }
             Some(data) => match DatumKind::decode(&mut &*data) {
                 DatumKind::Data | DatumKind::Invalid => {
                     Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
-                    UpdateKind::Inserted(value)
+                    UpdateKind::Inserted(value.clone())
                 }
                 DatumKind::Formula => {
                     match Datum::decode(&mut &*data)? {
@@ -223,18 +227,18 @@ impl<'a> TxDb<'a> {
                             Datum::Formula(f, value.clone()).encode(&mut *val)?
                         }
                     }
-                    UpdateKind::Updated(value)
+                    UpdateKind::Updated(value.clone())
                 }
             },
         };
         self.data.insert(key, &**val)?;
-        self.pending.on_write.push((path, up));
+        self.pending.on_write.push((path.clone(), up));
         Ok(())
     }
 
     pub(super) fn create_sheet(
         &mut self,
-        base: Path,
+        base: &Path,
         rows: usize,
         cols: usize,
         lock: bool,
@@ -248,7 +252,7 @@ impl<'a> TxDb<'a> {
                 write!(buf, "{:0rwidth$}/{:0cwidth$}", i, j, rwidth = rd, cwidth = cd)?;
                 let path = base.append(buf.as_str());
                 if self.data.get(path.as_bytes())?.is_none() {
-                    self.set_data(true, path, Value::Null)?;
+                    self.set_data(true, &path, &Value::Null)?;
                 }
             }
         }
@@ -260,9 +264,9 @@ impl<'a> TxDb<'a> {
 
     pub(super) fn create_table(
         &mut self,
-        base: Path,
-        rows: Vec<Chars>,
-        cols: Vec<Chars>,
+        base: &Path,
+        rows: &Vec<Chars>,
+        cols: &Vec<Chars>,
         lock: bool,
     ) -> Result<()> {
         let mut buf = String::new();
@@ -274,7 +278,7 @@ impl<'a> TxDb<'a> {
                 write!(buf, "{}/{}", Path::escape(row), col)?;
                 let path = base.append(buf.as_str());
                 if self.data.get(path.as_bytes())?.is_none() {
-                    self.set_data(true, path, Value::Null)?;
+                    self.set_data(true, &path, &Value::Null)?;
                 }
             }
         }
@@ -284,18 +288,18 @@ impl<'a> TxDb<'a> {
         Ok(())
     }
 
-    pub(super) fn set_locked(&mut self, path: Path) -> Result<()> {
+    pub(super) fn set_locked(&mut self, path: &Path) -> Result<()> {
         let key = path.as_bytes();
         let mut val = BUF.take();
         Value::Null.encode(&mut *val)?;
         self.locked.insert(key, &**val)?;
-        self.pending.locked.push(path);
+        self.pending.locked.push(path.clone());
         Ok(())
     }
 
-    pub(super) fn set_unlocked(&mut self, path: Path) -> Result<()> {
+    pub(super) fn set_unlocked(&mut self, path: &Path) -> Result<()> {
         self.locked.remove(path.as_bytes())?;
-        self.pending.unlocked.push(path);
+        self.pending.unlocked.push(path.clone());
         Ok(())
     }
 }
@@ -312,37 +316,31 @@ enum TxnOp {
     RemoveSubtree(Path),
 }
 
-pub(super) struct Txn {
-    ops: Pooled<Vec<TxnOp>>,
-    pending: Update,
-}
+pub(super) struct Txn(Vec<TxnOp>);
 
 impl Txn {
     pub(super) fn new() -> Self {
-        Self {
-            ops: TXNS.take(),
-            pending: Update::new()
-        }
+        Self(Vec::new())
     }
 
     pub(super) fn dirty(&self) -> bool {
-        self.ops.len() > 0
+        self.0.len() > 0
     }
 
     pub(super) fn remove(&mut self, path: Path) {
-        self.ops.push(TxnOp::Remove(path))
+        self.0.push(TxnOp::Remove(path))
     }
 
     pub(super) fn set_data(&mut self, update: bool, path: Path, value: Value) {
-        self.ops.push(TxnOp::SetData(update, path, value))
+        self.0.push(TxnOp::SetData(update, path, value))
     }
 
     pub(super) fn set_formula(&mut self, path: Path, value: Value) {
-        self.ops.push(TxnOp::SetFormula(path, value))
+        self.0.push(TxnOp::SetFormula(path, value))
     }
 
     pub(super) fn set_on_write(&mut self, path: Path, value: Value) {
-        self.ops.push(TxnOp::SetOnWrite(path, value))
+        self.0.push(TxnOp::SetOnWrite(path, value))
     }
 
     pub(super) fn create_sheet(
@@ -352,7 +350,7 @@ impl Txn {
         cols: usize,
         lock: bool,
     ) {
-        self.ops.push(TxnOp::CreateSheet { base, rows, cols, lock })
+        self.0.push(TxnOp::CreateSheet { base, rows, cols, lock })
     }
 
     pub(super) fn create_table(
@@ -362,19 +360,19 @@ impl Txn {
         cols: Vec<Chars>,
         lock: bool,
     ) {
-        self.ops.push(TxnOp::CreateTable { base, rows, cols, lock })
+        self.0.push(TxnOp::CreateTable { base, rows, cols, lock })
     }
 
     pub(super) fn set_locked(&mut self, path: Path) {
-        self.ops.push(TxnOp::SetLocked(path))
+        self.0.push(TxnOp::SetLocked(path))
     }
 
     pub(super) fn set_unlocked(&mut self, path: Path) {
-        self.ops.push(TxnOp::SetUnlocked(path))
+        self.0.push(TxnOp::SetUnlocked(path))
     }
 
     pub(super) fn remove_subtree(&mut self, path: Path) {
-        self.ops.push(TxnOp::RemoveSubtree(path))
+        self.0.push(TxnOp::RemoveSubtree(path))
     }
 }
 
@@ -397,27 +395,27 @@ impl Db {
         Ok(Db { db, data, locked })
     }
 
-    pub(super) fn commit(&mut self, txn: &mut Txn) -> Result<Option<Update>> {
-        if txn.ops.is_empty() {
+    pub(super) fn commit(&self, txn: &mut Txn) -> Result<Option<Update>> {
+        if txn.0.is_empty() {
             Ok(None)
         } else {
-            (&self.data, &self.locked)
-                .transaction(|(data, locked)| {
-                    let mut tx = TxDb { data, locked, pending: &mut txn.pending };
-                    for op in txn.ops.drain(..) {
+            let pending = (&self.data, &self.locked)
+                .transaction(move |(data, locked)| {
+                    let mut tx = TxDb { data, locked, pending: Update::new() };
+                    for op in &txn.0 {
                         match op {
                             TxnOp::CreateSheet { base, rows, cols, lock } => {
-                                tx.create_sheet(base, rows, cols, lock)
+                                tx.create_sheet(base, *rows, *cols, *lock)
                             }
                             TxnOp::CreateTable { base, rows, cols, lock } => {
-                                tx.create_table(base, rows, cols, lock)
+                                tx.create_table(base, rows, cols, *lock)
                             }
                             TxnOp::Remove(path) => tx.remove(path),
                             TxnOp::RemoveSubtree(path) => {
                                 self.remove_subtree(&mut tx, path)
                             }
                             TxnOp::SetData(update, path, value) => {
-                                tx.set_data(update, path, value)
+                                tx.set_data(*update, path, value)
                             }
                             TxnOp::SetFormula(path, value) => tx.set_formula(path, value),
                             TxnOp::SetOnWrite(path, value) => {
@@ -430,13 +428,14 @@ impl Db {
                         }
                         .map_err(ConflictableTransactionError::Abort)?;
                     }
-                    Ok(())
+                    Ok(tx.pending)
                 })
                 .map_err(|e| match e {
                     TransactionError::Abort(e) => e,
                     TransactionError::Storage(_) => unreachable!(),
-                })?;
-            Ok(Some(mem::replace(&mut txn.pending, Update::new())))
+                });
+            txn.0.clear();
+            pending.map(|p| Some(p))
         }
     }
 
@@ -445,14 +444,14 @@ impl Db {
         Ok(())
     }
 
-    fn remove_subtree(&mut self, txn: &mut TxDb, path: Path) -> Result<()> {
+    fn remove_subtree(&self, txn: &mut TxDb, path: &Path) -> Result<()> {
         let mut paths = Vec::new();
         for res in self.data.scan_prefix(path.as_ref()).keys() {
             let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
             paths.push(path);
         }
         for path in paths {
-            txn.remove(path)?;
+            txn.remove(&path)?;
         }
         Ok(())
     }
@@ -579,7 +578,7 @@ impl Db {
         }
     }
 
-    fn unlock_subtree(&mut self, txn: &mut TxDb, path: Path) -> Result<()> {
+    fn unlock_subtree(&self, txn: &mut TxDb, path: &Path) -> Result<()> {
         let key = path.as_bytes();
         let mut paths = Vec::new();
         for res in self.locked.scan_prefix(key).keys() {
@@ -588,7 +587,7 @@ impl Db {
             paths.push(path);
         }
         for path in paths {
-            txn.set_unlocked(path)?
+            txn.set_unlocked(&path)?
         }
         Ok(())
     }
