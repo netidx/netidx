@@ -3,7 +3,10 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use futures::{
-    channel::{mpsc::{unbounded, UnboundedReceiver, UnboundedSender}, oneshot},
+    channel::{
+        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
     prelude::*,
 };
 use netidx::{
@@ -289,7 +292,9 @@ fn set_on_write(
             DatumKind::Formula => {
                 match Datum::decode(&mut &*data)? {
                     Datum::Data(_) => unreachable!(),
-                    Datum::Formula(f, _) => Datum::Formula(f, value.clone()).encode(&mut *val)?,
+                    Datum::Formula(f, _) => {
+                        Datum::Formula(f, value.clone()).encode(&mut *val)?
+                    }
                 }
                 UpdateKind::Updated(value)
             }
@@ -404,61 +409,47 @@ async fn commit_txns_task(
     outgoing: UnboundedSender<Update>,
 ) {
     while let Some(mut txn) = incoming.next().await {
-        if !txn.0.is_empty() {
-            let mut pending = Update::new();
-            task::block_in_place(|| {
-                for op in txn.0.drain(..) {
-                    // CR estokes: log this
-                    let _: Result<_> = match op {
-                        TxnOp::CreateSheet { base, rows, cols, lock } => create_sheet(
-                            &data,
-                            &locked,
-                            &mut pending,
-                            base,
-                            rows,
-                            cols,
-                            lock,
-                        ),
-                        TxnOp::CreateTable { base, rows, cols, lock } => create_table(
-                            &data,
-                            &locked,
-                            &mut pending,
-                            base,
-                            rows,
-                            cols,
-                            lock,
-                        ),
-                        TxnOp::Remove(path) => remove(&data, &mut pending, path),
-                        TxnOp::RemoveSubtree(path) => {
-                            remove_subtree(&data, &mut pending, path)
-                        }
-                        TxnOp::SetData(update, path, value) => {
-                            set_data(&data, &mut pending, update, path, value)
-                        }
-                        TxnOp::SetFormula(path, value) => {
-                            set_formula(&data, &mut pending, path, value)
-                        }
-                        TxnOp::SetOnWrite(path, value) => {
-                            set_on_write(&data, &mut pending, path, value)
-                        }
-                        TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
-                        TxnOp::SetUnlocked(path) => {
-                            unlock_subtree(&locked, &mut pending, path)
-                        }
-                        TxnOp::Flush(finished) => {
-                            // CR estokes: log
-                            let _: Result<_, _> = data.flush();
-                            let _: Result<_, _> = locked.flush();
-                            let _: Result<_, _> = finished.send(());
-                            Ok(())
-                        }
-                    };
-                }
-            });
-            match outgoing.unbounded_send(pending) {
-                Ok(()) => (),
-                Err(_) => break,
+        let mut pending = Update::new();
+        task::block_in_place(|| {
+            for op in txn.0.drain(..) {
+                // CR estokes: log this
+                let _: Result<_> = match op {
+                    TxnOp::CreateSheet { base, rows, cols, lock } => {
+                        create_sheet(&data, &locked, &mut pending, base, rows, cols, lock)
+                    }
+                    TxnOp::CreateTable { base, rows, cols, lock } => {
+                        create_table(&data, &locked, &mut pending, base, rows, cols, lock)
+                    }
+                    TxnOp::Remove(path) => remove(&data, &mut pending, path),
+                    TxnOp::RemoveSubtree(path) => {
+                        remove_subtree(&data, &mut pending, path)
+                    }
+                    TxnOp::SetData(update, path, value) => {
+                        set_data(&data, &mut pending, update, path, value)
+                    }
+                    TxnOp::SetFormula(path, value) => {
+                        set_formula(&data, &mut pending, path, value)
+                    }
+                    TxnOp::SetOnWrite(path, value) => {
+                        set_on_write(&data, &mut pending, path, value)
+                    }
+                    TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
+                    TxnOp::SetUnlocked(path) => {
+                        unlock_subtree(&locked, &mut pending, path)
+                    }
+                    TxnOp::Flush(finished) => {
+                        // CR estokes: log
+                        let _: Result<_, _> = data.flush();
+                        let _: Result<_, _> = locked.flush();
+                        let _: Result<_, _> = finished.send(());
+                        Ok(())
+                    }
+                };
             }
+        });
+        match outgoing.unbounded_send(pending) {
+            Ok(()) => (),
+            Err(_) => break,
         }
     }
 }
@@ -471,7 +462,9 @@ pub(super) struct Db {
 }
 
 impl Db {
-    pub(super) fn new(cfg: &ContainerConfig) -> Result<(Self, UnboundedReceiver<Update>)> {
+    pub(super) fn new(
+        cfg: &ContainerConfig,
+    ) -> Result<(Self, UnboundedReceiver<Update>)> {
         let db = sled::Config::default()
             .use_compression(cfg.compress)
             .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
@@ -482,7 +475,12 @@ impl Db {
         let locked = db.open_tree("locked")?;
         let (tx_incoming, rx_incoming) = unbounded();
         let (tx_outgoing, rx_outgoing) = unbounded();
-        task::spawn(commit_txns_task(data.clone(), locked.clone(), rx_incoming, tx_outgoing));
+        task::spawn(commit_txns_task(
+            data.clone(),
+            locked.clone(),
+            rx_incoming,
+            tx_outgoing,
+        ));
         Ok((Db { _db: db, data, locked, submit_txn: tx_incoming }, rx_outgoing))
     }
 
