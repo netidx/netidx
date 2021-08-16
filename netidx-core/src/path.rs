@@ -3,6 +3,7 @@ use crate::{
     pack::{Pack, PackError},
     utils,
 };
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use std::{
     borrow::{Borrow, Cow},
@@ -14,7 +15,6 @@ use std::{
     result::Result,
     str::{self, FromStr},
 };
-use arcstr::ArcStr;
 
 pub static ESC: char = '\\';
 pub static SEP: char = '/';
@@ -220,10 +220,33 @@ impl Path {
     ) -> bool {
         let parent = parent.as_ref();
         let other = other.as_ref();
-        parent == "/" ||
-            (other.starts_with(parent)
-             && (other.len() == parent.len()
-                 || other.as_bytes()[parent.len()] == SEP as u8))
+        parent == "/"
+            || (other.starts_with(parent)
+                && (other.len() == parent.len()
+                    || other.as_bytes()[parent.len()] == SEP as u8))
+    }
+
+    /// finds the longest common parent of the two specified paths, /
+    /// in the case they are completely disjoint.
+    pub fn lcp<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
+        path0: &'a T,
+        path1: &'a U,
+    ) -> &'a str {
+        let (mut p0, p1) = if path0.as_ref().len() <= path1.as_ref().len() {
+            (path0.as_ref(), path1.as_ref())
+        } else {
+            (path1.as_ref(), path0.as_ref())
+        };
+        loop {
+            if Path::is_parent(p0, p1) {
+                return p0;
+            } else {
+                match Path::dirname(p0) {
+                    Some(p) => p0 = p,
+                    None => return "/",
+                }
+            }
+        }
     }
 
     /// This will escape the path seperator and the escape character
