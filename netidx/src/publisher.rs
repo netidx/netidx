@@ -489,6 +489,11 @@ pub struct UpdateBatch {
 }
 
 impl UpdateBatch {
+    /// return the number of queued updates in the batch
+    pub fn len(&self) -> usize {
+        self.msgs.len()
+    }
+
     /// Commit this batch, triggering all queued values to be
     /// sent. Any subscriber that can't accept all the updates within
     /// `timeout` will be disconnected.

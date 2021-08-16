@@ -3,7 +3,7 @@ mod rpcs;
 
 use anyhow::Result;
 use arcstr::ArcStr;
-use db::{Datum, DatumKind};
+use db::{Datum, DatumKind, Txn};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -22,6 +22,7 @@ use netidx::{
     },
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
+    utils::BatchItem,
 };
 use netidx_bscript::{
     expr::{Expr, ExprId},
@@ -783,7 +784,11 @@ impl Container {
         }
     }
 
-    fn update_rels(&mut self, mut rels: Pooled<FxHashSet<Path>>, batch: &mut UpdateBatch) {
+    fn update_rels(
+        &mut self,
+        mut rels: Pooled<FxHashSet<Path>>,
+        batch: &mut UpdateBatch,
+    ) {
         let mut refs = REFIDS.take();
         for table in rels.drain() {
             if let Some(rels) = self.ctx.user.rels.get(&table) {
@@ -871,31 +876,24 @@ impl Container {
     fn process_writes(
         &mut self,
         batch: &mut UpdateBatch,
+        txn: &mut Txn,
         mut writes: Pooled<Vec<WriteRequest>>,
     ) {
         let mut refs = REFS.take();
+        // CR estokes: log this
         for req in writes.drain(..) {
             refs.clear();
             match self.ctx.user.by_id.get(&req.id) {
                 None => (), // CR estokes: log
                 Some(Published::Data(p)) => {
-                    let _: Result<_> =
-                        self.ctx.user.db.set_data(true, p.path.clone(), req.value);
+                    txn.set_data(true, p.path.clone(), req.value);
                 }
                 Some(Published::Formula(fifo)) => {
                     let fifo = fifo.clone();
                     if fifo.src.id() == req.id {
-                        let _: Result<_> = self
-                            .ctx
-                            .user
-                            .db
-                            .set_formula(fifo.data_path.clone(), req.value);
+                        txn.set_formula(fifo.data_path.clone(), req.value);
                     } else if fifo.on_write.id() == req.id {
-                        let _: Result<_> = self
-                            .ctx
-                            .user
-                            .db
-                            .set_on_write(fifo.data_path.clone(), req.value);
+                        txn.set_on_write(fifo.data_path.clone(), req.value);
                     } else if fifo.data.id() == req.id {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
@@ -936,11 +934,6 @@ impl Container {
                                 .map(|p| Path::is_parent(p, &path))
                                 .unwrap_or(false);
                             if !locked {
-                                let _: Result<_, _> = self.ctx.user.db.set_data(
-                                    false,
-                                    path.clone(),
-                                    Value::Null,
-                                );
                                 let _: Result<()> = self.publish_data(path, Value::Null);
                             }
                         }
@@ -1050,110 +1043,95 @@ impl Container {
         }
     }
 
-    fn delete_path(&mut self, path: Path) -> Result<()> {
+    fn delete_path(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
             if let Some(path) = Path::dirname(&path) {
-                self.ctx.user.db.remove(Path::from(ArcStr::from(path)))?;
+                txn.remove(Path::from(ArcStr::from(path)));
             }
         } else {
-            self.ctx.user.db.remove(path)?;
+            txn.remove(path);
         }
         Ok(())
     }
 
-    fn delete_subtree(&mut self, path: Path) -> Result<()> {
+    fn delete_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
-        self.ctx.user.db.remove_subtree(path)?;
+        txn.remove_subtree(path);
         Ok(())
     }
 
-    fn lock_subtree(&mut self, path: Path) -> Result<()> {
+    fn lock_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
-        self.ctx.user.db.set_locked(path)?;
+        txn.set_locked(path);
         Ok(())
     }
 
-    fn unlock_subtree(&mut self, path: Path) -> Result<()> {
+    fn unlock_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
-        self.ctx.user.db.set_unlocked(path)?;
+        txn.set_unlocked(path);
         Ok(())
     }
 
-    fn set_data(&mut self, path: Path, value: Value) -> Result<()> {
+    fn set_data(&mut self, txn: &mut Txn, path: Path, value: Value) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
-        self.ctx.user.db.set_data(true, path, value)?;
+        txn.set_data(true, path, value);
         Ok(())
     }
 
     fn set_formula(
         &mut self,
+        txn: &mut Txn,
         path: Path,
         formula: Option<Chars>,
         on_write: Option<Chars>,
     ) -> Result<()> {
         let path = check_path(&self.cfg.base_path, path)?;
         if let Some(formula) = formula {
-            self.ctx.user.db.set_formula(path.clone(), Value::from(formula))?;
+            txn.set_formula(path.clone(), Value::from(formula));
         }
         if let Some(on_write) = on_write {
-            self.ctx.user.db.set_on_write(path, Value::from(on_write))?;
+            txn.set_on_write(path, Value::from(on_write));
         }
         Ok(())
     }
 
-    fn create_sheet(
-        &mut self,
-        path: Path,
-        rows: usize,
-        columns: usize,
-        lock: bool,
-    ) -> Result<()> {
-        self.ctx.user.db.create_sheet(path, rows, columns, lock)?;
-        Ok(())
-    }
-
-    fn create_table(
-        &mut self,
-        path: Path,
-        rows: Vec<Chars>,
-        columns: Vec<Chars>,
-        lock: bool,
-    ) -> Result<()> {
-        self.ctx.user.db.create_table(path, rows, columns, lock)?;
-        Ok(())
-    }
-
-    fn process_rpc_request(&mut self, req: RpcRequest) {
+    fn process_rpc_requests(&mut self, txn: &mut Txn, reqs: &mut Vec<RpcRequest>) {
         fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
             let _: Result<_, _> = tx.send(match res {
                 Err(e) => Value::Error(Chars::from(format!("{}", e))),
                 Ok(()) => Value::Ok,
             });
         }
-        match req.kind {
-            RpcRequestKind::Delete(path) => reply(req.reply, self.delete_path(path)),
-            RpcRequestKind::DeleteSubtree(path) => {
-                reply(req.reply, self.delete_subtree(path))
-            }
-            RpcRequestKind::LockSubtree(path) => {
-                reply(req.reply, self.lock_subtree(path))
-            }
-            RpcRequestKind::UnlockSubtree(path) => {
-                reply(req.reply, self.unlock_subtree(path))
-            }
-            RpcRequestKind::SetData { path, value } => {
-                reply(req.reply, self.set_data(path, value))
-            }
-            RpcRequestKind::SetFormula { path, formula, on_write } => {
-                reply(req.reply, self.set_formula(path, formula, on_write))
-            }
-            RpcRequestKind::CreateSheet { path, rows, columns, lock } => {
-                reply(req.reply, self.create_sheet(path, rows, columns, lock))
-            }
-            RpcRequestKind::CreateTable { path, rows, columns, lock } => {
-                reply(req.reply, self.create_table(path, rows, columns, lock))
+        for req in reqs.drain(..) {
+            match req.kind {
+                RpcRequestKind::Delete(path) => {
+                    reply(req.reply, self.delete_path(txn, path))
+                }
+                RpcRequestKind::DeleteSubtree(path) => {
+                    reply(req.reply, self.delete_subtree(txn, path))
+                }
+                RpcRequestKind::LockSubtree(path) => {
+                    reply(req.reply, self.lock_subtree(txn, path))
+                }
+                RpcRequestKind::UnlockSubtree(path) => {
+                    reply(req.reply, self.unlock_subtree(txn, path))
+                }
+                RpcRequestKind::SetData { path, value } => {
+                    reply(req.reply, self.set_data(txn, path, value))
+                }
+                RpcRequestKind::SetFormula { path, formula, on_write } => {
+                    reply(req.reply, self.set_formula(txn, path, formula, on_write))
+                }
+                RpcRequestKind::CreateSheet { path, rows, columns, lock } => {
+                    txn.create_sheet(path, rows, columns, lock);
+                    reply(req.reply, Ok(()))
+                }
+                RpcRequestKind::CreateTable { path, rows, columns, lock } => {
+                    txn.create_table(path, rows, columns, lock);
+                    reply(req.reply, Ok(()))
+                }
             }
         }
     }
@@ -1296,37 +1274,30 @@ impl Container {
     async fn run(mut self) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut ctrl_c = Box::pin(signal::ctrl_c().fuse());
+        let mut rpcbatch = Vec::new();
         self.init().await?;
+        let mut batch = self.ctx.user.publisher.start_batch();
+        let mut txn = Txn::new();
         loop {
-            let mut batch = self.ctx.user.publisher.start_batch();
             select_biased! {
                 r = self.publish_events.select_next_some() => {
-                    task::block_in_place(|| self.process_publish_event(r));
+                    self.process_publish_event(r);
                 }
                 r = self.publish_requests.select_next_some() => {
-                    task::block_in_place(|| {
-                        self.process_publish_request(r.0, r.1)
-                    });
+                    self.process_publish_request(r.0, r.1)
                 }
                 r = self.sub_updates.select_next_some() => {
-                    task::block_in_place(|| {
-                        self.process_subscriptions(&mut batch, r)
-                    });
+                    self.process_subscriptions(&mut batch, r);
                 }
                 r = self.write_updates_rx.select_next_some() => {
-                    task::block_in_place(|| {
-                        self.process_writes(&mut batch, r)
-                    });
+                    self.process_writes(&mut batch, &mut txn, r)
                 }
-                r = self.api.rx.select_next_some() => {
-                    task::block_in_place(|| {
-                        self.process_rpc_request(r)
-                    });
-                }
+                r = self.api.rx.select_next_some() => match r {
+                    BatchItem::InBatch(v) => rpcbatch.push(v),
+                    BatchItem::EndBatch => self.process_rpc_requests(&mut txn, &mut rpcbatch)
+                },
                 r = self.bscript_event.select_next_some() => {
-                    task::block_in_place(|| {
-                        self.process_bscript_event(&mut batch, r)
-                    });
+                    self.process_bscript_event(&mut batch, r)
                 }
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
@@ -1337,12 +1308,19 @@ impl Container {
                 },
                 complete => break
             }
-            task::block_in_place(|| {
-                let update = self.ctx.user.db.finish();
-                self.process_update(&mut batch, update);
-            });
-            let timeout = self.cfg.timeout.map(Duration::from_secs);
-            batch.commit(timeout).await;
+            if txn.dirty() {
+                task::block_in_place(|| {
+                    // CR estokes: log
+                    if let Ok(Some(update)) = self.ctx.user.db.commit(&mut txn) {
+                        self.process_update(&mut batch, update);
+                    }
+                });
+            }
+            if batch.len() > 0 {
+                let timeout = self.cfg.timeout.map(Duration::from_secs);
+                let new_batch = self.ctx.user.publisher.start_batch();
+                mem::replace(&mut batch, new_batch).commit(timeout).await;
+            }
         }
         self.ctx.user.publisher.shutdown().await;
         self.ctx.user.db.flush_async().await?;

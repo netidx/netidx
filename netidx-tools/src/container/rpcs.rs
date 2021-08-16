@@ -6,6 +6,7 @@ use futures::{
 };
 use netidx::{
     chars::Chars, path::Path, pool::Pooled, publisher::Publisher, subscriber::Value,
+    utils::Batched,
 };
 use netidx_protocols::rpc::server::Proc;
 use std::{collections::HashMap, sync::Arc};
@@ -35,7 +36,7 @@ pub(super) struct RpcApi {
     _set_formula_rpc: Proc,
     _create_sheet_rpc: Proc,
     _create_table_rpc: Proc,
-    pub(super) rx: mpsc::Receiver<RpcRequest>,
+    pub(super) rx: Batched<mpsc::Receiver<RpcRequest>>,
 }
 
 impl RpcApi {
@@ -63,7 +64,7 @@ impl RpcApi {
             _set_formula_rpc,
             _create_sheet_rpc,
             _create_table_rpc,
-            rx,
+            rx: Batched::new(rx, 1_000_000),
         })
     }
 }
@@ -267,7 +268,8 @@ pub(super) fn start_set_formula_rpc(
                 match args.remove("path") {
                     None => err("invalid argument, expected path"),
                     Some(mut paths) => {
-                        let formula = match args.remove("formula")
+                        let formula = match args
+                            .remove("formula")
                             .and_then(|mut v| v.pop())
                             .map(|v| v.get_as::<Chars>())
                         {

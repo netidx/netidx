@@ -9,13 +9,18 @@ use netidx::{
     pool::{Pool, Pooled},
     subscriber::Value,
 };
-use sled;
+use sled::{
+    self,
+    transaction::{ConflictableTransactionError, TransactionError, TransactionalTree},
+    Transactional,
+};
 use std::{fmt::Write, mem, str};
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
     static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(16, 8124);
     static ref PATHS: Pool<Vec<Path>> = Pool::new(16, 8124);
+    static ref TXNS: Pool<Vec<TxnOp>> = Pool::new(16, 65534);
 }
 
 pub(super) enum UpdateKind {
@@ -41,6 +46,14 @@ impl Update {
             locked: PATHS.take(),
             unlocked: PATHS.take(),
         }
+    }
+
+    fn dirty(&self) -> bool {
+        self.data.len() > 0
+            || self.formula.len() > 0
+            || self.on_write.len() > 0
+            || self.locked.len() > 0
+            || self.unlocked.len() > 0
     }
 }
 
@@ -116,27 +129,13 @@ fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static
     tree.iter().keys().map(|res| Ok(Path::from(ArcStr::from(str::from_utf8(&res?)?))))
 }
 
-pub(super) struct Db {
-    db: sled::Db,
-    data: sled::Tree,
-    locked: sled::Tree,
-    pending: Update,
+struct TxDb<'a> {
+    data: &'a TransactionalTree,
+    locked: &'a TransactionalTree,
+    pending: &'a mut Update,
 }
 
-impl Db {
-    pub(super) fn new(cfg: &ContainerConfig) -> Result<Self> {
-        let db = sled::Config::default()
-            .use_compression(cfg.compress)
-            .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
-            .cache_capacity(cfg.cache_size.unwrap_or(16 * 1024 * 1024))
-            .path(&cfg.db)
-            .open()?;
-        let data = db.open_tree("data")?;
-        let locked = db.open_tree("locked")?;
-        let pending = Update::new();
-        Ok(Db { db, data, locked, pending })
-    }
-
+impl<'a> TxDb<'a> {
     pub(super) fn remove(&mut self, path: Path) -> Result<()> {
         let key = path.as_bytes();
         if let Some(data) = self.data.remove(key)? {
@@ -148,19 +147,6 @@ impl Db {
                 }
                 DatumKind::Invalid => (),
             }
-        }
-        Ok(())
-    }
-
-    pub(super) async fn flush_async(&self) -> Result<()> {
-        self.db.flush_async().await?;
-        Ok(())
-    }
-
-    pub(super) fn remove_subtree(&mut self, path: Path) -> Result<()> {
-        for res in self.data.scan_prefix(path.as_ref()).keys() {
-            let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
-            self.remove(path)?;
         }
         Ok(())
     }
@@ -261,7 +247,7 @@ impl Db {
                 buf.clear();
                 write!(buf, "{:0rwidth$}/{:0cwidth$}", i, j, rwidth = rd, cwidth = cd)?;
                 let path = base.append(buf.as_str());
-                if !self.data.contains_key(path.as_bytes())? {
+                if self.data.get(path.as_bytes())?.is_none() {
                     self.set_data(true, path, Value::Null)?;
                 }
             }
@@ -287,13 +273,186 @@ impl Db {
                 buf.clear();
                 write!(buf, "{}/{}", Path::escape(row), col)?;
                 let path = base.append(buf.as_str());
-                if !self.data.contains_key(path.as_bytes())? {
+                if self.data.get(path.as_bytes())?.is_none() {
                     self.set_data(true, path, Value::Null)?;
                 }
             }
         }
         if lock {
             self.set_locked(base)?
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_locked(&mut self, path: Path) -> Result<()> {
+        let key = path.as_bytes();
+        let mut val = BUF.take();
+        Value::Null.encode(&mut *val)?;
+        self.locked.insert(key, &**val)?;
+        self.pending.locked.push(path);
+        Ok(())
+    }
+
+    pub(super) fn set_unlocked(&mut self, path: Path) -> Result<()> {
+        self.locked.remove(path.as_bytes())?;
+        self.pending.unlocked.push(path);
+        Ok(())
+    }
+}
+
+enum TxnOp {
+    Remove(Path),
+    SetData(bool, Path, Value),
+    SetFormula(Path, Value),
+    SetOnWrite(Path, Value),
+    CreateSheet { base: Path, rows: usize, cols: usize, lock: bool },
+    CreateTable { base: Path, rows: Vec<Chars>, cols: Vec<Chars>, lock: bool },
+    SetLocked(Path),
+    SetUnlocked(Path),
+    RemoveSubtree(Path),
+}
+
+pub(super) struct Txn {
+    ops: Pooled<Vec<TxnOp>>,
+    pending: Update,
+}
+
+impl Txn {
+    pub(super) fn new() -> Self {
+        Self {
+            ops: TXNS.take(),
+            pending: Update::new()
+        }
+    }
+
+    pub(super) fn dirty(&self) -> bool {
+        self.ops.len() > 0
+    }
+
+    pub(super) fn remove(&mut self, path: Path) {
+        self.ops.push(TxnOp::Remove(path))
+    }
+
+    pub(super) fn set_data(&mut self, update: bool, path: Path, value: Value) {
+        self.ops.push(TxnOp::SetData(update, path, value))
+    }
+
+    pub(super) fn set_formula(&mut self, path: Path, value: Value) {
+        self.ops.push(TxnOp::SetFormula(path, value))
+    }
+
+    pub(super) fn set_on_write(&mut self, path: Path, value: Value) {
+        self.ops.push(TxnOp::SetOnWrite(path, value))
+    }
+
+    pub(super) fn create_sheet(
+        &mut self,
+        base: Path,
+        rows: usize,
+        cols: usize,
+        lock: bool,
+    ) {
+        self.ops.push(TxnOp::CreateSheet { base, rows, cols, lock })
+    }
+
+    pub(super) fn create_table(
+        &mut self,
+        base: Path,
+        rows: Vec<Chars>,
+        cols: Vec<Chars>,
+        lock: bool,
+    ) {
+        self.ops.push(TxnOp::CreateTable { base, rows, cols, lock })
+    }
+
+    pub(super) fn set_locked(&mut self, path: Path) {
+        self.ops.push(TxnOp::SetLocked(path))
+    }
+
+    pub(super) fn set_unlocked(&mut self, path: Path) {
+        self.ops.push(TxnOp::SetUnlocked(path))
+    }
+
+    pub(super) fn remove_subtree(&mut self, path: Path) {
+        self.ops.push(TxnOp::RemoveSubtree(path))
+    }
+}
+
+pub(super) struct Db {
+    db: sled::Db,
+    data: sled::Tree,
+    locked: sled::Tree,
+}
+
+impl Db {
+    pub(super) fn new(cfg: &ContainerConfig) -> Result<Self> {
+        let db = sled::Config::default()
+            .use_compression(cfg.compress)
+            .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
+            .cache_capacity(cfg.cache_size.unwrap_or(16 * 1024 * 1024))
+            .path(&cfg.db)
+            .open()?;
+        let data = db.open_tree("data")?;
+        let locked = db.open_tree("locked")?;
+        Ok(Db { db, data, locked })
+    }
+
+    pub(super) fn commit(&mut self, txn: &mut Txn) -> Result<Option<Update>> {
+        if txn.ops.is_empty() {
+            Ok(None)
+        } else {
+            (&self.data, &self.locked)
+                .transaction(|(data, locked)| {
+                    let mut tx = TxDb { data, locked, pending: &mut txn.pending };
+                    for op in txn.ops.drain(..) {
+                        match op {
+                            TxnOp::CreateSheet { base, rows, cols, lock } => {
+                                tx.create_sheet(base, rows, cols, lock)
+                            }
+                            TxnOp::CreateTable { base, rows, cols, lock } => {
+                                tx.create_table(base, rows, cols, lock)
+                            }
+                            TxnOp::Remove(path) => tx.remove(path),
+                            TxnOp::RemoveSubtree(path) => {
+                                self.remove_subtree(&mut tx, path)
+                            }
+                            TxnOp::SetData(update, path, value) => {
+                                tx.set_data(update, path, value)
+                            }
+                            TxnOp::SetFormula(path, value) => tx.set_formula(path, value),
+                            TxnOp::SetOnWrite(path, value) => {
+                                tx.set_on_write(path, value)
+                            }
+                            TxnOp::SetLocked(path) => tx.set_locked(path),
+                            TxnOp::SetUnlocked(path) => {
+                                self.unlock_subtree(&mut tx, path)
+                            }
+                        }
+                        .map_err(ConflictableTransactionError::Abort)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| match e {
+                    TransactionError::Abort(e) => e,
+                    TransactionError::Storage(_) => unreachable!(),
+                })?;
+            Ok(Some(mem::replace(&mut txn.pending, Update::new())))
+        }
+    }
+
+    pub(super) async fn flush_async(&self) -> Result<()> {
+        self.db.flush_async().await?;
+        Ok(())
+    }
+
+    fn remove_subtree(&mut self, txn: &mut TxDb, path: Path) -> Result<()> {
+        let mut paths = Vec::new();
+        for res in self.data.scan_prefix(path.as_ref()).keys() {
+            let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
+            paths.push(path);
+        }
+        for path in paths {
+            txn.remove(path)?;
         }
         Ok(())
     }
@@ -420,28 +579,18 @@ impl Db {
         }
     }
 
-    pub(super) fn set_locked(&mut self, path: Path) -> Result<()> {
+    fn unlock_subtree(&mut self, txn: &mut TxDb, path: Path) -> Result<()> {
         let key = path.as_bytes();
-        let mut val = BUF.take();
-        Value::Null.encode(&mut *val)?;
-        self.locked.insert(key, &**val)?;
-        self.pending.locked.push(path);
-        Ok(())
-    }
-
-    pub(super) fn set_unlocked(&mut self, path: Path) -> Result<()> {
-        let key = path.as_bytes();
+        let mut paths = Vec::new();
         for res in self.locked.scan_prefix(key).keys() {
             let key = res?;
-            self.locked.remove(&key)?;
             let path = Path::from(ArcStr::from(str::from_utf8(&key)?));
-            self.pending.unlocked.push(path);
+            paths.push(path);
+        }
+        for path in paths {
+            txn.set_unlocked(path)?
         }
         Ok(())
-    }
-
-    pub(super) fn finish(&mut self) -> Update {
-        mem::replace(&mut self.pending, Update::new())
     }
 
     pub(super) fn lookup<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Datum>> {
