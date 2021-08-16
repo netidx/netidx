@@ -567,6 +567,7 @@ struct Container {
     write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
     publish_events: mpsc::UnboundedReceiver<PEvent>,
     publish_requests: DefaultHandle,
+    db_updates: mpsc::UnboundedReceiver<db::Update>,
     api: rpcs::RpcApi,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
     rpcs: FxHashMap<
@@ -577,7 +578,7 @@ struct Container {
 
 impl Container {
     async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
-        let db = db::Db::new(&ccfg)?;
+        let (db, db_updates) = db::Db::new(&ccfg)?;
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         publisher.events(publish_events_tx);
@@ -600,6 +601,7 @@ impl Container {
             write_updates_rx,
             publish_events,
             publish_requests,
+            db_updates,
             api,
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
@@ -1302,6 +1304,9 @@ impl Container {
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
                 }
+                u = self.db_updates.select_next_some() => {
+                    self.process_update(&mut batch, u);
+                }
                 r = ctrl_c => match r {
                     Err(e) => panic!("failed to wait for ctrl_c: {}", e),
                     Ok(()) => break
@@ -1309,12 +1314,7 @@ impl Container {
                 complete => break
             }
             if txn.dirty() {
-                task::block_in_place(|| {
-                    // CR estokes: log
-                    if let Ok(Some(update)) = self.ctx.user.db.commit(&mut txn) {
-                        self.process_update(&mut batch, update);
-                    }
-                });
+                self.ctx.user.db.commit(mem::replace(&mut txn, Txn::new()));
             }
             if batch.len() > 0 {
                 let timeout = self.cfg.timeout.map(Duration::from_secs);
