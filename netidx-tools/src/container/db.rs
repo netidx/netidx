@@ -14,7 +14,7 @@ use sled::{
     transaction::{ConflictableTransactionError, TransactionError, TransactionalTree},
     Transactional,
 };
-use std::{fmt::Write, mem, str};
+use std::{fmt::Write, str};
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
@@ -46,14 +46,6 @@ impl Update {
             locked: PATHS.take(),
             unlocked: PATHS.take(),
         }
-    }
-
-    fn dirty(&self) -> bool {
-        self.data.len() > 0
-            || self.formula.len() > 0
-            || self.on_write.len() > 0
-            || self.locked.len() > 0
-            || self.unlocked.len() > 0
     }
 }
 
@@ -316,11 +308,11 @@ enum TxnOp {
     RemoveSubtree(Path),
 }
 
-pub(super) struct Txn(Vec<TxnOp>);
+pub(super) struct Txn(Pooled<Vec<TxnOp>>);
 
 impl Txn {
     pub(super) fn new() -> Self {
-        Self(Vec::new())
+        Self(TXNS.take())
     }
 
     pub(super) fn dirty(&self) -> bool {
@@ -400,9 +392,9 @@ impl Db {
             Ok(None)
         } else {
             let pending = (&self.data, &self.locked)
-                .transaction(move |(data, locked)| {
+                .transaction(|(data, locked)| {
                     let mut tx = TxDb { data, locked, pending: Update::new() };
-                    for op in &txn.0 {
+                    for op in &*txn.0 {
                         match op {
                             TxnOp::CreateSheet { base, rows, cols, lock } => {
                                 tx.create_sheet(base, *rows, *cols, *lock)
