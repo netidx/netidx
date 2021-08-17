@@ -17,14 +17,16 @@ use netidx::{
     subscriber::Value,
 };
 use sled;
-use std::{fmt::Write, str};
+use std::{collections::HashMap, fmt::Write, str};
 use tokio::task;
 
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
-    static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(16, 8124);
-    static ref PATHS: Pool<Vec<Path>> = Pool::new(16, 65534);
+    static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(256, 8124);
+    static ref PATHS: Pool<Vec<Path>> = Pool::new(128, 65534);
     static ref TXNS: Pool<Vec<TxnOp>> = Pool::new(16, 65534);
+    static ref STXNS: Pool<Vec<TxnOp>> = Pool::new(65534, 32);
+    static ref BYPATH: Pool<HashMap<Path, Pooled<Vec<TxnOp>>>> = Pool::new(16, 65534);
 }
 
 pub(super) enum UpdateKind {
@@ -50,6 +52,15 @@ impl Update {
             locked: PATHS.take(),
             unlocked: PATHS.take(),
         }
+    }
+
+    fn merge(mut self, mut other: Update) -> Update {
+        self.data.extend(other.data.drain(..));
+        self.formula.extend(other.formula.drain(..));
+        self.on_write.extend(other.on_write.drain(..));
+        self.locked.extend(other.locked.drain(..));
+        self.unlocked.extend(other.unlocked.drain(..));
+        self
     }
 }
 
@@ -131,11 +142,37 @@ enum TxnOp {
     SetFormula(Path, Value),
     SetOnWrite(Path, Value),
     CreateSheet { base: Path, rows: usize, cols: usize, lock: bool },
+    AddSheetColumns { base: Path, cols: usize },
+    AddSheetRows { base: Path, rows: usize },
     CreateTable { base: Path, rows: Vec<Chars>, cols: Vec<Chars>, lock: bool },
+    AddTableColumns { base: Path, cols: Vec<Chars> },
+    AddTableRows { base: Path, rows: Vec<Chars> },
     SetLocked(Path),
     SetUnlocked(Path),
     RemoveSubtree(Path),
     Flush(oneshot::Sender<()>),
+}
+
+impl TxnOp {
+    fn path(&self) -> Path {
+        use TxnOp::*;
+        match self {
+            Remove(p) => p.clone(),
+            SetData(_, p, _) => p.clone(),
+            SetFormula(p, _) => p.clone(),
+            SetOnWrite(p, _) => p.clone(),
+            CreateSheet { base, .. } => base.clone(),
+            AddSheetColumns { base, .. } => base.clone(),
+            AddSheetRows { base, .. } => base.clone(),
+            CreateTable { base, .. } => base.clone(),
+            AddTableColumns { base, .. } => base.clone(),
+            AddTableRows { base, .. } => base.clone(),
+            SetLocked(p) => p.clone(),
+            SetUnlocked(p) => p.clone(),
+            RemoveSubtree(p) => p.clone(),
+            Flush(_) => Path::root(),
+        }
+    }
 }
 
 pub(super) struct Txn(Pooled<Vec<TxnOp>>);
@@ -175,6 +212,14 @@ impl Txn {
         self.0.push(TxnOp::CreateSheet { base, rows, cols, lock })
     }
 
+    pub(super) fn add_sheet_columns(&mut self, base: Path, cols: usize) {
+        self.0.push(TxnOp::AddSheetColumns { base, cols })
+    }
+
+    pub(super) fn add_sheet_rows(&mut self, base: Path, rows: usize) {
+        self.0.push(TxnOp::AddSheetRows { base, rows })
+    }
+
     pub(super) fn create_table(
         &mut self,
         base: Path,
@@ -183,6 +228,14 @@ impl Txn {
         lock: bool,
     ) {
         self.0.push(TxnOp::CreateTable { base, rows, cols, lock })
+    }
+
+    pub(super) fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
+        self.0.push(TxnOp::AddTableColumns { base, cols })
+    }
+
+    pub(super) fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
+        self.0.push(TxnOp::AddTableRows { base, rows })
     }
 
     pub(super) fn set_locked(&mut self, path: Path) {
@@ -333,6 +386,24 @@ fn create_sheet(
     Ok(())
 }
 
+fn add_sheet_columns(
+    _data: &sled::Tree,
+    _pending: &mut Update,
+    _base: Path,
+    _cols: usize,
+) -> Result<()> {
+    Ok(())
+}
+
+fn add_sheet_rows(
+    _data: &sled::Tree,
+    _pending: &mut Update,
+    _base: Path,
+    _rows: usize,
+) -> Result<()> {
+    Ok(())
+}
+
 fn create_table(
     data: &sled::Tree,
     locked: &sled::Tree,
@@ -358,6 +429,24 @@ fn create_table(
     if lock {
         set_locked(locked, pending, base)?
     }
+    Ok(())
+}
+
+fn add_table_columns(
+    _data: &sled::Tree,
+    _pending: &mut Update,
+    _base: Path,
+    _cols: Vec<Chars>,
+) -> Result<()> {
+    Ok(())
+}
+
+fn add_table_rows(
+    _data: &sled::Tree,
+    _pending: &mut Update,
+    _base: Path,
+    _rows: Vec<Chars>,
+) -> Result<()> {
     Ok(())
 }
 
@@ -402,51 +491,125 @@ fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Resu
     Ok(())
 }
 
+fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update {
+    let mut pending = Update::new();
+    for op in txn.0.drain(..) {
+        // CR estokes: log this
+        let _: Result<_> = match op {
+            TxnOp::CreateSheet { base, rows, cols, lock } => {
+                create_sheet(&data, &locked, &mut pending, base, rows, cols, lock)
+            }
+            TxnOp::AddSheetColumns { base, cols } => {
+                add_sheet_columns(&data, &mut pending, base, cols)
+            }
+            TxnOp::AddSheetRows { base, rows } => {
+                add_sheet_rows(&data, &mut pending, base, rows)
+            }
+            TxnOp::CreateTable { base, rows, cols, lock } => {
+                create_table(&data, &locked, &mut pending, base, rows, cols, lock)
+            }
+            TxnOp::AddTableColumns { base, cols } => {
+                add_table_columns(&data, &mut pending, base, cols)
+            }
+            TxnOp::AddTableRows { base, rows } => {
+                add_table_rows(&data, &mut pending, base, rows)
+            }
+            TxnOp::Remove(path) => remove(&data, &mut pending, path),
+            TxnOp::RemoveSubtree(path) => remove_subtree(&data, &mut pending, path),
+            TxnOp::SetData(update, path, value) => {
+                set_data(&data, &mut pending, update, path, value)
+            }
+            TxnOp::SetFormula(path, value) => {
+                set_formula(&data, &mut pending, path, value)
+            }
+            TxnOp::SetOnWrite(path, value) => {
+                set_on_write(&data, &mut pending, path, value)
+            }
+            TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
+            TxnOp::SetUnlocked(path) => unlock_subtree(&locked, &mut pending, path),
+            TxnOp::Flush(finished) => {
+                // CR estokes: log
+                let _: Result<_, _> = data.flush();
+                let _: Result<_, _> = locked.flush();
+                let _: Result<_, _> = finished.send(());
+                Ok(())
+            }
+        };
+    }
+    pending
+}
+
+fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update {
+    use rayon::prelude::*;
+    let mut by_path = BYPATH.take();
+    for op in txn.0.drain(..) {
+        by_path.entry(op.path()).or_insert_with(|| STXNS.take()).push(op);
+    }
+    by_path
+        .par_drain()
+        .fold(
+            || Update::new(),
+            |mut pending, (_, mut ops)| {
+                for op in ops.drain(..) {
+                    let _: Result<_> = match op {
+                        TxnOp::SetData(update, path, value) => {
+                            set_data(data, &mut pending, update, path, value)
+                        }
+                        TxnOp::Remove(path) => remove(data, &mut pending, path),
+                        TxnOp::SetFormula(path, value) => {
+                            set_formula(data, &mut pending, path, value)
+                        }
+                        TxnOp::SetOnWrite(path, value) => {
+                            set_on_write(data, &mut pending, path, value)
+                        }
+                        TxnOp::SetLocked(path) => set_locked(locked, &mut pending, path),
+                        TxnOp::SetUnlocked(path) => {
+                            unlock_subtree(locked, &mut pending, path)
+                        }
+                        TxnOp::CreateSheet { .. }
+                        | TxnOp::AddSheetColumns { .. }
+                        | TxnOp::AddSheetRows { .. }
+                        | TxnOp::CreateTable { .. }
+                        | TxnOp::AddTableColumns { .. }
+                        | TxnOp::AddTableRows { .. }
+                        | TxnOp::RemoveSubtree { .. }
+                        | TxnOp::Flush(_) => unreachable!(),
+                    };
+                }
+                pending
+            },
+        )
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1))
+}
+
 async fn commit_txns_task(
     data: sled::Tree,
     locked: sled::Tree,
     mut incoming: UnboundedReceiver<Txn>,
     outgoing: UnboundedSender<Update>,
 ) {
-    while let Some(mut txn) = incoming.next().await {
-        let mut pending = Update::new();
-        task::block_in_place(|| {
-            for op in txn.0.drain(..) {
-                // CR estokes: log this
-                let _: Result<_> = match op {
-                    TxnOp::CreateSheet { base, rows, cols, lock } => {
-                        create_sheet(&data, &locked, &mut pending, base, rows, cols, lock)
-                    }
-                    TxnOp::CreateTable { base, rows, cols, lock } => {
-                        create_table(&data, &locked, &mut pending, base, rows, cols, lock)
-                    }
-                    TxnOp::Remove(path) => remove(&data, &mut pending, path),
-                    TxnOp::RemoveSubtree(path) => {
-                        remove_subtree(&data, &mut pending, path)
-                    }
-                    TxnOp::SetData(update, path, value) => {
-                        set_data(&data, &mut pending, update, path, value)
-                    }
-                    TxnOp::SetFormula(path, value) => {
-                        set_formula(&data, &mut pending, path, value)
-                    }
-                    TxnOp::SetOnWrite(path, value) => {
-                        set_on_write(&data, &mut pending, path, value)
-                    }
-                    TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
-                    TxnOp::SetUnlocked(path) => {
-                        unlock_subtree(&locked, &mut pending, path)
-                    }
-                    TxnOp::Flush(finished) => {
-                        // CR estokes: log
-                        let _: Result<_, _> = data.flush();
-                        let _: Result<_, _> = locked.flush();
-                        let _: Result<_, _> = finished.send(());
-                        Ok(())
-                    }
-                };
-            }
+    while let Some(txn) = incoming.next().await {
+        let simple = txn.0.iter().fold(true, |simple, op| match op {
+            TxnOp::CreateSheet { .. }
+            | TxnOp::AddSheetColumns { .. }
+            | TxnOp::AddSheetRows { .. }
+            | TxnOp::CreateTable { .. }
+            | TxnOp::AddTableColumns { .. }
+            | TxnOp::AddTableRows { .. }
+            | TxnOp::RemoveSubtree { .. }
+            | TxnOp::Flush(_) => false,
+            TxnOp::Remove(_)
+            | TxnOp::SetData(_, _, _)
+            | TxnOp::SetFormula(_, _)
+            | TxnOp::SetOnWrite(_, _)
+            | TxnOp::SetLocked(_)
+            | TxnOp::SetUnlocked(_) => simple,
         });
+        let pending = if simple {
+            task::block_in_place(|| commit_simple(&data, &locked, txn))
+        } else {
+            task::block_in_place(|| commit_complex(&data, &locked, txn))
+        };
         match outgoing.unbounded_send(pending) {
             Ok(()) => (),
             Err(_) => break,

@@ -51,3 +51,4 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "0.8", features = ["v4", "serde"] }
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }
+rayon = "1"
