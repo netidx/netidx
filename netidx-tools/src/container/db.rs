@@ -54,12 +54,16 @@ impl Update {
         }
     }
 
-    fn merge(mut self, mut other: Update) -> Update {
+    fn merge_from(&mut self, mut other: Update) {
         self.data.extend(other.data.drain(..));
         self.formula.extend(other.formula.drain(..));
         self.on_write.extend(other.on_write.drain(..));
         self.locked.extend(other.locked.drain(..));
         self.unlocked.extend(other.unlocked.drain(..));
+    }
+
+    fn merge(mut self, other: Update) -> Update {
+        self.merge_from(other);
         self
     }
 }
@@ -367,19 +371,39 @@ fn create_sheet(
     cols: usize,
     lock: bool,
 ) -> Result<()> {
-    let mut buf = String::with_capacity(128);
+    use rayon::prelude::*;
     let rd = 1 + (rows as f32).log10() as usize;
     let cd = 1 + (cols as f32).log10() as usize;
-    for i in 0..rows {
-        for j in 0..cols {
-            buf.clear();
-            write!(buf, "{:0rwidth$}/{:0cwidth$}", i, j, rwidth = rd, cwidth = cd)?;
-            let path = base.append(buf.as_str());
-            if !data.contains_key(path.as_bytes())? {
-                set_data(data, pending, true, path, Value::Null)?;
-            }
-        }
-    }
+    pending.merge_from(
+        (0..rows)
+            .into_par_iter()
+            .map(|row| (0..cols).into_par_iter().map(move |col| (row, col)))
+            .flatten()
+            .fold(
+                || (Update::new(), String::new()),
+                |(mut pending, mut buf), (i, j)| {
+                    buf.clear();
+                    write!(
+                        buf,
+                        "{:0rwidth$}/{:0cwidth$}",
+                        i,
+                        j,
+                        rwidth = rd,
+                        cwidth = cd
+                    )
+                    .unwrap();
+                    let path = base.append(buf.as_str());
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        // CR estokes: log
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
+                    }
+                    (pending, buf)
+                },
+            )
+            .map(|(u, _)| u)
+            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
+    );
     if lock {
         set_locked(locked, pending, base)?
     }
@@ -413,19 +437,32 @@ fn create_table(
     cols: Vec<Chars>,
     lock: bool,
 ) -> Result<()> {
-    let mut buf = String::new();
+    use rayon::prelude::*;
+    let rows: Vec<String> =
+        rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
     let cols: Vec<String> =
         cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    for row in rows.iter() {
-        for col in cols.iter() {
-            buf.clear();
-            write!(buf, "{}/{}", Path::escape(row), col)?;
-            let path = base.append(buf.as_str());
-            if !data.contains_key(path.as_bytes())? {
-                set_data(data, pending, true, path, Value::Null)?;
-            }
-        }
-    }
+    pending.merge_from(
+        rows.par_iter()
+            .map(|row| cols.par_iter().map(move |col| (row, col)))
+            .flatten()
+            .fold(
+                || (Update::new(), String::new()),
+                |(mut pending, mut buf), (row, col)| {
+                    buf.clear();
+                    write!(buf, "{}/{}", row, col).unwrap();
+                    let path = base.append(buf.as_str());
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        // CR estokes: log
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
+                    }
+                    (pending, buf)
+                },
+            )
+            .map(|(u, _)| u)
+            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
+    );
     if lock {
         set_locked(locked, pending, base)?
     }
@@ -466,14 +503,25 @@ fn set_unlocked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result
 }
 
 fn remove_subtree(data: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
+    use rayon::prelude::*;
     let mut paths = PATHS.take();
     for res in data.scan_prefix(path.as_ref()).keys() {
         let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
         paths.push(path);
     }
-    for path in paths.drain(..) {
-        remove(data, pending, path)?;
-    }
+    pending.merge_from(
+        paths
+            .par_drain(..)
+            .fold(
+                || Update::new(),
+                |mut pending, path| {
+                    // CR estokes: log
+                    let _: Result<_> = remove(data, &mut pending, path);
+                    pending
+                },
+            )
+            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
+    );
     Ok(())
 }
 
