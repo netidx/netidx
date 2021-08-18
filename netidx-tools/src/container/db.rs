@@ -511,17 +511,42 @@ fn remove_subtree(data: &sled::Tree, pending: &mut Update, path: Path) -> Result
     }
     pending.merge_from(
         paths
-            .par_drain(..)
+            .par_iter()
             .fold(
                 || Update::new(),
                 |mut pending, path| {
-                    // CR estokes: log
-                    let _: Result<_> = remove(data, &mut pending, path);
+                    if let Ok(Some(data)) = data.get(path.as_bytes()) {
+                        match DatumKind::decode(&mut &*data) {
+                            DatumKind::Data => {
+                                pending.data.push((path.clone(), UpdateKind::Deleted))
+                            }
+                            DatumKind::Formula => {
+                                pending.formula.push((path.clone(), UpdateKind::Deleted));
+                                pending
+                                    .on_write
+                                    .push((path.clone(), UpdateKind::Deleted));
+                            }
+                            DatumKind::Invalid => (),
+                        }
+                    }
                     pending
                 },
             )
             .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
     );
+    paths
+        .par_iter()
+        .fold(
+            || sled::Batch::default(),
+            |mut batch, path| {
+                batch.remove(path.as_bytes());
+                batch
+            },
+        )
+        .for_each(|batch| {
+            // CR estokes: log
+            let _: Result<_, _> = data.apply_batch(batch);
+        });
     Ok(())
 }
 
