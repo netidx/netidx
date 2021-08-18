@@ -559,6 +559,7 @@ enum Compiled {
 
 struct Container {
     cfg: ContainerConfig,
+    api_path: Path,
     locked: BTreeSet<Path>,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
@@ -587,13 +588,15 @@ impl Container {
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let api = rpcs::RpcApi::new(&publisher, &ccfg.base_path)?;
+        let api_path = ccfg.base_path.append(".api");
+        let api = rpcs::RpcApi::new(&publisher, &api_path)?;
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
         Rel::register(&mut ctx);
         Ok(Container {
             cfg: ccfg,
+            api_path,
             locked: BTreeSet::new(),
             ctx,
             sub_updates,
@@ -935,7 +938,7 @@ impl Container {
                                 .next_back()
                                 .map(|p| Path::is_parent(p, &path))
                                 .unwrap_or(false);
-                            if !locked {
+                            if !locked && !Path::is_parent(&self.api_path, &path) {
                                 let _: Result<()> = self.publish_data(path, Value::Null);
                             }
                         }

@@ -129,7 +129,7 @@ pub(super) fn start_delete_rpc(
     start_path_arg_rpc(
         publisher,
         base_path,
-        ".api/delete",
+        "delete",
         "delete path(s) from the database",
         "the path(s) to delete",
         RpcRequestKind::Delete,
@@ -145,7 +145,7 @@ pub(super) fn start_delete_subtree_rpc(
     start_path_arg_rpc(
         publisher,
         base_path,
-        ".api/delete-subtree",
+        "delete-subtree",
         "delete subtree(s) from the database",
         "the subtree(s) to delete",
         RpcRequestKind::DeleteSubtree,
@@ -161,7 +161,7 @@ pub(super) fn start_lock_subtree_rpc(
     start_path_arg_rpc(
         publisher,
         base_path,
-        ".api/lock-subtree",
+        "lock-subtree",
         "lock subtree(s) so only rpc calls can create/delete values there",
         "the subtree(s) to lock",
         RpcRequestKind::LockSubtree,
@@ -177,7 +177,7 @@ pub(super) fn start_unlock_subtree_rpc(
     start_path_arg_rpc(
         publisher,
         base_path,
-        ".api/unlock-subtree",
+        "unlock-subtree",
         "unlock subtree(s) so the default publisher can create values",
         "the subtree(s) to unlock",
         RpcRequestKind::UnlockSubtree,
@@ -192,7 +192,7 @@ pub(super) fn start_set_data_rpc(
 ) -> Result<Proc> {
     Ok(Proc::new(
         publisher,
-        base_path.append(".api/set-data"),
+        base_path.append("set-data"),
         Value::from("make the specified path(s) as data and optionally set the value"),
         vec![
             (
@@ -248,7 +248,7 @@ pub(super) fn start_set_formula_rpc(
 ) -> Result<Proc> {
     Ok(Proc::new(
         publisher,
-        base_path.append(".api/set-formula"),
+        base_path.append("set-formula"),
         Value::from(
             "make the specified path calculated and set it's formula and/or its on-write",
         ),
@@ -328,7 +328,7 @@ pub(super) fn start_create_sheet_rpc(
 ) -> Result<Proc> {
     Ok(Proc::new(
         publisher,
-        base_path.append(".api/create-sheet"),
+        base_path.append("create-sheet"),
         Value::from(
             "create a spreadsheet like sheet with the specified number of rows and columns",
         ),
@@ -436,7 +436,7 @@ pub(super) fn start_create_table_rpc(
 ) -> Result<Proc> {
     Ok(Proc::new(
         publisher,
-        base_path.append(".api/create-table"),
+        base_path.append("create-table"),
         Value::from("create a database like table with named rows and columns"),
         vec![
             (
