@@ -305,6 +305,7 @@ impl Ref {
             path.as_ref()
         };
         match or_ref!(ctx.user.db.lookup(dbpath).ok().flatten()) {
+            Datum::Deleted => Value::Error(Chars::from("#REF")),
             Datum::Data(v) => v,
             Datum::Formula(fv, wv) => {
                 if is_fpath {
@@ -717,13 +718,13 @@ impl Container {
                     }
                 }
                 DatumKind::Formula => match Datum::decode(&mut &*raw)? {
-                    Datum::Data(_) => unreachable!(),
                     Datum::Formula(fv, wv) => {
                         let _: Result<()> =
                             self.publish_formula(path, &mut batch, fv, wv);
-                    }
+                    },
+                    Datum::Deleted | Datum::Data(_) => unreachable!(),
                 },
-                DatumKind::Invalid => (),
+                DatumKind::Deleted | DatumKind::Invalid => (),
             }
         }
         Ok(batch.commit(self.cfg.timeout.map(Duration::from_secs)).await)
@@ -928,7 +929,7 @@ impl Container {
                             let _: Result<()> = self.publish_data(path, v);
                         }
                         Ok(Some(Datum::Formula(_, _))) => unreachable!(),
-                        Err(_) | Ok(None) => {
+                        Err(_) | Ok(Some(Datum::Deleted)) | Ok(None) => {
                             let locked = self
                                 .locked
                                 .range::<str, (Bound<&str>, Bound<&str>)>((

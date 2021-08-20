@@ -71,6 +71,7 @@ impl Update {
 pub(super) enum DatumKind {
     Data,
     Formula,
+    Deleted,
     Invalid,
 }
 
@@ -79,6 +80,7 @@ impl DatumKind {
         match buf.get_u8() {
             0 => DatumKind::Data,
             1 => DatumKind::Formula,
+            2 => DatumKind::Deleted,
             _ => DatumKind::Invalid,
         }
     }
@@ -88,6 +90,7 @@ impl DatumKind {
 pub(super) enum Datum {
     Data(Value),
     Formula(Value, Value),
+    Deleted,
 }
 
 impl Pack for Datum {
@@ -95,6 +98,7 @@ impl Pack for Datum {
         1 + match self {
             Datum::Data(v) => v.encoded_len(),
             Datum::Formula(f, w) => f.encoded_len() + w.encoded_len(),
+            Datum::Deleted => 0,
         }
     }
 
@@ -109,6 +113,7 @@ impl Pack for Datum {
                 Pack::encode(f, buf)?;
                 Pack::encode(w, buf)
             }
+            Datum::Deleted => Ok(buf.put_u8(2)),
         }
     }
 
@@ -123,6 +128,7 @@ impl Pack for Datum {
                     let w = Value::decode(buf)?;
                     Ok(Datum::Formula(f, w))
                 }
+                2 => Ok(Datum::Deleted),
                 _ => Err(PackError::UnknownTag),
             }
         }
@@ -257,14 +263,16 @@ impl Txn {
 
 fn remove(data: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
     let key = path.as_bytes();
-    if let Some(data) = data.remove(key)? {
+    let mut val = BUF.take();
+    Datum::Deleted.encode(&mut *val)?;
+    if let Some(data) = data.insert(key, &**val)? {
         match DatumKind::decode(&mut &*data) {
             DatumKind::Data => pending.data.push((path, UpdateKind::Deleted)),
             DatumKind::Formula => {
                 pending.formula.push((path.clone(), UpdateKind::Deleted));
                 pending.on_write.push((path, UpdateKind::Deleted));
             }
-            DatumKind::Invalid => (),
+            DatumKind::Deleted | DatumKind::Invalid => (),
         }
     }
     Ok(())
@@ -285,7 +293,9 @@ fn set_data(
         None => UpdateKind::Inserted(value),
         Some(data) => match DatumKind::decode(&mut &*data) {
             DatumKind::Data => UpdateKind::Updated(value),
-            DatumKind::Formula | DatumKind::Invalid => UpdateKind::Inserted(value),
+            DatumKind::Formula | DatumKind::Deleted | DatumKind::Invalid => {
+                UpdateKind::Inserted(value)
+            }
         },
     };
     if update {
@@ -308,13 +318,13 @@ fn set_formula(
             UpdateKind::Inserted(value)
         }
         Some(data) => match DatumKind::decode(&mut &*data) {
-            DatumKind::Data | DatumKind::Invalid => {
+            DatumKind::Data | DatumKind::Deleted | DatumKind::Invalid => {
                 Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
                 UpdateKind::Inserted(value)
             }
             DatumKind::Formula => {
                 match Datum::decode(&mut &*data)? {
-                    Datum::Data(_) => unreachable!(),
+                    Datum::Deleted | Datum::Data(_) => unreachable!(),
                     Datum::Formula(_, w) => {
                         Datum::Formula(value.clone(), w).encode(&mut *val)?
                     }
@@ -342,13 +352,13 @@ fn set_on_write(
             UpdateKind::Inserted(value)
         }
         Some(data) => match DatumKind::decode(&mut &*data) {
-            DatumKind::Data | DatumKind::Invalid => {
+            DatumKind::Data | DatumKind::Deleted | DatumKind::Invalid => {
                 Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
                 UpdateKind::Inserted(value)
             }
             DatumKind::Formula => {
                 match Datum::decode(&mut &*data)? {
-                    Datum::Data(_) => unreachable!(),
+                    Datum::Deleted | Datum::Data(_) => unreachable!(),
                     Datum::Formula(f, _) => {
                         Datum::Formula(f, value.clone()).encode(&mut *val)?
                     }
