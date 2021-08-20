@@ -8,6 +8,7 @@ use futures::{
         oneshot,
     },
     prelude::*,
+    select_biased,
 };
 use netidx::{
     chars::Chars,
@@ -639,37 +640,76 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
         .reduce(|| Update::new(), |u0, u1| u0.merge(u1))
 }
 
+async fn background_delete_task(data: sled::Tree) {
+    task::block_in_place(|| {
+        for r in data.iter() {
+            if let Ok((k, v)) = r {
+                if let DatumKind::Deleted = DatumKind::decode(&mut &*v) {
+                    // CR estokes: log these errors
+                    let _: Result<_, _> = data.compare_and_swap(k, Some(v), None::<sled::IVec>);
+                }
+            }
+        }
+    })
+}
+
 async fn commit_txns_task(
     data: sled::Tree,
     locked: sled::Tree,
-    mut incoming: UnboundedReceiver<Txn>,
+    incoming: UnboundedReceiver<Txn>,
     outgoing: UnboundedSender<Update>,
 ) {
-    while let Some(txn) = incoming.next().await {
-        let simple = txn.0.iter().fold(true, |simple, op| match op {
-            TxnOp::CreateSheet { .. }
-            | TxnOp::AddSheetColumns { .. }
-            | TxnOp::AddSheetRows { .. }
-            | TxnOp::CreateTable { .. }
-            | TxnOp::AddTableColumns { .. }
-            | TxnOp::AddTableRows { .. }
-            | TxnOp::RemoveSubtree { .. }
-            | TxnOp::Flush(_) => false,
-            TxnOp::Remove(_)
-            | TxnOp::SetData(_, _, _)
-            | TxnOp::SetFormula(_, _)
-            | TxnOp::SetOnWrite(_, _)
-            | TxnOp::SetLocked(_)
-            | TxnOp::SetUnlocked(_) => simple,
-        });
-        let pending = if simple {
-            task::block_in_place(|| commit_simple(&data, &locked, txn))
-        } else {
-            task::block_in_place(|| commit_complex(&data, &locked, txn))
-        };
-        match outgoing.unbounded_send(pending) {
-            Ok(()) => (),
-            Err(_) => break,
+    let mut incoming = incoming.fuse();
+    async fn wait_delete_task(jh: &mut Option<task::JoinHandle<()>>) {
+        match jh {
+            Some(jh) => {
+                // CR estokes: log this
+                let _: Result<_, _> = jh.await;
+            }
+            None => future::pending().await,
+        }
+    }
+    let mut delete_task: Option<task::JoinHandle<()>> = None;
+    let mut delete_required = false;
+    loop {
+        select_biased! {
+            () = wait_delete_task(&mut delete_task).fuse() => {
+                delete_task = None;
+            }
+            txn = incoming.select_next_some() => {
+                let (simple, delete) =
+                    txn.0.iter().fold((true, false), |(simple, delete), op| match op {
+                        TxnOp::CreateSheet { .. }
+                        | TxnOp::AddSheetColumns { .. }
+                        | TxnOp::AddSheetRows { .. }
+                        | TxnOp::CreateTable { .. }
+                        | TxnOp::AddTableColumns { .. }
+                        | TxnOp::AddTableRows { .. }
+                        | TxnOp::Flush(_) => (false, delete),
+                        TxnOp::RemoveSubtree { .. } => (false, true),
+                        TxnOp::Remove(_) => (simple, true),
+                        TxnOp::SetData(_, _, _)
+                            | TxnOp::SetFormula(_, _)
+                            | TxnOp::SetOnWrite(_, _)
+                            | TxnOp::SetLocked(_)
+                            | TxnOp::SetUnlocked(_) => (simple, delete),
+                    });
+                delete_required |= delete;
+                let pending = if simple {
+                    task::block_in_place(|| commit_simple(&data, &locked, txn))
+                } else {
+                    task::block_in_place(|| commit_complex(&data, &locked, txn))
+                };
+                match outgoing.unbounded_send(pending) {
+                    Ok(()) => (),
+                    Err(_) => break,
+                }
+                if delete_required && delete_task.is_none() {
+                    delete_required = false;
+                    delete_task = Some(task::spawn(background_delete_task(data.clone())));
+                }
+            }
+            complete => break,
         }
     }
 }
