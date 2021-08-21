@@ -18,7 +18,7 @@ use netidx::{
     subscriber::Value,
 };
 use sled;
-use std::{collections::HashMap, fmt::Write, str};
+use std::{cmp::max, collections::HashMap, fmt::Write, str};
 use tokio::task;
 
 lazy_static! {
@@ -422,11 +422,64 @@ fn create_sheet(
 }
 
 fn add_sheet_columns(
-    _data: &sled::Tree,
-    _pending: &mut Update,
-    _base: Path,
-    _cols: usize,
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    cols: usize,
 ) -> Result<()> {
+    use rayon::prelude::*;
+    let base_levels = Path::levels(&base);
+    let mut paths = PATHS.take();
+    let mut max_col = 0;
+    for r in data.scan_prefix(base.as_bytes()).keys() {
+        if let Ok(k) = r {
+            if let Ok(path) = str::from_utf8(&*k) {
+                let mut row = path;
+                loop {
+                    let level = Path::levels(row);
+                    if level == base_levels + 1 {
+                        break;
+                    } else if level == base_levels + 2 {
+                        if let Ok(c) = Path::basename(row).unwrap_or("0").parse::<u64>() {
+                            max_col = max(c, max_col);
+                        }
+                    }
+                    row = Path::dirname(row).unwrap_or("/");
+                }
+                match paths.last() {
+                    None => paths.push(Path::from(ArcStr::from(row))),
+                    Some(last) => {
+                        if last.as_ref() != row {
+                            paths.push(Path::from(ArcStr::from(row)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let cd = 1 + ((max_col + cols as u64) as f32).log10() as usize;
+    pending.merge_from(
+        paths
+            .par_drain(..)
+            .fold(
+                || (Update::new(), String::new()),
+                |(mut pending, mut buf), row| {
+                    for i in 1..cols + 1 {
+                        let col = max_col + i as u64;
+                        buf.clear();
+                        write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
+                        let path = base.append(buf.as_str());
+                        if let Ok(false) = data.contains_key(path.as_bytes()) {
+                            let _: Result<_> =
+                                set_data(data, &mut pending, true, path, Value::Null);
+                        }
+                    }
+                    (pending, buf)
+                },
+            )
+            .map(|(u, _)| u)
+            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
+    );
     Ok(())
 }
 
@@ -646,7 +699,8 @@ async fn background_delete_task(data: sled::Tree) {
             if let Ok((k, v)) = r {
                 if let DatumKind::Deleted = DatumKind::decode(&mut &*v) {
                     // CR estokes: log these errors
-                    let _: Result<_, _> = data.compare_and_swap(k, Some(v), None::<sled::IVec>);
+                    let _: Result<_, _> =
+                        data.compare_and_swap(k, Some(v), None::<sled::IVec>);
                 }
             }
         }
