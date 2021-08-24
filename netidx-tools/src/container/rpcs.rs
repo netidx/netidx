@@ -406,7 +406,7 @@ pub(super) fn start_create_sheet_rpc(
                         {
                             Some(Some(rows)) => rows,
                             Some(None) => return err("invalid rows type, expected number"),
-                            None => 1
+                            None => 10f32.powf(1. + (rows as f32).log10()) as u64,
                         };
                         let columns = match args
                             .remove("columns")
@@ -428,7 +428,7 @@ pub(super) fn start_create_sheet_rpc(
                             Some(None) => {
                                 return err("invalid columns type, expected number")
                             }
-                            None => 1,
+                            None => 10f32.powf(1. + (columns as f32).log10()) as u64,
                         };
                         let lock = match args
                             .remove("lock")

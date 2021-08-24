@@ -456,6 +456,7 @@ fn add_sheet_columns(
     let base_levels = Path::levels(&base);
     let mut paths = PATHS.take();
     let mut max_col = 0;
+    let mut max_col_width = 0;
     for r in data.scan_prefix(base.as_bytes()).keys() {
         if let Ok(k) = r {
             if let Ok(path) = str::from_utf8(&*k) {
@@ -465,8 +466,11 @@ fn add_sheet_columns(
                     if level == base_levels + 1 {
                         break;
                     } else if level == base_levels + 2 {
-                        if let Ok(c) = Path::basename(row).unwrap_or("0").parse::<u64>() {
-                            max_col = max(c, max_col);
+                        if let Some(col) = Path::basename(row) {
+                            if let Ok(c) = col.parse::<usize>() {
+                                max_col_width = max(max_col_width, col.len());
+                                max_col = max(c, max_col);
+                            }
                         }
                     }
                     row = Path::dirname(row).unwrap_or("/");
@@ -483,9 +487,7 @@ fn add_sheet_columns(
             }
         }
     }
-    let mcd = 1 + ((max_col + 1 as u64) as f32).log10() as usize;
-    let cd = 1 + ((max_col + 1 + cols as u64) as f32).log10() as usize;
-    if mcd < cd {
+    if max_col_width < 1 + ((max_col + cols + 1) as f32).log10() as usize {
         bail!("columns full")
     }
     let up = paths
@@ -494,9 +496,10 @@ fn add_sheet_columns(
             || (Update::new(), String::new()),
             |(mut pending, mut buf), row| {
                 for i in 1..cols + 1 {
-                    let col = max_col + i as u64;
+                    let col = max_col + i;
                     buf.clear();
-                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
+                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = max_col_width)
+                        .unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
                     if let Ok(false) = data.contains_key(path.as_bytes()) {
                         let _: Result<_> =
@@ -522,36 +525,37 @@ fn add_sheet_rows(
     let base_levels = Path::levels(&base);
     let mut max_row = 0;
     let mut max_col = 0;
+    let mut max_row_width = 0;
+    let mut max_col_width = 0;
     let cols: HashSet<usize> = data
         .scan_prefix(base.as_bytes())
         .keys()
         .filter_map(|k| k.ok())
         .filter_map(|k| {
             str::from_utf8(&k).ok().and_then(|path| {
-                if Path::levels(path) == base_levels + 2 {
-                    if let Some(row) = Path::dirname(path) {
-                        if let Ok(i) = Path::basename(row).unwrap_or("").parse::<usize>()
-                        {
-                            max_row = max(i, max_row);
-                        }
-                    }
-                    match Path::basename(path).unwrap_or("").parse::<usize>() {
-                        Err(_) => None,
-                        Ok(col) => {
-                            max_col = max(col, max_col);
-                            Some(col)
-                        }
-                    }
-                } else {
+                if Path::levels(path) != base_levels + 2 {
                     None
+                } else {
+                    if let Some(row) = Path::dirname(path) {
+                        if let Some(row) = Path::basename(row) {
+                            if let Ok(i) = row.parse::<usize>() {
+                                max_row = max(i, max_row);
+                                max_row_width = max(row.len(), max_row_width);
+                            }
+                        }
+                    }
+                    Path::basename(path)
+                        .and_then(|p| p.parse::<usize>().ok().map(move |i| (p, i)))
+                        .map(|(col, i)| {
+                            max_col = max(i, max_col);
+                            max_col_width = max(col.len(), max_col_width);
+                            i
+                        })
                 }
             })
         })
         .collect();
-    let mrd = 1 + ((max_row + rows) as f32).log10() as usize;
-    let rd = 1 + ((max_row + 1) as f32).log10() as usize;
-    let cd = 1 + ((max_col + 1) as f32).log10() as usize;
-    if mrd > rd {
+    if max_row_width < 1 + ((max_row + rows + 1) as f32).log10() as usize {
         bail!("sheet is full")
     }
     let up = (max_row + 1..max_row + rows)
@@ -566,8 +570,8 @@ fn add_sheet_rows(
                         "{:0rwidth$}/{:0cwidth$}",
                         row,
                         col,
-                        rwidth = rd,
-                        cwidth = cd
+                        rwidth = max_row_width,
+                        cwidth = max_col_width,
                     )
                     .unwrap();
                     let path = base.append(&buf);
