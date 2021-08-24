@@ -18,7 +18,12 @@ use netidx::{
     subscriber::Value,
 };
 use sled;
-use std::{cmp::max, collections::HashMap, fmt::Write, str};
+use std::{
+    cmp::max,
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    str,
+};
 use tokio::task;
 
 lazy_static! {
@@ -385,36 +390,28 @@ fn create_sheet(
     use rayon::prelude::*;
     let rd = 1 + (rows as f32).log10() as usize;
     let cd = 1 + (cols as f32).log10() as usize;
-    pending.merge_from(
-        (0..rows)
-            .into_par_iter()
-            .map(|row| (0..cols).into_par_iter().map(move |col| (row, col)))
-            .flatten()
-            .fold(
-                || (Update::new(), String::new()),
-                |(mut pending, mut buf), (i, j)| {
-                    buf.clear();
-                    write!(
-                        buf,
-                        "{:0rwidth$}/{:0cwidth$}",
-                        i,
-                        j,
-                        rwidth = rd,
-                        cwidth = cd
-                    )
+    let up = (0..rows)
+        .into_par_iter()
+        .map(|row| (0..cols).into_par_iter().map(move |col| (row, col)))
+        .flatten()
+        .fold(
+            || (Update::new(), String::new()),
+            |(mut pending, mut buf), (i, j)| {
+                buf.clear();
+                write!(buf, "{:0rwidth$}/{:0cwidth$}", i, j, rwidth = rd, cwidth = cd)
                     .unwrap();
-                    let path = base.append(buf.as_str());
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        // CR estokes: log
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
-                    }
-                    (pending, buf)
-                },
-            )
-            .map(|(u, _)| u)
-            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
-    );
+                let path = base.append(buf.as_str());
+                if let Ok(false) = data.contains_key(path.as_bytes()) {
+                    // CR estokes: log
+                    let _: Result<_> =
+                        set_data(data, &mut pending, true, path, Value::Null);
+                }
+                (pending, buf)
+            },
+        )
+        .map(|(u, _)| u)
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
     if lock {
         set_locked(locked, pending, base)?
     }
@@ -435,8 +432,8 @@ fn add_sheet_columns(
         if let Ok(k) = r {
             if let Ok(path) = str::from_utf8(&*k) {
                 let mut row = path;
+                let mut level = Path::levels(row);
                 loop {
-                    let level = Path::levels(row);
                     if level == base_levels + 1 {
                         break;
                     } else if level == base_levels + 2 {
@@ -445,6 +442,7 @@ fn add_sheet_columns(
                         }
                     }
                     row = Path::dirname(row).unwrap_or("/");
+                    level -= 1;
                 }
                 match paths.last() {
                     None => paths.push(Path::from(ArcStr::from(row))),
@@ -458,37 +456,87 @@ fn add_sheet_columns(
         }
     }
     let cd = 1 + ((max_col + cols as u64) as f32).log10() as usize;
-    pending.merge_from(
-        paths
-            .par_drain(..)
-            .fold(
-                || (Update::new(), String::new()),
-                |(mut pending, mut buf), row| {
-                    for i in 1..cols + 1 {
-                        let col = max_col + i as u64;
-                        buf.clear();
-                        write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
-                        let path = base.append(buf.as_str());
-                        if let Ok(false) = data.contains_key(path.as_bytes()) {
-                            let _: Result<_> =
-                                set_data(data, &mut pending, true, path, Value::Null);
-                        }
+    let up = paths
+        .par_drain(..)
+        .fold(
+            || (Update::new(), String::new()),
+            |(mut pending, mut buf), row| {
+                for i in 1..cols + 1 {
+                    let col = max_col + i as u64;
+                    buf.clear();
+                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
+                    let path = Path::from(ArcStr::from(buf.as_str()));
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
                     }
-                    (pending, buf)
-                },
-            )
-            .map(|(u, _)| u)
-            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
-    );
+                }
+                (pending, buf)
+            },
+        )
+        .map(|(u, _)| u)
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
     Ok(())
 }
 
 fn add_sheet_rows(
-    _data: &sled::Tree,
-    _pending: &mut Update,
-    _base: Path,
-    _rows: usize,
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    rows: usize,
 ) -> Result<()> {
+    use rayon::prelude::*;
+    let base_levels = Path::levels(&base);
+    let mut max_row = 0;
+    let mut max_col = 0;
+    let cols: HashSet<usize> = data
+        .scan_prefix(base.as_bytes())
+        .keys()
+        .filter_map(|k| k.ok())
+        .filter_map(|k| {
+            str::from_utf8(&k).ok().and_then(|path| {
+                if Path::levels(path) == base_levels + 2 {
+                    if let Some(row) = Path::dirname(path) {
+                        if let Ok(i) = Path::basename(row).unwrap_or("").parse::<usize>()
+                        {
+                            max_row = max(i, max_row);
+                        }
+                    }
+                    match Path::basename(path).unwrap_or("").parse::<usize>() {
+                        Err(_) => None,
+                        Ok(col) => {
+                            max_col = max(col, max_col);
+                            Some(col)
+                        }
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    let cd = 1 + (max_col as f32).log10() as usize;
+    let up = (max_row..max_row + rows)
+        .into_par_iter()
+        .fold(
+            || (Update::new(), String::new()),
+            |(mut pending, mut buf), row| {
+                for col in &cols {
+                    buf.clear();
+                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
+                    let path = base.append(&buf);
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
+                    }
+                }
+                (pending, buf)
+            },
+        )
+        .map(|(u, _)| u)
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
     Ok(())
 }
 
@@ -534,20 +582,105 @@ fn create_table(
 }
 
 fn add_table_columns(
-    _data: &sled::Tree,
-    _pending: &mut Update,
-    _base: Path,
-    _cols: Vec<Chars>,
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    cols: Vec<Chars>,
 ) -> Result<()> {
+    use rayon::prelude::*;
+    let cols: Vec<String> =
+        cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
+    let base_levels = Path::levels(&base);
+    let mut paths = PATHS.take();
+    for r in data.scan_prefix(base.as_bytes()).keys() {
+        if let Ok(k) = r {
+            if let Ok(path) = str::from_utf8(&*k) {
+                let mut row = path;
+                let mut level = Path::levels(row);
+                while level > base_levels + 1 {
+                    row = Path::dirname(row).unwrap_or("/");
+                    level -= 1;
+                }
+                match paths.last() {
+                    None => paths.push(Path::from(ArcStr::from(row))),
+                    Some(last) => {
+                        if last.as_ref() != row {
+                            paths.push(Path::from(ArcStr::from(row)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let up = paths
+        .par_drain(..)
+        .fold(
+            || Update::new(),
+            |mut pending, row| {
+                for col in &cols {
+                    let path = row.append(col);
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
+                    }
+                }
+                pending
+            },
+        )
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
     Ok(())
 }
 
 fn add_table_rows(
-    _data: &sled::Tree,
-    _pending: &mut Update,
-    _base: Path,
-    _rows: Vec<Chars>,
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    rows: Vec<Chars>,
 ) -> Result<()> {
+    use rayon::prelude::*;
+    let rows: Vec<String> =
+        rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
+    let base_levels = Path::levels(&base);
+    let cols: HashSet<sled::IVec> = data
+        .scan_prefix(base.as_bytes())
+        .keys()
+        .filter_map(|k| k.ok())
+        .filter_map(|k| {
+            str::from_utf8(&k).ok().and_then(|path| {
+                if Path::levels(path) == base_levels + 2 {
+                    let col = Path::basename(path).unwrap_or("");
+                    Some(k.subslice(k.len() - col.len(), col.len()))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    let cols: HashSet<String> = cols
+        .into_iter()
+        .filter_map(|k| str::from_utf8(&k).ok().map(String::from))
+        .collect();
+    let up = rows
+        .into_par_iter()
+        .fold(
+            || (Update::new(), String::new()),
+            |(mut pending, mut buf), row| {
+                for col in &cols {
+                    buf.clear();
+                    write!(buf, "{}/{}", row, col).unwrap();
+                    let path = base.append(&buf);
+                    if let Ok(false) = data.contains_key(path.as_bytes()) {
+                        let _: Result<_> =
+                            set_data(data, &mut pending, true, path, Value::Null);
+                    }
+                }
+                (pending, buf)
+            },
+        )
+        .map(|(u, _)| u)
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
     Ok(())
 }
 
