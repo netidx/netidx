@@ -19,7 +19,11 @@ pub(super) enum RpcRequestKind {
     SetData { path: Path, value: Value },
     SetFormula { path: Path, formula: Option<Chars>, on_write: Option<Chars> },
     CreateSheet { path: Path, rows: usize, columns: usize, lock: bool },
+    AddSheetRows(Path, usize),
+    AddSheetCols(Path, usize),
     CreateTable { path: Path, rows: Vec<Chars>, columns: Vec<Chars>, lock: bool },
+    AddTableRows(Path, Vec<Chars>),
+    AddTableCols(Path, Vec<Chars>),
 }
 
 pub(super) struct RpcRequest {
@@ -35,7 +39,11 @@ pub(super) struct RpcApi {
     _set_data_rpc: Proc,
     _set_formula_rpc: Proc,
     _create_sheet_rpc: Proc,
+    _add_sheet_rows: Proc,
+    _add_sheet_cols: Proc,
     _create_table_rpc: Proc,
+    _add_table_rows: Proc,
+    _add_table_cols: Proc,
     pub(super) rx: Batched<mpsc::Receiver<RpcRequest>>,
 }
 
@@ -53,8 +61,16 @@ impl RpcApi {
         let _set_formula_rpc = start_set_formula_rpc(&publisher, &base_path, tx.clone())?;
         let _create_sheet_rpc =
             start_create_sheet_rpc(&publisher, &base_path, tx.clone())?;
+        let _add_sheet_rows =
+            start_add_sheet_rows_rpc(&publisher, &base_path, tx.clone())?;
+        let _add_sheet_cols =
+            start_add_sheet_cols_rpc(&publisher, &base_path, tx.clone())?;
         let _create_table_rpc =
             start_create_table_rpc(&publisher, &base_path, tx.clone())?;
+        let _add_table_rows =
+            start_add_table_rows_rpc(&publisher, &base_path, tx.clone())?;
+        let _add_table_cols =
+            start_add_table_cols_rpc(&publisher, &base_path, tx.clone())?;
         Ok(RpcApi {
             _delete_path_rpc,
             _delete_subtree_rpc,
@@ -63,7 +79,11 @@ impl RpcApi {
             _set_data_rpc,
             _set_formula_rpc,
             _create_sheet_rpc,
+            _add_sheet_rows,
+            _add_sheet_cols,
             _create_table_rpc,
+            _add_table_rows,
+            _add_table_cols,
             rx: Batched::new(rx, 1_000_000),
         })
     }
@@ -410,6 +430,137 @@ pub(super) fn start_create_sheet_rpc(
     )?)
 }
 
+pub(super) fn start_add_sheet_rows_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("add-sheet-rows"),
+        Value::from("add rows to a previously created spreadsheet like sheet"),
+        vec![
+            (
+                Arc::from("path"),
+                (Value::Null, Value::from("the path(s) to the sheet(s)")),
+            ),
+            (
+                Arc::from("rows"),
+                (Value::U64(1), Value::from("the number of rows to add")),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let rows = match args
+                            .remove("rows")
+                            .and_then(|mut v| v.pop())
+                            .map(|v| v.cast_to::<u64>().ok())
+                        {
+                            Some(Some(rows)) => rows,
+                            Some(None) => {
+                                return err("invalid rows type, expected number")
+                            }
+                            None => 1,
+                        };
+                        for path in paths.drain(..) {
+                            let path = match path {
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
+                                _ => {
+                                    return err("invalid argument type, expected string")
+                                }
+                            };
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::AddSheetRows(path, rows as usize);
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+pub(super) fn start_add_sheet_cols_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("add-sheet-columns"),
+        Value::from("add columns to a previously created spreadsheet like sheet"),
+        vec![
+            (
+                Arc::from("path"),
+                (Value::Null, Value::from("the path(s) to the sheet(s)")),
+            ),
+            (
+                Arc::from("columns"),
+                (Value::U64(1), Value::from("the number of columns to add")),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let columns = match args
+                            .remove("columns")
+                            .and_then(|mut v| v.pop())
+                            .map(|v| v.cast_to::<u64>().ok())
+                        {
+                            Some(Some(cols)) => cols,
+                            Some(None) => {
+                                return err("invalid columns type, expected number")
+                            }
+                            None => 1,
+                        };
+                        for path in paths.drain(..) {
+                            let path = match path {
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
+                                _ => {
+                                    return err("invalid argument type, expected string")
+                                }
+                            };
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind =
+                                RpcRequestKind::AddSheetCols(path, columns as usize);
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
 fn collect_chars_vec(
     args: &mut Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
     name: &str,
@@ -495,6 +646,122 @@ pub(super) fn start_create_table_rpc(
                                 columns: columns.clone(),
                                 lock,
                             };
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+pub(super) fn start_add_table_rows_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("add-table-rows"),
+        Value::from("add rows to a database like table"),
+        vec![
+            (
+                Arc::from("path"),
+                (Value::Null, Value::from("the path(s) to the tables(s)")),
+            ),
+            (
+                Arc::from("row"),
+                (Value::Null, Value::from("the row names (specify multiple)")),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let rows = match collect_chars_vec(&mut args, "row") {
+                            Err(e) => return Value::from(format!("{}", e)),
+                            Ok(rows) => rows,
+                        };
+                        for path in paths.drain(..) {
+                            let path = match path {
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
+                                _ => {
+                                    return err("invalid argument type, expected string")
+                                }
+                            };
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::AddTableRows(path, rows.clone());
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+pub(super) fn start_add_table_cols_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("add-table-columns"),
+        Value::from("add columns to a database like table"),
+        vec![
+            (
+                Arc::from("path"),
+                (Value::Null, Value::from("the path(s) to the tables(s)")),
+            ),
+            (
+                Arc::from("columns"),
+                (Value::Null, Value::from("the column names (specify multiple)")),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let cols = match collect_chars_vec(&mut args, "columns") {
+                            Err(e) => return Value::from(format!("{}", e)),
+                            Ok(cols) => cols,
+                        };
+                        for path in paths.drain(..) {
+                            let path = match path {
+                                Value::String(path) => Path::from(ArcStr::from(&*path)),
+                                _ => {
+                                    return err("invalid argument type, expected string")
+                                }
+                            };
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::AddTableCols(path, cols.clone());
                             let _: Result<_, _> =
                                 tx.send(RpcRequest { kind, reply }).await;
                             match reply_rx.await {

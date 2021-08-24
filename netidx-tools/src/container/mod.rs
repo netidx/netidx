@@ -1134,8 +1134,24 @@ impl Container {
                     txn.create_sheet(path, rows, columns, lock);
                     reply(req.reply, Ok(()))
                 }
+                RpcRequestKind::AddSheetRows(path, rows) => {
+                    txn.add_sheet_rows(path, rows);
+                    reply(req.reply, Ok(()))
+                }
+                RpcRequestKind::AddSheetCols(path, cols) => {
+                    txn.add_sheet_columns(path, cols);
+                    reply(req.reply, Ok(()))
+                }
                 RpcRequestKind::CreateTable { path, rows, columns, lock } => {
                     txn.create_table(path, rows, columns, lock);
+                    reply(req.reply, Ok(()))
+                }
+                RpcRequestKind::AddTableRows(path, rows) => {
+                    txn.add_table_rows(path, rows);
+                    reply(req.reply, Ok(()))
+                }
+                RpcRequestKind::AddTableCols(path, cols) => {
+                    txn.add_table_columns(path, cols);
                     reply(req.reply, Ok(()))
                 }
             }
