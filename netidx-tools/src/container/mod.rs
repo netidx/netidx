@@ -721,7 +721,7 @@ impl Container {
                     Datum::Formula(fv, wv) => {
                         let _: Result<()> =
                             self.publish_formula(path, &mut batch, fv, wv);
-                    },
+                    }
                     Datum::Deleted | Datum::Data(_) => unreachable!(),
                 },
                 DatumKind::Deleted | DatumKind::Invalid => (),
@@ -1130,9 +1130,30 @@ impl Container {
                 RpcRequestKind::SetFormula { path, formula, on_write } => {
                     reply(req.reply, self.set_formula(txn, path, formula, on_write))
                 }
-                RpcRequestKind::CreateSheet { path, rows, columns, lock } => {
-                    txn.create_sheet(path, rows, columns, lock);
-                    reply(req.reply, Ok(()))
+                RpcRequestKind::CreateSheet {
+                    path,
+                    rows,
+                    columns,
+                    max_rows,
+                    max_columns,
+                    lock,
+                } => {
+                    if rows > max_rows || columns > max_columns {
+                        reply(
+                            req.reply,
+                            Err(anyhow!("rows <= max_rows && columns <= max_columns")),
+                        )
+                    } else {
+                        txn.create_sheet(
+                            path,
+                            rows,
+                            columns,
+                            max_rows,
+                            max_columns,
+                            lock,
+                        );
+                        reply(req.reply, Ok(()))
+                    }
                 }
                 RpcRequestKind::AddSheetRows(path, rows) => {
                     txn.add_sheet_rows(path, rows);

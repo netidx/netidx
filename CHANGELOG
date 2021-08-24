@@ -7,7 +7,8 @@
   - Subscriber durable resubscriptions reworked, now we will
     resubscribe in batches of up to 100K instead of just unleashing a
     horde of resubscriptions if the publishers get
-    behind. Resubscribing to 10 million things is now much smoother.
+    behind. Resubscribing to large numbers of things (e.g. 10 million)
+    is now much smoother.
 
   - Subscriber message rates are about 24% faster unencrypted, and
     about 12% faster encrypted on x86_64 (Skylake). 18% faster
@@ -37,14 +38,15 @@
       - 32% faster message rates on OpenPower (POWER 9), I think due
         to decreased use of atomic data structures that are not well
         optimized for the platform. Now POWER 9 performance lines up
-        much better with other benchmarks vs x86_64.
+        much better with other benchmarks vs x86_64 and ARM64.
 
       - 17% faster message rates on ARM (A72) and x86_64 (Skylake)
 
       - 20% less memory per published value
 
   - Publisher advertisements, a middle way between a sparse namespace
-    and a fully published one.
+    and a fully published one. Uses less memory than a full publish
+    but looks identical to subscribers.
 
   - Paths are now based by ArcStr instead of Arc<str>, this saves at
     least 1 word per path, and makes Path::clone slightly
@@ -63,6 +65,9 @@
 
   - fix: in bscript multiple concurrent rpc calls to the same function
     could result in return values getting mixed up or duplicated.
+
+  - added CALL command to the subscriber tool, easily call netidx RPCs
+    from shell scripts.
 
   - new tool, container, a persistant, bscript enabled, value
     store. Kinda like a distributed spreadsheet. Kinda like a nosql

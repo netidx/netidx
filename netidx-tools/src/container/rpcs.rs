@@ -16,12 +16,31 @@ pub(super) enum RpcRequestKind {
     DeleteSubtree(Path),
     LockSubtree(Path),
     UnlockSubtree(Path),
-    SetData { path: Path, value: Value },
-    SetFormula { path: Path, formula: Option<Chars>, on_write: Option<Chars> },
-    CreateSheet { path: Path, rows: usize, columns: usize, lock: bool },
+    SetData {
+        path: Path,
+        value: Value,
+    },
+    SetFormula {
+        path: Path,
+        formula: Option<Chars>,
+        on_write: Option<Chars>,
+    },
+    CreateSheet {
+        path: Path,
+        rows: usize,
+        columns: usize,
+        max_rows: usize,
+        max_columns: usize,
+        lock: bool,
+    },
     AddSheetRows(Path, usize),
     AddSheetCols(Path, usize),
-    CreateTable { path: Path, rows: Vec<Chars>, columns: Vec<Chars>, lock: bool },
+    CreateTable {
+        path: Path,
+        rows: Vec<Chars>,
+        columns: Vec<Chars>,
+        lock: bool,
+    },
     AddTableRows(Path, Vec<Chars>),
     AddTableCols(Path, Vec<Chars>),
 }
@@ -359,6 +378,8 @@ pub(super) fn start_create_sheet_rpc(
             ),
             (Arc::from("rows"), (Value::U64(1), Value::from("the number of rows"))),
             (Arc::from("columns"), (Value::U64(1), Value::from("the number of columns"))),
+            (Arc::from("max-rows"), (Value::Null, Value::from("the maximum number of rows"))),
+            (Arc::from("max-columns"), (Value::Null, Value::from("the maximum number of columns"))),
             (Arc::from("lock"), (Value::True, Value::from("lock the sheet subtree (see lock)")))
         ]
         .into_iter()
@@ -378,8 +399,28 @@ pub(super) fn start_create_sheet_rpc(
                             Some(None) => return err("invalid rows type, expected number"),
                             None => 1
                         };
+                        let max_rows = match args
+                            .remove("max-rows")
+                            .and_then(|mut v| v.pop())
+                            .map(|v| v.cast_to::<u64>().ok())
+                        {
+                            Some(Some(rows)) => rows,
+                            Some(None) => return err("invalid rows type, expected number"),
+                            None => 1
+                        };
                         let columns = match args
                             .remove("columns")
+                            .and_then(|mut v| v.pop())
+                            .map(|v| v.cast_to::<u64>().ok())
+                        {
+                            Some(Some(columns)) => columns,
+                            Some(None) => {
+                                return err("invalid columns type, expected number")
+                            }
+                            None => 1,
+                        };
+                        let max_columns = match args
+                            .remove("max-columns")
                             .and_then(|mut v| v.pop())
                             .map(|v| v.cast_to::<u64>().ok())
                         {
@@ -410,6 +451,8 @@ pub(super) fn start_create_sheet_rpc(
                                 path,
                                 rows: rows as usize,
                                 columns: columns as usize,
+                                max_rows: max_rows as usize,
+                                max_columns: max_columns as usize,
                                 lock
                             };
                             let _: Result<_, _> =

@@ -157,12 +157,36 @@ enum TxnOp {
     SetData(bool, Path, Value),
     SetFormula(Path, Value),
     SetOnWrite(Path, Value),
-    CreateSheet { base: Path, rows: usize, cols: usize, lock: bool },
-    AddSheetColumns { base: Path, cols: usize },
-    AddSheetRows { base: Path, rows: usize },
-    CreateTable { base: Path, rows: Vec<Chars>, cols: Vec<Chars>, lock: bool },
-    AddTableColumns { base: Path, cols: Vec<Chars> },
-    AddTableRows { base: Path, rows: Vec<Chars> },
+    CreateSheet {
+        base: Path,
+        rows: usize,
+        max_rows: usize,
+        max_columns: usize,
+        cols: usize,
+        lock: bool,
+    },
+    AddSheetColumns {
+        base: Path,
+        cols: usize,
+    },
+    AddSheetRows {
+        base: Path,
+        rows: usize,
+    },
+    CreateTable {
+        base: Path,
+        rows: Vec<Chars>,
+        cols: Vec<Chars>,
+        lock: bool,
+    },
+    AddTableColumns {
+        base: Path,
+        cols: Vec<Chars>,
+    },
+    AddTableRows {
+        base: Path,
+        rows: Vec<Chars>,
+    },
     SetLocked(Path),
     SetUnlocked(Path),
     RemoveSubtree(Path),
@@ -223,9 +247,11 @@ impl Txn {
         base: Path,
         rows: usize,
         cols: usize,
+        max_rows: usize,
+        max_columns: usize,
         lock: bool,
     ) {
-        self.0.push(TxnOp::CreateSheet { base, rows, cols, lock })
+        self.0.push(TxnOp::CreateSheet { base, rows, cols, max_rows, max_columns, lock })
     }
 
     pub(super) fn add_sheet_columns(&mut self, base: Path, cols: usize) {
@@ -385,11 +411,13 @@ fn create_sheet(
     base: Path,
     rows: usize,
     cols: usize,
+    max_rows: usize,
+    max_columns: usize,
     lock: bool,
 ) -> Result<()> {
     use rayon::prelude::*;
-    let rd = 1 + (rows as f32).log10() as usize;
-    let cd = 1 + (cols as f32).log10() as usize;
+    let rd = 1 + (max(rows, max_rows) as f32).log10() as usize;
+    let cd = 1 + (max(cols, max_columns) as f32).log10() as usize;
     let up = (0..rows)
         .into_par_iter()
         .map(|row| (0..cols).into_par_iter().map(move |col| (row, col)))
@@ -455,7 +483,11 @@ fn add_sheet_columns(
             }
         }
     }
-    let cd = 1 + ((max_col + cols as u64) as f32).log10() as usize;
+    let mcd = 1 + ((max_col + 1 as u64) as f32).log10() as usize;
+    let cd = 1 + ((max_col + 1 + cols as u64) as f32).log10() as usize;
+    if mcd < cd {
+        bail!("columns full")
+    }
     let up = paths
         .par_drain(..)
         .fold(
@@ -516,15 +548,28 @@ fn add_sheet_rows(
             })
         })
         .collect();
-    let cd = 1 + (max_col as f32).log10() as usize;
-    let up = (max_row..max_row + rows)
+    let mrd = 1 + ((max_row + rows) as f32).log10() as usize;
+    let rd = 1 + ((max_row + 1) as f32).log10() as usize;
+    let cd = 1 + ((max_col + 1) as f32).log10() as usize;
+    if mrd > rd {
+        bail!("sheet is full")
+    }
+    let up = (max_row + 1..max_row + rows)
         .into_par_iter()
         .fold(
             || (Update::new(), String::new()),
             |(mut pending, mut buf), row| {
                 for col in &cols {
                     buf.clear();
-                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cd).unwrap();
+                    write!(
+                        buf,
+                        "{:0rwidth$}/{:0cwidth$}",
+                        row,
+                        col,
+                        rwidth = rd,
+                        cwidth = cd
+                    )
+                    .unwrap();
                     let path = base.append(&buf);
                     if let Ok(false) = data.contains_key(path.as_bytes()) {
                         let _: Result<_> =
@@ -740,8 +785,18 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
     for op in txn.0.drain(..) {
         // CR estokes: log this
         let _: Result<_> = match op {
-            TxnOp::CreateSheet { base, rows, cols, lock } => {
-                create_sheet(&data, &locked, &mut pending, base, rows, cols, lock)
+            TxnOp::CreateSheet { base, rows, cols, max_rows, max_columns, lock } => {
+                create_sheet(
+                    &data,
+                    &locked,
+                    &mut pending,
+                    base,
+                    rows,
+                    cols,
+                    max_rows,
+                    max_columns,
+                    lock,
+                )
             }
             TxnOp::AddSheetColumns { base, cols } => {
                 add_sheet_columns(&data, &mut pending, base, cols)
