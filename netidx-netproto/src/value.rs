@@ -583,7 +583,7 @@ impl Pack for Value {
 }
 
 pub trait FromValue {
-    type Error;
+    type Error: fmt::Debug;
 
     /// attempt to cast v to the type of self using any reasonable means
     fn from_value(v: Value) -> result::Result<Self, Self::Error>
