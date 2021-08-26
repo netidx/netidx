@@ -787,31 +787,37 @@ fn create_table(
         rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
     let cols: Vec<String> =
         cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    pending.merge_from(
-        rows.par_iter()
-            .map(|row| cols.par_iter().map(move |col| (row, col)))
-            .flatten()
-            .fold(
-                || (Update::new(), String::new()),
-                |(mut pending, mut buf), (row, col)| {
-                    buf.clear();
-                    write!(buf, "{}/{}", row, col).unwrap();
-                    let path = base.append(buf.as_str());
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        // CR estokes: log
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
+    let (up, res) = rows
+        .par_iter()
+        .map(|row| cols.par_iter().map(move |col| (row, col)))
+        .flatten()
+        .fold(
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, res), (row, col)| {
+                buf.clear();
+                write!(buf, "{}/{}", row, col).unwrap();
+                let path = base.append(buf.as_str());
+                let res = match data.contains_key(path.as_bytes()) {
+                    Ok(false) => {
+                        let r = set_data(data, &mut pending, true, path, Value::Null);
+                        merge_err(r, res)
                     }
-                    (pending, buf)
-                },
-            )
-            .map(|(u, _)| u)
-            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
-    );
+                    Ok(true) => res,
+                    Err(e) => Err(e.into()),
+                };
+                (pending, buf, res)
+            },
+        )
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
+    pending.merge_from(up);
     if lock {
         set_locked(locked, pending, base)?
     }
-    Ok(())
+    res
 }
 
 fn table_rows(data: &sled::Tree, base: &Path) -> Result<Pooled<Vec<Path>>> {
@@ -848,24 +854,31 @@ fn add_table_columns(
     use rayon::prelude::*;
     let cols: Vec<String> =
         cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    let up = table_rows(data, &base)?
+    let (up, res) = table_rows(data, &base)?
         .par_drain(..)
         .fold(
-            || Update::new(),
-            |mut pending, row| {
+            || (Update::new(), Ok(())),
+            |(mut pending, mut res), row| {
                 for col in &cols {
                     let path = row.append(col);
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
+                    res = match data.contains_key(path.as_bytes()) {
+                        Ok(false) => {
+                            let r = set_data(data, &mut pending, true, path, Value::Null);
+                            merge_err(r, res)
+                        }
+                        Ok(true) => res,
+                        Err(e) => Err(e.into()),
                     }
                 }
-                pending
+                (pending, res)
             },
         )
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn del_table_columns(
@@ -877,21 +890,24 @@ fn del_table_columns(
     use rayon::prelude::*;
     let cols: Vec<String> =
         cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    let up = table_rows(data, &base)?
+    let (up, res) = table_rows(data, &base)?
         .par_drain(..)
         .fold(
-            || Update::new(),
-            |mut pending, row| {
+            || (Update::new(), Ok(())),
+            |(mut pending, mut res), row| {
                 for col in &cols {
                     let path = row.append(col);
-                    let _: Result<_> = remove(data, &mut pending, path);
+                    res = merge_err(remove(data, &mut pending, path), res);
                 }
-                pending
+                (pending, res)
             },
         )
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn add_table_rows(
@@ -904,46 +920,47 @@ fn add_table_rows(
     let rows: Vec<String> =
         rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
     let base_levels = Path::levels(&base);
-    let cols: HashSet<sled::IVec> = data
-        .scan_prefix(base.as_bytes())
-        .keys()
-        .filter_map(|k| k.ok())
-        .filter_map(|k| {
-            str::from_utf8(&k).ok().and_then(|path| {
-                if Path::levels(path) == base_levels + 2 {
-                    let col = Path::basename(path).unwrap_or("");
-                    Some(k.subslice(k.len() - col.len(), col.len()))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
+    let mut cols = HashSet::new();
+    for r in data.scan_prefix(base.as_bytes()).keys() {
+        let k = r?;
+        let path = str::from_utf8(&k)?;
+        if Path::levels(path) == base_levels + 2 {
+            let col = Path::basename(path).unwrap_or("");
+            cols.insert(k.subslice(k.len() - col.len(), col.len()));
+        }
+    }
     let cols: HashSet<String> = cols
         .into_iter()
         .filter_map(|k| str::from_utf8(&k).ok().map(String::from))
         .collect();
-    let up = rows
+    let (up, res) = rows
         .into_par_iter()
         .fold(
-            || (Update::new(), String::new()),
-            |(mut pending, mut buf), row| {
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, mut res), row| {
                 for col in &cols {
                     buf.clear();
                     write!(buf, "{}/{}", row, col).unwrap();
                     let path = base.append(&buf);
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
+                    res = match data.contains_key(path.as_bytes()) {
+                        Ok(false) => {
+                            let r = set_data(data, &mut pending, true, path, Value::Null);
+                            merge_err(r, res)
+                        }
+                        Ok(true) => res,
+                        Err(e) => Err(e.into()),
                     }
                 }
-                (pending, buf)
+                (pending, buf, res)
             },
         )
-        .map(|(u, _)| u)
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn del_table_rows(
@@ -955,19 +972,22 @@ fn del_table_rows(
     use rayon::prelude::*;
     let rows: Vec<String> =
         rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    let up = rows
+    let (up, res) = rows
         .into_par_iter()
         .fold(
-            || Update::new(),
-            |mut pending, row| {
+            || (Update::new(), Ok(())),
+            |(mut pending, res), row| {
                 let path = base.append(&row);
-                let _: Result<_> = remove_subtree(data, &mut pending, path);
-                pending
+                let res = merge_err(remove_subtree(data, &mut pending, path), res);
+                (pending, res)
             },
         )
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
@@ -992,19 +1012,21 @@ fn remove_subtree(data: &sled::Tree, pending: &mut Update, path: Path) -> Result
         let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
         paths.push(path);
     }
-    pending.merge_from(
-        paths
-            .par_drain(..)
-            .fold(
-                || Update::new(),
-                |mut pending, path| {
-                    let _: Result<_> = remove(data, &mut pending, path);
-                    pending
-                },
-            )
-            .reduce(|| Update::new(), |u0, u1| u0.merge(u1)),
-    );
-    Ok(())
+    let (up, res) = paths
+        .par_drain(..)
+        .fold(
+            || (Update::new(), Ok(())),
+            |(mut pending, res), path| {
+                let res = merge_err(remove(data, &mut pending, path), res);
+                (pending, res)
+            },
+        )
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
+    pending.merge_from(up);
+    res
 }
 
 fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
@@ -1092,7 +1114,6 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
             TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
             TxnOp::SetUnlocked(path) => unlock_subtree(&locked, &mut pending, path),
             TxnOp::Flush(finished) => {
-                // CR estokes: log
                 let _: Result<_, _> = data.flush();
                 let _: Result<_, _> = locked.flush();
                 let _: Result<_, _> = finished.send(());
