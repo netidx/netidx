@@ -35,6 +35,8 @@ pub(super) enum RpcRequestKind {
     },
     AddSheetRows(Path, usize),
     AddSheetCols(Path, usize),
+    DelSheetRows(Path, usize),
+    DelSheetCols(Path, usize),
     CreateTable {
         path: Path,
         rows: Vec<Chars>,
@@ -43,6 +45,8 @@ pub(super) enum RpcRequestKind {
     },
     AddTableRows(Path, Vec<Chars>),
     AddTableCols(Path, Vec<Chars>),
+    DelTableRows(Path, Vec<Chars>),
+    DelTableCols(Path, Vec<Chars>),
 }
 
 pub(super) struct RpcRequest {
@@ -60,9 +64,13 @@ pub(super) struct RpcApi {
     _create_sheet_rpc: Proc,
     _add_sheet_rows: Proc,
     _add_sheet_cols: Proc,
+    _del_sheet_rows: Proc,
+    _del_sheet_cols: Proc,
     _create_table_rpc: Proc,
     _add_table_rows: Proc,
     _add_table_cols: Proc,
+    _del_table_rows: Proc,
+    _del_table_cols: Proc,
     pub(super) rx: Batched<mpsc::Receiver<RpcRequest>>,
 }
 
@@ -84,12 +92,20 @@ impl RpcApi {
             start_add_sheet_rows_rpc(&publisher, &base_path, tx.clone())?;
         let _add_sheet_cols =
             start_add_sheet_cols_rpc(&publisher, &base_path, tx.clone())?;
+        let _del_sheet_rows =
+            start_del_sheet_rows_rpc(&publisher, &base_path, tx.clone())?;
+        let _del_sheet_cols =
+            start_del_sheet_cols_rpc(&publisher, &base_path, tx.clone())?;
         let _create_table_rpc =
             start_create_table_rpc(&publisher, &base_path, tx.clone())?;
         let _add_table_rows =
             start_add_table_rows_rpc(&publisher, &base_path, tx.clone())?;
         let _add_table_cols =
             start_add_table_cols_rpc(&publisher, &base_path, tx.clone())?;
+        let _del_table_rows =
+            start_del_table_rows_rpc(&publisher, &base_path, tx.clone())?;
+        let _del_table_cols =
+            start_del_table_cols_rpc(&publisher, &base_path, tx.clone())?;
         Ok(RpcApi {
             _delete_path_rpc,
             _delete_subtree_rpc,
@@ -100,9 +116,13 @@ impl RpcApi {
             _create_sheet_rpc,
             _add_sheet_rows,
             _add_sheet_cols,
+            _del_sheet_rows,
+            _del_sheet_cols,
             _create_table_rpc,
             _add_table_rows,
             _add_table_cols,
+            _del_table_rows,
+            _del_table_cols,
             rx: Batched::new(rx, 1_000_000),
         })
     }
@@ -503,6 +523,95 @@ pub(super) fn start_add_sheet_cols_rpc(
     )?)
 }
 
+pub(super) fn start_del_sheet_rows_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("delete-sheet-rows"),
+        Value::from("delte rows in a previously created sheet"),
+        vec![
+            (Arc::from("path"), (Value::Null, Value::from("the sheets(s)"))),
+            (Arc::from("rows"), (Value::U64(1), Value::from("rows to delete"))),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let rows = get_arg!(u64, args, "rows", 1);
+                        for path in paths.drain(..) {
+                            let path = get_path!(path);
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::DelSheetRows(path, rows as usize);
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+pub(super) fn start_del_sheet_cols_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("delete-sheet-columns"),
+        Value::from("delete columns in a previously created sheet"),
+        vec![
+            (Arc::from("path"), (Value::Null, Value::from("the sheets(s)"))),
+            (Arc::from("columns"), (Value::U64(1), Value::from("cols to delete"))),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let columns = get_arg!(u64, args, "columns", 1);
+                        for path in paths.drain(..) {
+                            let path = get_path!(path);
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind =
+                                RpcRequestKind::DelSheetCols(path, columns as usize);
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
 fn collect_chars_vec(
     args: &mut Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
     name: &str,
@@ -657,6 +766,101 @@ pub(super) fn start_add_table_cols_rpc(
                             let path = get_path!(path);
                             let (reply, reply_rx) = oneshot::channel();
                             let kind = RpcRequestKind::AddTableCols(path, cols.clone());
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+
+pub(super) fn start_del_table_rows_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("delete-table-rows"),
+        Value::from("delete rows from a table"),
+        vec![
+            (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
+            (Arc::from("row"), (Value::Null, Value::from("the row names"))),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let rows = match collect_chars_vec(&mut args, "row") {
+                            Err(e) => return Value::from(format!("{}", e)),
+                            Ok(rows) => rows,
+                        };
+                        for path in paths.drain(..) {
+                            let path = get_path!(path);
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::DelTableRows(path, rows.clone());
+                            let _: Result<_, _> =
+                                tx.send(RpcRequest { kind, reply }).await;
+                            match reply_rx.await {
+                                Err(_) => return err("internal error"),
+                                Ok(v) => match v {
+                                    Value::Ok => (),
+                                    v => return v,
+                                },
+                            }
+                        }
+                        Value::Ok
+                    }
+                }
+            })
+        }),
+    )?)
+}
+
+pub(super) fn start_del_table_cols_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    Ok(Proc::new(
+        publisher,
+        base_path.append("delete-table-columns"),
+        Value::from("delte columns from a table"),
+        vec![
+            (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
+            (Arc::from("columns"), (Value::Null, Value::from("the column names"))),
+        ]
+        .into_iter()
+        .collect(),
+        Arc::new(move |_addr, mut args| {
+            let mut tx = tx.clone();
+            Box::pin(async move {
+                match args.remove("path") {
+                    None => err("invalid argument, expected path"),
+                    Some(mut paths) => {
+                        let cols = match collect_chars_vec(&mut args, "columns") {
+                            Err(e) => return Value::from(format!("{}", e)),
+                            Ok(cols) => cols,
+                        };
+                        for path in paths.drain(..) {
+                            let path = get_path!(path);
+                            let (reply, reply_rx) = oneshot::channel();
+                            let kind = RpcRequestKind::DelTableCols(path, cols.clone());
                             let _: Result<_, _> =
                                 tx.send(RpcRequest { kind, reply }).await;
                             match reply_rx.await {

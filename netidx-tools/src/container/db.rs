@@ -19,20 +19,23 @@ use netidx::{
 };
 use sled;
 use std::{
-    cmp::max,
+    cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt::Write,
     str,
 };
 use tokio::task;
 
+type Reply = Option<oneshot::Sender<Result<()>>>;
+type Txns = Vec<(TxnOp, Reply)>;
+
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
     static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(256, 8124);
     static ref PATHS: Pool<Vec<Path>> = Pool::new(128, 65534);
-    static ref TXNS: Pool<Vec<TxnOp>> = Pool::new(16, 65534);
-    static ref STXNS: Pool<Vec<TxnOp>> = Pool::new(65534, 32);
-    static ref BYPATH: Pool<HashMap<Path, Pooled<Vec<TxnOp>>>> = Pool::new(16, 65534);
+    static ref TXNS: Pool<Txns> = Pool::new(16, 65534);
+    static ref STXNS: Pool<Txns> = Pool::new(65534, 32);
+    static ref BYPATH: Pool<HashMap<Path, Pooled<Txns>>> = Pool::new(16, 65534);
 }
 
 pub(super) enum UpdateKind {
@@ -173,6 +176,14 @@ enum TxnOp {
         base: Path,
         rows: usize,
     },
+    DelSheetColumns {
+        base: Path,
+        cols: usize,
+    },
+    DelSheetRows {
+        base: Path,
+        rows: usize,
+    },
     CreateTable {
         base: Path,
         rows: Vec<Chars>,
@@ -184,6 +195,14 @@ enum TxnOp {
         cols: Vec<Chars>,
     },
     AddTableRows {
+        base: Path,
+        rows: Vec<Chars>,
+    },
+    DelTableColumns {
+        base: Path,
+        cols: Vec<Chars>,
+    },
+    DelTableRows {
         base: Path,
         rows: Vec<Chars>,
     },
@@ -204,9 +223,13 @@ impl TxnOp {
             CreateSheet { base, .. } => base.clone(),
             AddSheetColumns { base, .. } => base.clone(),
             AddSheetRows { base, .. } => base.clone(),
+            DelSheetColumns { base, .. } => base.clone(),
+            DelSheetRows { base, .. } => base.clone(),
             CreateTable { base, .. } => base.clone(),
             AddTableColumns { base, .. } => base.clone(),
             AddTableRows { base, .. } => base.clone(),
+            DelTableColumns { base, .. } => base.clone(),
+            DelTableRows { base, .. } => base.clone(),
             SetLocked(p) => p.clone(),
             SetUnlocked(p) => p.clone(),
             RemoveSubtree(p) => p.clone(),
@@ -215,7 +238,7 @@ impl TxnOp {
     }
 }
 
-pub(super) struct Txn(Pooled<Vec<TxnOp>>);
+pub(super) struct Txn(Pooled<Txns>);
 
 impl Txn {
     pub(super) fn new() -> Self {
@@ -226,20 +249,26 @@ impl Txn {
         self.0.len() > 0
     }
 
-    pub(super) fn remove(&mut self, path: Path) {
-        self.0.push(TxnOp::Remove(path))
+    pub(super) fn remove(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::Remove(path), reply))
     }
 
-    pub(super) fn set_data(&mut self, update: bool, path: Path, value: Value) {
-        self.0.push(TxnOp::SetData(update, path, value))
+    pub(super) fn set_data(
+        &mut self,
+        update: bool,
+        path: Path,
+        value: Value,
+        reply: Reply,
+    ) {
+        self.0.push((TxnOp::SetData(update, path, value), reply))
     }
 
-    pub(super) fn set_formula(&mut self, path: Path, value: Value) {
-        self.0.push(TxnOp::SetFormula(path, value))
+    pub(super) fn set_formula(&mut self, path: Path, value: Value, reply: Reply) {
+        self.0.push((TxnOp::SetFormula(path, value), reply))
     }
 
-    pub(super) fn set_on_write(&mut self, path: Path, value: Value) {
-        self.0.push(TxnOp::SetOnWrite(path, value))
+    pub(super) fn set_on_write(&mut self, path: Path, value: Value, reply: Reply) {
+        self.0.push((TxnOp::SetOnWrite(path, value), reply))
     }
 
     pub(super) fn create_sheet(
@@ -250,16 +279,28 @@ impl Txn {
         max_rows: usize,
         max_columns: usize,
         lock: bool,
+        reply: Reply,
     ) {
-        self.0.push(TxnOp::CreateSheet { base, rows, cols, max_rows, max_columns, lock })
+        self.0.push((
+            TxnOp::CreateSheet { base, rows, cols, max_rows, max_columns, lock },
+            reply,
+        ))
     }
 
-    pub(super) fn add_sheet_columns(&mut self, base: Path, cols: usize) {
-        self.0.push(TxnOp::AddSheetColumns { base, cols })
+    pub(super) fn add_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
+        self.0.push((TxnOp::AddSheetColumns { base, cols }, reply))
     }
 
-    pub(super) fn add_sheet_rows(&mut self, base: Path, rows: usize) {
-        self.0.push(TxnOp::AddSheetRows { base, rows })
+    pub(super) fn add_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
+        self.0.push((TxnOp::AddSheetRows { base, rows }, reply))
+    }
+
+    pub(super) fn del_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
+        self.0.push((TxnOp::DelSheetColumns { base, cols }, reply))
+    }
+
+    pub(super) fn del_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
+        self.0.push((TxnOp::DelSheetRows { base, rows }, reply))
     }
 
     pub(super) fn create_table(
@@ -268,28 +309,47 @@ impl Txn {
         rows: Vec<Chars>,
         cols: Vec<Chars>,
         lock: bool,
+        reply: Reply,
     ) {
-        self.0.push(TxnOp::CreateTable { base, rows, cols, lock })
+        self.0.push((TxnOp::CreateTable { base, rows, cols, lock }, reply))
     }
 
-    pub(super) fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
-        self.0.push(TxnOp::AddTableColumns { base, cols })
+    pub(super) fn add_table_columns(
+        &mut self,
+        base: Path,
+        cols: Vec<Chars>,
+        reply: Reply,
+    ) {
+        self.0.push((TxnOp::AddTableColumns { base, cols }, reply))
     }
 
-    pub(super) fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
-        self.0.push(TxnOp::AddTableRows { base, rows })
+    pub(super) fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+        self.0.push((TxnOp::AddTableRows { base, rows }, reply))
     }
 
-    pub(super) fn set_locked(&mut self, path: Path) {
-        self.0.push(TxnOp::SetLocked(path))
+    pub(super) fn del_table_columns(
+        &mut self,
+        base: Path,
+        cols: Vec<Chars>,
+        reply: Reply,
+    ) {
+        self.0.push((TxnOp::DelTableColumns { base, cols }, reply))
     }
 
-    pub(super) fn set_unlocked(&mut self, path: Path) {
-        self.0.push(TxnOp::SetUnlocked(path))
+    pub(super) fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+        self.0.push((TxnOp::DelTableRows { base, rows }, reply))
     }
 
-    pub(super) fn remove_subtree(&mut self, path: Path) {
-        self.0.push(TxnOp::RemoveSubtree(path))
+    pub(super) fn set_locked(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::SetLocked(path), reply))
+    }
+
+    pub(super) fn set_unlocked(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::SetUnlocked(path), reply))
+    }
+
+    pub(super) fn remove_subtree(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::RemoveSubtree(path), reply))
     }
 }
 
@@ -446,6 +506,52 @@ fn create_sheet(
     Ok(())
 }
 
+struct SheetDescr {
+    rows: Pooled<Vec<Path>>,
+    max_col: usize,
+    max_col_width: usize,
+}
+
+impl SheetDescr {
+    fn new(data: &sled::Tree, base: &Path) -> Result<Self> {
+        let base_levels = Path::levels(base);
+        let mut rows = PATHS.take();
+        let mut max_col = 0;
+        let mut max_col_width = 0;
+        for r in data.scan_prefix(base.as_bytes()).keys() {
+            if let Ok(k) = r {
+                if let Ok(path) = str::from_utf8(&*k) {
+                    let mut row = path;
+                    let mut level = Path::levels(row);
+                    loop {
+                        if level == base_levels + 1 {
+                            break;
+                        } else if level == base_levels + 2 {
+                            if let Some(col) = Path::basename(row) {
+                                if let Ok(c) = col.parse::<usize>() {
+                                    max_col_width = max(max_col_width, col.len());
+                                    max_col = max(c, max_col);
+                                }
+                            }
+                        }
+                        row = Path::dirname(row).unwrap_or("/");
+                        level -= 1;
+                    }
+                    match rows.last() {
+                        None => rows.push(Path::from(ArcStr::from(row))),
+                        Some(last) => {
+                            if last.as_ref() != row {
+                                rows.push(Path::from(ArcStr::from(row)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self { rows, max_col, max_col_width })
+    }
+}
+
 fn add_sheet_columns(
     data: &sled::Tree,
     pending: &mut Update,
@@ -453,58 +559,56 @@ fn add_sheet_columns(
     cols: usize,
 ) -> Result<()> {
     use rayon::prelude::*;
-    let base_levels = Path::levels(&base);
-    let mut paths = PATHS.take();
-    let mut max_col = 0;
-    let mut max_col_width = 0;
-    for r in data.scan_prefix(base.as_bytes()).keys() {
-        if let Ok(k) = r {
-            if let Ok(path) = str::from_utf8(&*k) {
-                let mut row = path;
-                let mut level = Path::levels(row);
-                loop {
-                    if level == base_levels + 1 {
-                        break;
-                    } else if level == base_levels + 2 {
-                        if let Some(col) = Path::basename(row) {
-                            if let Ok(c) = col.parse::<usize>() {
-                                max_col_width = max(max_col_width, col.len());
-                                max_col = max(c, max_col);
-                            }
-                        }
-                    }
-                    row = Path::dirname(row).unwrap_or("/");
-                    level -= 1;
-                }
-                match paths.last() {
-                    None => paths.push(Path::from(ArcStr::from(row))),
-                    Some(last) => {
-                        if last.as_ref() != row {
-                            paths.push(Path::from(ArcStr::from(row)));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if max_col_width < 1 + ((max_col + cols + 1) as f32).log10() as usize {
+    let mut cs = SheetDescr::new(data, &base)?;
+    if cs.max_col_width < 1 + ((cs.max_col + cols + 1) as f32).log10() as usize {
         bail!("columns full")
     }
-    let up = paths
+    let up = cs
+        .rows
         .par_drain(..)
         .fold(
             || (Update::new(), String::new()),
             |(mut pending, mut buf), row| {
                 for i in 1..cols + 1 {
-                    let col = max_col + i;
+                    let col = cs.max_col + i;
                     buf.clear();
-                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = max_col_width)
+                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cs.max_col_width)
                         .unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
                     if let Ok(false) = data.contains_key(path.as_bytes()) {
                         let _: Result<_> =
                             set_data(data, &mut pending, true, path, Value::Null);
                     }
+                }
+                (pending, buf)
+            },
+        )
+        .map(|(u, _)| u)
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
+    Ok(())
+}
+
+fn del_sheet_columns(
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    cols: usize,
+) -> Result<()> {
+    use rayon::prelude::*;
+    let mut cs = SheetDescr::new(data, &base)?;
+    let cols = min(cs.max_col, cols);
+    let up = cs
+        .rows
+        .par_drain(..)
+        .fold(
+            || (Update::new(), String::new()),
+            |(mut pending, mut buf), row| {
+                for col in (cs.max_col - cols..cs.max_col + 1).rev() {
+                    buf.clear();
+                    write!(buf, "{}/{:0cw$}", row, col, cw = cs.max_col_width).unwrap();
+                    let path = Path::from(ArcStr::from(buf.as_str()));
+                    let _: Result<_, _> = remove(data, &mut pending, path);
                 }
                 (pending, buf)
             },
@@ -589,6 +693,31 @@ fn add_sheet_rows(
     Ok(())
 }
 
+fn del_sheet_rows(
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    rows: usize,
+) -> Result<()> {
+    use rayon::prelude::*;
+    let mut cs = SheetDescr::new(data, &base)?;
+    let len = cs.rows.len();
+    let rows = min(len, rows);
+    let up = cs
+        .rows
+        .par_drain(len - rows..len + 1)
+        .fold(
+            || Update::new(),
+            |mut pending, row| {
+                let _: Result<_> = remove_subtree(data, &mut pending, row);
+                pending
+            },
+        )
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
+    Ok(())
+}
+
 fn create_table(
     data: &sled::Tree,
     locked: &sled::Tree,
@@ -630,6 +759,31 @@ fn create_table(
     Ok(())
 }
 
+fn table_rows(data: &sled::Tree, base: &Path) -> Result<Pooled<Vec<Path>>> {
+    let base_levels = Path::levels(&base);
+    let mut paths = PATHS.take();
+    for r in data.scan_prefix(base.as_bytes()).keys() {
+        let k = r?;
+        if let Ok(path) = str::from_utf8(&*k) {
+            let mut row = path;
+            let mut level = Path::levels(row);
+            while level > base_levels + 1 {
+                row = Path::dirname(row).unwrap_or("/");
+                level -= 1;
+            }
+            match paths.last() {
+                None => paths.push(Path::from(ArcStr::from(row))),
+                Some(last) => {
+                    if last.as_ref() != row {
+                        paths.push(Path::from(ArcStr::from(row)));
+                    }
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+
 fn add_table_columns(
     data: &sled::Tree,
     pending: &mut Update,
@@ -639,29 +793,7 @@ fn add_table_columns(
     use rayon::prelude::*;
     let cols: Vec<String> =
         cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
-    let base_levels = Path::levels(&base);
-    let mut paths = PATHS.take();
-    for r in data.scan_prefix(base.as_bytes()).keys() {
-        if let Ok(k) = r {
-            if let Ok(path) = str::from_utf8(&*k) {
-                let mut row = path;
-                let mut level = Path::levels(row);
-                while level > base_levels + 1 {
-                    row = Path::dirname(row).unwrap_or("/");
-                    level -= 1;
-                }
-                match paths.last() {
-                    None => paths.push(Path::from(ArcStr::from(row))),
-                    Some(last) => {
-                        if last.as_ref() != row {
-                            paths.push(Path::from(ArcStr::from(row)));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let up = paths
+    let up = table_rows(data, &base)?
         .par_drain(..)
         .fold(
             || Update::new(),
@@ -672,6 +804,32 @@ fn add_table_columns(
                         let _: Result<_> =
                             set_data(data, &mut pending, true, path, Value::Null);
                     }
+                }
+                pending
+            },
+        )
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
+    Ok(())
+}
+
+fn del_table_columns(
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    cols: Vec<Chars>,
+) -> Result<()> {
+    use rayon::prelude::*;
+    let cols: Vec<String> =
+        cols.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
+    let up = table_rows(data, &base)?
+        .par_drain(..)
+        .fold(
+            || Update::new(),
+            |mut pending, row| {
+                for col in &cols {
+                    let path = row.append(col);
+                    let _: Result<_> = remove(data, &mut pending, path);
                 }
                 pending
             },
@@ -733,6 +891,30 @@ fn add_table_rows(
     Ok(())
 }
 
+fn del_table_rows(
+    data: &sled::Tree,
+    pending: &mut Update,
+    base: Path,
+    rows: Vec<Chars>,
+) -> Result<()> {
+    use rayon::prelude::*;
+    let rows: Vec<String> =
+        rows.into_iter().map(|c| Path::escape(&c).into_owned()).collect();
+    let up = rows
+        .into_par_iter()
+        .fold(
+            || Update::new(),
+            |mut pending, row| {
+                let path = base.append(&row);
+                let _: Result<_> = remove_subtree(data, &mut pending, path);
+                pending
+            },
+        )
+        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+    pending.merge_from(up);
+    Ok(())
+}
+
 fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
     let key = path.as_bytes();
     let mut val = BUF.take();
@@ -784,11 +966,22 @@ fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Resu
     Ok(())
 }
 
+fn send_reply(reply: Reply, r: Result<()>) {
+    match (r, reply) {
+        (Ok(()), Some(reply)) => {
+            let _: Result<_, _> = reply.send(Ok(()));
+        }
+        (Err(e), Some(reply)) => {
+            let _: Result<_, _> = reply.send(Err(e));
+        }
+        (_, None) => (),
+    }
+}
+
 fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update {
     let mut pending = Update::new();
-    for op in txn.0.drain(..) {
-        // CR estokes: log this
-        let _: Result<_> = match op {
+    for (op, reply) in txn.0.drain(..) {
+        let r = match op {
             TxnOp::CreateSheet { base, rows, cols, max_rows, max_columns, lock } => {
                 create_sheet(
                     &data,
@@ -808,6 +1001,12 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
             TxnOp::AddSheetRows { base, rows } => {
                 add_sheet_rows(&data, &mut pending, base, rows)
             }
+            TxnOp::DelSheetColumns { base, cols } => {
+                del_sheet_columns(&data, &mut pending, base, cols)
+            }
+            TxnOp::DelSheetRows { base, rows } => {
+                del_sheet_rows(&data, &mut pending, base, rows)
+            }
             TxnOp::CreateTable { base, rows, cols, lock } => {
                 create_table(&data, &locked, &mut pending, base, rows, cols, lock)
             }
@@ -816,6 +1015,12 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
             }
             TxnOp::AddTableRows { base, rows } => {
                 add_table_rows(&data, &mut pending, base, rows)
+            }
+            TxnOp::DelTableColumns { base, cols } => {
+                del_table_columns(&data, &mut pending, base, cols)
+            }
+            TxnOp::DelTableRows { base, rows } => {
+                del_table_rows(&data, &mut pending, base, rows)
             }
             TxnOp::Remove(path) => remove(&data, &mut pending, path),
             TxnOp::RemoveSubtree(path) => remove_subtree(&data, &mut pending, path),
@@ -838,6 +1043,7 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
                 Ok(())
             }
         };
+        send_reply(reply, r);
     }
     pending
 }
@@ -845,16 +1051,16 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
 fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update {
     use rayon::prelude::*;
     let mut by_path = BYPATH.take();
-    for op in txn.0.drain(..) {
-        by_path.entry(op.path()).or_insert_with(|| STXNS.take()).push(op);
+    for (op, reply) in txn.0.drain(..) {
+        by_path.entry(op.path()).or_insert_with(|| STXNS.take()).push((op, reply));
     }
     by_path
         .par_drain()
         .fold(
             || Update::new(),
             |mut pending, (_, mut ops)| {
-                for op in ops.drain(..) {
-                    let _: Result<_> = match op {
+                for (op, reply) in ops.drain(..) {
+                    let r = match op {
                         TxnOp::SetData(update, path, value) => {
                             set_data(data, &mut pending, update, path, value)
                         }
@@ -872,12 +1078,17 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
                         TxnOp::CreateSheet { .. }
                         | TxnOp::AddSheetColumns { .. }
                         | TxnOp::AddSheetRows { .. }
+                        | TxnOp::DelSheetColumns { .. }
+                        | TxnOp::DelSheetRows { .. }
                         | TxnOp::CreateTable { .. }
                         | TxnOp::AddTableColumns { .. }
                         | TxnOp::AddTableRows { .. }
+                        | TxnOp::DelTableColumns { .. }
+                        | TxnOp::DelTableRows { .. }
                         | TxnOp::RemoveSubtree { .. }
                         | TxnOp::Flush(_) => unreachable!(),
                     };
+                    send_reply(reply, r)
                 }
                 pending
             },
@@ -924,7 +1135,7 @@ async fn commit_txns_task(
             }
             txn = incoming.select_next_some() => {
                 let (simple, delete) =
-                    txn.0.iter().fold((true, false), |(simple, delete), op| match op {
+                    txn.0.iter().fold((true, false), |(simple, delete), op| match &op.0 {
                         TxnOp::CreateSheet { .. }
                         | TxnOp::AddSheetColumns { .. }
                         | TxnOp::AddSheetRows { .. }
@@ -932,13 +1143,17 @@ async fn commit_txns_task(
                         | TxnOp::AddTableColumns { .. }
                         | TxnOp::AddTableRows { .. }
                         | TxnOp::Flush(_) => (false, delete),
-                        TxnOp::RemoveSubtree { .. } => (false, true),
+                        TxnOp::RemoveSubtree { .. }
+                        | TxnOp::DelTableColumns { .. }
+                        | TxnOp::DelTableRows { .. }
+                        | TxnOp::DelSheetColumns { .. }
+                        | TxnOp::DelSheetRows { .. } => (false, true),
                         TxnOp::Remove(_) => (simple, true),
                         TxnOp::SetData(_, _, _)
-                            | TxnOp::SetFormula(_, _)
-                            | TxnOp::SetOnWrite(_, _)
-                            | TxnOp::SetLocked(_)
-                            | TxnOp::SetUnlocked(_) => (simple, delete),
+                        | TxnOp::SetFormula(_, _)
+                        | TxnOp::SetOnWrite(_, _)
+                        | TxnOp::SetLocked(_)
+                        | TxnOp::SetUnlocked(_) => (simple, delete),
                     });
                 delete_required |= delete;
                 let pending = if simple {
@@ -997,7 +1212,7 @@ impl Db {
     pub(super) async fn flush_async(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let mut txn = Txn::new();
-        txn.0.push(TxnOp::Flush(tx));
+        txn.0.push((TxnOp::Flush(tx), None));
         self.commit(txn);
         let _: Result<_, _> = rx.await;
         Ok(())
