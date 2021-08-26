@@ -15,8 +15,8 @@ use netidx::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    subscriber::Value,
     publisher::SendResult,
+    subscriber::Value,
 };
 use sled;
 use std::{
@@ -29,7 +29,7 @@ use tokio::task;
 
 pub(super) enum Sendable {
     Rpc(oneshot::Sender<Value>),
-    Write(SendResult)
+    Write(SendResult),
 }
 
 impl Sendable {
@@ -483,6 +483,15 @@ fn set_on_write(
     Ok(())
 }
 
+fn merge_err(e0: Result<()>, e1: Result<()>) -> Result<()> {
+    match (e0, e1) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Err(_)) => Err(e),
+        (Err(e), Ok(())) => Err(e),
+        (Ok(()), Err(e)) => Err(e),
+    }
+}
+
 fn create_sheet(
     data: &sled::Tree,
     locked: &sled::Tree,
@@ -497,32 +506,38 @@ fn create_sheet(
     use rayon::prelude::*;
     let rd = 1 + (max(rows, max_rows) as f32).log10() as usize;
     let cd = 1 + (max(cols, max_columns) as f32).log10() as usize;
-    let up = (0..rows)
+    let (up, res) = (0..rows)
         .into_par_iter()
         .map(|row| (0..cols).into_par_iter().map(move |col| (row, col)))
         .flatten()
         .fold(
-            || (Update::new(), String::new()),
-            |(mut pending, mut buf), (i, j)| {
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, res), (i, j)| {
                 buf.clear();
                 write!(buf, "{:0rwidth$}/{:0cwidth$}", i, j, rwidth = rd, cwidth = cd)
                     .unwrap();
                 let path = base.append(buf.as_str());
-                if let Ok(false) = data.contains_key(path.as_bytes()) {
-                    // CR estokes: log
-                    let _: Result<_> =
-                        set_data(data, &mut pending, true, path, Value::Null);
-                }
-                (pending, buf)
+                let res = match data.contains_key(path.as_bytes()) {
+                    Ok(false) => {
+                        let r = set_data(data, &mut pending, true, path, Value::Null);
+                        merge_err(r, res)
+                    }
+                    Ok(true) => res,
+                    Err(e) => Err(e.into()),
+                };
+                (pending, buf, res)
             },
         )
-        .map(|(u, _)| u)
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
     if lock {
         set_locked(locked, pending, base)?
     }
-    Ok(())
+    res
 }
 
 struct SheetDescr {
@@ -584,30 +599,37 @@ fn add_sheet_columns(
     if cs.max_col_width < 1 + ((cs.max_col + cols + 1) as f32).log10() as usize {
         bail!("columns full")
     }
-    let up = cs
+    let (up, res) = cs
         .rows
         .par_drain(..)
         .fold(
-            || (Update::new(), String::new()),
-            |(mut pending, mut buf), row| {
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, mut res), row| {
                 for i in 1..cols + 1 {
                     let col = max_col + i;
                     buf.clear();
                     write!(buf, "{}/{:0cwidth$}", row, col, cwidth = max_col_width)
                         .unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
+                    res = match data.contains_key(path.as_bytes()) {
+                        Ok(false) => {
+                            let r = set_data(data, &mut pending, true, path, Value::Null);
+                            merge_err(r, res)
+                        }
+                        Ok(true) => res,
+                        Err(e) => Err(e.into()),
                     }
                 }
-                (pending, buf)
+                (pending, buf, res)
             },
         )
-        .map(|(u, _)| u)
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn del_sheet_columns(
@@ -621,25 +643,28 @@ fn del_sheet_columns(
     let max_col = cs.max_col;
     let max_col_width = cs.max_col_width;
     let cols = min(cs.max_col, cols);
-    let up = cs
+    let (up, res) = cs
         .rows
         .par_drain(..)
         .fold(
-            || (Update::new(), String::new()),
-            |(mut pending, mut buf), row| {
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, mut res), row| {
                 for col in (max_col - cols..max_col + 1).rev() {
                     buf.clear();
                     write!(buf, "{}/{:0cw$}", row, col, cw = max_col_width).unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
-                    let _: Result<_, _> = remove(data, &mut pending, path);
+                    res = merge_err(remove(data, &mut pending, path), res);
                 }
-                (pending, buf)
+                (pending, buf, res)
             },
         )
-        .map(|(u, _)| u)
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn add_sheet_rows(
@@ -654,42 +679,39 @@ fn add_sheet_rows(
     let mut max_col = 0;
     let mut max_row_width = 0;
     let mut max_col_width = 0;
-    let cols: HashSet<usize> = data
-        .scan_prefix(base.as_bytes())
-        .keys()
-        .filter_map(|k| k.ok())
-        .filter_map(|k| {
-            str::from_utf8(&k).ok().and_then(|path| {
-                if Path::levels(path) != base_levels + 2 {
-                    None
-                } else {
-                    if let Some(row) = Path::dirname(path) {
-                        if let Some(row) = Path::basename(row) {
-                            if let Ok(i) = row.parse::<usize>() {
-                                max_row = max(i, max_row);
-                                max_row_width = max(row.len(), max_row_width);
-                            }
-                        }
+    let mut cols = HashSet::new();
+    for r in data.scan_prefix(base.as_bytes()).keys() {
+        let k = r?;
+        let path = str::from_utf8(&k)?;
+        if Path::levels(path) == base_levels + 2 {
+            if let Some(row) = Path::dirname(path) {
+                if let Some(row) = Path::basename(row) {
+                    if let Ok(i) = row.parse::<usize>() {
+                        max_row = max(i, max_row);
+                        max_row_width = max(row.len(), max_row_width);
                     }
-                    Path::basename(path)
-                        .and_then(|p| p.parse::<usize>().ok().map(move |i| (p, i)))
-                        .map(|(col, i)| {
-                            max_col = max(i, max_col);
-                            max_col_width = max(col.len(), max_col_width);
-                            i
-                        })
                 }
-            })
-        })
-        .collect();
+            }
+            let col = Path::basename(path)
+                .and_then(|p| p.parse::<usize>().ok().map(move |i| (p, i)))
+                .map(|(col, i)| {
+                    max_col = max(i, max_col);
+                    max_col_width = max(col.len(), max_col_width);
+                    i
+                });
+            if let Some(col) = col {
+                cols.insert(col);
+            }
+        }
+    }
     if max_row_width < 1 + ((max_row + rows + 1) as f32).log10() as usize {
         bail!("sheet is full")
     }
-    let up = (max_row + 1..max_row + rows)
+    let (up, res) = (max_row + 1..max_row + rows)
         .into_par_iter()
         .fold(
-            || (Update::new(), String::new()),
-            |(mut pending, mut buf), row| {
+            || (Update::new(), String::new(), Ok(())),
+            |(mut pending, mut buf, mut res), row| {
                 for col in &cols {
                     buf.clear();
                     write!(
@@ -702,18 +724,25 @@ fn add_sheet_rows(
                     )
                     .unwrap();
                     let path = base.append(&buf);
-                    if let Ok(false) = data.contains_key(path.as_bytes()) {
-                        let _: Result<_> =
-                            set_data(data, &mut pending, true, path, Value::Null);
+                    res = match data.contains_key(path.as_bytes()) {
+                        Ok(false) => {
+                            let r = set_data(data, &mut pending, true, path, Value::Null);
+                            merge_err(r, res)
+                        }
+                        Ok(true) => res,
+                        Err(e) => Err(e.into()),
                     }
                 }
-                (pending, buf)
+                (pending, buf, res)
             },
         )
-        .map(|(u, _)| u)
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .map(|(u, _, r)| (u, r))
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn del_sheet_rows(
@@ -726,19 +755,22 @@ fn del_sheet_rows(
     let mut cs = SheetDescr::new(data, &base)?;
     let len = cs.rows.len();
     let rows = min(len, rows);
-    let up = cs
+    let (up, res) = cs
         .rows
         .par_drain(len - rows..len + 1)
         .fold(
-            || Update::new(),
-            |mut pending, row| {
-                let _: Result<_> = remove_subtree(data, &mut pending, row);
-                pending
+            || (Update::new(), Ok(())),
+            |(mut pending, res), row| {
+                let res = merge_err(remove_subtree(data, &mut pending, row), res);
+                (pending, res)
             },
         )
-        .reduce(|| Update::new(), |u0, u1| u0.merge(u1));
+        .reduce(
+            || (Update::new(), Ok(())),
+            |(u0, r0), (u1, r1)| (u0.merge(u1), merge_err(r0, r1)),
+        );
     pending.merge_from(up);
-    Ok(())
+    res
 }
 
 fn create_table(
