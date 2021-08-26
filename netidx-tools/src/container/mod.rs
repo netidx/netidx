@@ -3,7 +3,7 @@ mod rpcs;
 
 use anyhow::Result;
 use arcstr::ArcStr;
-use db::{Datum, DatumKind, Txn};
+use db::{Datum, DatumKind, Reply, Sendable, Txn};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -51,6 +51,21 @@ lazy_static! {
     static ref REFIDS: Pool<Vec<ExprId>> = Pool::new(8, 2048);
     static ref PKBUF: Pool<Vec<u8>> = Pool::new(8, 16384);
     static ref RELS: Pool<FxHashSet<Path>> = Pool::new(8, 2048);
+}
+
+macro_rules! or_reply {
+    ($reply:expr, $r:expr) => {
+        match $r {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(reply) = $reply {
+                    let e = Value::Error(Chars::from(format!("{}", e)));
+                    reply.send(e);
+                }
+                return;
+            }
+        }
+    };
 }
 
 struct Refs {
@@ -888,18 +903,19 @@ impl Container {
         let mut refs = REFS.take();
         // CR estokes: log this
         for req in writes.drain(..) {
+            let reply = req.send_result.map(Sendable::Write);
             refs.clear();
             match self.ctx.user.by_id.get(&req.id) {
                 None => (), // CR estokes: log
                 Some(Published::Data(p)) => {
-                    txn.set_data(true, p.path.clone(), req.value);
+                    txn.set_data(true, p.path.clone(), req.value, reply);
                 }
                 Some(Published::Formula(fifo)) => {
                     let fifo = fifo.clone();
                     if fifo.src.id() == req.id {
-                        txn.set_formula(fifo.data_path.clone(), req.value);
+                        txn.set_formula(fifo.data_path.clone(), req.value, reply);
                     } else if fifo.on_write.id() == req.id {
-                        txn.set_on_write(fifo.data_path.clone(), req.value);
+                        txn.set_on_write(fifo.data_path.clone(), req.value, reply);
                     } else if fifo.data.id() == req.id {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
@@ -1049,41 +1065,36 @@ impl Container {
         }
     }
 
-    fn delete_path(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
+    fn delete_path(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
             if let Some(path) = Path::dirname(&path) {
-                txn.remove(Path::from(ArcStr::from(path)));
+                txn.remove(Path::from(ArcStr::from(path)), reply);
             }
         } else {
-            txn.remove(path);
+            txn.remove(path, reply);
         }
-        Ok(())
     }
 
-    fn delete_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
-        txn.remove_subtree(path);
-        Ok(())
+    fn delete_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        txn.remove_subtree(path, reply);
     }
 
-    fn lock_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
-        txn.set_locked(path);
-        Ok(())
+    fn lock_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        txn.set_locked(path, reply);
     }
 
-    fn unlock_subtree(&mut self, txn: &mut Txn, path: Path) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
-        txn.set_unlocked(path);
-        Ok(())
+    fn unlock_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        txn.set_unlocked(path, reply);
     }
 
-    fn set_data(&mut self, txn: &mut Txn, path: Path, value: Value) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
-        txn.set_data(true, path, value);
-        Ok(())
+    fn set_data(&mut self, txn: &mut Txn, path: Path, value: Value, reply: Reply) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        txn.set_data(true, path, value, reply);
     }
 
     fn set_formula(
@@ -1092,43 +1103,38 @@ impl Container {
         path: Path,
         formula: Option<Chars>,
         on_write: Option<Chars>,
-    ) -> Result<()> {
-        let path = check_path(&self.cfg.base_path, path)?;
+        reply: Reply,
+    ) {
+        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
         if let Some(formula) = formula {
-            txn.set_formula(path.clone(), Value::from(formula));
+            txn.set_formula(path.clone(), Value::from(formula), reply);
         }
         if let Some(on_write) = on_write {
-            txn.set_on_write(path, Value::from(on_write));
+            txn.set_on_write(path, Value::from(on_write), None);
         }
-        Ok(())
     }
 
     fn process_rpc_requests(&mut self, txn: &mut Txn, reqs: &mut Vec<RpcRequest>) {
-        fn reply(tx: oneshot::Sender<Value>, res: Result<()>) {
-            let _: Result<_, _> = tx.send(match res {
-                Err(e) => Value::Error(Chars::from(format!("{}", e))),
-                Ok(()) => Value::Ok,
-            });
-        }
         for req in reqs.drain(..) {
+            let reply = Sendable::Rpc(req.reply);
             match req.kind {
                 RpcRequestKind::Delete(path) => {
-                    reply(req.reply, self.delete_path(txn, path))
+                    self.delete_path(txn, path, Some(reply))
                 }
                 RpcRequestKind::DeleteSubtree(path) => {
-                    reply(req.reply, self.delete_subtree(txn, path))
+                    self.delete_subtree(txn, path, Some(reply))
                 }
                 RpcRequestKind::LockSubtree(path) => {
-                    reply(req.reply, self.lock_subtree(txn, path))
+                    self.lock_subtree(txn, path, Some(reply))
                 }
                 RpcRequestKind::UnlockSubtree(path) => {
-                    reply(req.reply, self.unlock_subtree(txn, path))
+                    self.unlock_subtree(txn, path, Some(reply))
                 }
                 RpcRequestKind::SetData { path, value } => {
-                    reply(req.reply, self.set_data(txn, path, value))
+                    self.set_data(txn, path, value, Some(reply))
                 }
                 RpcRequestKind::SetFormula { path, formula, on_write } => {
-                    reply(req.reply, self.set_formula(txn, path, formula, on_write))
+                    self.set_formula(txn, path, formula, on_write, Some(reply))
                 }
                 RpcRequestKind::CreateSheet {
                     path,
@@ -1139,10 +1145,9 @@ impl Container {
                     lock,
                 } => {
                     if rows > max_rows || columns > max_columns {
-                        reply(
-                            req.reply,
-                            Err(anyhow!("rows <= max_rows && columns <= max_columns")),
-                        )
+                        let m = "rows <= max_rows && columns <= max_columns";
+                        let e = Value::Error(Chars::from(m));
+                        reply.send(e);
                     } else {
                         txn.create_sheet(
                             path,
@@ -1151,29 +1156,36 @@ impl Container {
                             max_rows,
                             max_columns,
                             lock,
+                            Some(reply),
                         );
-                        reply(req.reply, Ok(()))
                     }
                 }
                 RpcRequestKind::AddSheetRows(path, rows) => {
-                    txn.add_sheet_rows(path, rows);
-                    reply(req.reply, Ok(()))
+                    txn.add_sheet_rows(path, rows, Some(reply));
                 }
                 RpcRequestKind::AddSheetCols(path, cols) => {
-                    txn.add_sheet_columns(path, cols);
-                    reply(req.reply, Ok(()))
+                    txn.add_sheet_columns(path, cols, Some(reply));
+                }
+                RpcRequestKind::DelSheetRows(path, rows) => {
+                    txn.del_sheet_rows(path, rows, Some(reply));
+                }
+                RpcRequestKind::DelSheetCols(path, cols) => {
+                    txn.del_sheet_columns(path, cols, Some(reply));
                 }
                 RpcRequestKind::CreateTable { path, rows, columns, lock } => {
-                    txn.create_table(path, rows, columns, lock);
-                    reply(req.reply, Ok(()))
+                    txn.create_table(path, rows, columns, lock, Some(reply));
                 }
                 RpcRequestKind::AddTableRows(path, rows) => {
-                    txn.add_table_rows(path, rows);
-                    reply(req.reply, Ok(()))
+                    txn.add_table_rows(path, rows, Some(reply));
                 }
                 RpcRequestKind::AddTableCols(path, cols) => {
-                    txn.add_table_columns(path, cols);
-                    reply(req.reply, Ok(()))
+                    txn.add_table_columns(path, cols, Some(reply));
+                }
+                RpcRequestKind::DelTableRows(path, rows) => {
+                    txn.del_table_rows(path, rows, Some(reply));
+                }
+                RpcRequestKind::DelTableCols(path, cols) => {
+                    txn.del_table_columns(path, cols, Some(reply));
                 }
             }
         }

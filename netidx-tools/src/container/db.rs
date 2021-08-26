@@ -16,6 +16,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     subscriber::Value,
+    publisher::SendResult,
 };
 use sled;
 use std::{
@@ -26,7 +27,25 @@ use std::{
 };
 use tokio::task;
 
-type Reply = Option<oneshot::Sender<Result<()>>>;
+pub(super) enum Sendable {
+    Rpc(oneshot::Sender<Value>),
+    Write(SendResult)
+}
+
+impl Sendable {
+    pub(super) fn send(self, v: Value) {
+        match self {
+            Sendable::Rpc(reply) => {
+                let _: Result<_, _> = reply.send(v);
+            }
+            Sendable::Write(reply) => {
+                reply.send(v);
+            }
+        }
+    }
+}
+
+pub(super) type Reply = Option<Sendable>;
 type Txns = Vec<(TxnOp, Reply)>;
 
 lazy_static! {
@@ -560,6 +579,8 @@ fn add_sheet_columns(
 ) -> Result<()> {
     use rayon::prelude::*;
     let mut cs = SheetDescr::new(data, &base)?;
+    let max_col = cs.max_col;
+    let max_col_width = cs.max_col_width;
     if cs.max_col_width < 1 + ((cs.max_col + cols + 1) as f32).log10() as usize {
         bail!("columns full")
     }
@@ -570,9 +591,9 @@ fn add_sheet_columns(
             || (Update::new(), String::new()),
             |(mut pending, mut buf), row| {
                 for i in 1..cols + 1 {
-                    let col = cs.max_col + i;
+                    let col = max_col + i;
                     buf.clear();
-                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = cs.max_col_width)
+                    write!(buf, "{}/{:0cwidth$}", row, col, cwidth = max_col_width)
                         .unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
                     if let Ok(false) = data.contains_key(path.as_bytes()) {
@@ -597,6 +618,8 @@ fn del_sheet_columns(
 ) -> Result<()> {
     use rayon::prelude::*;
     let mut cs = SheetDescr::new(data, &base)?;
+    let max_col = cs.max_col;
+    let max_col_width = cs.max_col_width;
     let cols = min(cs.max_col, cols);
     let up = cs
         .rows
@@ -604,9 +627,9 @@ fn del_sheet_columns(
         .fold(
             || (Update::new(), String::new()),
             |(mut pending, mut buf), row| {
-                for col in (cs.max_col - cols..cs.max_col + 1).rev() {
+                for col in (max_col - cols..max_col + 1).rev() {
                     buf.clear();
-                    write!(buf, "{}/{:0cw$}", row, col, cw = cs.max_col_width).unwrap();
+                    write!(buf, "{}/{:0cw$}", row, col, cw = max_col_width).unwrap();
                     let path = Path::from(ArcStr::from(buf.as_str()));
                     let _: Result<_, _> = remove(data, &mut pending, path);
                 }
@@ -969,10 +992,11 @@ fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Resu
 fn send_reply(reply: Reply, r: Result<()>) {
     match (r, reply) {
         (Ok(()), Some(reply)) => {
-            let _: Result<_, _> = reply.send(Ok(()));
+            reply.send(Value::Ok);
         }
         (Err(e), Some(reply)) => {
-            let _: Result<_, _> = reply.send(Err(e));
+            let e = Value::Error(Chars::from(format!("{}", e)));
+            reply.send(e);
         }
         (_, None) => (),
     }
