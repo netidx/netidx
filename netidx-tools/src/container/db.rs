@@ -51,7 +51,7 @@ type Txns = Vec<(TxnOp, Reply)>;
 lazy_static! {
     static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
     static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(256, 8124);
-    static ref PATHS: Pool<Vec<Path>> = Pool::new(128, 65534);
+    static ref PATHS: Pool<Vec<Path>> = Pool::new(256, 65534);
     static ref TXNS: Pool<Txns> = Pool::new(16, 65534);
     static ref STXNS: Pool<Txns> = Pool::new(65534, 32);
     static ref BYPATH: Pool<HashMap<Path, Pooled<Txns>>> = Pool::new(16, 65534);
@@ -69,6 +69,8 @@ pub(super) struct Update {
     pub(super) on_write: Pooled<Vec<(Path, UpdateKind)>>,
     pub(super) locked: Pooled<Vec<Path>>,
     pub(super) unlocked: Pooled<Vec<Path>>,
+    pub(super) added_roots: Pooled<Vec<Path>>,
+    pub(super) removed_roots: Pooled<Vec<Path>>,
 }
 
 impl Update {
@@ -79,6 +81,8 @@ impl Update {
             on_write: PDPAIR.take(),
             locked: PATHS.take(),
             unlocked: PATHS.take(),
+            added_roots: PATHS.take(),
+            removed_roots: PATHS.take(),
         }
     }
 
@@ -88,6 +92,8 @@ impl Update {
         self.on_write.extend(other.on_write.drain(..));
         self.locked.extend(other.locked.drain(..));
         self.unlocked.extend(other.unlocked.drain(..));
+        self.added_roots.extend(other.added_roots.drain(..));
+        self.removed_roots.extend(other.removed_roots.drain(..));
     }
 
     fn merge(mut self, other: Update) -> Update {
@@ -227,6 +233,8 @@ enum TxnOp {
     },
     SetLocked(Path),
     SetUnlocked(Path),
+    AddRoot(Path),
+    DelRoot(Path),
     RemoveSubtree(Path),
     Flush(oneshot::Sender<()>),
 }
@@ -252,6 +260,8 @@ impl TxnOp {
             SetLocked(p) => p.clone(),
             SetUnlocked(p) => p.clone(),
             RemoveSubtree(p) => p.clone(),
+            AddRoot(p) => p.clone(),
+            DelRoot(p) => p.clone(),
             Flush(_) => Path::root(),
         }
     }
@@ -365,6 +375,14 @@ impl Txn {
 
     pub(super) fn set_unlocked(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::SetUnlocked(path), reply))
+    }
+
+    pub(super) fn add_root(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::AddRoot(path), reply));
+    }
+
+    pub(super) fn del_root(&mut self, path: Path, reply: Reply) {
+        self.0.push((TxnOp::DelRoot(path), reply));
     }
 
     pub(super) fn remove_subtree(&mut self, path: Path, reply: Reply) {
@@ -1043,6 +1061,44 @@ fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Resu
     Ok(())
 }
 
+fn add_root(roots: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
+    let key = path.as_bytes();
+    if let Some(r) = roots.range(..key).next_back() {
+        let (prev, _) = r?;
+        if key.starts_with(&prev) {
+            bail!("a parent path is already a root")
+        }
+    }
+    if !roots.contains_key(key)? {
+        roots.insert(key, &[])?;
+        pending.added_roots.push(path);
+    }
+    Ok(())
+}
+
+fn del_root(
+    data: &sled::Tree,
+    roots: &sled::Tree,
+    pending: &mut Update,
+    path: Path,
+) -> Result<()> {
+    let key = path.as_bytes();
+    if roots.contains_key(key)? {
+        match roots.range(..key).next_back() {
+            None => remove_subtree(data, pending, path.clone())?,
+            Some(r) => {
+                let (prev, _) = r?;
+                if !key.starts_with(&prev) {
+                    remove_subtree(data, pending, path.clone())?
+                }
+            }
+        }
+        roots.remove(key)?;
+        pending.removed_roots.push(path);
+    }
+    Ok(())
+}
+
 fn send_reply(reply: Reply, r: Result<()>) {
     match (r, reply) {
         (Ok(()), Some(reply)) => {
@@ -1056,7 +1112,12 @@ fn send_reply(reply: Reply, r: Result<()>) {
     }
 }
 
-fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update {
+fn commit_complex(
+    data: &sled::Tree,
+    locked: &sled::Tree,
+    roots: &sled::Tree,
+    mut txn: Txn,
+) -> Update {
     let mut pending = Update::new();
     for (op, reply) in txn.0.drain(..) {
         let r = match op {
@@ -1113,6 +1174,8 @@ fn commit_complex(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Updat
             }
             TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
             TxnOp::SetUnlocked(path) => unlock_subtree(&locked, &mut pending, path),
+            TxnOp::AddRoot(path) => add_root(&roots, &mut pending, path),
+            TxnOp::DelRoot(path) => del_root(&data, &roots, &mut pending, path),
             TxnOp::Flush(finished) => {
                 let _: Result<_, _> = data.flush();
                 let _: Result<_, _> = locked.flush();
@@ -1163,6 +1226,8 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
                         | TxnOp::DelTableColumns { .. }
                         | TxnOp::DelTableRows { .. }
                         | TxnOp::RemoveSubtree { .. }
+                        | TxnOp::AddRoot(_)
+                        | TxnOp::DelRoot(_)
                         | TxnOp::Flush(_) => unreachable!(),
                     };
                     send_reply(reply, r)
@@ -1190,6 +1255,7 @@ async fn background_delete_task(data: sled::Tree) {
 async fn commit_txns_task(
     data: sled::Tree,
     locked: sled::Tree,
+    roots: sled::Tree,
     incoming: UnboundedReceiver<Txn>,
     outgoing: UnboundedSender<Update>,
 ) {
@@ -1219,12 +1285,14 @@ async fn commit_txns_task(
                         | TxnOp::CreateTable { .. }
                         | TxnOp::AddTableColumns { .. }
                         | TxnOp::AddTableRows { .. }
+                        | TxnOp::AddRoot(_)
                         | TxnOp::Flush(_) => (false, delete),
                         TxnOp::RemoveSubtree { .. }
                         | TxnOp::DelTableColumns { .. }
                         | TxnOp::DelTableRows { .. }
                         | TxnOp::DelSheetColumns { .. }
-                        | TxnOp::DelSheetRows { .. } => (false, true),
+                        | TxnOp::DelSheetRows { .. }
+                        | TxnOp::DelRoot(_) => (false, true),
                         TxnOp::Remove(_) => (simple, true),
                         TxnOp::SetData(_, _, _)
                         | TxnOp::SetFormula(_, _)
@@ -1236,7 +1304,7 @@ async fn commit_txns_task(
                 let pending = if simple {
                     task::block_in_place(|| commit_simple(&data, &locked, txn))
                 } else {
-                    task::block_in_place(|| commit_complex(&data, &locked, txn))
+                    task::block_in_place(|| commit_complex(&data, &locked, &roots, txn))
                 };
                 match outgoing.unbounded_send(pending) {
                     Ok(()) => (),
@@ -1256,6 +1324,7 @@ pub(super) struct Db {
     _db: sled::Db,
     data: sled::Tree,
     locked: sled::Tree,
+    roots: sled::Tree,
     submit_txn: UnboundedSender<Txn>,
 }
 
@@ -1271,15 +1340,17 @@ impl Db {
             .open()?;
         let data = db.open_tree("data")?;
         let locked = db.open_tree("locked")?;
+        let roots = db.open_tree("roots")?;
         let (tx_incoming, rx_incoming) = unbounded();
         let (tx_outgoing, rx_outgoing) = unbounded();
         task::spawn(commit_txns_task(
             data.clone(),
             locked.clone(),
+            roots.clone(),
             rx_incoming,
             tx_outgoing,
         ));
-        Ok((Db { _db: db, data, locked, submit_txn: tx_incoming }, rx_outgoing))
+        Ok((Db { _db: db, data, locked, roots, submit_txn: tx_incoming }, rx_outgoing))
     }
 
     pub(super) fn commit(&self, txn: Txn) {

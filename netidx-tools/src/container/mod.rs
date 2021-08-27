@@ -543,8 +543,8 @@ pub(super) struct ContainerConfig {
         help = "require subscribers to consume values before timeout (seconds)"
     )]
     timeout: Option<u64>,
-    #[structopt(long = "base-path", help = "the netidx path of the db")]
-    base_path: Path,
+    #[structopt(long = "api-path", help = "the netidx path of the container api")]
+    api_path: Path,
     #[structopt(long = "db", help = "the db file")]
     db: String,
     #[structopt(long = "compress", help = "use zstd compression")]
