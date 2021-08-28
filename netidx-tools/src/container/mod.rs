@@ -5,9 +5,11 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use db::{Datum, DatumKind, Reply, Sendable, Txn};
 use futures::{
+    self,
     channel::{mpsc, oneshot},
     prelude::*,
     select_biased,
+    stream::FusedStream,
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use netidx::{
@@ -32,9 +34,16 @@ use netidx_protocols::rpc;
 use parking_lot::Mutex;
 use rpcs::{RpcRequest, RpcRequestKind};
 use std::{
-    collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
+    collections::{
+        hash_map::Entry,
+        BTreeMap, BTreeSet,
+        Bound::{self, *},
+        HashMap, HashSet,
+    },
     hash::Hash,
     mem,
+    ops::{Deref, DerefMut},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -561,11 +570,45 @@ fn to_chars(value: Value) -> Chars {
     value.cast_to::<Chars>().ok().unwrap_or_else(|| Chars::from("null"))
 }
 
-fn check_path(base_path: &Path, path: Path) -> Result<Path> {
-    if !path.starts_with(&**base_path) {
-        bail!("non root path")
+#[must_use = "streams do nothing unless polled"]
+struct Roots(BTreeMap<Path, DefaultHandle>);
+
+impl Deref for Roots {
+    type Target = BTreeMap<Path, DefaultHandle>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
-    Ok(path)
+}
+
+impl DerefMut for Roots {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'a> Stream for Roots {
+    type Item = (Path, oneshot::Sender<()>);
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        for dh in self.values_mut() {
+            match Pin::new(&mut **dh).poll_next(cx) {
+                Poll::Pending => (),
+                r @ Poll::Ready(_) => return r,
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl<'a> FusedStream for Roots {
+    fn is_terminated(&self) -> bool {
+        self.values().all(|ch| ch.is_terminated())
+    }
 }
 
 enum Compiled {
@@ -583,7 +626,7 @@ struct Container {
     write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
     publish_events: mpsc::UnboundedReceiver<PEvent>,
-    publish_requests: DefaultHandle,
+    roots: Roots,
     db_updates: mpsc::UnboundedReceiver<db::Update>,
     api: rpcs::RpcApi,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
@@ -599,12 +642,11 @@ impl Container {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         publisher.events(publish_events_tx);
-        let publish_requests = publisher.publish_default(ccfg.base_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let api_path = ccfg.base_path.append(".api");
+        let api_path = ccfg.api_path.append("rpcs");
         let api = rpcs::RpcApi::new(&publisher, &api_path)?;
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
@@ -614,18 +656,46 @@ impl Container {
             cfg: ccfg,
             api_path,
             locked: BTreeSet::new(),
+            roots: Roots(BTreeMap::new()),
             ctx,
             sub_updates,
             write_updates_tx,
             write_updates_rx,
             publish_events,
-            publish_requests,
             db_updates,
             api,
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
         })
+    }
+
+    fn get_root(&self, path: &Path) -> Option<(&Path, &DefaultHandle)> {
+        match self
+            .roots
+            .range::<str, (Bound<&str>, Bound<&str>)>((
+                Unbounded,
+                Excluded(path.as_ref()),
+            ))
+            .next_back()
+        {
+            None => None,
+            Some((prev, def)) => {
+                if path.starts_with(prev.as_ref()) {
+                    Some((prev, def))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn check_path(&self, path: Path) -> Result<Path> {
+        if self.get_root(&path).is_some() {
+            Ok(path)
+        } else {
+            bail!("non root path")
+        }
     }
 
     fn publish_formula(
@@ -700,9 +770,7 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
-        if !self.cfg.sparse {
-            self.publish_requests.advertise(path.clone())?;
-        }
+        self.advertise_path(path.clone());
         let val = self.ctx.user.publisher.publish_with_flags(
             PublishFlags::DESTROY_ON_IDLE,
             path.clone(),
@@ -718,22 +786,26 @@ impl Container {
     }
 
     async fn init(&mut self) -> Result<()> {
+        for res in self.ctx.user.db.roots() {
+            let path = res?;
+            let def = self.ctx.user.publisher.publish_default(path.clone())?;
+            self.roots.insert(path, def);
+        }
         for res in self.ctx.user.db.locked() {
-            let path = check_path(&self.cfg.base_path, res?)?;
+            let path = self.check_path(res?)?;
             self.locked.insert(path);
         }
         let mut batch = self.ctx.user.publisher.start_batch();
         for res in self.ctx.user.db.iter() {
             let (path, kind, raw) = res?;
-            let path = check_path(&self.cfg.base_path, path)?;
             match kind {
                 DatumKind::Data => {
-                    if !self.cfg.sparse {
-                        let _: Result<()> = self.publish_requests.advertise(path);
-                    }
+                    let path = self.check_path(path)?;
+                    self.advertise_path(path);
                 }
                 DatumKind::Formula => match Datum::decode(&mut &*raw)? {
                     Datum::Formula(fv, wv) => {
+                        let path = self.check_path(path)?;
                         let _: Result<()> =
                             self.publish_formula(path, &mut batch, fv, wv);
                     }
@@ -932,7 +1004,7 @@ impl Container {
     }
 
     fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
-        match check_path(&self.cfg.base_path, path) {
+        match self.check_path(path) {
             Err(_) => {
                 // this should not be possible, but in case of a bug, just do nothing
                 let _: Result<_, _> = reply.send(());
@@ -1066,7 +1138,7 @@ impl Container {
     }
 
     fn delete_path(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         let bn = Path::basename(&path);
         if bn == Some(".formula") || bn == Some(".on-write") {
             if let Some(path) = Path::dirname(&path) {
@@ -1078,22 +1150,22 @@ impl Container {
     }
 
     fn delete_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         txn.remove_subtree(path, reply);
     }
 
     fn lock_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         txn.set_locked(path, reply);
     }
 
     fn unlock_subtree(&mut self, txn: &mut Txn, path: Path, reply: Reply) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         txn.set_unlocked(path, reply);
     }
 
     fn set_data(&mut self, txn: &mut Txn, path: Path, value: Value, reply: Reply) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         txn.set_data(true, path, value, reply);
     }
 
@@ -1105,7 +1177,7 @@ impl Container {
         on_write: Option<Chars>,
         reply: Reply,
     ) {
-        let path = or_reply!(reply, check_path(&self.cfg.base_path, path));
+        let path = or_reply!(reply, self.check_path(path));
         if let Some(formula) = formula {
             txn.set_formula(path.clone(), Value::from(formula), reply);
         }
@@ -1118,9 +1190,7 @@ impl Container {
         for req in reqs.drain(..) {
             let reply = Sendable::Rpc(req.reply);
             match req.kind {
-                RpcRequestKind::Delete(path) => {
-                    self.delete_path(txn, path, Some(reply))
-                }
+                RpcRequestKind::Delete(path) => self.delete_path(txn, path, Some(reply)),
                 RpcRequestKind::DeleteSubtree(path) => {
                     self.delete_subtree(txn, path, Some(reply))
                 }
@@ -1193,7 +1263,7 @@ impl Container {
 
     fn remove_deleted_published(&mut self, batch: &mut UpdateBatch, path: &Path) {
         let ref_err = Value::Error(Chars::from("#REF"));
-        self.publish_requests.remove_advertisement(&path);
+        self.remove_advertisement(&path);
         match self.ctx.user.by_path.remove(path) {
             None => (),
             Some(Published::Data(p)) => {
@@ -1223,9 +1293,17 @@ impl Container {
         self.update_refs(batch)
     }
 
+    fn remove_advertisement(&self, path: &Path) {
+        if let Some((_, def)) = self.get_root(&path) {
+            def.remove_advertisement(&path);
+        }
+    }
+
     fn advertise_path(&self, path: Path) {
         if !self.cfg.sparse {
-            let _: Result<_> = self.publish_requests.advertise(path);
+            if let Some((_, def)) = self.get_root(&path) {
+                let _: Result<_> = def.advertise(path);
+            }
         }
     }
 
@@ -1338,7 +1416,7 @@ impl Container {
                 r = self.publish_events.select_next_some() => {
                     self.process_publish_event(r);
                 }
-                r = self.publish_requests.select_next_some() => {
+                r = self.roots.select_next_some() => {
                     self.process_publish_request(r.0, r.1)
                 }
                 r = self.sub_updates.select_next_some() => {

@@ -1079,6 +1079,7 @@ fn add_root(roots: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> 
 fn del_root(
     data: &sled::Tree,
     roots: &sled::Tree,
+    locked: &sled::Tree,
     pending: &mut Update,
     path: Path,
 ) -> Result<()> {
@@ -1093,8 +1094,16 @@ fn del_root(
                 }
             }
         }
-        roots.remove(key)?;
-        pending.removed_roots.push(path);
+        for r in roots.scan_prefix(key).keys() {
+            let k = r?;
+            roots.remove(&k)?;
+            pending.removed_roots.push(Path::from(ArcStr::from(str::from_utf8(&k)?)));
+        }
+        for r in locked.scan_prefix(key).keys() {
+            let k = r?;
+            locked.remove(&k)?;
+            pending.unlocked.push(Path::from(ArcStr::from(str::from_utf8(&k)?)));
+        }
     }
     Ok(())
 }
@@ -1175,7 +1184,7 @@ fn commit_complex(
             TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
             TxnOp::SetUnlocked(path) => unlock_subtree(&locked, &mut pending, path),
             TxnOp::AddRoot(path) => add_root(&roots, &mut pending, path),
-            TxnOp::DelRoot(path) => del_root(&data, &roots, &mut pending, path),
+            TxnOp::DelRoot(path) => del_root(&data, &roots, &locked, &mut pending, path),
             TxnOp::Flush(finished) => {
                 let _: Result<_, _> = data.flush();
                 let _: Result<_, _> = locked.flush();
@@ -1505,5 +1514,9 @@ impl Db {
 
     pub(super) fn locked(&self) -> impl Iterator<Item = Result<Path>> + 'static {
         iter_paths(&self.locked)
+    }
+
+    pub(super) fn roots(&self) -> impl Iterator<Item = Result<Path>> + 'static {
+        iter_paths(&self.roots)
     }
 }
