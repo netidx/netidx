@@ -1010,15 +1010,25 @@ fn del_table_rows(
 
 fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
     let key = path.as_bytes();
-    let mut val = BUF.take();
-    Value::Null.encode(&mut *val)?;
-    locked.insert(key, &**val)?;
+    locked.insert(key, &[1u8])?;
     pending.locked.push(path);
     Ok(())
 }
 
 fn set_unlocked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    locked.remove(path.as_bytes())?;
+    let key = path.as_bytes();
+    let remove = match locked.range(..key).next_back() {
+        None => true,
+        Some(r) => {
+            let (k, v) = r?;
+            !(key.starts_with(&k) && &*v == &[1u8])
+        }
+    };
+    if remove {
+        locked.remove(key)?;
+    } else {
+        locked.insert(key, &[0u8])?;
+    }
     pending.unlocked.push(path);
     Ok(())
 }
@@ -1045,20 +1055,6 @@ fn remove_subtree(data: &sled::Tree, pending: &mut Update, path: Path) -> Result
         );
     pending.merge_from(up);
     res
-}
-
-fn unlock_subtree(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    let key = path.as_bytes();
-    let mut paths = PATHS.take();
-    for res in locked.scan_prefix(key).keys() {
-        let key = res?;
-        let path = Path::from(ArcStr::from(str::from_utf8(&key)?));
-        paths.push(path);
-    }
-    for path in paths.drain(..) {
-        set_unlocked(locked, pending, path)?
-    }
-    Ok(())
 }
 
 fn add_root(roots: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
@@ -1182,7 +1178,7 @@ fn commit_complex(
                 set_on_write(&data, &mut pending, path, value)
             }
             TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
-            TxnOp::SetUnlocked(path) => unlock_subtree(&locked, &mut pending, path),
+            TxnOp::SetUnlocked(path) => set_unlocked(&locked, &mut pending, path),
             TxnOp::AddRoot(path) => add_root(&roots, &mut pending, path),
             TxnOp::DelRoot(path) => del_root(&data, &roots, &locked, &mut pending, path),
             TxnOp::Flush(finished) => {
@@ -1222,7 +1218,7 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
                         }
                         TxnOp::SetLocked(path) => set_locked(locked, &mut pending, path),
                         TxnOp::SetUnlocked(path) => {
-                            unlock_subtree(locked, &mut pending, path)
+                            set_unlocked(locked, &mut pending, path)
                         }
                         TxnOp::CreateSheet { .. }
                         | TxnOp::AddSheetColumns { .. }
@@ -1512,8 +1508,13 @@ impl Db {
         })
     }
 
-    pub(super) fn locked(&self) -> impl Iterator<Item = Result<Path>> + 'static {
-        iter_paths(&self.locked)
+    pub(super) fn locked(&self) -> impl Iterator<Item = Result<(Path, bool)>> + 'static {
+        self.locked.iter().map(|r| {
+            let (k, v) = r?;
+            let path = Path::from(ArcStr::from(str::from_utf8(&k)?));
+            let locked = &*v == &[1u8];
+            Ok((path, locked))
+        })
     }
 
     pub(super) fn roots(&self) -> impl Iterator<Item = Result<Path>> + 'static {

@@ -36,7 +36,7 @@ use rpcs::{RpcRequest, RpcRequestKind};
 use std::{
     collections::{
         hash_map::Entry,
-        BTreeMap, BTreeSet,
+        BTreeMap,
         Bound::{self, *},
         HashMap, HashSet,
     },
@@ -619,7 +619,7 @@ enum Compiled {
 struct Container {
     cfg: ContainerConfig,
     api_path: Path,
-    locked: BTreeSet<Path>,
+    locked: BTreeMap<Path, bool>,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
     sub_updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
@@ -655,7 +655,7 @@ impl Container {
         Ok(Container {
             cfg: ccfg,
             api_path,
-            locked: BTreeSet::new(),
+            locked: BTreeMap::new(),
             roots: Roots(BTreeMap::new()),
             ctx,
             sub_updates,
@@ -792,8 +792,9 @@ impl Container {
             self.roots.insert(path, def);
         }
         for res in self.ctx.user.db.locked() {
-            let path = self.check_path(res?)?;
-            self.locked.insert(path);
+            let (path, locked) = res?;
+            let path = self.check_path(path)?;
+            self.locked.insert(path, locked);
         }
         let mut batch = self.ctx.user.publisher.start_batch();
         for res in self.ctx.user.db.iter() {
@@ -1003,6 +1004,17 @@ impl Container {
         }
     }
 
+    fn is_locked(&self, path: &Path) -> bool {
+        self.locked
+            .range::<str, (Bound<&str>, Bound<&str>)>((
+                Bound::Unbounded,
+                Bound::Included(path.as_ref()),
+            ))
+            .next_back()
+            .map(|(p, locked)| if Path::is_parent(p, &path) { *locked } else { false })
+            .unwrap_or(false)
+    }
+
     fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
         match self.check_path(path) {
             Err(_) => {
@@ -1018,15 +1030,7 @@ impl Container {
                         }
                         Ok(Some(Datum::Formula(_, _))) => unreachable!(),
                         Err(_) | Ok(Some(Datum::Deleted)) | Ok(None) => {
-                            let locked = self
-                                .locked
-                                .range::<str, (Bound<&str>, Bound<&str>)>((
-                                    Bound::Unbounded,
-                                    Bound::Included(path.as_ref()),
-                                ))
-                                .next_back()
-                                .map(|p| Path::is_parent(p, &path))
-                                .unwrap_or(false);
+                            let locked = self.is_locked(&path);
                             if !locked && !Path::is_parent(&self.api_path, &path) {
                                 let _: Result<()> = self.publish_data(path, Value::Null);
                             }
@@ -1326,7 +1330,9 @@ impl Container {
         for path in update.added_roots.drain(..) {
             match self.ctx.user.publisher.publish_default(path.clone()) {
                 Err(_) => (), // CR estokes: log this
-                Ok(dh) => { self.roots.insert(path, dh); },
+                Ok(dh) => {
+                    self.roots.insert(path, dh);
+                }
             }
         }
         for path in update.removed_roots.drain(..) {
@@ -1408,10 +1414,25 @@ impl Container {
             }
         }
         for path in update.locked.drain(..) {
-            self.locked.insert(path);
+            self.locked.insert(path, true);
         }
         for path in update.unlocked.drain(..) {
-            self.locked.remove(&path);
+            let remove = match self
+                .locked
+                .range::<str, (Bound<&str>, Bound<&str>)>((
+                    Unbounded,
+                    Excluded(path.as_ref()),
+                ))
+                .next_back()
+            {
+                None => true,
+                Some((key, locked)) => !(path.starts_with(key.as_ref()) && *locked),
+            };
+            if remove {
+                self.locked.remove(&path);
+            } else {
+                self.locked.insert(path, false);
+            }
         }
         self.update_refs(batch);
         if !rels.is_empty() {
