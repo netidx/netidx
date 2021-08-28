@@ -1257,6 +1257,12 @@ impl Container {
                 RpcRequestKind::DelTableCols(path, cols) => {
                     txn.del_table_columns(path, cols, Some(reply));
                 }
+                RpcRequestKind::AddRoot(path) => {
+                    txn.add_root(path, Some(reply));
+                }
+                RpcRequestKind::DelRoot(path) => {
+                    txn.del_root(path, Some(reply));
+                }
             }
         }
     }
@@ -1316,6 +1322,15 @@ impl Container {
                     rels.insert(Path::from(ArcStr::from(table)));
                 }
             }
+        }
+        for path in update.added_roots.drain(..) {
+            match self.ctx.user.publisher.publish_default(path.clone()) {
+                Err(_) => (), // CR estokes: log this
+                Ok(dh) => { self.roots.insert(path, dh); },
+            }
+        }
+        for path in update.removed_roots.drain(..) {
+            self.roots.remove(&path);
         }
         for (path, value) in update.data.drain(..) {
             match value {

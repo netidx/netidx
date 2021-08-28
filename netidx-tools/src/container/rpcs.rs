@@ -47,6 +47,8 @@ pub(super) enum RpcRequestKind {
     AddTableCols(Path, Vec<Chars>),
     DelTableRows(Path, Vec<Chars>),
     DelTableCols(Path, Vec<Chars>),
+    AddRoot(Path),
+    DelRoot(Path),
 }
 
 pub(super) struct RpcRequest {
@@ -71,6 +73,8 @@ pub(super) struct RpcApi {
     _add_table_cols: Proc,
     _del_table_rows: Proc,
     _del_table_cols: Proc,
+    _add_root: Proc,
+    _del_root: Proc,
     pub(super) rx: Batched<mpsc::Receiver<RpcRequest>>,
 }
 
@@ -106,6 +110,10 @@ impl RpcApi {
             start_del_table_rows_rpc(&publisher, &base_path, tx.clone())?;
         let _del_table_cols =
             start_del_table_cols_rpc(&publisher, &base_path, tx.clone())?;
+        let _add_root =
+            start_add_root_rpc(&publisher, &base_path, tx.clone())?;
+        let _del_root =
+            start_del_root_rpc(&publisher, &base_path, tx.clone())?;
         Ok(RpcApi {
             _delete_path_rpc,
             _delete_subtree_rpc,
@@ -123,6 +131,8 @@ impl RpcApi {
             _add_table_cols,
             _del_table_rows,
             _del_table_cols,
+            _add_root,
+            _del_root,
             rx: Batched::new(rx, 1_000_000),
         })
     }
@@ -270,6 +280,38 @@ pub(super) fn start_unlock_subtree_rpc(
         "unlock subtree(s) so the default publisher can create values",
         "the subtree(s) to unlock",
         RpcRequestKind::UnlockSubtree,
+        tx,
+    )
+}
+
+pub(super) fn start_add_root_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    start_path_arg_rpc(
+        publisher,
+        base_path,
+        "add-root",
+        "add a new root to the container",
+        "the root(s) to add",
+        RpcRequestKind::AddRoot,
+        tx,
+    )
+}
+
+pub(super) fn start_del_root_rpc(
+    publisher: &Publisher,
+    base_path: &Path,
+    tx: mpsc::Sender<RpcRequest>,
+) -> Result<Proc> {
+    start_path_arg_rpc(
+        publisher,
+        base_path,
+        "remove-root",
+        "remove a root and all it's children",
+        "the root(s) to remove",
+        RpcRequestKind::DelRoot,
         tx,
     )
 }
