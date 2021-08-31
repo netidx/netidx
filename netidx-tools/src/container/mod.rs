@@ -770,12 +770,12 @@ impl Container {
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {
-        self.advertise_path(path.clone());
         let val = self.ctx.user.publisher.publish_with_flags(
             PublishFlags::DESTROY_ON_IDLE,
             path.clone(),
             value.clone(),
         )?;
+        self.advertise_path(path.clone());
         let id = val.id();
         self.ctx.user.publisher.writes(val.id(), self.write_updates_tx.clone());
         let published =

@@ -219,10 +219,7 @@ impl Ctx {
         subscriptions.entry(path.clone()).or_insert_with(|| {
             let s = subscriber.durable_subscribe(path.clone());
             paths.insert(s.id(), path.clone());
-            s.updates(
-                UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::STOP_COLLECTING_LAST,
-                sender_updates,
-            );
+            s.updates(UpdatesFlags::BEGIN_WITH_LAST, sender_updates);
             if subscribe_timeout {
                 subscribe_ts.insert(path.clone(), Instant::now());
             }
