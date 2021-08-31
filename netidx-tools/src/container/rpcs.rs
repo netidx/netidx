@@ -882,7 +882,7 @@ pub(super) fn start_del_table_cols_rpc(
     Ok(Proc::new(
         publisher,
         base_path.append("delete-table-columns"),
-        Value::from("delte columns from a table"),
+        Value::from("delete columns from a table"),
         vec![
             (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
             (Arc::from("columns"), (Value::Null, Value::from("the column names"))),
