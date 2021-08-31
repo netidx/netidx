@@ -1541,9 +1541,6 @@ async fn connection(
                             }
                             ToCon::Stream { id, sub_id, mut tx, flags } => {
                                 if let Some(sub) = subscriptions.get_mut(&id) {
-                                    if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
-                                        sub.last = None;
-                                    }
                                     let mut already_have = false;
                                     for (_, c) in sub.streams.0.iter() {
                                         if tx.same_receiver(&c.0) {
@@ -1563,6 +1560,9 @@ async fn connection(
                                                 Ok(()) => ()
                                             }
                                         }
+                                    }
+                                    if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
+                                        sub.last = None;
                                     }
                                     if !already_have {
                                         let tx = ChanWrap(tx);
