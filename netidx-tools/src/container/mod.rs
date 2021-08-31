@@ -675,7 +675,7 @@ impl Container {
             .roots
             .range::<str, (Bound<&str>, Bound<&str>)>((
                 Unbounded,
-                Excluded(path.as_ref()),
+                Included(path.as_ref()),
             ))
             .next_back()
         {
