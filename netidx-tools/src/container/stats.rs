@@ -26,7 +26,7 @@ impl Stats {
             self.roots.pop();
         }
         while self.roots.len() < roots.len() {
-            let p = self.base_path.append(&format!("roots/{0:6}", self.roots.len()));
+            let p = self.base_path.append(&format!("roots/{:06}", self.roots.len()));
             self.roots.push(self.publisher.publish(p, Value::Null)?);
         }
         for (path, p) in roots.keys().zip(self.roots.iter()) {
@@ -44,7 +44,7 @@ impl Stats {
             self.locked.pop();
         }
         while self.locked.len() < locked.len() {
-            let p = self.base_path.append(&format!("locked/{0:6}", self.locked.len()));
+            let p = self.base_path.append(&format!("locked/{:06}", self.locked.len()));
             let pk = self.publisher.publish(p.append("path"), Value::Null)?;
             let pv = self.publisher.publish(p.append("locked"), Value::Null)?;
             self.locked.push((pk, pv));

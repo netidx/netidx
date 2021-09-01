@@ -792,17 +792,19 @@ impl Container {
     }
 
     async fn init(&mut self) -> Result<()> {
+        let mut batch = self.ctx.user.publisher.start_batch();
         for res in self.ctx.user.db.roots() {
             let path = res?;
             let def = self.ctx.user.publisher.publish_default(path.clone())?;
             self.roots.insert(path, def);
         }
+        let _ = self.stats.set_roots(&mut batch, &self.roots);
         for res in self.ctx.user.db.locked() {
             let (path, locked) = res?;
             let path = self.check_path(path)?;
             self.locked.insert(path, locked);
         }
-        let mut batch = self.ctx.user.publisher.start_batch();
+        let _ = self.stats.set_locked(&mut batch, &self.locked);
         for res in self.ctx.user.db.iter() {
             let (path, kind, raw) = res?;
             match kind {
