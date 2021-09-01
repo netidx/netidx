@@ -15,7 +15,7 @@ use netidx::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    publisher::{Publisher, SendResult, Val},
+    publisher::{Publisher, SendResult, Val, UpdateBatch},
     subscriber::Value,
 };
 use sled;
@@ -1254,6 +1254,13 @@ struct Stats {
     queued: Val,
     queued_cnt: AtomicUsize,
     deleting: Val,
+    to_commit: UnboundedSender<UpdateBatch>,
+}
+
+async fn stats_commit_task(mut rx: UnboundedReceiver<UpdateBatch>) {
+    while let Some(batch) = rx.next().await {
+        batch.commit(Some(Duration::from_secs(10))).await
+    }
 }
 
 impl Stats {
@@ -1262,12 +1269,15 @@ impl Stats {
         let queued = publisher.publish(base_path.append("queued"), 0.into())?;
         let deleting =
             publisher.publish(base_path.append("background-delete"), false.into())?;
+        let (tx, rx) = unbounded();
+        task::spawn(stats_commit_task(rx));
         Ok(Arc::new(Stats {
             publisher,
             busy,
             queued,
             queued_cnt: AtomicUsize::new(0),
             deleting,
+            to_commit: tx,
         }))
     }
 
@@ -1275,32 +1285,32 @@ impl Stats {
         let n = self.queued_cnt.fetch_add(1, Ordering::Relaxed) + 1;
         let mut batch = self.publisher.start_batch();
         self.queued.update(&mut batch, n.into());
-        task::spawn(batch.commit(Some(Duration::from_secs(10))));
+        let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
-    async fn dec_queued(&self) {
+    fn dec_queued(&self) {
         let n = self.queued_cnt.fetch_sub(1, Ordering::Relaxed) - 1;
         let mut batch = self.publisher.start_batch();
         self.queued.update(&mut batch, n.into());
         self.busy.update(&mut batch, true.into());
-        batch.commit(Some(Duration::from_secs(10))).await;
+        let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
-    async fn set_busy(&self, busy: bool) {
+    fn set_busy(&self, busy: bool) {
         let mut batch = self.publisher.start_batch();
         self.busy.update(&mut batch, busy.into());
-        batch.commit(Some(Duration::from_secs(10))).await
+        let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
-    async fn set_deleting(&self, deleting: bool) {
+    fn set_deleting(&self, deleting: bool) {
         let mut batch = self.publisher.start_batch();
         self.deleting.update(&mut batch, deleting.into());
-        batch.commit(Some(Duration::from_secs(10))).await
+        let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 }
 
 async fn background_delete_task(data: sled::Tree, stats: Arc<Stats>) {
-    stats.set_deleting(true).await;
+    stats.set_deleting(true);
     task::block_in_place(|| {
         for r in data.iter() {
             if let Ok((k, v)) = r {
@@ -1312,7 +1322,7 @@ async fn background_delete_task(data: sled::Tree, stats: Arc<Stats>) {
             }
         }
     });
-    stats.set_deleting(false).await;
+    stats.set_deleting(false);
 }
 
 async fn commit_txns_task(
@@ -1341,7 +1351,7 @@ async fn commit_txns_task(
                 delete_task = None;
             }
             txn = incoming.select_next_some() => {
-                stats.dec_queued().await;
+                stats.dec_queued();
                 let (simple, delete) =
                     txn.0.iter().fold((true, false), |(simple, delete), op| match &op.0 {
                         TxnOp::CreateSheet { .. }
@@ -1371,6 +1381,7 @@ async fn commit_txns_task(
                 } else {
                     task::block_in_place(|| commit_complex(&data, &locked, &roots, txn))
                 };
+                stats.set_busy(false);
                 match outgoing.unbounded_send(pending) {
                     Ok(()) => (),
                     Err(_) => break,
@@ -1380,7 +1391,6 @@ async fn commit_txns_task(
                     delete_required = false;
                     delete_task = Some(task::spawn(job));
                 }
-                stats.set_busy(false).await;
             }
             complete => break,
         }
@@ -1429,8 +1439,8 @@ impl Db {
     }
 
     pub(super) fn commit(&self, txn: Txn) {
-        let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
         self.stats.inc_queued();
+        let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
     }
 
     pub(super) async fn flush_async(&self) -> Result<()> {

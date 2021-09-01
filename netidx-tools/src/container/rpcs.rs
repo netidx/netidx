@@ -573,7 +573,7 @@ pub(super) fn start_del_sheet_rows_rpc(
     Ok(Proc::new(
         publisher,
         base_path.append("delete-sheet-rows"),
-        Value::from("delte rows in a previously created sheet"),
+        Value::from("delete rows in a previously created sheet"),
         vec![
             (Arc::from("path"), (Value::Null, Value::from("the sheets(s)"))),
             (Arc::from("rows"), (Value::U64(1), Value::from("rows to delete"))),
