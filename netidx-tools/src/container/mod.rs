@@ -1196,6 +1196,42 @@ impl Container {
         }
     }
 
+    fn create_sheet(
+        &self,
+        txn: &mut Txn,
+        path: Path,
+        rows: usize,
+        columns: usize,
+        max_rows: usize,
+        max_columns: usize,
+        lock: bool,
+        reply: Reply,
+    ) {
+        let path = or_reply!(reply, self.check_path(path));
+        if rows > max_rows || columns > max_columns {
+            let m = "rows <= max_rows && columns <= max_columns";
+            let e = Value::Error(Chars::from(m));
+            if let Some(reply) = reply {
+                reply.send(e);
+            }
+        } else {
+            txn.create_sheet(path, rows, columns, max_rows, max_columns, lock, reply);
+        }
+    }
+
+    fn create_table(
+        &self,
+        txn: &mut Txn,
+        path: Path,
+        rows: Vec<Chars>,
+        columns: Vec<Chars>,
+        lock: bool,
+        reply: Reply,
+    ) {
+        let path = or_reply!(reply, self.check_path(path));
+        txn.create_table(path, rows, columns, lock, reply);
+    }
+
     fn process_rpc_requests(&mut self, txn: &mut Txn, reqs: &mut Vec<RpcRequest>) {
         for req in reqs.drain(..) {
             let reply = Sendable::Rpc(req.reply);
@@ -1223,23 +1259,16 @@ impl Container {
                     max_rows,
                     max_columns,
                     lock,
-                } => {
-                    if rows > max_rows || columns > max_columns {
-                        let m = "rows <= max_rows && columns <= max_columns";
-                        let e = Value::Error(Chars::from(m));
-                        reply.send(e);
-                    } else {
-                        txn.create_sheet(
-                            path,
-                            rows,
-                            columns,
-                            max_rows,
-                            max_columns,
-                            lock,
-                            Some(reply),
-                        );
-                    }
-                }
+                } => self.create_sheet(
+                    txn,
+                    path,
+                    rows,
+                    columns,
+                    max_rows,
+                    max_columns,
+                    lock,
+                    Some(reply),
+                ),
                 RpcRequestKind::AddSheetRows(path, rows) => {
                     txn.add_sheet_rows(path, rows, Some(reply));
                 }
@@ -1253,7 +1282,7 @@ impl Container {
                     txn.del_sheet_columns(path, cols, Some(reply));
                 }
                 RpcRequestKind::CreateTable { path, rows, columns, lock } => {
-                    txn.create_table(path, rows, columns, lock, Some(reply));
+                    self.create_table(txn, path, rows, columns, lock, Some(reply))
                 }
                 RpcRequestKind::AddTableRows(path, rows) => {
                     txn.add_table_rows(path, rows, Some(reply));
