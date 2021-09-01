@@ -12,7 +12,7 @@ use crate::{
     utils::{self, Addr},
 };
 use bytes::Bytes;
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap};
 use immutable_chunkmap::set::Set;
 use log::debug;
 use std::{
@@ -29,8 +29,8 @@ use std::{
 };
 
 lazy_static! {
-    static ref SPN_POOL: Pool<HashMap<SocketAddr, Chars, FxBuildHasher>> =
-        Pool::new(256, 100);
+    static ref SPN_POOL: Pool<FxHashMap<SocketAddr, Chars>> = Pool::new(256, 100);
+    static ref BY_ADDR_POOL: Pool<FxHashMap<SocketAddr, Bytes>> = Pool::new(256, 100);
     static ref SIGNED_ADDRS_POOL: Pool<Vec<(SocketAddr, Bytes)>> = Pool::new(256, 100);
     pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
     pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
@@ -47,7 +47,7 @@ pub(crate) const GC_THRESHOLD: usize = 100_000;
 #[derive(Debug)]
 struct HCAddrs {
     ops: usize,
-    addrs: HashMap<Set<Addr>, (), FxBuildHasher>,
+    addrs: FxHashMap<Set<Addr>, ()>,
 }
 
 impl HCAddrs {
@@ -105,8 +105,8 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 pub(crate) struct Store {
     by_path: HashMap<Path, Set<Addr>>,
     by_path_flags: HashMap<Path, u16>,
-    by_addr: HashMap<SocketAddr, HashSet<Path>, FxBuildHasher>,
-    by_level: HashMap<usize, BTreeMap<Path, Z64>, FxBuildHasher>,
+    by_addr: FxHashMap<SocketAddr, HashSet<Path>>,
+    by_level: FxHashMap<usize, BTreeMap<Path, Z64>>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
@@ -405,13 +405,27 @@ impl Store {
     }
 
     pub(crate) fn resolve(&self, path: &Path) -> (u16, Pooled<Vec<(SocketAddr, Bytes)>>) {
-        match self.by_path.get(path.as_ref()) {
-            None => self.resolve_default(path),
-            Some(a) => {
-                let mut addrs = SIGNED_ADDRS_POOL.take();
-                addrs.extend(a.into_iter().map(|addr| (addr.0, Bytes::new())));
-                (self.get_flags(path.as_ref()), addrs)
+        let (flags, mut addrs) = self.resolve_default(path);
+        if addrs.len() == 0 {
+            match self.by_path.get(path.as_ref()) {
+                None => (flags, addrs),
+                Some(a) => {
+                    addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
+                    (self.get_flags(path.as_ref()), addrs)
+                }
             }
+        } else {
+            let mut by_addr = BY_ADDR_POOL.take();
+            by_addr.extend(addrs.drain(..));
+            let flags = match self.by_path.get(path.as_ref()) {
+                None => flags,
+                Some(a) => {
+                    by_addr.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
+                    self.get_flags(path.as_ref())
+                }
+            };
+            addrs.extend(by_addr.drain());
+            (flags, addrs)
         }
     }
 
@@ -423,7 +437,7 @@ impl Store {
         path: &Path,
     ) -> (
         u16,
-        Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+        Pooled<FxHashMap<SocketAddr, Chars>>,
         Pooled<Vec<(SocketAddr, Bytes)>>,
     ) {
         let mut krb5_spns = SPN_POOL.take();
@@ -447,19 +461,29 @@ impl Store {
                 )
             }
         };
-        let mut signed_addrs = SIGNED_ADDRS_POOL.take();
-        let flags = match self.by_path.get(&*path) {
-            None => {
-                let (flags, mut addrs) = self.resolve_default(path);
-                signed_addrs.extend(addrs.drain(..).map(|(a, _)| sign_addr(&a)));
-                flags
+        let (flags, mut addrs) = self.resolve_default(path);
+        let flags = if addrs.len() == 0 {
+            match self.by_path.get(&*path) {
+                None => flags,
+                Some(a) => {
+                    addrs.extend(a.into_iter().map(|a| sign_addr(&a.0)));
+                    self.get_flags(&*path)
+                }
             }
-            Some(addrs) => {
-                signed_addrs.extend(addrs.into_iter().map(|a| sign_addr(&a.0)));
-                self.get_flags(&*path)
-            }
+        } else {
+            let mut by_addr = BY_ADDR_POOL.take();
+            by_addr.extend(addrs.drain(..).map(|(a, _)| sign_addr(&a)));
+            let flags = match self.by_path.get(&*path) {
+                None => flags,
+                Some(a) => {
+                    by_addr.extend(a.into_iter().map(|a| sign_addr(&a.0)));
+                    self.get_flags(&*path)
+                }
+            };
+            addrs.extend(by_addr.drain());
+            flags
         };
-        (flags, krb5_spns, signed_addrs)
+        (flags, krb5_spns, addrs)
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
