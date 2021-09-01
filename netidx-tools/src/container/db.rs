@@ -11,6 +11,7 @@ use futures::{
     select_biased,
 };
 use netidx::{
+    utils::{BatchItem, Batched},
     chars::Chars,
     pack::{Pack, PackError},
     path::Path,
@@ -1257,9 +1258,21 @@ struct Stats {
     to_commit: UnboundedSender<UpdateBatch>,
 }
 
-async fn stats_commit_task(mut rx: UnboundedReceiver<UpdateBatch>) {
+async fn stats_commit_task(rx: UnboundedReceiver<UpdateBatch>) {
+    let mut rx = Batched::new(rx, 1_000_000);
+    let mut pending: Option<UpdateBatch> = None;
     while let Some(batch) = rx.next().await {
-        batch.commit(Some(Duration::from_secs(10))).await
+        match batch {
+            BatchItem::InBatch(mut b) => match &mut pending {
+                Some(pending) => { let _: Result<_> = pending.merge_from(&mut b); }
+                None => { pending = Some(b); }
+            }
+            BatchItem::EndBatch => {
+                if let Some(pending) = pending.take() {
+                    pending.commit(Some(Duration::from_secs(10))).await
+                }
+            }
+        }
     }
 }
 

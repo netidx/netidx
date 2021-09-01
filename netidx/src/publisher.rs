@@ -494,6 +494,17 @@ impl UpdateBatch {
         self.msgs.len()
     }
 
+    /// merge all the updates from `other` into `self` assuming they
+    /// are batches from the same publisher, if they are not, do
+    /// nothing.
+    pub fn merge_from(&mut self, other: &mut UpdateBatch) -> Result<()> {
+        if Arc::as_ptr(&self.origin.0) != Arc::as_ptr(&other.origin.0) {
+            bail!("can't merge batches from different publishers");
+        } else {
+            Ok(self.msgs.extend(other.msgs.drain(..)))
+        }
+    }
+
     /// Commit this batch, triggering all queued values to be
     /// sent. Any subscriber that can't accept all the updates within
     /// `timeout` will be disconnected.
