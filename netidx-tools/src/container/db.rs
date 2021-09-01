@@ -11,13 +11,13 @@ use futures::{
     select_biased,
 };
 use netidx::{
-    utils::{BatchItem, Batched},
     chars::Chars,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    publisher::{Publisher, SendResult, Val, UpdateBatch},
+    publisher::{Publisher, SendResult, UpdateBatch, Val},
     subscriber::Value,
+    utils::{BatchItem, Batched},
 };
 use sled;
 use std::{
@@ -579,27 +579,29 @@ impl SheetDescr {
         for r in data.scan_prefix(base.as_bytes()).keys() {
             if let Ok(k) = r {
                 if let Ok(path) = str::from_utf8(&*k) {
-                    let mut row = path;
-                    let mut level = Path::levels(row);
-                    loop {
-                        if level == base_levels + 1 {
-                            break;
-                        } else if level == base_levels + 2 {
-                            if let Some(col) = Path::basename(row) {
-                                if let Ok(c) = col.parse::<usize>() {
-                                    max_col_width = max(max_col_width, col.len());
-                                    max_col = max(c, max_col);
+                    if Path::is_parent(base, path) {
+                        let mut row = path;
+                        let mut level = Path::levels(row);
+                        loop {
+                            if level == base_levels + 1 {
+                                break;
+                            } else if level == base_levels + 2 {
+                                if let Some(col) = Path::basename(row) {
+                                    if let Ok(c) = col.parse::<usize>() {
+                                        max_col_width = max(max_col_width, col.len());
+                                        max_col = max(c, max_col);
+                                    }
                                 }
                             }
+                            row = Path::dirname(row).unwrap_or("/");
+                            level -= 1;
                         }
-                        row = Path::dirname(row).unwrap_or("/");
-                        level -= 1;
-                    }
-                    match rows.last() {
-                        None => rows.push(Path::from(ArcStr::from(row))),
-                        Some(last) => {
-                            if last.as_ref() != row {
-                                rows.push(Path::from(ArcStr::from(row)));
+                        match rows.last() {
+                            None => rows.push(Path::from(ArcStr::from(row))),
+                            Some(last) => {
+                                if last.as_ref() != row {
+                                    rows.push(Path::from(ArcStr::from(row)));
+                                }
                             }
                         }
                     }
@@ -707,24 +709,26 @@ fn add_sheet_rows(
     for r in data.scan_prefix(base.as_bytes()).keys() {
         let k = r?;
         let path = str::from_utf8(&k)?;
-        if Path::levels(path) == base_levels + 2 {
-            if let Some(row) = Path::dirname(path) {
-                if let Some(row) = Path::basename(row) {
-                    if let Ok(i) = row.parse::<usize>() {
-                        max_row = max(i, max_row);
-                        max_row_width = max(row.len(), max_row_width);
+        if Path::is_parent(&base, path) {
+            if Path::levels(path) == base_levels + 2 {
+                if let Some(row) = Path::dirname(path) {
+                    if let Some(row) = Path::basename(row) {
+                        if let Ok(i) = row.parse::<usize>() {
+                            max_row = max(i, max_row);
+                            max_row_width = max(row.len(), max_row_width);
+                        }
                     }
                 }
-            }
-            let col = Path::basename(path)
-                .and_then(|p| p.parse::<usize>().ok().map(move |i| (p, i)))
-                .map(|(col, i)| {
-                    max_col = max(i, max_col);
-                    max_col_width = max(col.len(), max_col_width);
-                    i
-                });
-            if let Some(col) = col {
-                cols.insert(col);
+                let col = Path::basename(path)
+                    .and_then(|p| p.parse::<usize>().ok().map(move |i| (p, i)))
+                    .map(|(col, i)| {
+                        max_col = max(i, max_col);
+                        max_col_width = max(col.len(), max_col_width);
+                        i
+                    });
+                if let Some(col) = col {
+                    cols.insert(col);
+                }
             }
         }
     }
@@ -850,17 +854,19 @@ fn table_rows(data: &sled::Tree, base: &Path) -> Result<Pooled<Vec<Path>>> {
     for r in data.scan_prefix(base.as_bytes()).keys() {
         let k = r?;
         if let Ok(path) = str::from_utf8(&*k) {
-            let mut row = path;
-            let mut level = Path::levels(row);
-            while level > base_levels + 1 {
-                row = Path::dirname(row).unwrap_or("/");
-                level -= 1;
-            }
-            match paths.last() {
-                None => paths.push(Path::from(ArcStr::from(row))),
-                Some(last) => {
-                    if last.as_ref() != row {
-                        paths.push(Path::from(ArcStr::from(row)));
+            if Path::is_parent(base, path) {
+                let mut row = path;
+                let mut level = Path::levels(row);
+                while level > base_levels + 1 {
+                    row = Path::dirname(row).unwrap_or("/");
+                    level -= 1;
+                }
+                match paths.last() {
+                    None => paths.push(Path::from(ArcStr::from(row))),
+                    Some(last) => {
+                        if last.as_ref() != row {
+                            paths.push(Path::from(ArcStr::from(row)));
+                        }
                     }
                 }
             }
@@ -948,9 +954,11 @@ fn add_table_rows(
     for r in data.scan_prefix(base.as_bytes()).keys() {
         let k = r?;
         let path = str::from_utf8(&k)?;
-        if Path::levels(path) == base_levels + 2 {
-            let col = Path::basename(path).unwrap_or("");
-            cols.insert(k.subslice(k.len() - col.len(), col.len()));
+        if Path::is_parent(&base, path) {
+            if Path::levels(path) == base_levels + 2 {
+                let col = Path::basename(path).unwrap_or("");
+                cols.insert(k.subslice(k.len() - col.len(), col.len()));
+            }
         }
     }
     let cols: HashSet<String> = cols
@@ -1027,7 +1035,8 @@ fn set_unlocked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result
         None => true,
         Some(r) => {
             let (k, v) = r?;
-            !(key.starts_with(&k) && &*v == &[1u8])
+            let k = str::from_utf8(&k)?;
+            !(Path::is_parent(k, &path) && &*v == &[1u8])
         }
     };
     if remove {
@@ -1043,8 +1052,11 @@ fn remove_subtree(data: &sled::Tree, pending: &mut Update, path: Path) -> Result
     use rayon::prelude::*;
     let mut paths = PATHS.take();
     for res in data.scan_prefix(path.as_ref()).keys() {
-        let path = Path::from(ArcStr::from(str::from_utf8(&res?)?));
-        paths.push(path);
+        let key = res?;
+        let key = str::from_utf8(&key)?;
+        if Path::is_parent(&path, &key) {
+            paths.push(Path::from(ArcStr::from(key)));
+        }
     }
     let (up, res) = paths
         .par_drain(..)
@@ -1067,7 +1079,8 @@ fn add_root(roots: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> 
     let key = path.as_bytes();
     if let Some(r) = roots.range(..key).next_back() {
         let (prev, _) = r?;
-        if key.starts_with(&prev) {
+        let prev = str::from_utf8(&prev)?;
+        if Path::is_parent(prev, &path) {
             bail!("a parent path is already a root")
         }
     }
@@ -1091,20 +1104,27 @@ fn del_root(
             None => remove_subtree(data, pending, path.clone())?,
             Some(r) => {
                 let (prev, _) = r?;
-                if !key.starts_with(&prev) {
+                let prev = str::from_utf8(&prev)?;
+                if !Path::is_parent(prev, &path) {
                     remove_subtree(data, pending, path.clone())?
                 }
             }
         }
         for r in roots.scan_prefix(key).keys() {
             let k = r?;
-            roots.remove(&k)?;
-            pending.removed_roots.push(Path::from(ArcStr::from(str::from_utf8(&k)?)));
+            let k = str::from_utf8(&k)?;
+            if Path::is_parent(&path, k) {
+                roots.remove(&k)?;
+                pending.removed_roots.push(Path::from(ArcStr::from(k)));
+            }
         }
         for r in locked.scan_prefix(key).keys() {
             let k = r?;
-            locked.remove(&k)?;
-            pending.unlocked.push(Path::from(ArcStr::from(str::from_utf8(&k)?)));
+            let k = str::from_utf8(&k)?;
+            if Path::is_parent(&path, k) {
+                locked.remove(&k)?;
+                pending.unlocked.push(Path::from(ArcStr::from(k)));
+            }
         }
     }
     Ok(())
@@ -1264,9 +1284,13 @@ async fn stats_commit_task(rx: UnboundedReceiver<UpdateBatch>) {
     while let Some(batch) = rx.next().await {
         match batch {
             BatchItem::InBatch(mut b) => match &mut pending {
-                Some(pending) => { let _: Result<_> = pending.merge_from(&mut b); }
-                None => { pending = Some(b); }
-            }
+                Some(pending) => {
+                    let _: Result<_> = pending.merge_from(&mut b);
+                }
+                None => {
+                    pending = Some(b);
+                }
+            },
             BatchItem::EndBatch => {
                 if let Some(pending) = pending.take() {
                     pending.commit(Some(Duration::from_secs(10))).await
@@ -1483,7 +1507,9 @@ impl Db {
             while let Some(r) = iter.next_back() {
                 let r = r?;
                 let path = str::from_utf8(&r)?;
-                if Path::dirname(path) == Some(rowbase) {
+                if !Path::is_parent(&base, path) {
+                    return Ok(None);
+                } else if Path::dirname(path) == Some(rowbase) {
                     i -= 1;
                     if i == offset {
                         return Ok(Some(Path::from(ArcStr::from(path))));
@@ -1501,7 +1527,9 @@ impl Db {
             for r in iter {
                 let r = r?;
                 let path = str::from_utf8(&r)?;
-                if Path::dirname(path) == Some(rowbase) {
+                if !Path::is_parent(&base, path) {
+                    return Ok(None);
+                } else if Path::dirname(path) == Some(rowbase) {
                     i += 1;
                     if i == offset {
                         return Ok(Some(Path::from(ArcStr::from(path))));
@@ -1541,7 +1569,9 @@ impl Db {
                 let path_column = or_none!(Path::basename(path));
                 let path_row = or_none!(Path::dirname(path));
                 let path_table = or_none!(Path::dirname(path_row));
-                if path_table == tablebase {
+                if !Path::is_parent(&base, path) {
+                    return Ok(None);
+                } else if path_table == tablebase {
                     if path_row != rowbase.as_str() {
                         i -= 1;
                         rowbase = ArcStr::from(path_row);
@@ -1568,7 +1598,9 @@ impl Db {
                 let path_column = or_none!(Path::basename(path));
                 let path_row = or_none!(Path::dirname(path));
                 let path_table = or_none!(Path::dirname(path_row));
-                if path_table == tablebase {
+                if !Path::is_parent(&base, path) {
+                    return Ok(None);
+                } else if path_table == tablebase {
                     if path_row != rowbase.as_str() {
                         i += 1;
                         rowbase = ArcStr::from(path_row);
