@@ -1455,8 +1455,8 @@ impl Container {
             }
         }
         for path in update.locked.drain(..) {
-            self.locked.insert(path, true);
             locked = true;
+            self.locked.insert(path, true);
         }
         for path in update.unlocked.drain(..) {
             locked = true;
