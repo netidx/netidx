@@ -1,5 +1,6 @@
 mod db;
 mod rpcs;
+mod stats;
 
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -33,6 +34,7 @@ use netidx_bscript::{
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
 use rpcs::{RpcRequest, RpcRequestKind};
+use stats::Stats;
 use std::{
     collections::{
         hash_map::Entry,
@@ -619,6 +621,7 @@ enum Compiled {
 struct Container {
     cfg: ContainerConfig,
     api_path: Path,
+    stats: Stats,
     locked: BTreeMap<Path, bool>,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
@@ -638,16 +641,18 @@ struct Container {
 
 impl Container {
     async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
-        let (db, db_updates) = db::Db::new(&ccfg)?;
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
         publisher.events(publish_events_tx);
+        let (db, db_updates) =
+            db::Db::new(&ccfg, publisher.clone(), ccfg.api_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
         let api_path = ccfg.api_path.append("rpcs");
         let api = rpcs::RpcApi::new(&publisher, &api_path)?;
+        let stats = Stats::new(publisher.clone(), ccfg.api_path.clone());
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
@@ -655,6 +660,7 @@ impl Container {
         Ok(Container {
             cfg: ccfg,
             api_path,
+            stats,
             locked: BTreeMap::new(),
             roots: Roots(BTreeMap::new()),
             ctx,
@@ -1319,6 +1325,8 @@ impl Container {
 
     fn process_update(&mut self, batch: &mut UpdateBatch, mut update: db::Update) {
         use db::UpdateKind;
+        let mut locked = false;
+        let mut roots = false;
         let mut rels = RELS.take();
         fn add_rel(rels: &mut Pooled<FxHashSet<Path>>, rel: &Path) {
             if let Some(table) = Path::dirname(rel).and_then(Path::dirname) {
@@ -1328,6 +1336,7 @@ impl Container {
             }
         }
         for path in update.added_roots.drain(..) {
+            roots = true;
             match self.ctx.user.publisher.publish_default(path.clone()) {
                 Err(_) => (), // CR estokes: log this
                 Ok(dh) => {
@@ -1336,6 +1345,7 @@ impl Container {
             }
         }
         for path in update.removed_roots.drain(..) {
+            roots = true;
             self.roots.remove(&path);
         }
         for (path, value) in update.data.drain(..) {
@@ -1415,8 +1425,10 @@ impl Container {
         }
         for path in update.locked.drain(..) {
             self.locked.insert(path, true);
+            locked = true;
         }
         for path in update.unlocked.drain(..) {
+            locked = true;
             let remove = match self
                 .locked
                 .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -1437,6 +1449,14 @@ impl Container {
         self.update_refs(batch);
         if !rels.is_empty() {
             self.update_rels(rels, batch);
+        }
+        if locked {
+            // CR estokes: log this
+            let _: Result<_> = self.stats.set_locked(batch, &self.locked);
+        }
+        if roots {
+            // CR estokes: log this
+            let _: Result<_> = self.stats.set_roots(batch, &self.roots);
         }
     }
 

@@ -1239,6 +1239,33 @@ impl convert::From<u64> for Value {
     }
 }
 
+impl convert::From<usize> for Value {
+    fn from(v: usize) -> Value {
+        Value::U64(v as u64)
+    }
+}
+
+impl FromValue for usize {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::U64).ok_or(CantCast).and_then(|v| match v {
+            Value::U64(v) => Ok(v as usize),
+            _ => Err(CantCast),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::U32(v) | Value::V32(v) => Some(v as usize),
+            Value::U64(v) | Value::V64(v) => Some(v as usize),
+            Value::I32(v) | Value::Z32(v) => Some(v as usize),
+            Value::I64(v) | Value::Z64(v) => Some(v as usize),
+            _ => None,
+        }
+    }
+}
+     
 impl FromValue for i64 {
     type Error = CantCast;
 
@@ -1259,6 +1286,7 @@ impl FromValue for i64 {
         }
     }
 }
+
 
 impl convert::From<i64> for Value {
     fn from(v: i64) -> Value {
@@ -1431,6 +1459,16 @@ impl FromValue for bool {
             Value::True => Some(true),
             Value::False => Some(false),
             _ => None,
+        }
+    }
+}
+
+impl convert::From<bool> for Value {
+    fn from(v: bool) -> Value {
+        if v {
+            Value::True
+        } else {
+            Value::False
         }
     }
 }

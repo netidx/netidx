@@ -15,7 +15,7 @@ use netidx::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    publisher::SendResult,
+    publisher::{Publisher, SendResult, Val},
     subscriber::Value,
 };
 use sled;
@@ -24,6 +24,11 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
     str,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio::task;
 
@@ -1243,7 +1248,59 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
         .reduce(|| Update::new(), |u0, u1| u0.merge(u1))
 }
 
-async fn background_delete_task(data: sled::Tree) {
+struct Stats {
+    publisher: Publisher,
+    busy: Val,
+    queued: Val,
+    queued_cnt: AtomicUsize,
+    deleting: Val,
+}
+
+impl Stats {
+    fn new(publisher: Publisher, base_path: Path) -> Result<Arc<Self>> {
+        let busy = publisher.publish(base_path.append("busy"), false.into())?;
+        let queued = publisher.publish(base_path.append("queued"), 0.into())?;
+        let deleting =
+            publisher.publish(base_path.append("background-delete"), false.into())?;
+        Ok(Arc::new(Stats {
+            publisher,
+            busy,
+            queued,
+            queued_cnt: AtomicUsize::new(0),
+            deleting,
+        }))
+    }
+
+    fn inc_queued(&self) {
+        let n = self.queued_cnt.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut batch = self.publisher.start_batch();
+        self.queued.update(&mut batch, n.into());
+        task::spawn(batch.commit(Some(Duration::from_secs(10))));
+    }
+
+    async fn dec_queued(&self) {
+        let n = self.queued_cnt.fetch_sub(1, Ordering::Relaxed) - 1;
+        let mut batch = self.publisher.start_batch();
+        self.queued.update(&mut batch, n.into());
+        self.busy.update(&mut batch, true.into());
+        batch.commit(Some(Duration::from_secs(10))).await;
+    }
+
+    async fn set_busy(&self, busy: bool) {
+        let mut batch = self.publisher.start_batch();
+        self.busy.update(&mut batch, busy.into());
+        batch.commit(Some(Duration::from_secs(10))).await
+    }
+
+    async fn set_deleting(&self, deleting: bool) {
+        let mut batch = self.publisher.start_batch();
+        self.deleting.update(&mut batch, deleting.into());
+        batch.commit(Some(Duration::from_secs(10))).await
+    }
+}
+
+async fn background_delete_task(data: sled::Tree, stats: Arc<Stats>) {
+    stats.set_deleting(true).await;
     task::block_in_place(|| {
         for r in data.iter() {
             if let Ok((k, v)) = r {
@@ -1254,10 +1311,12 @@ async fn background_delete_task(data: sled::Tree) {
                 }
             }
         }
-    })
+    });
+    stats.set_deleting(false).await;
 }
 
 async fn commit_txns_task(
+    stats: Arc<Stats>,
     data: sled::Tree,
     locked: sled::Tree,
     roots: sled::Tree,
@@ -1282,6 +1341,7 @@ async fn commit_txns_task(
                 delete_task = None;
             }
             txn = incoming.select_next_some() => {
+                stats.dec_queued().await;
                 let (simple, delete) =
                     txn.0.iter().fold((true, false), |(simple, delete), op| match &op.0 {
                         TxnOp::CreateSheet { .. }
@@ -1316,9 +1376,11 @@ async fn commit_txns_task(
                     Err(_) => break,
                 }
                 if delete_required && delete_task.is_none() {
+                    let job = background_delete_task(data.clone(), stats.clone());
                     delete_required = false;
-                    delete_task = Some(task::spawn(background_delete_task(data.clone())));
+                    delete_task = Some(task::spawn(job));
                 }
+                stats.set_busy(false).await;
             }
             complete => break,
         }
@@ -1331,12 +1393,16 @@ pub(super) struct Db {
     locked: sled::Tree,
     roots: sled::Tree,
     submit_txn: UnboundedSender<Txn>,
+    stats: Arc<Stats>,
 }
 
 impl Db {
     pub(super) fn new(
         cfg: &ContainerConfig,
+        publisher: Publisher,
+        base_path: Path,
     ) -> Result<(Self, UnboundedReceiver<Update>)> {
+        let stats = Stats::new(publisher, base_path)?;
         let db = sled::Config::default()
             .use_compression(cfg.compress)
             .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
@@ -1349,17 +1415,22 @@ impl Db {
         let (tx_incoming, rx_incoming) = unbounded();
         let (tx_outgoing, rx_outgoing) = unbounded();
         task::spawn(commit_txns_task(
+            stats.clone(),
             data.clone(),
             locked.clone(),
             roots.clone(),
             rx_incoming,
             tx_outgoing,
         ));
-        Ok((Db { _db: db, data, locked, roots, submit_txn: tx_incoming }, rx_outgoing))
+        Ok((
+            Db { _db: db, data, locked, roots, submit_txn: tx_incoming, stats },
+            rx_outgoing,
+        ))
     }
 
     pub(super) fn commit(&self, txn: Txn) {
         let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
+        self.stats.inc_queued();
     }
 
     pub(super) async fn flush_async(&self) -> Result<()> {
