@@ -743,7 +743,7 @@ pub(super) fn start_add_table_rows_rpc(
         Value::from("add rows to a table"),
         vec![
             (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
-            (Arc::from("row"), (Value::Null, Value::from("the row names"))),
+            (Arc::from("row"), (Value::Null, Value::from("the row(s)"))),
         ]
         .into_iter()
         .collect(),
@@ -790,7 +790,7 @@ pub(super) fn start_add_table_cols_rpc(
         Value::from("add columns to a table"),
         vec![
             (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
-            (Arc::from("columns"), (Value::Null, Value::from("the column names"))),
+            (Arc::from("column"), (Value::Null, Value::from("the column(s)"))),
         ]
         .into_iter()
         .collect(),
