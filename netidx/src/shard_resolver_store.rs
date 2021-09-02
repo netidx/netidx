@@ -317,7 +317,7 @@ impl Shard {
             ToWrite::PublishDefaultWithFlags(path, flags) => {
                 (id, publish(store, path, true, Some(flags)))
             }
-            ToWrite::Unpublish(path) => {
+            ToWrite::Unpublish(path) | ToWrite::UnpublishDefault(path) => {
                 if !Path::is_absolute(&*path) {
                     (id, FromWrite::Error("absolute paths required".into()))
                 } else if let Some(r) = store.check_referral(&path) {
@@ -330,6 +330,18 @@ impl Shard {
         }));
         resp
     }
+}
+
+macro_rules! same {
+    ($con:expr, $replies:expr, $res:expr, $msg:expr) => {
+        for i in 1..$replies.len() {
+            let (_, v) = $replies[i].pop_front().unwrap();
+            if &v != $res {
+                panic!($msg);
+            }
+        }
+        $con.queue_send($res)?;
+    };
 }
 
 #[derive(Clone)]
@@ -461,23 +473,11 @@ impl Store {
                 } else {
                     match replies[0].pop_front().unwrap() {
                         (_, FromRead::Resolved(_)) => unreachable!(),
-                        (_, FromRead::Referral(r)) => {
-                            for i in 1..replies.len() {
-                                match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Referral(r_)) if r == r_ => (),
-                                    _ => panic!("desynced referral"),
-                                }
-                            }
-                            con.queue_send(&FromRead::Referral(r))?;
+                        (_, m @ FromRead::Referral(_)) => {
+                            same!(con, replies, &m, "desynced referral");
                         }
-                        (_, FromRead::Denied) => {
-                            for i in 1..replies.len() {
-                                match replies[i].pop_front().unwrap() {
-                                    (_, FromRead::Denied) => (),
-                                    _ => panic!("desynced permissions"),
-                                }
-                            }
-                            con.queue_send(&FromRead::Denied)?;
+                        (_, m @ FromRead::Denied) => {
+                            same!(con, replies, &m, "desynced permissions");
                         }
                         (_, FromRead::Error(e)) => {
                             for i in 1..replies.len() {
@@ -604,6 +604,11 @@ impl Store {
                         let s = self.shard(&path);
                         by_shard[s].push((n, ToWrite::Unpublish(path)));
                     }
+                    Some(ToWrite::UnpublishDefault(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::UnpublishDefault(path.clone())));
+                        }
+                    }
                     Some(ToWrite::PublishDefault(path)) => {
                         for b in by_shard.iter_mut() {
                             b.push((n, ToWrite::PublishDefault(path.clone())));
@@ -640,14 +645,41 @@ impl Store {
                 .collect::<result::Result<Vec<Pooled<WriteR>>, Canceled>>()?;
             if let Some(ref mut c) = con {
                 for i in 0..n {
-                    let r = replies
-                        .iter_mut()
-                        .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
-                        .unwrap()
-                        .pop_front()
-                        .unwrap()
-                        .1;
-                    c.queue_send(&r)?;
+                    if replies.len() == 1
+                        || !replies
+                            .iter()
+                            .all(|v| v.front().map(|v| i == v.0).unwrap_or(false))
+                    {
+                        let r = replies
+                            .iter_mut()
+                            .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
+                            .unwrap()
+                            .pop_front()
+                            .unwrap()
+                            .1;
+                        c.queue_send(&r)?;
+                    } else {
+                        match replies[0].pop_front().unwrap() {
+                            (_, m @ FromWrite::Denied) => {
+                                same!(c, replies, &m, "desynced permissions");
+                            }
+                            (_, FromWrite::Error(e)) => {
+                                for i in 1..replies.len() {
+                                    replies[i].pop_front().unwrap();
+                                }
+                                c.queue_send(&FromWrite::Error(e))?;
+                            }
+                            (_, m @ FromWrite::Published) => {
+                                same!(c, replies, &m, "desynced publish");
+                            }
+                            (_, m @ FromWrite::Referral(_)) => {
+                                same!(c, replies, &m, "desynced referrals");
+                            }
+                            (_, m @ FromWrite::Unpublished) => {
+                                same!(c, replies, &m, "desynced unpublish");
+                            }
+                        }
+                    }
                 }
                 c.flush().await?;
             }

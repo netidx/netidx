@@ -675,6 +675,8 @@ pub enum ToWrite {
     PublishWithFlags(Path, u16),
     /// Add a default publisher to path and set associated flags
     PublishDefaultWithFlags(Path, u16),
+    /// Unpublish a default publisher
+    UnpublishDefault(Path),
 }
 
 impl Pack for ToWrite {
@@ -691,6 +693,7 @@ impl Pack for ToWrite {
             ToWrite::PublishDefaultWithFlags(p, f) => {
                 <Path as Pack>::encoded_len(p) + <u16 as Pack>::encoded_len(f)
             }
+            ToWrite::UnpublishDefault(p) => <Path as Pack>::encoded_len(p),
         }
     }
 
@@ -720,6 +723,10 @@ impl Pack for ToWrite {
                 <Path as Pack>::encode(p, buf)?;
                 <u16 as Pack>::encode(f, buf)
             }
+            ToWrite::UnpublishDefault(p) => {
+                buf.put_u8(7);
+                <Path as Pack>::encode(p, buf)
+            }
         }
     }
 
@@ -739,6 +746,9 @@ impl Pack for ToWrite {
                 let p = <Path as Pack>::decode(buf)?;
                 let f = <u16 as Pack>::decode(buf)?;
                 Ok(ToWrite::PublishDefaultWithFlags(p, f))
+            }
+            7 => {
+                Ok(ToWrite::UnpublishDefault(<Path as Pack>::decode(buf)?))
             }
             _ => Err(Error::UnknownTag),
         }

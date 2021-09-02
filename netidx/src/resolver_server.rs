@@ -161,6 +161,8 @@ async fn client_loop_write(
                                     c.queue_send(&FromWrite::Published)?,
                                 ToWrite::Unpublish(_) =>
                                     c.queue_send(&FromWrite::Unpublished)?,
+                                ToWrite::UnpublishDefault(_) =>
+                                    c.queue_send(&FromWrite::Unpublished)?,
                                 ToWrite::Clear => {
                                     store.handle_clear(
                                         uifo.clone(),

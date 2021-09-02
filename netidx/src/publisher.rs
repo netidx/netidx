@@ -476,7 +476,7 @@ impl Drop for DefaultHandle {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.default.remove(self.path.as_ref());
-            pb.to_unpublish.insert(self.path.clone());
+            pb.to_unpublish_default.insert(self.path.clone());
         }
     }
 }
@@ -593,6 +593,7 @@ struct PublisherInner {
     to_publish: Pooled<HashMap<Path, Option<u16>>>,
     to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
     to_unpublish: Pooled<HashSet<Path>>,
+    to_unpublish_default: Pooled<HashSet<Path>>,
     to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
@@ -755,6 +756,7 @@ impl Publisher {
             to_publish: TOPUB.take(),
             to_publish_default: TOPUB.take(),
             to_unpublish: TOUPUB.take(),
+            to_unpublish_default: TOUPUB.take(),
             to_unsubscribe: TOUSUB.take(),
             publish_triggered: false,
             trigger_publish: tx_trigger,
@@ -1607,6 +1609,7 @@ async fn publish_loop(
             let mut to_publish;
             let mut to_publish_default;
             let mut to_unpublish;
+            let mut to_unpublish_default;
             let mut to_unsubscribe;
             let resolver = {
                 let mut pb = publisher.0.lock();
@@ -1614,6 +1617,8 @@ async fn publish_loop(
                 to_publish_default =
                     mem::replace(&mut pb.to_publish_default, TOPUB.take());
                 to_unpublish = mem::replace(&mut pb.to_unpublish, TOUPUB.take());
+                to_unpublish_default =
+                    mem::replace(&mut pb.to_unpublish_default, TOUPUB.take());
                 to_unsubscribe = mem::replace(&mut pb.to_unsubscribe, TOUSUB.take());
                 pb.publish_triggered = false;
                 pb.resolver.clone()
@@ -1633,6 +1638,11 @@ async fn publish_loop(
             if to_unpublish.len() > 0 {
                 if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
                     error!("failed to unpublish some paths {} will retry", e)
+                }
+            }
+            if to_unpublish_default.len() > 0 {
+                if let Err(e) = resolver.unpublish_default(to_unpublish_default.drain()).await {
+                    error!("failed to unpublish default some paths {} will retry", e)
                 }
             }
             if to_unsubscribe.len() > 0 {
