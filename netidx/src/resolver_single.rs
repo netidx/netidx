@@ -1,8 +1,8 @@
 use crate::{
     channel::Channel,
     chars::Chars,
-    path::Path,
     os::{self, ClientCtx, Krb5Ctx},
+    path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
@@ -24,11 +24,7 @@ use log::{debug, info, warn};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
-    cmp::max,
-    collections::HashMap,
-    fmt::Debug,
-    net::SocketAddr,
-    sync::Arc,
+    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -571,7 +567,8 @@ async fn write_mgr(
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
-    let published: Arc<RwLock<HashMap<Path, ToWrite>>> = Arc::new(RwLock::new(HashMap::new()));
+    let published: Arc<RwLock<HashMap<Path, ToWrite>>> =
+        Arc::new(RwLock::new(HashMap::new()));
     let mut senders = {
         let mut senders = Vec::new();
         for addr in resolver.addrs.iter() {
@@ -611,7 +608,10 @@ async fn write_mgr(
                     | ToWrite::PublishDefaultWithFlags(p, _) => {
                         published.insert(p.clone(), tx.clone());
                     }
-                    ToWrite::Unpublish(_) | ToWrite::Clear | ToWrite::Heartbeat => (),
+                    ToWrite::Unpublish(_)
+                    | ToWrite::UnpublishDefault(_)
+                    | ToWrite::Clear
+                    | ToWrite::Heartbeat => (),
                 }
             }
         }
