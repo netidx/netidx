@@ -1022,27 +1022,37 @@ fn del_table_rows(
     res
 }
 
+fn is_parent_locked(locked: &sled::Tree, path: &Path) -> Result<bool> {
+    let mut iter = locked.range(..path.as_bytes());
+    loop {
+        match iter.next_back() {
+            None => break Ok(false),
+            Some(r) => {
+                let (k, v) = r?;
+                let k = str::from_utf8(&k)?;
+                if Path::is_parent(k, &path) {
+                    break Ok(&*v == &[1u8])
+                }
+            }
+        }
+    }
+}
+
 fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    let key = path.as_bytes();
-    locked.insert(key, &[1u8])?;
+    if is_parent_locked(locked, &path)? {
+        locked.remove(path.as_bytes())?;
+    } else {
+        locked.insert(path.as_bytes(), &[1u8])?;
+    }
     pending.locked.push(path);
     Ok(())
 }
 
 fn set_unlocked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    let key = path.as_bytes();
-    let remove = match locked.range(..key).next_back() {
-        None => true,
-        Some(r) => {
-            let (k, v) = r?;
-            let k = str::from_utf8(&k)?;
-            !(Path::is_parent(k, &path) && &*v == &[1u8])
-        }
-    };
-    if remove {
-        locked.remove(key)?;
+    if !is_parent_locked(locked, &path)? {
+        locked.remove(path.as_bytes())?;
     } else {
-        locked.insert(key, &[0u8])?;
+        locked.insert(path.as_bytes(), &[0u8])?;
     }
     pending.unlocked.push(path);
     Ok(())
