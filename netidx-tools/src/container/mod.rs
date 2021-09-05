@@ -137,6 +137,7 @@ impl Published {
 
 #[derive(Debug)]
 enum UserEv {
+    OnWriteEvent(Value),
     Ref(Path, Value),
     Rel,
 }
@@ -360,7 +361,8 @@ impl Ref {
                     None
                 }
             }
-            vm::Event::User(UserEv::Rel)
+            vm::Event::User(UserEv::OnWriteEvent(_))
+            | vm::Event::User(UserEv::Rel)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
             | vm::Event::Variable(_, _) => None,
@@ -539,6 +541,56 @@ impl Apply<Lc, UserEv> for Rel {
     }
 }
 
+pub(crate) struct OnWriteEvent {
+    cur: Option<Value>,
+    invalid: bool,
+}
+
+impl Register<Lc, UserEv> for OnWriteEvent {
+    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
+        let f: InitFn<Lc, UserEv> = Arc::new(|_, from, _| {
+            Box::new(OnWriteEvent { cur: None, invalid: from.len() > 0 })
+        });
+        ctx.functions.insert("event".into(), f);
+    }
+}
+
+impl Apply<Lc, UserEv> for OnWriteEvent {
+    fn current(&self) -> Option<Value> {
+        if self.invalid {
+            OnWriteEvent::err()
+        } else {
+            self.cur.as_ref().cloned()
+        }
+    }
+
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<Lc, UserEv>,
+        from: &mut [Node<Lc, UserEv>],
+        event: &vm::Event<UserEv>,
+    ) -> Option<Value> {
+        self.invalid = from.len() > 0;
+        match event {
+            vm::Event::Variable(_, _)
+            | vm::Event::Netidx(_, _)
+            | vm::Event::Rpc(_, _)
+            | vm::Event::User(UserEv::Ref(_, _))
+            | vm::Event::User(UserEv::Rel) => None,
+            vm::Event::User(UserEv::OnWriteEvent(value)) => {
+                self.cur = Some(value.clone());
+                self.current()
+            }
+        }
+    }
+}
+
+impl OnWriteEvent {
+    fn err() -> Option<Value> {
+        Some(Value::Error(Chars::from("event(): expected 0 arguments")))
+    }
+}
+
 #[derive(StructOpt, Debug)]
 pub(super) struct ContainerConfig {
     #[structopt(
@@ -657,6 +709,7 @@ impl Container {
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
         Rel::register(&mut ctx);
+        OnWriteEvent::register(&mut ctx);
         Ok(Container {
             cfg: ccfg,
             api_path,
@@ -1001,8 +1054,7 @@ impl Container {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
                         {
-                            let path = fifo.data_path.clone();
-                            let ev = vm::Event::User(UserEv::Ref(path, req.value));
+                            let ev = vm::Event::User(UserEv::OnWriteEvent(req.value));
                             node.update(&mut self.ctx, &ev);
                             self.update_refs(batch);
                         }
