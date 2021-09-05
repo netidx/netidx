@@ -79,6 +79,13 @@
     initially if the trigger has a current value. This allows much
     easier use of the call function in event handlers.
 
+  - Fix additional resolver server bugs related to removal of default
+    publishers. Due to protocol changes 0.9 publishers require a 0.9
+    resolver server if they use the default publisher feature. Old
+    publishers will still work with the 0.9 resolver server, however
+    if they use default publishers it is recommended to recompile
+    against 0.9.
+
 * 0.8.1 netidx, netidx-tools:
   - fix a bug in the resolver server which would cause it to hang on
     to default publishers until the process is restarted even if the

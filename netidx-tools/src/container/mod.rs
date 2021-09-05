@@ -1013,14 +1013,17 @@ impl Container {
     }
 
     fn is_locked(&self, path: &Path) -> bool {
-        self.locked
-            .range::<str, (Bound<&str>, Bound<&str>)>((
-                Bound::Unbounded,
-                Bound::Included(path.as_ref()),
-            ))
-            .next_back()
-            .map(|(p, locked)| if Path::is_parent(p, &path) { *locked } else { false })
-            .unwrap_or(false)
+        let mut iter = self.locked.range::<str, (Bound<&str>, Bound<&str>)>((
+            Bound::Unbounded,
+            Bound::Included(path.as_ref()),
+        ));
+        loop {
+            match iter.next_back() {
+                None => break false,
+                Some((p, locked)) if Path::is_parent(p, &path) => break *locked,
+                Some(_) => (),
+            }
+        }
     }
 
     fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
