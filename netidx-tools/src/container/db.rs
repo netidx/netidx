@@ -1022,8 +1022,12 @@ fn del_table_rows(
     res
 }
 
-fn is_parent_locked(locked: &sled::Tree, path: &Path) -> Result<bool> {
-    let mut iter = locked.range(..path.as_bytes());
+fn is_locked(locked: &sled::Tree, path: &Path, parent_only: bool) -> Result<bool> {
+    let mut iter = if parent_only {
+        locked.range(..path.as_bytes())
+    } else {
+        locked.range(..=path.as_bytes())
+    };
     loop {
         match iter.next_back() {
             None => break Ok(false),
@@ -1039,7 +1043,7 @@ fn is_parent_locked(locked: &sled::Tree, path: &Path) -> Result<bool> {
 }
 
 fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    if is_parent_locked(locked, &path)? {
+    if is_locked(locked, &path, true)? {
         locked.remove(path.as_bytes())?;
     } else {
         locked.insert(path.as_bytes(), &[1u8])?;
@@ -1049,7 +1053,7 @@ fn set_locked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<(
 }
 
 fn set_unlocked(locked: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
-    if !is_parent_locked(locked, &path)? {
+    if !is_locked(locked, &path, true)? {
         locked.remove(path.as_bytes())?;
     } else {
         locked.insert(path.as_bytes(), &[0u8])?;

@@ -1012,10 +1012,14 @@ impl Container {
         }
     }
 
-    fn is_locked(&self, path: &Path) -> bool {
+    fn is_locked_gen(&self, path: &Path, parent_only: bool) -> bool {
         let mut iter = self.locked.range::<str, (Bound<&str>, Bound<&str>)>((
             Bound::Unbounded,
-            Bound::Included(path.as_ref()),
+            if parent_only {
+                Bound::Excluded(path.as_ref())
+            } else {
+                Bound::Included(path.as_ref())
+            },
         ));
         loop {
             match iter.next_back() {
@@ -1024,6 +1028,10 @@ impl Container {
                 Some(_) => (),
             }
         }
+    }
+
+    fn is_locked(&self, path: &Path) -> bool {
+        self.is_locked_gen(path, false)
     }
 
     fn process_publish_request(&mut self, path: Path, reply: oneshot::Sender<()>) {
@@ -1459,22 +1467,15 @@ impl Container {
         }
         for path in update.locked.drain(..) {
             locked = true;
-            self.locked.insert(path, true);
+            if self.is_locked_gen(&path, true) {
+                self.locked.remove(&path);
+            } else {
+                self.locked.insert(path, true);
+            }
         }
         for path in update.unlocked.drain(..) {
             locked = true;
-            let remove = match self
-                .locked
-                .range::<str, (Bound<&str>, Bound<&str>)>((
-                    Unbounded,
-                    Excluded(path.as_ref()),
-                ))
-                .next_back()
-            {
-                None => true,
-                Some((key, locked)) => !(path.starts_with(key.as_ref()) && *locked),
-            };
-            if remove {
+            if !self.is_locked_gen(&path, true) {
                 self.locked.remove(&path);
             } else {
                 self.locked.insert(path, false);
