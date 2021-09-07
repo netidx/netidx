@@ -21,9 +21,8 @@
 //!
 //! For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 //!
-//! Here is an example service that publishes a cpu temperature to
-//! part of the directory, along with the corresponding subscriber
-//! that consumes the data.
+//! Here is an example service that publishes a cpu temperature, along
+//! with the corresponding subscriber that consumes the data.
 //!
 //! # Publisher
 //! ```no_run
