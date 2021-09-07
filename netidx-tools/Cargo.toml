@@ -37,7 +37,7 @@ indexmap = "1"
 log = "0.4"
 mapr = "0.8"
 netidx-archive = { path = "../netidx-archive", version = "0.9", default_features = false }
-netidx-core = { path = "../netidx-core", version = "0.7" }
+netidx-core = { path = "../netidx-core", version = "0.9" }
 netidx = { path = "../netidx", version = "0.9" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.9", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.9" }

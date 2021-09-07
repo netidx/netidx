@@ -28,7 +28,7 @@ futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
 serde = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-netidx-core = { path = "../netidx-core", version = "0.7" }
+netidx-core = { path = "../netidx-core", version = "0.9" }
 netidx = { path = "../netidx", version = "0.9" , default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.9" }
 netidx-protocols = { path = "../netidx-protocols", version = "0.9", default_features = false }

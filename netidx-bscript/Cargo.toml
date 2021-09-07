@@ -18,7 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 combine = "4"
 fxhash = "0.2"
 lazy_static = "1"
-netidx-core = { path = "../netidx-core", version = "0.7" }
+netidx-core = { path = "../netidx-core", version = "0.9" }
 netidx = { path = "../netidx", version = "0.9" }
 regex = "1"
 serde = "1"
