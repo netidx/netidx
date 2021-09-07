@@ -21,7 +21,6 @@ that consumes the data.
 
 # Publisher
 ```rust
-fn get_cpu_temp() -> f32 { 42. }
 use netidx::{
     publisher::{Publisher, Value, BindCfg},
     config::Config,
@@ -30,8 +29,10 @@ use netidx::{
 };
 use tokio::time;
 use std::time::Duration;
-
 use anyhow::Result;
+
+fn get_cpu_temp() -> f32 { 42. }
+
 async fn run() -> Result<()> {
     // load the site cluster config. You can also just use a file.
     let cfg = Config::load_default()?;
