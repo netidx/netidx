@@ -21,7 +21,7 @@ that consumes the data.
 
 # Publisher
 ```rust
-# fn get_cpu_temp() -> f32 { 42. }
+fn get_cpu_temp() -> f32 { 42. }
 use netidx::{
     publisher::{Publisher, Value, BindCfg},
     config::Config,
@@ -31,28 +31,28 @@ use netidx::{
 use tokio::time;
 use std::time::Duration;
 
-# use anyhow::Result;
-# async fn run() -> Result<()> {
-// load the site cluster config. You can also just use a file.
-let cfg = Config::load_default()?;
+use anyhow::Result;
+async fn run() -> Result<()> {
+    // load the site cluster config. You can also just use a file.
+    let cfg = Config::load_default()?;
 
-// no authentication (kerberos v5 is the other option)
-// listen on any unique address matching 192.168.0.0/16
-let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
+    // no authentication (kerberos v5 is the other option)
+    // listen on any unique address matching 192.168.0.0/16
+    let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
 
-let temp = publisher.publish(
-    Path::from("/hw/washu-chan/cpu-temp"),
-    Value::F32(get_cpu_temp())
-)?;
+    let temp = publisher.publish(
+        Path::from("/hw/washu-chan/cpu-temp"),
+        Value::F32(get_cpu_temp())
+    )?;
 
-loop {
-    time::sleep(Duration::from_millis(500)).await;
-    let mut batch = publisher.start_batch();
-    temp.update(&mut batch, Value::F32(get_cpu_temp()));
-    batch.commit(None).await;
+    loop {
+        time::sleep(Duration::from_millis(500)).await;
+        let mut batch = publisher.start_batch();
+        temp.update(&mut batch, Value::F32(get_cpu_temp()));
+        batch.commit(None).await;
+    }
+    Ok(())
 }
-# Ok(())
-# };
 ```
 
 # Subscriber
@@ -64,24 +64,24 @@ use netidx::{
     path::Path,
 };
 use futures::{prelude::*, channel::mpsc};
-# use anyhow::Result;
+use anyhow::Result;
 
-# async fn run() -> Result<()> {
-let cfg = Config::load_default()?;
-let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
-let path = Path::from("/hw/washu-chan/cpu-temp");
-let temp = subscriber.subscribe_one(path, None).await?;
-println!("washu-chan cpu temp is: {:?}", temp.last());
+async fn run() -> Result<()> {
+    let cfg = Config::load_default()?;
+    let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
+    let path = Path::from("/hw/washu-chan/cpu-temp");
+    let temp = subscriber.subscribe_one(path, None).await?;
+    println!("washu-chan cpu temp is: {:?}", temp.last());
 
-let (tx, mut rx) = mpsc::channel(10);
-temp.updates(UpdatesFlags::empty(), tx);
-while let Some(mut batch) = rx.next().await {
-    for (_, v) in batch.drain(..) {
-        println!("washu-chan cpu temp is: {:?}", v);
+    let (tx, mut rx) = mpsc::channel(10);
+    temp.updates(UpdatesFlags::empty(), tx);
+    while let Some(mut batch) = rx.next().await {
+        for (_, v) in batch.drain(..) {
+            println!("washu-chan cpu temp is: {:?}", v);
+        }
     }
+    Ok(())
 }
-# Ok(())
-# };
 ```
 
 Published values always have a value, and new subscribers receive
