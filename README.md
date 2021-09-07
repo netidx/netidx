@@ -1,4 +1,3 @@
-For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 What is netidx?
 
 - It's a directory service; like LDAP or X.500
@@ -13,6 +12,8 @@ What is netidx?
 - It's a publish/subscribe messaging system; like MQTT
   - Except there is no centralized broker, communication happens directly between publishers and subscribers
   - Message archiving and other services provided by MQTT brokers can be provided by normal publishers, or omitted if they aren't needed
+
+For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 
 Here is an example service that publishes a cpu temperature to
 part of the directory, along with the corresponding subscriber
