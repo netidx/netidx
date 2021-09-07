@@ -20,7 +20,7 @@ part of the directory, along with the corresponding subscriber
 that consumes the data.
 
 # Publisher
-```no_run
+```rust
 # fn get_cpu_temp() -> f32 { 42. }
 use netidx::{
     publisher::{Publisher, Value, BindCfg},
@@ -56,7 +56,7 @@ loop {
 ```
 
 # Subscriber
-```no_run
+```rust
 use netidx::{
     subscriber::{Subscriber, UpdatesFlags},
     config::Config,
