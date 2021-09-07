@@ -6,10 +6,9 @@ What is netidx?
   - It's distributed, lightweight, and scalable
 
 - It's a distributed tuple space; like JavaSpaces, zookeeper, memcached
-  - It's distributed; the directory server keeps track of where things are, publishers keep the data.
-  - It's a tuple space; each tuple is identified by a unique path in
-    the directory server, and holds a flexible set of primitive data
-    types
+  - The directory server keeps track of where things are, publishers keep the data.
+  - Each tuple is identified by a unique path in the directory server,
+    and holds a flexible set of primitive data types
 
 - It's a publish/subscribe messaging system; like MQTT
   - Except there is no centralized broker, communication happens
