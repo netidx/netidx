@@ -1,18 +1,26 @@
 For more details see the [netidx book](https://estokes.github.io/netidx-book/)
+What is netidx?
 
-Netidx is like DNS for values. With netidx you can name individual
-values in your program, and other programs can find and subscribe to
-those values securely over the network.
+- It's a directory service; like LDAP or X.500
+  - It keeps track of a hierarchical directory of things
+  - It's browsable, discoverable, and queryable
+  - It's distributed, lightweight, and scalable
 
-Like DNS netidx maintains a hierarchical namespace in a resolver
-server. Publishers tell the resolver about values they
-have. Subscribers ask the resolver for values they want. Once a
-subscriber knows where to find a value it is looking for, it
-connects directly to the publisher, and the resolver is no longer
-involved.
+- It's a distributed tuple space; like JavaSpaces, zookeeper, memcached
+  - It's distributed; the directory server keeps track of where things are, publishers keep the data.
+  - It's a tuple space; each tuple is identified by a unique path in the directory server, and holds a flexible set of primitive data types
 
- # Publisher
- ```rust
+- It's a publish/subscribe messaging system; like MQTT
+  - Except there is no centralized broker, communication happens directly between publishers and subscribers
+  - Message archiving and other services provided by MQTT brokers can be provided by normal publishers, or omitted if they aren't needed
+
+Here is an example service that publishes a cpu temperature to
+part of the directory, along with the corresponding subscriber
+that consumes the data.
+
+# Publisher
+```no_run
+# fn get_cpu_temp() -> f32 { 42. }
 use netidx::{
     publisher::{Publisher, Value, BindCfg},
     config::Config,
@@ -22,6 +30,8 @@ use netidx::{
 use tokio::time;
 use std::time::Duration;
 
+# use anyhow::Result;
+# async fn run() -> Result<()> {
 // load the site cluster config. You can also just use a file.
 let cfg = Config::load_default()?;
 
@@ -33,17 +43,19 @@ let temp = publisher.publish(
     Path::from("/hw/washu-chan/cpu-temp"),
     Value::F32(get_cpu_temp())
 )?;
-publisher.flush(None).await;
 
 loop {
     time::sleep(Duration::from_millis(500)).await;
-    temp.update(Value::F32(get_cpu_temp()));
-    publisher.flush(None).await;
+    let mut batch = publisher.start_batch();
+    temp.update(&mut batch, Value::F32(get_cpu_temp()));
+    batch.commit(None).await;
 }
+# Ok(())
+# };
 ```
 
- # Subscriber
- ```rust
+# Subscriber
+```no_run
 use netidx::{
     subscriber::{Subscriber, UpdatesFlags},
     config::Config,
@@ -51,7 +63,9 @@ use netidx::{
     path::Path,
 };
 use futures::{prelude::*, channel::mpsc};
+# use anyhow::Result;
 
+# async fn run() -> Result<()> {
 let cfg = Config::load_default()?;
 let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
 let path = Path::from("/hw/washu-chan/cpu-temp");
@@ -65,14 +79,16 @@ while let Some(mut batch) = rx.next().await {
         println!("washu-chan cpu temp is: {:?}", v);
     }
 }
+# Ok(())
+# };
 ```
 
 Published values always have a value, and new subscribers receive
 the most recent published value initially. Thereafter a
 subscription is a lossless ordered stream, just like a tcp
-connection, except that instead of bytes Values are the unit of
-transmission. Since the subscriber can write values back to the
-publisher, the connection is bidirectional, also like a Tcp
+connection, except that instead of bytes `publisher::Value` is the
+unit of transmission. Since the subscriber can write values back
+to the publisher, the connection is bidirectional, also like a Tcp
 stream.
 
 Values include many useful primitives, including zero copy bytes
@@ -82,39 +98,12 @@ it's advised to stick to primitives and express structure with
 muliple published values in a hierarchy, since this makes your
 system more discoverable, and is also quite efficient.
 
-# Browser
+netidx includes optional support for kerberos v5 (including Active
+Directory). If enabled, all components will do mutual
+authentication between the resolver, subscriber, and publisher as
+well as encryption of all data on the wire.
 
-In the case where you publish values in a regular structure you can
-use netidx browser to visualize part of your tree as a table. A row in
-the table is made of a root node with a child for each column.  If a
-subtree consists of row nodes that share the same columns most of the
-time then it can be drawn as a table in the browser. e.g.
-
-```
-/bench/0/0
-/bench/0/1
-/bench/0/2
-```
-
-is one row, the next row is
-
-```
-/bench/1/0
-/bench/1/1
-/bench/1/2
-```
-
-Since these two rows both have columns 0, 1, and 2, they would be drawn
-by the browser as two rows 0, and 1, each with three columns 0, 1, and 2.
-
-# Security
-
-Many environments require strong security, whereas in others it may
-not be necessary. To handle both of these cases netidx includes optional
-support for kerberos v5 (a.k.a. ms active directory). If enabled,
-all components will do mutual authentication between the resolver,
-subscriber, and publisher as well as encryption of all data on the
-wire. In addition to authentication, the resolver server in krb5
-mode maintains and enforces authorization permissions for the
-entire namespace, so whoever runs the resolvers can centrally
-enforce who can publish where, and who can subscribe to what.
+In krb5 mode the resolver server maintains and enforces a set of
+authorization permissions for the entire namespace. The system
+administrator can centrally enforce who can publish where, and who
+can subscribe to what.

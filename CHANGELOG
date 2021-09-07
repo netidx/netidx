@@ -19,15 +19,15 @@
     previous api.
 
     - most serious, you had to remember to call flush after updating
-      values, if you forgot nothing would be sent. Now there is a
+      values, if you forgot, nothing would be sent. Now there is a
       structure marked with must_use so you can't accidentially forget
       to flush updates.
 
-    - It wasn't possible with the old api to have multiple concurrent
-      processes using the same publisher but retaining control of
-      their own batching. This meant that it was sometimes necessary
-      to create separate publishers within the same process just to
-      get control of the grouping of updates (e.g. in the recorder).
+    - It wasn't possible with the old api to have concurrent tasks
+      using the same publisher but retaining control of their own
+      batching. This meant that it was sometimes necessary to create
+      separate publishers within the same process just to get control
+      of the grouping of updates (e.g. in the recorder).
 
     - The use of SocketAddr as a unique id for a client was dangerous,
       it has been replaced everywhere with a unique id.
@@ -48,14 +48,15 @@
     and a fully published one. Uses less memory than a full publish
     but looks identical to subscribers.
 
-  - Paths are now based by ArcStr instead of Arc<str>, this saves at
-    least 1 word per path, and makes Path::clone slightly
-    cheaper. This can add up to a significant memory savings in the
-    resolver server or a large publisher/subscriber.
+  - Paths are now based by ArcStr instead of Arc<str>, this saves 1
+    word per path, and makes Path::clone slightly cheaper. This can
+    add up to a significant memory savings in the resolver server or a
+    large publisher/subscriber (e.g. 10 million paths costs 800 MiB
+    less after this change).
 
   - Documented the rpc module.
 
-  - rpc protocol now allows procedure arguments to be specified
+  - the rpc protocol now allows procedure arguments to be specified
     multiple times. The server side will receive a list of all values
     specified for each key.
 
@@ -66,8 +67,8 @@
   - fix: in bscript multiple concurrent rpc calls to the same function
     could result in return values getting mixed up or duplicated.
 
-  - added CALL command to the subscriber tool, easily call netidx RPCs
-    from shell scripts.
+  - added CALL command to call an RPC from the subscriber command line
+    tool.
 
   - new tool, container, a persistant, bscript enabled, value
     store. Kinda like a distributed spreadsheet. Kinda like a nosql

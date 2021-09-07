@@ -1,13 +1,21 @@
-//! Netidx is like DNS for values. With netidx you can name individual
-//! values in your program, and other programs can find and subscribe
-//! to those values securely over the network.
+//! What is netidx?
 //!
-//! Like DNS netidx maintains a hierarchical namespace in a resolver
-//! server. Publishers tell the resolver about values they
-//! have. Subscribers ask the resolver for values they want. Once a
-//! subscriber knows where to find a value it is looking for, it
-//! connects directly to the publisher, and the resolver is no longer
-//! involved.
+//! - It's a directory service; like LDAP or X.500
+//!   - It keeps track of a hierarchical directory of things
+//!   - It's browsable, discoverable, and queryable
+//!   - It's distributed, lightweight, and scalable
+//!
+//! - It's a distributed tuple space; like JavaSpaces, zookeeper, memcached
+//!   - It's distributed; the directory server keeps track of where things are, publishers keep the data.
+//!   - It's a tuple space; each tuple is identified by a unique path in the directory server, and holds a flexible set of primitive data types
+//!
+//! - It's a publish/subscribe messaging system; like MQTT
+//!   - Except there is no centralized broker, communication happens directly between publishers and subscribers
+//!   - Message archiving and other services provided by MQTT brokers can be provided by normal publishers, or omitted if they aren't needed
+//!
+//! Here is an example service that publishes a cpu temperature to
+//! part of the directory, along with the corresponding subscriber
+//! that consumes the data.
 //!
 //! # Publisher
 //! ```no_run
@@ -89,16 +97,15 @@
 //! muliple published values in a hierarchy, since this makes your
 //! system more discoverable, and is also quite efficient.
 //!
-//! In many environments security is a requirement, whereas in others
-//! it's not necessary. To handle both of these cases netidx includes
-//! optional support for kerberos v5 (including Active Directory). If
-//! enabled, all components will do mutual authentication between the
-//! resolver, subscriber, and publisher as well as encryption of all
-//! data on the wire. In addition to authentication, the resolver
-//! server in krb5 mode maintains and enforces authorization
-//! permissions for the entire namespace, so the resolvers can
-//! centrally enforce who can publish where, and who can subscribe to
-//! what.
+//! netidx includes optional support for kerberos v5 (including Active
+//! Directory). If enabled, all components will do mutual
+//! authentication between the resolver, subscriber, and publisher as
+//! well as encryption of all data on the wire.
+
+//! In krb5 mode the resolver server maintains and enforces a set of
+//! authorization permissions for the entire namespace. The system
+//! administrator can centrally enforce who can publish where, and who
+//! can subscribe to what.
 //!
 //! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
 //! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
