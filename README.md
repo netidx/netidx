@@ -16,6 +16,8 @@ What is netidx?
     directly between publishers and subscribers
   - Message archiving and other services provided by MQTT brokers can
     be provided by normal publishers, or omitted if they aren't needed
+  - Because it has no central bottlenecks it scales to huge message
+    rates
 
 For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 
