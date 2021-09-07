@@ -5,7 +5,7 @@ What is netidx?
   - It's browsable and queryable
   - It's distributed, lightweight, and scalable
 
-- It's a tuple space; like JavaSpaces, zookeeper, memcached
+- It's a tuple space; like JavaSpaces, zookeeper, or memcached
   - Except it's distributed. The directory server keeps track of where
     things are, publishers keep the data.
   - Each tuple is identified by a unique path in the directory server,
