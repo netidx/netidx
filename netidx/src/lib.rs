@@ -2,7 +2,7 @@
 //!
 //! - It's a directory service; like LDAP or X.500
 //!   - It keeps track of a hierarchical directory of things
-//!   - It's browsable, discoverable, and queryable
+//!   - It's browsable and queryable
 //!   - It's distributed, lightweight, and scalable
 //!
 //! - It's a tuple space; like JavaSpaces, zookeeper, memcached
