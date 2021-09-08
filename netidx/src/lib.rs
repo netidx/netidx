@@ -12,7 +12,7 @@
 //!   server, and holds a flexible set of primitive data types
 //!
 //! - It's a publish/subscribe messaging system; like MQTT
-//!   - Except there is no centralized broker, communication happens
+//!   - Except there is no centralized broker. Communication happens
 //!   directly between publishers and subscribers
 //!   - Message archiving and other services provided by MQTT brokers
 //!   can be provided by normal publishers, or omitted if they aren't
@@ -89,26 +89,25 @@
 //! # };
 //! ```
 //!
-//! Published values always have a value, and new subscribers receive
-//! the most recent published value initially. Thereafter a
-//! subscription is a lossless ordered stream, just like a tcp
-//! connection, except that instead of bytes `publisher::Value` is the
-//! unit of transmission. Since the subscriber can write values back
-//! to the publisher, the connection is bidirectional, also like a Tcp
-//! stream.
+//! Published things always have a value, which new subscribers receive
+//! initially. Thereafter a subscription is a lossless ordered stream,
+//! just like a tcp connection, except that instead of bytes
+//! `publisher::Value` is the unit of transmission. Since the subscriber
+//! can write values back to the publisher, the connection is
+//! bidirectional, also like a Tcp stream.
 //!
 //! Values include many useful primitives, including zero copy bytes
 //! buffers (using the awesome bytes crate), so you can easily use
 //! netidx to efficiently send any kind of message you like. However
 //! it's advised to stick to primitives and express structure with
-//! muliple published values in a hierarchy, since this makes your
+//! multiple published values in a hierarchy, since this makes your
 //! system more discoverable, and is also quite efficient.
 //!
 //! netidx includes optional support for kerberos v5 (including Active
 //! Directory). If enabled, all components will do mutual
 //! authentication between the resolver, subscriber, and publisher as
 //! well as encryption of all data on the wire.
-
+//!
 //! In krb5 mode the resolver server maintains and enforces a set of
 //! authorization permissions for the entire namespace. The system
 //! administrator can centrally enforce who can publish where, and who

@@ -100,7 +100,7 @@ Values include many useful primitives, including zero copy bytes
 buffers (using the awesome bytes crate), so you can easily use
 netidx to efficiently send any kind of message you like. However
 it's advised to stick to primitives and express structure with
-muliple published values in a hierarchy, since this makes your
+multiple published values in a hierarchy, since this makes your
 system more discoverable, and is also quite efficient.
 
 netidx includes optional support for kerberos v5 (including Active
