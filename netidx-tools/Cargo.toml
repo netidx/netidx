@@ -35,7 +35,6 @@ futures = "0.3"
 fxhash = "0.2"
 indexmap = "1"
 log = "0.4"
-mapr = "0.8"
 netidx-archive = { path = "../netidx-archive", version = "0.9", default_features = false }
 netidx-core = { path = "../netidx-core", version = "0.9" }
 netidx = { path = "../netidx", version = "0.9" , default_features = false }
