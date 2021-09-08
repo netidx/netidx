@@ -12,7 +12,7 @@ What is netidx?
     and holds a flexible set of primitive data types
 
 - It's a publish/subscribe messaging system; like MQTT
-  - Except there is no centralized broker, communication happens
+  - Except there is no centralized broker. Communication happens
     directly between publishers and subscribers
   - Message archiving and other services provided by MQTT brokers can
     be provided by normal publishers, or omitted if they aren't needed
@@ -89,13 +89,12 @@ async fn run() -> Result<()> {
 }
 ```
 
-Published values always have a value, and new subscribers receive
-the most recent published value initially. Thereafter a
-subscription is a lossless ordered stream, just like a tcp
-connection, except that instead of bytes `publisher::Value` is the
-unit of transmission. Since the subscriber can write values back
-to the publisher, the connection is bidirectional, also like a Tcp
-stream.
+Published things always have a value, which new subscribers receive
+initially. Thereafter a subscription is a lossless ordered stream,
+just like a tcp connection, except that instead of bytes
+`publisher::Value` is the unit of transmission. Since the subscriber
+can write values back to the publisher, the connection is
+bidirectional, also like a Tcp stream.
 
 Values include many useful primitives, including zero copy bytes
 buffers (using the awesome bytes crate), so you can easily use
