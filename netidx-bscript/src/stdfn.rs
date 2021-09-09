@@ -69,12 +69,12 @@ impl<C: Ctx, E> Apply<C, E> for Any {
     }
 }
 
-pub struct Do;
+pub struct Do(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Do {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
-            Box::new(Any(from.iter().find_map(|s| s.current())))
+            Box::new(Do(from.iter().fold(None, |_, s| s.current())))
         });
         ctx.functions.insert("do".into(), f);
     }
@@ -82,7 +82,7 @@ impl<C: Ctx, E> Register<C, E> for Do {
 
 impl<C: Ctx, E> Apply<C, E> for Do {
     fn current(&self) -> Option<Value> {
-        None
+        self.0.clone()
     }
 
     fn update(
@@ -91,10 +91,8 @@ impl<C: Ctx, E> Apply<C, E> for Do {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        for src in from {
-            src.update(ctx, event);
-        }
-        None
+        self.0 = from.into_iter().fold(None, |_, src| src.update(ctx, event));
+        self.0.clone()
     }
 }
 
