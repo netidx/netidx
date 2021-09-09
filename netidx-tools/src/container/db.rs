@@ -1114,15 +1114,21 @@ fn del_root(
 ) -> Result<()> {
     let key = path.as_bytes();
     if roots.contains_key(key)? {
-        match roots.range(..key).next_back() {
-            None => remove_subtree(data, pending, path.clone())?,
-            Some(r) => {
-                let (prev, _) = r?;
-                let prev = str::from_utf8(&prev)?;
-                if !Path::is_parent(prev, &path) {
-                    remove_subtree(data, pending, path.clone())?
+        let mut iter = roots.range(..key).keys();
+        let remove = loop {
+            match iter.next_back() {
+                None => break false,
+                Some(r) => {
+                    let k = r?;
+                    let k = str::from_utf8(&k)?;
+                    if Path::is_parent(k, &path) {
+                        break true
+                    }
                 }
             }
+        };
+        if remove {
+            remove_subtree(data, pending, path.clone())?
         }
         for r in roots.scan_prefix(key).keys() {
             let k = r?;
