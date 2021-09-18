@@ -1,3 +1,14 @@
+* 0.9.1 bscript, tools, browser
+
+  - fix the "do" bscript function which was broken, and fix it's
+    semantics to match documentation (return the value of the last
+    expression instead of nothing)
+
+  - fix a bug in the container that could have resulted in subtrees
+    being erroniously deleted. If the user deleted a nested root, the
+    container might not have recognized that the subtree had a parent
+    root, and would then have deleted it. This has been corrected.
+
 * 0.9.0 netidx, netidx-tools, netidx-browser:
 
   - Subscriber uses much less memory, a durable subscription now costs
