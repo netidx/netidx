@@ -3,6 +3,7 @@ use chrono::{naive::NaiveDateTime, prelude::*};
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError},
+    utils,
 };
 use std::{
     convert, error, fmt, mem,
@@ -10,8 +11,11 @@ use std::{
     ops::{Add, Div, Mul, Not, Sub},
     result,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
+
+pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -33,9 +37,10 @@ pub enum Typ {
     String,
     Bytes,
     Result,
+    Array,
 }
 
-static TYPES: [Typ; 16] = [
+static TYPES: [Typ; 17] = [
     Typ::U32,
     Typ::V32,
     Typ::I32,
@@ -52,6 +57,7 @@ static TYPES: [Typ; 16] = [
     Typ::String,
     Typ::Bytes,
     Typ::Result,
+    Typ::Array,
 ];
 
 impl Typ {
@@ -73,6 +79,7 @@ impl Typ {
             Typ::String => "string",
             Typ::Bytes => "bytes",
             Typ::Result => "result",
+            Typ::Array => "array",
         }
     }
 
@@ -95,70 +102,8 @@ impl Typ {
             Value::True | Value::False => Some(Typ::Bool),
             Value::Null => None,
             Value::Ok | Value::Error(_) => Some(Typ::Result),
+            Value::Array(_) => Some(Typ::Array),
         }
-    }
-
-    pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
-        Ok(match s {
-            "null" | "Null" => Value::Null,
-            s => match self {
-                Typ::U32 => Value::U32(s.parse::<u32>()?),
-                Typ::V32 => Value::V32(s.parse::<u32>()?),
-                Typ::I32 => Value::I32(s.parse::<i32>()?),
-                Typ::Z32 => Value::Z32(s.parse::<i32>()?),
-                Typ::U64 => Value::U64(s.parse::<u64>()?),
-                Typ::V64 => Value::V64(s.parse::<u64>()?),
-                Typ::I64 => Value::I64(s.parse::<i64>()?),
-                Typ::Z64 => Value::Z64(s.parse::<i64>()?),
-                Typ::F32 => Value::F32(s.parse::<f32>()?),
-                Typ::F64 => Value::F64(s.parse::<f64>()?),
-                Typ::DateTime => match DateTime::parse_from_rfc3339(s) {
-                    Err(_) => Value::DateTime(DateTime::<Utc>::from(
-                        DateTime::parse_from_rfc2822(s)?,
-                    )),
-                    Ok(dt) => Value::DateTime(DateTime::<Utc>::from(dt)),
-                },
-                Typ::Duration => {
-                    let s = s.trim();
-                    let last =
-                        s.chars().next_back().ok_or_else(|| anyhow!("too short"))?;
-                    let n = if last.is_ascii_digit() {
-                        s.parse::<f64>()?
-                    } else {
-                        s.strip_suffix(|c: char| !c.is_ascii_digit())
-                            .ok_or_else(|| anyhow!("duration strip suffix"))
-                            .and_then(|s| s.parse::<f64>().map_err(anyhow::Error::from))?
-                    };
-                    let n = if last == 's' {
-                        n
-                    } else {
-                        bail!("invalid duration suffix {}", last)
-                    };
-                    Value::F64(n)
-                        .cast(Typ::Duration)
-                        .ok_or_else(|| anyhow!("failed to cast float to duration"))?
-                }
-                Typ::Bool => match s.trim() {
-                    "true" | "True" => Value::True,
-                    "false" | "False" => Value::False,
-                    _ => bail!("parse error expected boolean {}", s),
-                },
-                Typ::String => Value::String(Chars::from(String::from(s))),
-                Typ::Bytes => Value::Bytes(Bytes::from(base64::decode(s)?)),
-                Typ::Result => {
-                    let s = s.trim();
-                    if s == "ok" || s == "Ok" {
-                        Value::Ok
-                    } else if s == "error" || s == "Error" {
-                        Value::Error(Chars::from(""))
-                    } else if s.starts_with("error:") || s.starts_with("Error:") {
-                        Value::Error(Chars::from(String::from(s[6..].trim())))
-                    } else {
-                        bail!("invalid error type, must start with 'ok' or 'error:'")
-                    }
-                }
-            },
-        })
     }
 
     pub fn all() -> &'static [Self] {
@@ -187,8 +132,9 @@ impl FromStr for Typ {
             "string" => Ok(Typ::String),
             "bytes" => Ok(Typ::Bytes),
             "result" => Ok(Typ::Result),
+            "array" => Ok(Typ::Array),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result, array", s))
         }
     }
 }
@@ -241,26 +187,66 @@ pub enum Value {
     Ok,
     /// An explicit error
     Error(Chars),
+    /// An array of values
+    Array(Arc<[Value]>),
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::U32(v) | Value::V32(v) => write!(f, "{}", v),
-            Value::I32(v) | Value::Z32(v) => write!(f, "{}", v),
-            Value::U64(v) | Value::V64(v) => write!(f, "{}", v),
-            Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
-            Value::F32(v) => write!(f, "{}", v),
-            Value::F64(v) => write!(f, "{}", v),
-            Value::DateTime(d) => write!(f, "{}", d),
-            Value::Duration(d) => write!(f, "{}s", d.as_secs_f64()),
-            Value::String(v) => write!(f, "{}", &*v),
-            Value::Bytes(_) => write!(f, "<binary>"),
-            Value::True => write!(f, "True"),
-            Value::False => write!(f, "False"),
-            Value::Null => write!(f, "Null"),
-            Value::Ok => write!(f, "Ok"),
-            Value::Error(v) => write!(f, "Error {}", v),
+            Value::U32(v) => write!(f, "u32:{}", v),
+            Value::V32(v) => write!(f, "v32:{}", v),
+            Value::I32(v) => write!(f, "i32:{}", v),
+            Value::Z32(v) => write!(f, "z32:{}", v),
+            Value::U64(v) => write!(f, "u64:{}", v),
+            Value::V64(v) => write!(f, "v64:{}", v),
+            Value::I64(v) => write!(f, "i64:{}", v),
+            Value::Z64(v) => write!(f, "z64:{}", v),
+            Value::F32(v) => {
+                if v.fract() == 0. {
+                    write!(f, "f32:{}.", v)
+                } else {
+                    write!(f, "f32:{}", v)
+                }
+            }
+            Value::F64(v) => {
+                if v.fract() == 0. {
+                    write!(f, "f64:{}.", v)
+                } else {
+                    write!(f, "f64:{}", v)
+                }
+            }
+            Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
+            Value::Duration(v) => {
+                let v = v.as_secs_f64();
+                if v.fract() == 0. {
+                    write!(f, r#"duration:{}.s"#, v)
+                } else {
+                    write!(f, r#"duration:{}s"#, v)
+                }
+            }
+            Value::String(s) => {
+                write!(f, r#""{}""#, utils::escape(&*s, '\\', &BSCRIPT_ESC))
+            }
+            Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
+            Value::True => write!(f, "true"),
+            Value::False => write!(f, "false"),
+            Value::Null => write!(f, "null"),
+            Value::Ok => write!(f, "ok"),
+            Value::Error(v) => {
+                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', &BSCRIPT_ESC))
+            }
+            Value::Array(elts) => {
+                write!(f, "[")?;
+                for (i, v) in elts.iter().enumerate() {
+                    if i < elts.len() - 1 {
+                        write!(f, "{}, ", v)?
+                    } else {
+                        write!(f, "{}", v)?
+                    }
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -1265,7 +1251,7 @@ impl FromValue for usize {
         }
     }
 }
-     
+
 impl FromValue for i64 {
     type Error = CantCast;
 
@@ -1286,7 +1272,6 @@ impl FromValue for i64 {
         }
     }
 }
-
 
 impl convert::From<i64> for Value {
     fn from(v: i64) -> Value {

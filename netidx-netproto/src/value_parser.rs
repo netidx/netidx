@@ -1,4 +1,4 @@
-use crate::expr::{Expr, ExprId, ExprKind};
+use crate::value::{Value, BSCRIPT_ESC};
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -14,8 +14,7 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx_netproto::value::BSCRIPT_ESC;
-use netidx::{chars::Chars, utils, publisher::Value};
+use netidx_core::{chars::Chars, utils};
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 fn escaped_string<I>() -> impl Parser<I, Output = String>
@@ -108,103 +107,6 @@ where
     ))
 }
 
-fn fname<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((
-        take_while1(|c: char| c.is_alphabetic() && c.is_lowercase()),
-        take_while(|c: char| {
-            (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
-        }),
-    ))
-}
-
-fn interpolated_<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    #[derive(Debug)]
-    enum Intp {
-        Lit(String),
-        Expr(Expr),
-    }
-    impl Intp {
-        fn to_expr(self) -> Expr {
-            match self {
-                Intp::Lit(s) => {
-                    Expr { id: ExprId::new(), kind: ExprKind::Constant(Value::from(s)) }
-                }
-                Intp::Expr(s) => s,
-            }
-        }
-    }
-    spaces()
-        .with(between(
-            token('"'),
-            token('"'),
-            many(choice((
-                attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
-                escaped_string()
-                    .then(|s| {
-                        if s.is_empty() {
-                            unexpected_any("empty string").right()
-                        } else {
-                            value(s).left()
-                        }
-                    })
-                    .map(Intp::Lit),
-            ))),
-        ))
-        .map(|toks: Vec<Intp>| {
-            toks.into_iter()
-                .fold(None, |src, tok| -> Option<Expr> {
-                    match (src, tok) {
-                        (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                        (None, Intp::Expr(s)) => Some(
-                            ExprKind::Apply {
-                                args: vec![s],
-                                function: "string_concat".into(),
-                            }
-                            .to_expr(),
-                        ),
-                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
-                            Some(
-                                ExprKind::Apply {
-                                    args: vec![src, s.to_expr()],
-                                    function: "string_concat".into(),
-                                }
-                                .to_expr(),
-                            )
-                        }
-                        (
-                            Some(Expr {
-                                kind: ExprKind::Apply { mut args, function },
-                                ..
-                            }),
-                            s,
-                        ) => {
-                            args.push(s.to_expr());
-                            Some(ExprKind::Apply { args, function }.to_expr())
-                        }
-                    }
-                })
-                .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
-        })
-}
-
-parser! {
-    fn interpolated[I]()(I) -> Expr
-    where [I: RangeStream<Token = char>, I::Range: Range]
-    {
-        interpolated_()
-    }
-}
-
 fn constant<I>(typ: &'static str) -> impl Parser<I, Output = char>
 where
     I: RangeStream<Token = char>,
@@ -214,98 +116,54 @@ where
     string(typ).with(token(':'))
 }
 
-fn expr_<I>() -> impl Parser<I, Output = Expr>
+fn value_<I>() -> impl Parser<I, Output = Value>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(interpolated()),
-        attempt(from_str(flt()).map(|v| ExprKind::Constant(Value::F64(v)).to_expr())),
-        attempt(from_str(int()).map(|v| ExprKind::Constant(Value::I64(v)).to_expr())),
+        attempt(quoted()).map(|s| Value::String(Chars::from(s))),
+        attempt(from_str(flt()).map(|v| Value::F64(v))),
+        attempt(from_str(int()).map(|v| Value::I64(v))),
         attempt(
             string("true")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::True).to_expr()),
+                .map(|_| Value::True),
         ),
         attempt(
             string("false")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::False).to_expr()),
+                .map(|_| Value::False),
         ),
         attempt(
             string("null")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::Null).to_expr()),
+                .map(|_| Value::Null),
         ),
+        attempt(constant("u32").with(from_str(uint())).map(|v| Value::U32(v))),
+        attempt(constant("v32").with(from_str(uint())).map(|v| Value::V32(v))),
+        attempt(constant("i32").with(from_str(int())).map(|v| Value::I32(v))),
+        attempt(constant("z32").with(from_str(int())).map(|v| Value::Z32(v))),
+        attempt(constant("u64").with(from_str(uint())).map(|v| Value::U64(v))),
+        attempt(constant("v64").with(from_str(uint())).map(|v| Value::V64(v))),
+        attempt(constant("i64").with(from_str(int())).map(|v| Value::I64(v))),
+        attempt(constant("z64").with(from_str(int())).map(|v| Value::Z64(v))),
+        attempt(constant("f32").with(from_str(flt())).map(|v| Value::F32(v))),
+        attempt(constant("f64").with(from_str(flt())).map(|v| Value::F64(v))),
         attempt(
-            constant("u32")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::U32(v)).to_expr()),
+            constant("bytes")
+                .with(from_str(base64str()))
+                .map(|Base64Encoded(v)| Value::Bytes(Bytes::from(v))),
         ),
-        attempt(
-            constant("v32")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::V32(v)).to_expr()),
-        ),
-        attempt(
-            constant("i32")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::I32(v)).to_expr()),
-        ),
-        attempt(
-            constant("z32")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::Z32(v)).to_expr()),
-        ),
-        attempt(
-            constant("u64")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::U64(v)).to_expr()),
-        ),
-        attempt(
-            constant("v64")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::V64(v)).to_expr()),
-        ),
-        attempt(
-            constant("i64")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::I64(v)).to_expr()),
-        ),
-        attempt(
-            constant("z64")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::Z64(v)).to_expr()),
-        ),
-        attempt(
-            constant("f32")
-                .with(from_str(flt()))
-                .map(|v| ExprKind::Constant(Value::F32(v)).to_expr()),
-        ),
-        attempt(
-            constant("f64")
-                .with(from_str(flt()))
-                .map(|v| ExprKind::Constant(Value::F64(v)).to_expr()),
-        ),
-        attempt(constant("bytes").with(from_str(base64str())).map(|Base64Encoded(v)| {
-            ExprKind::Constant(Value::Bytes(Bytes::from(v))).to_expr()
-        })),
         attempt(
             string("ok")
                 .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::Ok).to_expr()),
+                .map(|_| Value::Ok),
         ),
+        attempt(constant("error").with(quoted()).map(|s| Value::Error(Chars::from(s)))),
         attempt(
-            constant("error")
-                .with(quoted())
-                .map(|s| ExprKind::Constant(Value::Error(Chars::from(s))).to_expr()),
-        ),
-        attempt(
-            constant("datetime")
-                .with(from_str(quoted()))
-                .map(|d| ExprKind::Constant(Value::DateTime(d)).to_expr()),
+            constant("datetime").with(from_str(quoted())).map(|d| Value::DateTime(d)),
         ),
         attempt(
             constant("duration")
@@ -323,35 +181,17 @@ where
                         "s" => Duration::from_secs_f64(n),
                         _ => unreachable!(),
                     };
-                    ExprKind::Constant(Value::Duration(d)).to_expr()
+                    Value::Duration(d)
                 }),
         ),
-        attempt(
-            (
-                fname(),
-                between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    spaces().with(sep_by(expr(), spaces().with(token(',')))),
-                ),
-            )
-                .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
-        ),
-        fname().skip(not_followed_by(none_of(" ),]".chars()))).map(|var| {
-            ExprKind::Apply {
-                function: "load_var".into(),
-                args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],
-            }
-            .to_expr()
-        }),
     )))
 }
 
 parser! {
-    fn expr[I]()(I) -> Expr
+    fn value[I]()(I) -> Expr
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        expr_()
+        value_()
     }
 }
 
@@ -490,10 +330,6 @@ mod tests {
         assert_eq!(
             ExprKind::Constant(Value::True).to_expr(),
             parse_expr("true").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::True).to_expr(),
-            parse_expr("true ").unwrap()
         );
         assert_eq!(
             ExprKind::Constant(Value::False).to_expr(),

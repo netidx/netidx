@@ -11,6 +11,8 @@ readme = "../README.md"
 license = "MIT"
 
 [dependencies]
+immutable-chunkmap = "1"
+combine = "4"
 netidx-core = { version = "0.9", path = "../netidx-core" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
