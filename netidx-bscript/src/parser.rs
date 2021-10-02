@@ -14,9 +14,10 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx_netproto::value::BSCRIPT_ESC;
 use netidx::{chars::Chars, utils, publisher::Value};
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
+
+pub static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
@@ -25,9 +26,9 @@ where
     I::Range: Range,
 {
     recognize(escaped(
-        take_while1(|c| !BSCRIPT_ESC.contains(&c)),
+        take_while1(|c| !PATH_ESC.contains(&c)),
         '\\',
-        one_of(BSCRIPT_ESC.iter().copied()),
+        one_of(PATH_ESC.iter().copied()),
     ))
     .map(|s| match utils::unescape(&s, '\\') {
         Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
@@ -365,150 +366,6 @@ pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn const_expr_parse() {
-        assert_eq!(
-            ExprKind::Constant(Value::U32(23)).to_expr(),
-            parse_expr("u32:23").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::V32(42)).to_expr(),
-            parse_expr("v32:42").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I32(-10)).to_expr(),
-            parse_expr("i32:-10").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I32(12321)).to_expr(),
-            parse_expr("i32:12321").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::Z32(-99)).to_expr(),
-            parse_expr("z32:-99").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::U64(100)).to_expr(),
-            parse_expr("u64:100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::V64(100)).to_expr(),
-            parse_expr("v64:100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I64(-100)).to_expr(),
-            parse_expr("i64:-100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I64(-100)).to_expr(),
-            parse_expr("-100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I64(100)).to_expr(),
-            parse_expr("i64:100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::I64(100)).to_expr(),
-            parse_expr("100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::Z64(-100)).to_expr(),
-            parse_expr("z64:-100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::Z64(100)).to_expr(),
-            parse_expr("z64:100").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(3.1415)).to_expr(),
-            parse_expr("f32:3.1415").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(675.6)).to_expr(),
-            parse_expr("f32:675.6").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(42.3435)).to_expr(),
-            parse_expr("f32:42.3435").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(1.123e9)).to_expr(),
-            parse_expr("f32:1.123e9").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(1e9)).to_expr(),
-            parse_expr("f32:1e9").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(21.2443e-6)).to_expr(),
-            parse_expr("f32:21.2443e-6").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F32(3.)).to_expr(),
-            parse_expr("f32:3.").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(3.1415)).to_expr(),
-            parse_expr("f64:3.1415").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(3.1415)).to_expr(),
-            parse_expr("3.1415").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(1.123e9)).to_expr(),
-            parse_expr("1.123e9").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(1e9)).to_expr(),
-            parse_expr("1e9").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(21.2443e-6)).to_expr(),
-            parse_expr("21.2443e-6").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(3.)).to_expr(),
-            parse_expr("f64:3.").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::F64(3.)).to_expr(),
-            parse_expr("3.").unwrap()
-        );
-        let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
-        let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
-        assert_eq!(
-            ExprKind::Constant(Value::String(c)).to_expr(),
-            parse_expr(s).unwrap()
-        );
-        let c = Chars::new();
-        assert_eq!(
-            ExprKind::Constant(Value::String(c)).to_expr(),
-            parse_expr(r#""""#).unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::True).to_expr(),
-            parse_expr("true").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::True).to_expr(),
-            parse_expr("true ").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::False).to_expr(),
-            parse_expr("false").unwrap()
-        );
-        assert_eq!(
-            ExprKind::Constant(Value::Null).to_expr(),
-            parse_expr("null").unwrap()
-        );
-        assert_eq!(ExprKind::Constant(Value::Ok).to_expr(), parse_expr("ok").unwrap());
-        assert_eq!(
-            ExprKind::Constant(Value::Error(Chars::from("error"))).to_expr(),
-            parse_expr(r#"error:"error""#).unwrap()
-        );
-    }
 
     #[test]
     fn interp_parse() {

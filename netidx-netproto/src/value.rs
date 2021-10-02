@@ -15,8 +15,6 @@ use std::{
     time::Duration,
 };
 
-pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
-
 type Result<T> = result::Result<T, PackError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,61 +191,7 @@ pub enum Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::U32(v) => write!(f, "u32:{}", v),
-            Value::V32(v) => write!(f, "v32:{}", v),
-            Value::I32(v) => write!(f, "i32:{}", v),
-            Value::Z32(v) => write!(f, "z32:{}", v),
-            Value::U64(v) => write!(f, "u64:{}", v),
-            Value::V64(v) => write!(f, "v64:{}", v),
-            Value::I64(v) => write!(f, "i64:{}", v),
-            Value::Z64(v) => write!(f, "z64:{}", v),
-            Value::F32(v) => {
-                if v.fract() == 0. {
-                    write!(f, "f32:{}.", v)
-                } else {
-                    write!(f, "f32:{}", v)
-                }
-            }
-            Value::F64(v) => {
-                if v.fract() == 0. {
-                    write!(f, "f64:{}.", v)
-                } else {
-                    write!(f, "f64:{}", v)
-                }
-            }
-            Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
-            Value::Duration(v) => {
-                let v = v.as_secs_f64();
-                if v.fract() == 0. {
-                    write!(f, r#"duration:{}.s"#, v)
-                } else {
-                    write!(f, r#"duration:{}s"#, v)
-                }
-            }
-            Value::String(s) => {
-                write!(f, r#""{}""#, utils::escape(&*s, '\\', &BSCRIPT_ESC))
-            }
-            Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
-            Value::True => write!(f, "true"),
-            Value::False => write!(f, "false"),
-            Value::Null => write!(f, "null"),
-            Value::Ok => write!(f, "ok"),
-            Value::Error(v) => {
-                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', &BSCRIPT_ESC))
-            }
-            Value::Array(elts) => {
-                write!(f, "[")?;
-                for (i, v) in elts.iter().enumerate() {
-                    if i < elts.len() - 1 {
-                        write!(f, "{}, ", v)?
-                    } else {
-                        write!(f, "{}", v)?
-                    }
-                }
-                write!(f, "]")
-            }
-        }
+        self.fmt_with_esc(f, &[])
     }
 }
 
@@ -584,6 +528,64 @@ pub trait FromValue {
 }
 
 impl Value {
+    fn fmt_with_esc(&self, f: &mut fmt::Formatter<'_>, esc: &[char]) -> fmt::Result {
+        match self {
+            Value::U32(v) => write!(f, "u32:{}", v),
+            Value::V32(v) => write!(f, "v32:{}", v),
+            Value::I32(v) => write!(f, "i32:{}", v),
+            Value::Z32(v) => write!(f, "z32:{}", v),
+            Value::U64(v) => write!(f, "u64:{}", v),
+            Value::V64(v) => write!(f, "v64:{}", v),
+            Value::I64(v) => write!(f, "i64:{}", v),
+            Value::Z64(v) => write!(f, "z64:{}", v),
+            Value::F32(v) => {
+                if v.fract() == 0. {
+                    write!(f, "f32:{}.", v)
+                } else {
+                    write!(f, "f32:{}", v)
+                }
+            }
+            Value::F64(v) => {
+                if v.fract() == 0. {
+                    write!(f, "f64:{}.", v)
+                } else {
+                    write!(f, "f64:{}", v)
+                }
+            }
+            Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
+            Value::Duration(v) => {
+                let v = v.as_secs_f64();
+                if v.fract() == 0. {
+                    write!(f, r#"duration:{}.s"#, v)
+                } else {
+                    write!(f, r#"duration:{}s"#, v)
+                }
+            }
+            Value::String(s) => {
+                write!(f, r#""{}""#, utils::escape(&*s, '\\', esc))
+            }
+            Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
+            Value::True => write!(f, "true"),
+            Value::False => write!(f, "false"),
+            Value::Null => write!(f, "null"),
+            Value::Ok => write!(f, "ok"),
+            Value::Error(v) => {
+                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', esc))
+            }
+            Value::Array(elts) => {
+                write!(f, "[")?;
+                for (i, v) in elts.iter().enumerate() {
+                    if i < elts.len() - 1 {
+                        write!(f, "{}, ", v)?
+                    } else {
+                        write!(f, "{}", v)?
+                    }
+                }
+                write!(f, "]")
+            }
+        }
+    }
+
     /// Whatever value is attempt to turn it into the type specified
     pub fn cast(self, typ: Typ) -> Option<Value> {
         match typ {
