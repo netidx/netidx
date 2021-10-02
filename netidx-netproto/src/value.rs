@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+use crate::value_parser;
+
 type Result<T> = result::Result<T, PackError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,9 +38,10 @@ pub enum Typ {
     Bytes,
     Result,
     Array,
+    Null,
 }
 
-static TYPES: [Typ; 17] = [
+static TYPES: [Typ; 18] = [
     Typ::U32,
     Typ::V32,
     Typ::I32,
@@ -56,6 +59,7 @@ static TYPES: [Typ; 17] = [
     Typ::Bytes,
     Typ::Result,
     Typ::Array,
+    Typ::Null,
 ];
 
 impl Typ {
@@ -78,29 +82,30 @@ impl Typ {
             Typ::Bytes => "bytes",
             Typ::Result => "result",
             Typ::Array => "array",
+            Typ::Null => "null",
         }
     }
 
-    pub fn get(v: &Value) -> Option<Self> {
+    pub fn get(v: &Value) -> Self {
         match v {
-            Value::U32(_) => Some(Typ::U32),
-            Value::V32(_) => Some(Typ::V32),
-            Value::I32(_) => Some(Typ::I32),
-            Value::Z32(_) => Some(Typ::Z32),
-            Value::U64(_) => Some(Typ::U64),
-            Value::V64(_) => Some(Typ::V64),
-            Value::I64(_) => Some(Typ::I64),
-            Value::Z64(_) => Some(Typ::Z64),
-            Value::F32(_) => Some(Typ::F32),
-            Value::F64(_) => Some(Typ::F64),
-            Value::DateTime(_) => Some(Typ::DateTime),
-            Value::Duration(_) => Some(Typ::Duration),
-            Value::String(_) => Some(Typ::String),
-            Value::Bytes(_) => Some(Typ::Bytes),
-            Value::True | Value::False => Some(Typ::Bool),
-            Value::Null => None,
-            Value::Ok | Value::Error(_) => Some(Typ::Result),
-            Value::Array(_) => Some(Typ::Array),
+            Value::U32(_) => Typ::U32,
+            Value::V32(_) => Typ::V32,
+            Value::I32(_) => Typ::I32,
+            Value::Z32(_) => Typ::Z32,
+            Value::U64(_) => Typ::U64,
+            Value::V64(_) => Typ::V64,
+            Value::I64(_) => Typ::I64,
+            Value::Z64(_) => Typ::Z64,
+            Value::F32(_) => Typ::F32,
+            Value::F64(_) => Typ::F64,
+            Value::DateTime(_) => Typ::DateTime,
+            Value::Duration(_) => Typ::Duration,
+            Value::String(_) => Typ::String,
+            Value::Bytes(_) => Typ::Bytes,
+            Value::True | Value::False => Typ::Bool,
+            Value::Null => Typ::Null,
+            Value::Ok | Value::Error(_) => Typ::Result,
+            Value::Array(_) => Typ::Array,
         }
     }
 
@@ -131,8 +136,9 @@ impl FromStr for Typ {
             "bytes" => Ok(Typ::Bytes),
             "result" => Ok(Typ::Result),
             "array" => Ok(Typ::Array),
+            "null" => Ok(Typ::Null),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result, array", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result, array, null", s))
         }
     }
 }
@@ -191,7 +197,15 @@ pub enum Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_with_esc(f, &[])
+        self.fmt_ext(f, &[], true)
+    }
+}
+
+impl FromStr for Value {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        value_parser::parse_value(s)
     }
 }
 
@@ -388,6 +402,7 @@ impl Not for Value {
             Value::Error(v) => {
                 Value::Error(Chars::from(format!("can't apply not to Error({})", v)))
             }
+            Value::Array(_) => Value::Error(Chars::from("can't apply not to an array")),
         }
     }
 }
@@ -412,6 +427,10 @@ impl Pack for Value {
             Value::True | Value::False | Value::Null => 0,
             Value::Ok => 0,
             Value::Error(c) => <Chars as Pack>::encoded_len(c),
+            Value::Array(elts) => {
+                pack::varint_len(elts.len() as u64)
+                    + elts.iter().fold(0, |sum, v| sum + Pack::encoded_len(v))
+            }
         }
     }
 
@@ -483,6 +502,14 @@ impl Pack for Value {
                 buf.put_u8(18);
                 <Chars as Pack>::encode(e, buf)
             }
+            Value::Array(elts) => {
+                buf.put_u8(19);
+                pack::encode_varint(elts.len() as u64, buf);
+                for elt in &**elts {
+                    <Value as Pack>::encode(elt, buf)?
+                }
+                Ok(())
+            }
         }
     }
 
@@ -507,6 +534,14 @@ impl Pack for Value {
             16 => Ok(Value::Null),
             17 => Ok(Value::Ok),
             18 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
+            19 => {
+                let len = pack::decode_varint(buf)? as usize;
+                let mut elts = Vec::with_capacity(len);
+                while elts.len() < len {
+                    elts.push(<Value as Pack>::decode(buf)?);
+                }
+                Ok(Value::Array(Arc::from(elts)))
+            }
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -528,43 +563,108 @@ pub trait FromValue {
 }
 
 impl Value {
-    fn fmt_with_esc(&self, f: &mut fmt::Formatter<'_>, esc: &[char]) -> fmt::Result {
+    fn fmt_ext(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        esc: &[char],
+        types: bool,
+    ) -> fmt::Result {
         match self {
-            Value::U32(v) => write!(f, "u32:{}", v),
-            Value::V32(v) => write!(f, "v32:{}", v),
-            Value::I32(v) => write!(f, "i32:{}", v),
-            Value::Z32(v) => write!(f, "z32:{}", v),
-            Value::U64(v) => write!(f, "u64:{}", v),
-            Value::V64(v) => write!(f, "v64:{}", v),
-            Value::I64(v) => write!(f, "i64:{}", v),
-            Value::Z64(v) => write!(f, "z64:{}", v),
-            Value::F32(v) => {
-                if v.fract() == 0. {
-                    write!(f, "f32:{}.", v)
+            Value::U32(v) => {
+                if types {
+                    write!(f, "u32:{}", v)
                 } else {
-                    write!(f, "f32:{}", v)
+                    write!(f, "{}", v)
+                }
+            }
+            Value::V32(v) => {
+                if types {
+                    write!(f, "v32:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::I32(v) => {
+                if types {
+                    write!(f, "i32:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::Z32(v) => {
+                if types {
+                    write!(f, "z32:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::U64(v) => {
+                if types {
+                    write!(f, "u64:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::V64(v) => {
+                if types {
+                    write!(f, "v64:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::I64(v) => {
+                if types {
+                    write!(f, "i64:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::Z64(v) => {
+                if types {
+                    write!(f, "z64:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::F32(v) => {
+                let pfx = if types { "f32:" } else { "" };
+                if v.fract() == 0. {
+                    write!(f, "{}{}.", pfx, v)
+                } else {
+                    write!(f, "{}{}", pfx, v)
                 }
             }
             Value::F64(v) => {
+                let pfx = if types { "f64:" } else { "" };
                 if v.fract() == 0. {
-                    write!(f, "f64:{}.", v)
+                    write!(f, "{}{}.", pfx, v)
                 } else {
-                    write!(f, "f64:{}", v)
+                    write!(f, "{}{}", pfx, v)
                 }
             }
-            Value::DateTime(v) => write!(f, r#"datetime:"{}""#, v),
+            Value::DateTime(v) => {
+                if types {
+                    write!(f, r#"datetime:"{}""#, v)
+                } else {
+                    write!(f, r#""{}""#, v)
+                }
+            }
             Value::Duration(v) => {
+                let pfx = if types { "duration:" } else { "" };
                 let v = v.as_secs_f64();
                 if v.fract() == 0. {
-                    write!(f, r#"duration:{}.s"#, v)
+                    write!(f, r#"{}{}.s"#, pfx, v)
                 } else {
-                    write!(f, r#"duration:{}s"#, v)
+                    write!(f, r#"{}{}s"#, pfx, v)
                 }
             }
             Value::String(s) => {
                 write!(f, r#""{}""#, utils::escape(&*s, '\\', esc))
             }
-            Value::Bytes(b) => write!(f, "bytes:{}", base64::encode(&*b)),
+            Value::Bytes(b) => {
+                let pfx = if types { "bytes:" } else { "" };
+                write!(f, "{}{}", pfx, base64::encode(&*b))
+            }
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
@@ -576,9 +676,10 @@ impl Value {
                 write!(f, "[")?;
                 for (i, v) in elts.iter().enumerate() {
                     if i < elts.len() - 1 {
-                        write!(f, "{}, ", v)?
+                        v.fmt_ext(f, esc, types)?;
+                        write!(f, ", ")?
                     } else {
-                        write!(f, "{}", v)?
+                        v.fmt_ext(f, esc, types)?
                     }
                 }
                 write!(f, "]")
