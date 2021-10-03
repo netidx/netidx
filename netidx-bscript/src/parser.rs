@@ -1,112 +1,17 @@
 use crate::expr::{Expr, ExprId, ExprKind};
-use base64;
-use bytes::Bytes;
 use combine::{
-    attempt, between, choice, from_str, many, many1, none_of, not_followed_by, one_of,
-    optional,
+    attempt, between, choice, many, none_of, not_followed_by,
     parser::{
-        char::{digit, spaces, string},
+        char::spaces,
         combinator::recognize,
         range::{take_while, take_while1},
-        repeat::escaped,
     },
     sep_by,
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx_netproto::value_parser::BSCRIPT_ESC;
-use netidx::{chars::Chars, utils, publisher::Value};
-use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
-
-fn escaped_string<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize(escaped(
-        take_while1(|c| !BSCRIPT_ESC.contains(&c)),
-        '\\',
-        one_of(BSCRIPT_ESC.iter().copied()),
-    ))
-    .map(|s| match utils::unescape(&s, '\\') {
-        Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
-        Cow::Owned(s) => s,
-    })
-}
-
-fn quoted<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spaces().with(between(token('"'), token('"'), escaped_string()))
-}
-
-fn uint<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    many1(digit())
-}
-
-fn int<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((optional(token('-')), take_while1(|c: char| c.is_digit(10))))
-}
-
-fn flt<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    choice((
-        attempt(recognize((
-            optional(token('-')),
-            take_while1(|c: char| c.is_digit(10)),
-            optional(token('.')),
-            take_while(|c: char| c.is_digit(10)),
-            token('e'),
-            int(),
-        ))),
-        attempt(recognize((
-            optional(token('-')),
-            take_while1(|c: char| c.is_digit(10)),
-            token('.'),
-            take_while(|c: char| c.is_digit(10)),
-        ))),
-    ))
-}
-
-struct Base64Encoded(Vec<u8>);
-
-impl FromStr for Base64Encoded {
-    type Err = base64::DecodeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        base64::decode(s).map(Base64Encoded)
-    }
-}
-
-fn base64str<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((
-        take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
-        take_while(|c: char| c == '='),
-    ))
-}
+use netidx::{chars::Chars, publisher::Value};
+use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 
 fn fname<I>() -> impl Parser<I, Output = String>
 where
@@ -205,15 +110,6 @@ parser! {
     }
 }
 
-fn constant<I>(typ: &'static str) -> impl Parser<I, Output = char>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    string(typ).with(token(':'))
-}
-
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -222,110 +118,7 @@ where
 {
     spaces().with(choice((
         attempt(interpolated()),
-        attempt(from_str(flt()).map(|v| ExprKind::Constant(Value::F64(v)).to_expr())),
-        attempt(from_str(int()).map(|v| ExprKind::Constant(Value::I64(v)).to_expr())),
-        attempt(
-            string("true")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::True).to_expr()),
-        ),
-        attempt(
-            string("false")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::False).to_expr()),
-        ),
-        attempt(
-            string("null")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::Null).to_expr()),
-        ),
-        attempt(
-            constant("u32")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::U32(v)).to_expr()),
-        ),
-        attempt(
-            constant("v32")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::V32(v)).to_expr()),
-        ),
-        attempt(
-            constant("i32")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::I32(v)).to_expr()),
-        ),
-        attempt(
-            constant("z32")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::Z32(v)).to_expr()),
-        ),
-        attempt(
-            constant("u64")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::U64(v)).to_expr()),
-        ),
-        attempt(
-            constant("v64")
-                .with(from_str(uint()))
-                .map(|v| ExprKind::Constant(Value::V64(v)).to_expr()),
-        ),
-        attempt(
-            constant("i64")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::I64(v)).to_expr()),
-        ),
-        attempt(
-            constant("z64")
-                .with(from_str(int()))
-                .map(|v| ExprKind::Constant(Value::Z64(v)).to_expr()),
-        ),
-        attempt(
-            constant("f32")
-                .with(from_str(flt()))
-                .map(|v| ExprKind::Constant(Value::F32(v)).to_expr()),
-        ),
-        attempt(
-            constant("f64")
-                .with(from_str(flt()))
-                .map(|v| ExprKind::Constant(Value::F64(v)).to_expr()),
-        ),
-        attempt(constant("bytes").with(from_str(base64str())).map(|Base64Encoded(v)| {
-            ExprKind::Constant(Value::Bytes(Bytes::from(v))).to_expr()
-        })),
-        attempt(
-            string("ok")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| ExprKind::Constant(Value::Ok).to_expr()),
-        ),
-        attempt(
-            constant("error")
-                .with(quoted())
-                .map(|s| ExprKind::Constant(Value::Error(Chars::from(s))).to_expr()),
-        ),
-        attempt(
-            constant("datetime")
-                .with(from_str(quoted()))
-                .map(|d| ExprKind::Constant(Value::DateTime(d)).to_expr()),
-        ),
-        attempt(
-            constant("duration")
-                .with(from_str(flt()).and(choice((
-                    string("ns"),
-                    string("us"),
-                    string("ms"),
-                    string("s"),
-                ))))
-                .map(|(n, suffix)| {
-                    let d = match suffix {
-                        "ns" => Duration::from_secs_f64(n / 1e9),
-                        "us" => Duration::from_secs_f64(n / 1e6),
-                        "ms" => Duration::from_secs_f64(n / 1e3),
-                        "s" => Duration::from_secs_f64(n),
-                        _ => unreachable!(),
-                    };
-                    ExprKind::Constant(Value::Duration(d)).to_expr()
-                }),
-        ),
+        attempt(netidx_value().map(|v| ExprKind::Constant(v).to_expr())),
         attempt(
             (
                 fname(),

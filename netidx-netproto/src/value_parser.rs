@@ -19,7 +19,7 @@ use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
 
 pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
-fn escaped_string<I>() -> impl Parser<I, Output = String>
+pub fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,

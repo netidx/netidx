@@ -7,7 +7,6 @@ use netidx_core::{
 };
 use std::{
     convert, error, fmt, mem,
-    num::FpCategory,
     ops::{Add, Div, Mul, Not, Sub},
     result,
     str::FromStr,
