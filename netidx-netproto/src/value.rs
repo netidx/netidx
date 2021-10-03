@@ -563,7 +563,7 @@ pub trait FromValue {
 }
 
 impl Value {
-    fn fmt_ext(
+    pub fn fmt_ext(
         &self,
         f: &mut fmt::Formatter<'_>,
         esc: &[char],
@@ -835,7 +835,7 @@ impl Value {
                     Typ::Result => Some(Value::Ok),
                     Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
                     Typ::Null => Some(Value::Null),
-                    Typ::String => unreachable!()
+                    Typ::String => unreachable!(),
                 }
             }
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
@@ -878,7 +878,8 @@ impl Value {
             | Value::False
             | Value::Null
             | Value::Ok
-            | Value::Error(_) => false,
+            | Value::Error(_)
+            | Value::Array(_) => false,
         }
     }
 }

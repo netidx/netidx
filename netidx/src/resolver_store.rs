@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use fxhash::{FxBuildHasher, FxHashMap};
-use immutable_chunkmap::set::Set;
+use immutable_chunkmap::set::Set as ISet;
 use log::debug;
 use std::{
     clone::Clone,
@@ -37,6 +37,7 @@ lazy_static! {
     pub(crate) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
 }
 
+type Set<T> = ISet<T, 8>;
 pub(crate) const MAX_WRITE_BATCH: usize = 100_000;
 pub(crate) const MAX_READ_BATCH: usize = 1_000_000;
 pub(crate) const GC_THRESHOLD: usize = 100_000;

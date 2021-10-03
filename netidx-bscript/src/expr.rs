@@ -1,4 +1,5 @@
 use crate::parser;
+use netidx_netproto::value_parser::BSCRIPT_ESC;
 use netidx::{subscriber::Value, utils};
 use regex::Regex;
 use serde::{
@@ -32,7 +33,7 @@ impl ExprKind {
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ExprKind::Constant(v) => v.fmt_with_esc(f, &parser::PATH_ESC),
+            ExprKind::Constant(v) => v.fmt_ext(f, &BSCRIPT_ESC, true),
             ExprKind::Apply { args, function } => {
                 if function == "string_concat" && args.len() > 0 {
                     // interpolation
@@ -43,7 +44,7 @@ impl fmt::Display for ExprKind {
                                 write!(
                                     f,
                                     "{}",
-                                    utils::escape(&*s, '\\', &parser::PATH_ESC)
+                                    utils::escape(&*s, '\\', &BSCRIPT_ESC)
                                 )?;
                             }
                             s => {
