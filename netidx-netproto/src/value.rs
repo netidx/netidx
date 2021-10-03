@@ -689,392 +689,161 @@ impl Value {
 
     /// Whatever value is attempt to turn it into the type specified
     pub fn cast(self, typ: Typ) -> Option<Value> {
-        match typ {
-            Typ::U32 => match self {
-                Value::U32(v) => Some(Value::U32(v)),
-                Value::V32(v) => Some(Value::U32(v)),
-                Value::I32(v) => Some(Value::U32(v as u32)),
-                Value::Z32(v) => Some(Value::U32(v as u32)),
-                Value::U64(v) => Some(Value::U32(v as u32)),
-                Value::V64(v) => Some(Value::U32(v as u32)),
-                Value::I64(v) => Some(Value::U32(v as u32)),
-                Value::Z64(v) => Some(Value::U32(v as u32)),
-                Value::F32(v) => Some(Value::U32(v as u32)),
-                Value::F64(v) => Some(Value::U32(v as u32)),
-                Value::DateTime(_) => None,
-                Value::Duration(d) => Some(Value::U32(d.as_secs() as u32)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::U32(1)),
-                Value::False => Some(Value::U32(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::V32 => match self {
-                Value::U32(v) => Some(Value::V32(v)),
-                Value::V32(v) => Some(Value::V32(v)),
-                Value::I32(v) => Some(Value::V32(v as u32)),
-                Value::Z32(v) => Some(Value::V32(v as u32)),
-                Value::U64(v) => Some(Value::V32(v as u32)),
-                Value::V64(v) => Some(Value::V32(v as u32)),
-                Value::I64(v) => Some(Value::V32(v as u32)),
-                Value::Z64(v) => Some(Value::V32(v as u32)),
-                Value::F32(v) => Some(Value::V32(v as u32)),
-                Value::F64(v) => Some(Value::V32(v as u32)),
-                Value::DateTime(_) => None,
-                Value::Duration(d) => Some(Value::V32(d.as_secs() as u32)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::V32(1)),
-                Value::False => Some(Value::V32(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::I32 => match self {
-                Value::U32(v) => Some(Value::I32(v as i32)),
-                Value::V32(v) => Some(Value::I32(v as i32)),
-                Value::I32(v) => Some(Value::I32(v)),
-                Value::Z32(v) => Some(Value::I32(v)),
-                Value::U64(v) => Some(Value::I32(v as i32)),
-                Value::V64(v) => Some(Value::I32(v as i32)),
-                Value::I64(v) => Some(Value::I32(v as i32)),
-                Value::Z64(v) => Some(Value::I32(v as i32)),
-                Value::F32(v) => Some(Value::I32(v as i32)),
-                Value::F64(v) => Some(Value::I32(v as i32)),
-                Value::DateTime(v) => Some(Value::I32(v.timestamp() as i32)),
-                Value::Duration(v) => Some(Value::I32(v.as_secs() as i32)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::I32(1)),
-                Value::False => Some(Value::I32(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::Z32 => match self {
-                Value::U32(v) => Some(Value::Z32(v as i32)),
-                Value::V32(v) => Some(Value::Z32(v as i32)),
-                Value::I32(v) => Some(Value::Z32(v)),
-                Value::Z32(v) => Some(Value::Z32(v)),
-                Value::U64(v) => Some(Value::Z32(v as i32)),
-                Value::V64(v) => Some(Value::Z32(v as i32)),
-                Value::I64(v) => Some(Value::Z32(v as i32)),
-                Value::Z64(v) => Some(Value::Z32(v as i32)),
-                Value::F32(v) => Some(Value::Z32(v as i32)),
-                Value::F64(v) => Some(Value::Z32(v as i32)),
-                Value::DateTime(v) => Some(Value::Z32(v.timestamp() as i32)),
-                Value::Duration(v) => Some(Value::Z32(v.as_secs() as i32)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::Z32(1)),
-                Value::False => Some(Value::Z32(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::U64 => match self {
-                Value::U32(v) => Some(Value::U64(v as u64)),
-                Value::V32(v) => Some(Value::U64(v as u64)),
-                Value::I32(v) => Some(Value::U64(v as u64)),
-                Value::Z32(v) => Some(Value::U64(v as u64)),
-                Value::U64(v) => Some(Value::U64(v)),
-                Value::V64(v) => Some(Value::U64(v)),
-                Value::I64(v) => Some(Value::U64(v as u64)),
-                Value::Z64(v) => Some(Value::U64(v as u64)),
-                Value::F32(v) => Some(Value::U64(v as u64)),
-                Value::F64(v) => Some(Value::U64(v as u64)),
-                Value::DateTime(_) => None,
-                Value::Duration(d) => Some(Value::U64(d.as_secs())),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::U64(1)),
-                Value::False => Some(Value::U64(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::V64 => match self {
-                Value::U32(v) => Some(Value::V64(v as u64)),
-                Value::V32(v) => Some(Value::V64(v as u64)),
-                Value::I32(v) => Some(Value::V64(v as u64)),
-                Value::Z32(v) => Some(Value::V64(v as u64)),
-                Value::U64(v) => Some(Value::V64(v)),
-                Value::V64(v) => Some(Value::V64(v)),
-                Value::I64(v) => Some(Value::V64(v as u64)),
-                Value::Z64(v) => Some(Value::V64(v as u64)),
-                Value::F32(v) => Some(Value::V64(v as u64)),
-                Value::F64(v) => Some(Value::V64(v as u64)),
-                Value::DateTime(_) => None,
-                Value::Duration(d) => Some(Value::V64(d.as_secs())),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::V64(1)),
-                Value::False => Some(Value::V64(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::I64 => match self {
-                Value::U32(v) => Some(Value::I64(v as i64)),
-                Value::V32(v) => Some(Value::I64(v as i64)),
-                Value::I32(v) => Some(Value::I64(v as i64)),
-                Value::Z32(v) => Some(Value::I64(v as i64)),
-                Value::U64(v) => Some(Value::I64(v as i64)),
-                Value::V64(v) => Some(Value::I64(v as i64)),
-                Value::I64(v) => Some(Value::I64(v)),
-                Value::Z64(v) => Some(Value::I64(v)),
-                Value::F32(v) => Some(Value::I64(v as i64)),
-                Value::F64(v) => Some(Value::I64(v as i64)),
-                Value::DateTime(v) => Some(Value::I64(v.timestamp())),
-                Value::Duration(v) => Some(Value::I64(v.as_secs() as i64)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::I64(1)),
-                Value::False => Some(Value::I64(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::Z64 => match self {
-                Value::U32(v) => Some(Value::Z64(v as i64)),
-                Value::V32(v) => Some(Value::Z64(v as i64)),
-                Value::I32(v) => Some(Value::Z64(v as i64)),
-                Value::Z32(v) => Some(Value::Z64(v as i64)),
-                Value::U64(v) => Some(Value::Z64(v as i64)),
-                Value::V64(v) => Some(Value::Z64(v as i64)),
-                Value::I64(v) => Some(Value::Z64(v)),
-                Value::Z64(v) => Some(Value::Z64(v)),
-                Value::F32(v) => Some(Value::Z64(v as i64)),
-                Value::F64(v) => Some(Value::Z64(v as i64)),
-                Value::DateTime(v) => Some(Value::Z64(v.timestamp())),
-                Value::Duration(v) => Some(Value::Z64(v.as_secs() as i64)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::Z64(1)),
-                Value::False => Some(Value::Z64(0)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::F32 => match self {
-                Value::U32(v) => Some(Value::F32(v as f32)),
-                Value::V32(v) => Some(Value::F32(v as f32)),
-                Value::I32(v) => Some(Value::F32(v as f32)),
-                Value::Z32(v) => Some(Value::F32(v as f32)),
-                Value::U64(v) => Some(Value::F32(v as f32)),
-                Value::V64(v) => Some(Value::F32(v as f32)),
-                Value::I64(v) => Some(Value::F32(v as f32)),
-                Value::Z64(v) => Some(Value::F32(v as f32)),
-                Value::F32(v) => Some(Value::F32(v)),
-                Value::F64(v) => Some(Value::F32(v as f32)),
-                Value::DateTime(v) => Some(Value::F32(v.timestamp() as f32)),
-                Value::Duration(v) => Some(Value::F32(v.as_secs() as f32)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::F32(1.)),
-                Value::False => Some(Value::F32(0.)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::F64 => match self {
-                Value::U32(v) => Some(Value::F64(v as f64)),
-                Value::V32(v) => Some(Value::F64(v as f64)),
-                Value::I32(v) => Some(Value::F64(v as f64)),
-                Value::Z32(v) => Some(Value::F64(v as f64)),
-                Value::U64(v) => Some(Value::F64(v as f64)),
-                Value::V64(v) => Some(Value::F64(v as f64)),
-                Value::I64(v) => Some(Value::F64(v as f64)),
-                Value::Z64(v) => Some(Value::F64(v as f64)),
-                Value::F32(v) => Some(Value::F64(v as f64)),
-                Value::F64(v) => Some(Value::F64(v)),
-                Value::DateTime(v) => Some(Value::F64(v.timestamp() as f64)),
-                Value::Duration(v) => Some(Value::F64(v.as_secs() as f64)),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::F64(1.)),
-                Value::False => Some(Value::F64(0.)),
-                Value::Null => None,
-                Value::Ok => None,
-                Value::Error(_) => None,
-            },
-            Typ::Bool => match self {
-                Value::U32(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::V32(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::I32(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::Z32(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::U64(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::V64(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::I64(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::Z64(v) => Some(if v > 0 { Value::True } else { Value::False }),
-                Value::F32(v) => Some(if v > 0. { Value::True } else { Value::False }),
-                Value::F64(v) => Some(if v > 0. { Value::True } else { Value::False }),
-                Value::DateTime(_) => None,
-                Value::Duration(_) => None,
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::True),
-                Value::False => Some(Value::False),
-                Value::Null => Some(Value::False),
-                Value::Ok => Some(Value::True),
-                Value::Error(_) => Some(Value::False),
-            },
-            Typ::String => match self {
-                Value::U32(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::V32(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::I32(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::Z32(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::U64(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::V64(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::I64(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::Z64(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::F32(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::F64(v) => Some(Value::String(Chars::from(v.to_string()))),
-                Value::DateTime(d) => Some(Value::String(Chars::from(format!("{}", d)))),
-                Value::Duration(d) => {
-                    Some(Value::String(Chars::from(format!("{}s", d.as_secs_f64()))))
-                }
-                Value::String(s) => Some(Value::String(s)),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::String(Chars::from("true"))),
-                Value::False => Some(Value::String(Chars::from("false"))),
-                Value::Null => Some(Value::String(Chars::from("null"))),
-                Value::Ok => Some(Value::String(Chars::from("ok"))),
-                Value::Error(s) => Some(Value::String(s)),
-            },
-            Typ::Bytes => None,
-            Typ::Result => match self {
-                Value::U32(_) => Some(Value::Ok),
-                Value::V32(_) => Some(Value::Ok),
-                Value::I32(_) => Some(Value::Ok),
-                Value::Z32(_) => Some(Value::Ok),
-                Value::U64(_) => Some(Value::Ok),
-                Value::V64(_) => Some(Value::Ok),
-                Value::I64(_) => Some(Value::Ok),
-                Value::Z64(_) => Some(Value::Ok),
-                Value::F32(_) => Some(Value::Ok),
-                Value::F64(_) => Some(Value::Ok),
-                Value::DateTime(_) => Some(Value::Ok),
-                Value::Duration(_) => Some(Value::Ok),
-                Value::String(s) => typ.parse(&*s).ok(),
-                Value::Bytes(_) => None,
-                Value::True => Some(Value::Ok),
-                Value::False => Some(Value::Ok),
-                Value::Null => Some(Value::Ok),
-                Value::Ok => Some(Value::Ok),
-                Value::Error(s) => Some(Value::Error(s)),
-            },
-            Typ::DateTime => match self {
-                Value::U32(v) | Value::V32(v) => {
-                    Some(Value::DateTime(DateTime::from_utc(
-                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
+        macro_rules! cast_number {
+            ($v:expr, $typ:expr) => {
+                match typ {
+                    Typ::U32 => Some(Value::U32($v as u32)),
+                    Typ::V32 => Some(Value::V32($v as u32)),
+                    Typ::I32 => Some(Value::I32($v as i32)),
+                    Typ::Z32 => Some(Value::Z32($v as i32)),
+                    Typ::U64 => Some(Value::U64($v as u64)),
+                    Typ::V64 => Some(Value::V64($v as u64)),
+                    Typ::I64 => Some(Value::I64($v as i64)),
+                    Typ::Z64 => Some(Value::Z64($v as i64)),
+                    Typ::F32 => Some(Value::F32($v as f32)),
+                    Typ::F64 => Some(Value::F64($v as f64)),
+                    Typ::DateTime => Some(Value::DateTime(DateTime::from_utc(
+                        NaiveDateTime::from_timestamp_opt($v as i64, 0)?,
                         Utc,
-                    )))
-                }
-                Value::I32(v) | Value::Z32(v) => {
-                    Some(Value::DateTime(DateTime::from_utc(
-                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
-                        Utc,
-                    )))
-                }
-                Value::U64(v) | Value::V64(v) => {
-                    Some(Value::DateTime(DateTime::from_utc(
-                        NaiveDateTime::from_timestamp_opt(v as i64, 0)?,
-                        Utc,
-                    )))
-                }
-                Value::I64(v) | Value::Z64(v) => Some(Value::DateTime(
-                    DateTime::from_utc(NaiveDateTime::from_timestamp_opt(v, 0)?, Utc),
-                )),
-                Value::F32(v) => match v.classify() {
-                    FpCategory::Nan | FpCategory::Infinite => None,
-                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
-                        Some(Value::DateTime(DateTime::from_utc(
-                            NaiveDateTime::from_timestamp_opt(
-                                v.trunc() as i64,
-                                v.fract().abs() as u32,
-                            )?,
-                            Utc,
-                        )))
+                    ))),
+                    Typ::Duration => {
+                        Some(Value::Duration(Duration::from_secs($v as u64)))
                     }
-                },
-                Value::F64(v) => match v.classify() {
-                    FpCategory::Nan | FpCategory::Infinite => None,
-                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
-                        Some(Value::DateTime(DateTime::from_utc(
-                            NaiveDateTime::from_timestamp_opt(
-                                v.trunc() as i64,
-                                v.fract().abs() as u32,
-                            )?,
-                            Utc,
-                        )))
+                    Typ::Bool => {
+                        Some(if $v as i64 > 0 { Value::True } else { Value::False })
                     }
-                },
-                v @ Value::DateTime(_) => Some(v),
-                Value::Duration(d) => Some(Value::DateTime(DateTime::from_utc(
-                    NaiveDateTime::from_timestamp_opt(
-                        d.as_secs() as i64,
-                        d.subsec_nanos(),
-                    )?,
-                    Utc,
-                ))),
-                Value::String(c) => typ.parse(&*c).ok(),
-                Value::Bytes(_)
-                | Value::True
-                | Value::False
-                | Value::Null
-                | Value::Ok
-                | Value::Error(_) => None,
-            },
-            Typ::Duration => match self {
-                Value::U32(v) | Value::V32(v) => {
-                    Some(Value::Duration(Duration::from_secs(v as u64)))
+                    Typ::String => Some(Value::String(Chars::from(format!("{}", self)))),
+                    Typ::Bytes => None,
+                    Typ::Result => Some(Value::Ok),
+                    Typ::Array => {
+                        Some(Value::Array(Arc::from(Vec::from([self.clone()]))))
+                    }
+                    Typ::Null => Some(Value::Null),
                 }
-                Value::I32(v) | Value::Z32(v) => {
-                    Some(Value::Duration(Duration::from_secs(i32::abs(v) as u64)))
-                }
-                Value::U64(v) | Value::V64(v) => {
-                    Some(Value::Duration(Duration::from_secs(v)))
-                }
-                Value::I64(v) | Value::Z64(v) => {
-                    Some(Value::Duration(Duration::from_secs(i64::abs(v) as u64)))
-                }
-                Value::F32(v) => match v.classify() {
-                    FpCategory::Nan | FpCategory::Infinite => None,
-                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
-                        if v < 0. || v > u64::MAX as f32 {
-                            None
+            };
+        }
+        match self {
+            Value::String(s) if typ != Typ::String => {
+                s.parse::<Value>().ok().and_then(|v| v.cast(typ))
+            }
+            v @ Value::String(_) => Some(v),
+            v if typ == Typ::String => Some(Value::String(Chars::from(format!("{}", v)))),
+            Value::Array(elts) if typ != Typ::Array => {
+                elts.first().and_then(|v| v.clone().cast(typ))
+            }
+            v @ Value::Array(_) => Some(v),
+            Value::U32(v) | Value::V32(v) => cast_number!(v, typ),
+            Value::I32(v) | Value::Z32(v) => cast_number!(v, typ),
+            Value::U64(v) | Value::V64(v) => cast_number!(v, typ),
+            Value::I64(v) | Value::Z64(v) => cast_number!(v, typ),
+            Value::F32(v) => cast_number!(v, typ),
+            Value::F64(v) => cast_number!(v, typ),
+            Value::DateTime(v) => match typ {
+                Typ::U32 | Typ::V32 => {
+                    let ts = v.timestamp();
+                    if ts < 0 && ts > u32::MAX as i64 {
+                        None
+                    } else {
+                        if typ == Typ::U32 {
+                            Some(Value::U32(ts as u32))
                         } else {
-                            Some(Value::Duration(Duration::from_secs_f32(v)))
+                            Some(Value::V32(ts as u32))
                         }
                     }
-                },
-                Value::F64(v) => match v.classify() {
-                    FpCategory::Nan | FpCategory::Infinite => None,
-                    FpCategory::Normal | FpCategory::Subnormal | FpCategory::Zero => {
-                        if v < 0. || v > u64::MAX as f64 {
-                            None
+                }
+                Typ::I32 | Typ::Z32 => {
+                    let ts = v.timestamp();
+                    if ts < i32::MIN as i64 || ts > i32::MAX as i64 {
+                        None
+                    } else {
+                        if typ == Typ::I32 {
+                            Some(Value::I32(ts as i32))
                         } else {
-                            Some(Value::Duration(Duration::from_secs_f64(v)))
+                            Some(Value::Z32(ts as i32))
                         }
                     }
-                },
-                Value::DateTime(d) => {
-                    let dur = d.timestamp() as f64;
-                    let dur = dur + (d.timestamp_nanos() / 1_000_000_000) as f64;
-                    Some(Value::Duration(Duration::from_secs_f64(dur)))
                 }
-                v @ Value::Duration(_) => Some(v),
-                Value::String(c) => typ.parse(&*c).ok(),
-                Value::Bytes(_)
-                | Value::True
-                | Value::False
-                | Value::Null
-                | Value::Ok
-                | Value::Error(_) => None,
+                Typ::U64 | Typ::V64 => {
+                    let ts = v.timestamp();
+                    if ts < 0 {
+                        None
+                    } else {
+                        if typ == Typ::U64 {
+                            Some(Value::U64(ts as u64))
+                        } else {
+                            Some(Value::V64(ts as u64))
+                        }
+                    }
+                }
+                Typ::I64 => Some(Value::I64(v.timestamp())),
+                Typ::Z64 => Some(Value::Z64(v.timestamp())),
+                Typ::F32 | Typ::F64 => {
+                    let dur = v.timestamp() as f64;
+                    let dur = dur + (v.timestamp_nanos() / 1_000_000_000) as f64;
+                    if typ == Typ::F32 {
+                        Some(Value::F32(dur as f32))
+                    } else {
+                        Some(Value::F64(dur))
+                    }
+                }
+                Typ::DateTime => Some(Value::DateTime(v)),
+                Typ::Duration => None,
+                Typ::Bool => None,
+                Typ::Bytes => None,
+                Typ::Result => Some(Value::Ok),
+                Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                Typ::Null => Some(Value::Null),
+                Typ::String => unreachable!(),
             },
+            Value::Duration(d) => match typ {
+                Typ::U32 => Some(Value::U32(d.as_secs() as u32)),
+                Typ::V32 => Some(Value::V32(d.as_secs() as u32)),
+                Typ::I32 => Some(Value::I32(d.as_secs() as i32)),
+                Typ::Z32 => Some(Value::Z32(d.as_secs() as i32)),
+                Typ::U64 => Some(Value::U64(d.as_secs() as u64)),
+                Typ::V64 => Some(Value::V64(d.as_secs() as u64)),
+                Typ::I64 => Some(Value::I64(d.as_secs() as i64)),
+                Typ::Z64 => Some(Value::Z64(d.as_secs() as i64)),
+                Typ::F32 => Some(Value::F32(d.as_secs_f32())),
+                Typ::F64 => Some(Value::F64(d.as_secs_f64())),
+                Typ::DateTime => None,
+                Typ::Duration => Some(Value::Duration(d)),
+                Typ::Bool => None,
+                Typ::Bytes => None,
+                Typ::Result => Some(Value::Ok),
+                Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                Typ::Null => Some(Value::Null),
+                Typ::String => unreachable!(),
+            },
+            Value::True | Value::False => {
+                let b = self == Value::True;
+                match typ {
+                    Typ::U32 => Some(Value::U32(b as u32)),
+                    Typ::V32 => Some(Value::V32(b as u32)),
+                    Typ::I32 => Some(Value::I32(b as i32)),
+                    Typ::Z32 => Some(Value::Z32(b as i32)),
+                    Typ::U64 => Some(Value::U64(b as u64)),
+                    Typ::V64 => Some(Value::V64(b as u64)),
+                    Typ::I64 => Some(Value::I64(b as i64)),
+                    Typ::Z64 => Some(Value::Z64(b as i64)),
+                    Typ::F32 => Some(Value::F32(b as u32 as f32)),
+                    Typ::F64 => Some(Value::F64(b as u64 as f64)),
+                    Typ::DateTime => None,
+                    Typ::Duration => None,
+                    Typ::Bool => Some(self),
+                    Typ::Bytes => None,
+                    Typ::Result => Some(Value::Ok),
+                    Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                    Typ::Null => Some(Value::Null),
+                    Typ::String => unreachable!()
+                }
+            }
+            Value::Bytes(_) if typ == Typ::Bytes => Some(self),
+            Value::Bytes(_) => None,
+            Value::Ok => Value::True.cast(typ),
+            Value::Error(_) => Value::False.cast(typ),
+            Value::Null if typ == Typ::Null => Some(self),
+            Value::Null => None,
         }
     }
 

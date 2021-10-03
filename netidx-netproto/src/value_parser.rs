@@ -1,4 +1,4 @@
-use crate::value::{Value, BSCRIPT_ESC};
+use crate::value::Value;
 use base64;
 use bytes::Bytes;
 use combine::{
@@ -16,6 +16,8 @@ use combine::{
 };
 use netidx_core::{chars::Chars, utils};
 use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
+
+pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
@@ -212,141 +214,42 @@ mod tests {
 
     #[test]
     fn parse() {
-        assert_eq!(
-            Value::U32(23),
-            parse_value("u32:23").unwrap()
-        );
-        assert_eq!(
-            Value::V32(42),
-            parse_value("v32:42").unwrap()
-        );
-        assert_eq!(
-            Value::I32(-10),
-            parse_value("i32:-10").unwrap()
-        );
-        assert_eq!(
-            Value::I32(12321),
-            parse_value("i32:12321").unwrap()
-        );
-        assert_eq!(
-            Value::Z32(-99),
-            parse_value("z32:-99").unwrap()
-        );
-        assert_eq!(
-            Value::U64(100),
-            parse_value("u64:100").unwrap()
-        );
-        assert_eq!(
-            Value::V64(100),
-            parse_value("v64:100").unwrap()
-        );
-        assert_eq!(
-            Value::I64(-100),
-            parse_value("i64:-100").unwrap()
-        );
-        assert_eq!(
-            Value::I64(-100),
-            parse_value("-100").unwrap()
-        );
-        assert_eq!(
-            Value::I64(100),
-            parse_value("i64:100").unwrap()
-        );
-        assert_eq!(
-            Value::I64(100),
-            parse_value("100").unwrap()
-        );
-        assert_eq!(
-            Value::Z64(-100),
-            parse_value("z64:-100").unwrap()
-        );
-        assert_eq!(
-            Value::Z64(100),
-            parse_value("z64:100").unwrap()
-        );
-        assert_eq!(
-            Value::F32(3.1415),
-            parse_value("f32:3.1415").unwrap()
-        );
-        assert_eq!(
-            Value::F32(675.6),
-            parse_value("f32:675.6").unwrap()
-        );
-        assert_eq!(
-            Value::F32(42.3435),
-            parse_value("f32:42.3435").unwrap()
-        );
-        assert_eq!(
-            Value::F32(1.123e9),
-            parse_value("f32:1.123e9").unwrap()
-        );
-        assert_eq!(
-            Value::F32(1e9),
-            parse_value("f32:1e9").unwrap()
-        );
-        assert_eq!(
-            Value::F32(21.2443e-6),
-            parse_value("f32:21.2443e-6").unwrap()
-        );
-        assert_eq!(
-            Value::F32(3.),
-            parse_value("f32:3.").unwrap()
-        );
-        assert_eq!(
-            Value::F64(3.1415),
-            parse_value("f64:3.1415").unwrap()
-        );
-        assert_eq!(
-            Value::F64(3.1415),
-            parse_value("3.1415").unwrap()
-        );
-        assert_eq!(
-            Value::F64(1.123e9),
-            parse_value("1.123e9").unwrap()
-        );
-        assert_eq!(
-            Value::F64(1e9),
-            parse_value("1e9").unwrap()
-        );
-        assert_eq!(
-            Value::F64(21.2443e-6),
-            parse_value("21.2443e-6").unwrap()
-        );
-        assert_eq!(
-            Value::F64(3.),
-            parse_value("f64:3.").unwrap()
-        );
-        assert_eq!(
-            Value::F64(3.),
-            parse_value("3.").unwrap()
-        );
+        assert_eq!(Value::U32(23), parse_value("u32:23").unwrap());
+        assert_eq!(Value::V32(42), parse_value("v32:42").unwrap());
+        assert_eq!(Value::I32(-10), parse_value("i32:-10").unwrap());
+        assert_eq!(Value::I32(12321), parse_value("i32:12321").unwrap());
+        assert_eq!(Value::Z32(-99), parse_value("z32:-99").unwrap());
+        assert_eq!(Value::U64(100), parse_value("u64:100").unwrap());
+        assert_eq!(Value::V64(100), parse_value("v64:100").unwrap());
+        assert_eq!(Value::I64(-100), parse_value("i64:-100").unwrap());
+        assert_eq!(Value::I64(-100), parse_value("-100").unwrap());
+        assert_eq!(Value::I64(100), parse_value("i64:100").unwrap());
+        assert_eq!(Value::I64(100), parse_value("100").unwrap());
+        assert_eq!(Value::Z64(-100), parse_value("z64:-100").unwrap());
+        assert_eq!(Value::Z64(100), parse_value("z64:100").unwrap());
+        assert_eq!(Value::F32(3.1415), parse_value("f32:3.1415").unwrap());
+        assert_eq!(Value::F32(675.6), parse_value("f32:675.6").unwrap());
+        assert_eq!(Value::F32(42.3435), parse_value("f32:42.3435").unwrap());
+        assert_eq!(Value::F32(1.123e9), parse_value("f32:1.123e9").unwrap());
+        assert_eq!(Value::F32(1e9), parse_value("f32:1e9").unwrap());
+        assert_eq!(Value::F32(21.2443e-6), parse_value("f32:21.2443e-6").unwrap());
+        assert_eq!(Value::F32(3.), parse_value("f32:3.").unwrap());
+        assert_eq!(Value::F64(3.1415), parse_value("f64:3.1415").unwrap());
+        assert_eq!(Value::F64(3.1415), parse_value("3.1415").unwrap());
+        assert_eq!(Value::F64(1.123e9), parse_value("1.123e9").unwrap());
+        assert_eq!(Value::F64(1e9), parse_value("1e9").unwrap());
+        assert_eq!(Value::F64(21.2443e-6), parse_value("21.2443e-6").unwrap());
+        assert_eq!(Value::F64(3.), parse_value("f64:3.").unwrap());
+        assert_eq!(Value::F64(3.), parse_value("3.").unwrap());
         let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
         let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
-        assert_eq!(
-            Value::String(c),
-            parse_value(s).unwrap()
-        );
+        assert_eq!(Value::String(c), parse_value(s).unwrap());
         let c = Chars::new();
-        assert_eq!(
-            Value::String(c),
-            parse_value(r#""""#).unwrap()
-        );
-        assert_eq!(
-            Value::True,
-            parse_value("true").unwrap()
-        );
-        assert_eq!(
-            Value::True,
-            parse_value("true ").unwrap()
-        );
-        assert_eq!(
-            Value::False,
-            parse_value("false").unwrap()
-        );
-        assert_eq!(
-            Value::Null,
-            parse_value("null").unwrap()
-        );
+        assert_eq!(Value::String(c), parse_value(r#""""#).unwrap());
+        assert_eq!(Value::True, parse_value("true").unwrap());
+        assert_eq!(Value::True, parse_value("true ").unwrap());
+        assert_eq!(Value::False, parse_value("false").unwrap());
+        assert_eq!(Value::Null, parse_value("null").unwrap());
         assert_eq!(Value::Ok, parse_value("ok").unwrap());
         assert_eq!(
             Value::Error(Chars::from("error")),

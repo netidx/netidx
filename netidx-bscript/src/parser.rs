@@ -14,10 +14,9 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
+use netidx_netproto::value_parser::BSCRIPT_ESC;
 use netidx::{chars::Chars, utils, publisher::Value};
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
-
-pub static PATH_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
@@ -26,9 +25,9 @@ where
     I::Range: Range,
 {
     recognize(escaped(
-        take_while1(|c| !PATH_ESC.contains(&c)),
+        take_while1(|c| !BSCRIPT_ESC.contains(&c)),
         '\\',
-        one_of(PATH_ESC.iter().copied()),
+        one_of(BSCRIPT_ESC.iter().copied()),
     ))
     .map(|s| match utils::unescape(&s, '\\') {
         Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
