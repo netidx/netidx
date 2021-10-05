@@ -6,12 +6,13 @@ use netidx_core::{
     utils,
 };
 use std::{
-    convert, error, fmt, mem,
+    convert, error, fmt, iter, mem,
     ops::{Add, Div, Mul, Not, Sub},
     result,
     str::FromStr,
     sync::Arc,
     time::Duration,
+    num::Wrapping,
 };
 
 use crate::value_parser;
@@ -208,37 +209,146 @@ impl FromStr for Value {
     }
 }
 
+macro_rules! apply_op {
+    ($self:expr, $rhs:expr, $op:tt, $($($pat:pat)|+ => $blk:block),+) => {
+        match ($self, $rhs) {
+            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
+                Value::U32((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
+                Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
+            }
+            (Value::U64(l) | Value::V64(l), Value::U32(r) | Value::V32(r)) => {
+                Value::U64((Wrapping(l) $op Wrapping(r as u64)).0)
+            }
+            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
+                Value::U64((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
+                Value::I32((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::I32(l) | Value::Z32(l), Value::I64(r) | Value::Z64(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
+            }
+            (Value::I32(l) | Value::Z32(l), Value::U32(r) | Value::V32(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
+            }
+            (Value::U32(l) | Value::V32(l), Value::I32(r) | Value::Z32(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::I32(r) | Value::Z32(r)) => {
+                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
+                Value::I64((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::U32(r) | Value::V32(r)) => {
+                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
+            }
+            (Value::U32(l) | Value::V32(l), Value::I64(r) | Value::Z64(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::U64(r) | Value::V64(r)) => {
+                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
+            }
+            (Value::U64(l) | Value::V64(l), Value::I64(r) | Value::Z64(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
+            }
+            (Value::U64(l) | Value::V64(l), Value::I32(r) | Value::Z32(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
+            }
+            (Value::I32(l) | Value::Z32(l), Value::U64(r) | Value::V64(r)) => {
+                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
+            }
+            (Value::F32(l), Value::U32(r) | Value::V32(r)) => Value::F32(l $op r as f32),
+            (Value::U32(l) | Value::V32(l), Value::F32(r)) => Value::F32(l as f32 $op r),
+            (Value::F32(l), Value::U64(r) | Value::V64(r)) => Value::F32(l $op r as f32),
+            (Value::U64(l) | Value::V64(l), Value::F32(r)) => Value::F32(l as f32 $op r),
+            (Value::F32(l), Value::I32(r) | Value::Z32(r)) => Value::F32(l $op r  as f32),
+            (Value::I32(l) | Value::Z32(l), Value::F32(r)) => Value::F32(l as f32 $op r),
+            (Value::F32(l), Value::I64(r) | Value::Z64(r)) => Value::F32(l $op r as f32),
+            (Value::I64(l) | Value::Z64(l), Value::F32(r)) => Value::F32(l as f32 $op r),
+            (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
+            (Value::F32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
+            (Value::F64(l), Value::U32(r) | Value::V32(r)) => Value::F64(l $op r as f64),
+            (Value::U32(l) | Value::V32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
+            (Value::F64(l), Value::U64(r) | Value::V64(r)) => Value::F64(l $op r as f64),
+            (Value::U64(l) | Value::V64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
+            (Value::F64(l), Value::I32(r) | Value::Z32(r)) => Value::F64(l $op r as f64),
+            (Value::I32(l) | Value::Z32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
+            (Value::F64(l), Value::I64(r) | Value::Z64(r)) => Value::F64(l $op r as f64),
+            (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
+            (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
+            (Value::String(s), n) => match s.parse::<Value>() {
+                Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                Ok(s) => s $op n,
+            }
+            (n, Value::String(s)) => match s.parse::<Value>() {
+                Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                Ok(s) => n $op s,
+            },
+            (Value::Array(e0), Value::Array(e1)) => {
+                let (e0, e1) = if e0.len() < e1.len() { (e0, e1) } else { (e1, e0) };
+                let iter = e0
+                    .iter()
+                    .cloned()
+                    .chain(iter::repeat(Value::F64(0.)))
+                    .zip(e1.iter().cloned());
+                Value::Array(iter.map(|(v0, v1)| v0 $op v1).collect())
+            }
+            (l @ Value::Array(_), n) => {
+                match n.cast(Typ::Array) {
+                    None => Value::Error(Chars::from("can't add to array")),
+                    Some(r) => l $op r,
+                }
+            }
+            (n, r @ Value::Array(_)) => {
+                match n.cast(Typ::Array) {
+                    None => Value::Error(Chars::from("can't add to array")),
+                    Some(l) => l $op r,
+                }
+            }
+            (Value::Bytes(_), _) | (_, Value::Bytes(_)) => {
+                Value::Error(Chars::from("can't add bytes"))
+            }
+            (Value::Null, _) | (_, Value::Null) => {
+                Value::Error(Chars::from("can't add null"))
+            }
+            (Value::Ok, _)
+            | (_, Value::Ok)
+            | (Value::Error(_), _)
+            | (_, Value::Error(_)) => Value::Error(Chars::from("can't add result types")),
+            (Value::True, n) => Value::U32(1) $op n,
+            (n, Value::True) => n $op Value::U32(1),
+            (Value::False, n) => Value::U32(0) $op n,
+            (n, Value::False) => n $op Value::U32(0),
+            $($($pat)|+ => $blk),+
+        }
+    }
+}
+
 impl Add for Value {
     type Output = Value;
 
     fn add(self, rhs: Self) -> Self {
-        match (self, rhs) {
-            (Value::U32(l), Value::U32(r)) => Value::U32(l + r),
-            (Value::U32(l), Value::V32(r)) => Value::U32(l + r),
-            (Value::V32(l), Value::V32(r)) => Value::V32(l + r),
-            (Value::V32(l), Value::U32(r)) => Value::U32(l + r),
-            (Value::I32(l), Value::I32(r)) => Value::I32(l + r),
-            (Value::I32(l), Value::Z32(r)) => Value::I32(l + r),
-            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l + r),
-            (Value::Z32(l), Value::I32(r)) => Value::I32(l + r),
-            (Value::U64(l), Value::U64(r)) => Value::U64(l + r),
-            (Value::U64(l), Value::V64(r)) => Value::U64(l + r),
-            (Value::V64(l), Value::V64(r)) => Value::V64(l + r),
-            (Value::I64(l), Value::I64(r)) => Value::I64(l + r),
-            (Value::I64(l), Value::Z64(r)) => Value::I64(l + r),
-            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l + r),
-            (Value::Z64(l), Value::I64(r)) => Value::I64(l + r),
-            (Value::F32(l), Value::F32(r)) => Value::F32(l + r),
-            (Value::F64(l), Value::F64(r)) => Value::F64(l + r),
-            (Value::DateTime(dt), Value::Duration(d)) => {
-                match chrono::Duration::from_std(d) {
-                    Ok(d) => Value::DateTime(dt + d),
-                    Err(e) => Value::Error(Chars::from(format!("{}", e))),
+        apply_op!(
+            self, rhs, +,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(d) {
+                        Ok(d) => Value::DateTime(dt + d),
+                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                    }
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::Error(Chars::from("can't add to datetime/duration"))
                 }
-            }
-            (Value::Duration(d0), Value::Duration(d1)) => Value::Duration(d0 + d1),
-            (l, r) => Value::Error(Chars::from(format!("can't add {:?} and {:?}", l, r))),
-        }
+        )
     }
 }
 
@@ -246,33 +356,23 @@ impl Sub for Value {
     type Output = Value;
 
     fn sub(self, rhs: Self) -> Self {
-        match (self, rhs) {
-            (Value::U32(l), Value::U32(r)) if l >= r => Value::U32(l - r),
-            (Value::U32(l), Value::V32(r)) if l >= r => Value::U32(l - r),
-            (Value::V32(l), Value::V32(r)) if l >= r => Value::V32(l - r),
-            (Value::V32(l), Value::U32(r)) if l >= r => Value::U32(l - r),
-            (Value::I32(l), Value::I32(r)) => Value::I32(l - r),
-            (Value::I32(l), Value::Z32(r)) => Value::I32(l - r),
-            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l - r),
-            (Value::Z32(l), Value::I32(r)) => Value::I32(l - r),
-            (Value::U64(l), Value::U64(r)) if l >= r => Value::U64(l - r),
-            (Value::U64(l), Value::V64(r)) if l >= r => Value::U64(l - r),
-            (Value::V64(l), Value::V64(r)) if l >= r => Value::V64(l - r),
-            (Value::I64(l), Value::I64(r)) => Value::I64(l - r),
-            (Value::I64(l), Value::Z64(r)) => Value::I64(l - r),
-            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l - r),
-            (Value::Z64(l), Value::I64(r)) => Value::I64(l - r),
-            (Value::F32(l), Value::F32(r)) => Value::F32(l - r),
-            (Value::F64(l), Value::F64(r)) => Value::F64(l - r),
-            (Value::DateTime(dt), Value::Duration(d)) => {
-                match chrono::Duration::from_std(d) {
-                    Ok(d) => Value::DateTime(dt - d),
-                    Err(e) => Value::Error(Chars::from(format!("{}", e))),
+        apply_op!(
+            self, rhs, -,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(d) {
+                        Ok(d) => Value::DateTime(dt - d),
+                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                    }
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::Error(Chars::from("can't add to datetime/duration"))
                 }
-            }
-            (Value::Duration(d0), Value::Duration(d1)) => Value::Duration(d0 - d1),
-            (l, r) => Value::Error(Chars::from(format!("can't sub {:?} and {:?}", l, r))),
-        }
+        )
     }
 }
 
