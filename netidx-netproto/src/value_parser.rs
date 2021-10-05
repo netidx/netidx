@@ -17,18 +17,16 @@ use combine::{
 use netidx_core::{chars::Chars, utils};
 use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
 
-pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
-
-pub fn escaped_string<I>() -> impl Parser<I, Output = String>
+pub fn escaped_string<I>(esc: &'static [char]) -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     recognize(escaped(
-        take_while1(|c| !BSCRIPT_ESC.contains(&c)),
+        take_while1(move |c| !esc.contains(&c)),
         '\\',
-        one_of(BSCRIPT_ESC.iter().copied()),
+        one_of(esc.iter().copied()),
     ))
     .map(|s| match utils::unescape(&s, '\\') {
         Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
@@ -36,13 +34,13 @@ where
     })
 }
 
-fn quoted<I>() -> impl Parser<I, Output = String>
+fn quoted<I>(esc: &'static [char]) -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces().with(between(token('"'), token('"'), escaped_string()))
+    spaces().with(between(token('"'), token('"'), escaped_string(esc)))
 }
 
 fn uint<I>() -> impl Parser<I, Output = String>
@@ -118,7 +116,7 @@ where
     string(typ).with(token(':'))
 }
 
-fn value_<I>() -> impl Parser<I, Output = Value>
+fn value_<I>(esc: &'static [char]) -> impl Parser<I, Output = Value>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -126,10 +124,10 @@ where
 {
     spaces().with(choice((
         attempt(
-            between(token('['), token(']'), sep_by(value(), token(',')))
+            between(token('['), token(']'), sep_by(value(esc), token(',')))
                 .map(|vals: Vec<Value>| Value::Array(Arc::from(vals))),
         ),
-        attempt(quoted()).map(|s| Value::String(Chars::from(s))),
+        attempt(quoted(esc)).map(|s| Value::String(Chars::from(s))),
         attempt(from_str(flt()).map(|v| Value::F64(v))),
         attempt(from_str(int()).map(|v| Value::I64(v))),
         attempt(
@@ -167,9 +165,9 @@ where
                 .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Value::Ok),
         ),
-        attempt(constant("error").with(quoted()).map(|s| Value::Error(Chars::from(s)))),
+        attempt(constant("error").with(quoted(esc)).map(|s| Value::Error(Chars::from(s)))),
         attempt(
-            constant("datetime").with(from_str(quoted())).map(|d| Value::DateTime(d)),
+            constant("datetime").with(from_str(quoted(esc))).map(|d| Value::DateTime(d)),
         ),
         attempt(
             constant("duration")
@@ -194,15 +192,15 @@ where
 }
 
 parser! {
-    pub fn value[I]()(I) -> Value
+    pub fn value[I](escaped: &'static [char])(I) -> Value
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        value_()
+        value_(escaped)
     }
 }
 
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
-    value()
+    value(&[])
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))

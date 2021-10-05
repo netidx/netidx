@@ -13,6 +13,8 @@ use combine::{
 use netidx::{chars::Chars, publisher::Value};
 use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 
+pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
+
 fn fname<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
@@ -54,7 +56,7 @@ where
             token('"'),
             many(choice((
                 attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
-                escaped_string()
+                escaped_string(&BSCRIPT_ESC)
                     .then(|s| {
                         if s.is_empty() {
                             unexpected_any("empty string").right()
@@ -118,7 +120,7 @@ where
 {
     spaces().with(choice((
         attempt(interpolated()),
-        attempt(netidx_value().map(|v| ExprKind::Constant(v).to_expr())),
+        attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         attempt(
             (
                 fname(),

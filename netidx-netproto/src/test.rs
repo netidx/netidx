@@ -334,6 +334,25 @@ mod publisher {
         ]
     }
 
+    fn vequiv(v0: &Value, v1: &Value) -> bool {
+        match (v0, v1) {
+            (Value::Duration(d0), Value::Duration(d1)) => {
+                let f0 = d0.as_secs_f64();
+                let f1 = d1.as_secs_f64();
+                f0 == f1 || (f0 != 0. && f1 != 0. && ((f0 - f1).abs() / f0) < 1e-8)
+            }
+            (Value::F32(v0), Value::F32(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-7,
+            (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
+            (v0, v1) => v0 == v1
+        }
+    }
+    
+    fn round_trip(v: Value) {
+        let s = dbg!(format!("{}", v));
+        let v_ = dbg!(s.parse::<Value>()).unwrap();
+        assert!(vequiv(&v, &v_))
+    }
+
     proptest! {
         #[test]
         fn test_hello(a in hello()) {
@@ -348,6 +367,11 @@ mod publisher {
         #[test]
         fn test_from(a in from()) {
             check(a)
+        }
+
+        #[test]
+        fn test_value_roundtrip(v in value()) {
+            round_trip(v)
         }
     }
 }
