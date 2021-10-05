@@ -352,8 +352,8 @@ mod publisher {
     }
 
     fn round_trip(v: Value) {
-        let s = dbg!(format!("{}", v));
-        let v_ = dbg!(s.parse::<Value>()).unwrap();
+        let s = format!("{}", v);
+        let v_ = s.parse::<Value>().unwrap();
         assert!(vequiv(&v, &v_))
     }
 
