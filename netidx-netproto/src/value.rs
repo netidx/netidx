@@ -474,7 +474,9 @@ impl Not for Value {
             Value::Error(v) => {
                 Value::Error(Chars::from(format!("can't apply not to Error({})", v)))
             }
-            Value::Array(_) => Value::Error(Chars::from("can't apply not to an array")),
+            Value::Array(elts) => {
+                Value::Array(elts.iter().cloned().map(|v| !v).collect())
+            }
         }
     }
 }
@@ -1400,5 +1402,29 @@ impl convert::From<bool> for Value {
         } else {
             Value::False
         }
+    }
+}
+
+impl FromValue for Arc<[Value]> {
+    type Error = CantCast;
+
+    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+        v.cast(Typ::Array).ok_or(CantCast).and_then(|v| match v {
+            Value::Array(elts) => Ok(elts),
+            _ => Err(CantCast)
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => Some(elts),
+            _ => None
+        }
+    }
+}
+
+impl convert::From<Arc<[Value]>> for Value {
+    fn from(v: Arc<[Value]>) -> Value {
+        Value::Array(v)
     }
 }
