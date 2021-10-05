@@ -165,7 +165,7 @@ where
                 .skip(not_followed_by(none_of(" ),]".chars())))
                 .map(|_| Value::Ok),
         ),
-        attempt(constant("error").with(quoted(esc)).map(|s| Value::Error(Chars::from(s)))),
+        attempt(constant("error").with(quoted(esc)).map(|s| dbg!(Value::Error(Chars::from(s))))),
         attempt(
             constant("datetime").with(from_str(quoted(esc))).map(|d| Value::DateTime(d)),
         ),
@@ -200,7 +200,7 @@ parser! {
 }
 
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
-    value(&[])
+    value(&['"'])
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
