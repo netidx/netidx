@@ -17,6 +17,8 @@ use combine::{
 use netidx_core::{chars::Chars, utils};
 use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
 
+pub static VAL_ESC: [char; 2] = ['\\', '"'];
+
 pub fn escaped_string<I>(esc: &'static [char]) -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
@@ -200,7 +202,7 @@ parser! {
 }
 
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
-    value(&['"'])
+    value(&VAL_ESC)
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
@@ -244,6 +246,9 @@ mod tests {
         assert_eq!(Value::String(c), parse_value(s).unwrap());
         let c = Chars::new();
         assert_eq!(Value::String(c), parse_value(r#""""#).unwrap());
+        let c = Chars::from(r#"""#);
+        let s = r#""\"""#;
+        assert_eq!(Value::String(c), parse_value(s).unwrap());
         assert_eq!(Value::True, parse_value("true").unwrap());
         assert_eq!(Value::True, parse_value("true ").unwrap());
         assert_eq!(Value::False, parse_value("false").unwrap());
