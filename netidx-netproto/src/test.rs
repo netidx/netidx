@@ -343,10 +343,14 @@ mod publisher {
             }
             (Value::F32(v0), Value::F32(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-7,
             (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
-            (v0, v1) => v0 == v1
+            (Value::Array(e0), Value::Array(e1)) => {
+                e0.len() == e1.len()
+                    && e0.iter().zip(e1.iter()).all(|(v0, v1)| vequiv(v0, v1))
+            }
+            (v0, v1) => v0 == v1,
         }
     }
-    
+
     fn round_trip(v: Value) {
         let s = dbg!(format!("{}", v));
         let v_ = dbg!(s.parse::<Value>()).unwrap();
