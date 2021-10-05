@@ -216,17 +216,22 @@ macro_rules! apply_op {
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
                 Value::U32((Wrapping(l) $op Wrapping(r)).0)
             }
+            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
+                Value::I32((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
+                Value::U64((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
+                Value::I64((Wrapping(l) $op Wrapping(r)).0)
+            }
+            (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
+            (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
             (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
                 Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
             }
             (Value::U64(l) | Value::V64(l), Value::U32(r) | Value::V32(r)) => {
                 Value::U64((Wrapping(l) $op Wrapping(r as u64)).0)
-            }
-            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
-                Value::U64((Wrapping(l) $op Wrapping(r)).0)
-            }
-            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
-                Value::I32((Wrapping(l) $op Wrapping(r)).0)
             }
             (Value::I32(l) | Value::Z32(l), Value::I64(r) | Value::Z64(r)) => {
                 Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
@@ -239,9 +244,6 @@ macro_rules! apply_op {
             }
             (Value::I64(l) | Value::Z64(l), Value::I32(r) | Value::Z32(r)) => {
                 Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
-            }
-            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
-                Value::I64((Wrapping(l) $op Wrapping(r)).0)
             }
             (Value::I64(l) | Value::Z64(l), Value::U32(r) | Value::V32(r)) => {
                 Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
@@ -269,7 +271,6 @@ macro_rules! apply_op {
             (Value::I32(l) | Value::Z32(l), Value::F32(r)) => Value::F32(l as f32 $op r),
             (Value::F32(l), Value::I64(r) | Value::Z64(r)) => Value::F32(l $op r as f32),
             (Value::I64(l) | Value::Z64(l), Value::F32(r)) => Value::F32(l as f32 $op r),
-            (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
             (Value::F64(l), Value::U32(r) | Value::V32(r)) => Value::F64(l $op r as f64),
             (Value::U32(l) | Value::V32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
@@ -280,7 +281,6 @@ macro_rules! apply_op {
             (Value::F64(l), Value::I64(r) | Value::Z64(r)) => Value::F64(l $op r as f64),
             (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
             (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
-            (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
             (Value::String(s), n) => match s.parse::<Value>() {
                 Err(e) => Value::Error(Chars::from(format!("{}", e))),
                 Ok(s) => s $op n,

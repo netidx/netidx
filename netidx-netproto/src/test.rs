@@ -7,7 +7,7 @@ use netidx_core::{
     utils::pack,
 };
 use proptest::prelude::*;
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -244,8 +244,12 @@ mod resolver {
 
 mod publisher {
     use super::*;
-    use crate::{publisher::{From, Hello, Id, To}, value::Value};
+    use crate::{
+        publisher::{From, Hello, Id, To},
+        value::Value,
+    };
     use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use proptest::collection;
     use std::{net::SocketAddr, time::Duration};
 
     fn hello() -> impl Strategy<Value = Hello> {
@@ -287,7 +291,7 @@ mod publisher {
     }
 
     fn value() -> impl Strategy<Value = Value> {
-        prop_oneof![
+        let leaf = prop_oneof![
             any::<u32>().prop_map(Value::U32),
             any::<u32>().prop_map(Value::V32),
             any::<i32>().prop_map(Value::I32),
@@ -307,7 +311,11 @@ mod publisher {
             Just(Value::Null),
             Just(Value::Ok),
             chars().prop_map(Value::Error),
-        ]
+        ];
+        leaf.prop_recursive(10, 1000, 100, |inner| {
+            prop_oneof![collection::vec(inner.clone(), 0..100)
+                .prop_map(|e| Value::Array(Arc::from(e)))]
+        })
     }
 
     fn from() -> impl Strategy<Value = From> {
