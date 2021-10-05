@@ -7,12 +7,13 @@ use netidx_core::{
 };
 use std::{
     convert, error, fmt, iter, mem,
+    num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
+    panic::{catch_unwind, AssertUnwindSafe},
     result,
     str::FromStr,
     sync::Arc,
     time::Duration,
-    num::Wrapping,
 };
 
 use crate::value_parser;
@@ -380,36 +381,15 @@ impl Mul for Value {
     type Output = Value;
 
     fn mul(self, rhs: Self) -> Self {
-        match (self, rhs) {
-            (Value::U32(l), Value::U32(r)) => Value::U32(l * r),
-            (Value::U32(l), Value::V32(r)) => Value::U32(l * r),
-            (Value::V32(l), Value::V32(r)) => Value::V32(l * r),
-            (Value::V32(l), Value::U32(r)) => Value::U32(l * r),
-            (Value::I32(l), Value::I32(r)) => Value::I32(l * r),
-            (Value::I32(l), Value::Z32(r)) => Value::I32(l * r),
-            (Value::Z32(l), Value::Z32(r)) => Value::Z32(l * r),
-            (Value::Z32(l), Value::I32(r)) => Value::I32(l * r),
-            (Value::U64(l), Value::U64(r)) => Value::U64(l * r),
-            (Value::U64(l), Value::V64(r)) => Value::U64(l * r),
-            (Value::V64(l), Value::V64(r)) => Value::V64(l * r),
-            (Value::I64(l), Value::I64(r)) => Value::I64(l * r),
-            (Value::I64(l), Value::Z64(r)) => Value::I64(l * r),
-            (Value::Z64(l), Value::Z64(r)) => Value::Z64(l * r),
-            (Value::Z64(l), Value::I64(r)) => Value::I64(l * r),
-            (Value::F32(l), Value::F32(r)) => Value::F32(l * r),
-            (Value::F64(l), Value::F64(r)) => Value::F64(l * r),
-            (Value::Duration(d), Value::U32(s)) => Value::Duration(d * s),
-            (Value::U32(s), Value::Duration(d)) => Value::Duration(d * s),
-            (Value::Duration(d), Value::V32(s)) => Value::Duration(d * s),
-            (Value::V32(s), Value::Duration(d)) => Value::Duration(d * s),
-            (Value::Duration(d), Value::F32(s)) => Value::Duration(d.mul_f32(s)),
-            (Value::F32(s), Value::Duration(d)) => Value::Duration(d.mul_f32(s)),
-            (Value::Duration(d), Value::F64(s)) => Value::Duration(d.mul_f64(s)),
-            (Value::F64(s), Value::Duration(d)) => Value::Duration(d.mul_f64(s)),
-            (l, r) => {
-                Value::Error(Chars::from(format!("can't multiply {:?} and {:?}", l, r)))
-            }
-        }
+        apply_op!(
+            self, rhs, *,
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::Error(Chars::from("can't add to datetime/duration"))
+                }
+        )
     }
 }
 
@@ -417,31 +397,24 @@ impl Div for Value {
     type Output = Value;
 
     fn div(self, rhs: Self) -> Self {
-        match (self, rhs) {
-            (Value::U32(l), Value::U32(r)) if r > 0 => Value::U32(l / r),
-            (Value::U32(l), Value::V32(r)) if r > 0 => Value::U32(l / r),
-            (Value::V32(l), Value::V32(r)) if r > 0 => Value::V32(l / r),
-            (Value::V32(l), Value::U32(r)) if r > 0 => Value::U32(l / r),
-            (Value::I32(l), Value::I32(r)) if r > 0 => Value::I32(l / r),
-            (Value::I32(l), Value::Z32(r)) if r > 0 => Value::I32(l / r),
-            (Value::Z32(l), Value::Z32(r)) if r > 0 => Value::Z32(l / r),
-            (Value::Z32(l), Value::I32(r)) if r > 0 => Value::I32(l / r),
-            (Value::U64(l), Value::U64(r)) if r > 0 => Value::U64(l / r),
-            (Value::U64(l), Value::V64(r)) if r > 0 => Value::U64(l / r),
-            (Value::V64(l), Value::V64(r)) if r > 0 => Value::V64(l / r),
-            (Value::I64(l), Value::I64(r)) if r > 0 => Value::I64(l / r),
-            (Value::I64(l), Value::Z64(r)) if r > 0 => Value::I64(l / r),
-            (Value::Z64(l), Value::Z64(r)) if r > 0 => Value::Z64(l / r),
-            (Value::Z64(l), Value::I64(r)) if r > 0 => Value::I64(l / r),
-            (Value::F32(l), Value::F32(r)) => Value::F32(l / r),
-            (Value::F64(l), Value::F64(r)) => Value::F64(l / r),
-            (Value::Duration(d), Value::U32(s)) => Value::Duration(d / s),
-            (Value::Duration(d), Value::V32(s)) => Value::Duration(d / s),
-            (Value::Duration(d), Value::F32(s)) => Value::Duration(d.div_f32(s)),
-            (Value::Duration(d), Value::F64(s)) => Value::Duration(d.div_f64(s)),
-            (l, r) => {
-                Value::Error(Chars::from(format!("can't divide {:?} by {:?}", l, r)))
-            }
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            apply_op!(
+                self, rhs, *,
+                (Value::Duration(d), Value::U32(s)) => { Value::Duration(d / s) },
+                (Value::Duration(d), Value::V32(s)) => { Value::Duration(d / s) },
+                (Value::Duration(d), Value::F32(s)) => { Value::Duration(d.div_f32(s)) },
+                (Value::Duration(d), Value::F64(s)) => { Value::Duration(d.div_f64(s)) },
+                (Value::Duration(_), _)
+                    | (_, Value::Duration(_))
+                    | (_, Value::DateTime(_))
+                    | (Value::DateTime(_), _) => {
+                        Value::Error(Chars::from("can't add to datetime/duration"))
+                    }
+            )
+        }));
+        match res {
+            Ok(r) => r,
+            Err(_) => Value::Error(Chars::from("can't divide by zero"))
         }
     }
 }
