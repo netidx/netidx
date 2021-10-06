@@ -211,7 +211,7 @@ impl FromStr for Value {
 }
 
 macro_rules! apply_op {
-    ($self:expr, $rhs:expr, $op:tt, $($($pat:pat)|+ => $blk:block),+) => {
+    ($self:expr, $rhs:expr, $id:expr, $op:tt, $($($pat:pat)|+ => $blk:block),+) => {
         match ($self, $rhs) {
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
                 Value::U32((Wrapping(l) $op Wrapping(r)).0)
@@ -294,7 +294,7 @@ macro_rules! apply_op {
                 let iter = e0
                     .iter()
                     .cloned()
-                    .chain(iter::repeat(Value::F64(0.)))
+                    .chain(iter::repeat(Value::F64($id)))
                     .zip(e1.iter().cloned());
                 Value::Array(iter.map(|(v0, v1)| v0 $op v1).collect())
             }
@@ -334,7 +334,7 @@ impl Add for Value {
 
     fn add(self, rhs: Self) -> Self {
         apply_op!(
-            self, rhs, +,
+            self, rhs, 0., +,
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(d) {
@@ -358,7 +358,7 @@ impl Sub for Value {
 
     fn sub(self, rhs: Self) -> Self {
         apply_op!(
-            self, rhs, -,
+            self, rhs, 0., -,
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(d) {
@@ -382,7 +382,7 @@ impl Mul for Value {
 
     fn mul(self, rhs: Self) -> Self {
         apply_op!(
-            self, rhs, *,
+            self, rhs, 1., *,
             (Value::Duration(_), _)
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
@@ -399,7 +399,7 @@ impl Div for Value {
     fn div(self, rhs: Self) -> Self {
         let res = catch_unwind(AssertUnwindSafe(|| {
             apply_op!(
-                self, rhs, *,
+                self, rhs, 1., /,
                 (Value::Duration(d), Value::U32(s)) => { Value::Duration(d / s) },
                 (Value::Duration(d), Value::V32(s)) => { Value::Duration(d / s) },
                 (Value::Duration(d), Value::F32(s)) => { Value::Duration(d.div_f32(s)) },
