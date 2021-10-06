@@ -5,6 +5,7 @@ use netidx_core::{
     pack::{self, Pack, PackError},
     utils,
 };
+use smallvec::SmallVec;
 use std::{
     convert, error, fmt, iter, mem,
     num::Wrapping,
@@ -414,7 +415,7 @@ impl Div for Value {
         }));
         match res {
             Ok(r) => r,
-            Err(_) => Value::Error(Chars::from("can't divide by zero"))
+            Err(_) => Value::Error(Chars::from("can't divide by zero")),
         }
     }
 }
@@ -956,6 +957,54 @@ impl Value {
             | Value::Array(_) => false,
         }
     }
+
+    /// return an iterator that will perform a depth first traversal
+    /// of the specified value. All array elements will be flattened
+    /// into simple values.
+    pub fn flatten(self) -> impl Iterator<Item = Value> {
+        enum Either<T, U> {
+            Left(T),
+            Right(U),
+        }
+        impl<I, T: Iterator<Item = I>, U: Iterator<Item = I>> Iterator for Either<T, U> {
+            type Item = I;
+            fn next(&mut self) -> Option<I> {
+                match self {
+                    Either::Left(t) => t.next(),
+                    Either::Right(t) => t.next(),
+                }
+            }
+        }
+        match self {
+            Value::Array(elts) => {
+                let mut stack: SmallVec<[(Arc<[Value]>, usize); 8]> = SmallVec::new();
+                stack.push((elts, 0));
+                Either::Left(iter::from_fn(move || loop {
+                    match stack.last_mut() {
+                        None => break None,
+                        Some((elts, pos)) => {
+                            if *pos >= elts.len() {
+                                stack.pop();
+                            } else {
+                                match &elts[*pos] {
+                                    Value::Array(elts) => {
+                                        *pos += 1;
+                                        let elts = elts.clone();
+                                        stack.push((elts, 0));
+                                    }
+                                    val => {
+                                        *pos += 1;
+                                        break Some(val.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+            }
+            val => Either::Right(iter::once(val)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1411,14 +1460,14 @@ impl FromValue for Arc<[Value]> {
     fn from_value(v: Value) -> result::Result<Self, Self::Error> {
         v.cast(Typ::Array).ok_or(CantCast).and_then(|v| match v {
             Value::Array(elts) => Ok(elts),
-            _ => Err(CantCast)
+            _ => Err(CantCast),
         })
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
             Value::Array(elts) => Some(elts),
-            _ => None
+            _ => None,
         }
     }
 }
