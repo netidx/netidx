@@ -960,21 +960,9 @@ impl Value {
 
     /// return an iterator that will perform a depth first traversal
     /// of the specified value. All array elements will be flattened
-    /// into simple values.
+    /// into non array values.
     pub fn flatten(self) -> impl Iterator<Item = Value> {
-        enum Either<T, U> {
-            Left(T),
-            Right(U),
-        }
-        impl<I, T: Iterator<Item = I>, U: Iterator<Item = I>> Iterator for Either<T, U> {
-            type Item = I;
-            fn next(&mut self) -> Option<I> {
-                match self {
-                    Either::Left(t) => t.next(),
-                    Either::Right(t) => t.next(),
-                }
-            }
-        }
+        use utils::Either;
         match self {
             Value::Array(elts) => {
                 let mut stack: SmallVec<[(Arc<[Value]>, usize); 8]> = SmallVec::new();

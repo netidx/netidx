@@ -508,3 +508,18 @@ impl Ord for Addr {
         self.partial_cmp(other).unwrap()
     }
 }
+
+pub enum Either<T, U> {
+    Left(T),
+    Right(U),
+}
+
+impl<I, T: Iterator<Item = I>, U: Iterator<Item = I>> Iterator for Either<T, U> {
+    type Item = I;
+    fn next(&mut self) -> Option<I> {
+        match self {
+            Either::Left(t) => t.next(),
+            Either::Right(t) => t.next(),
+        }
+    }
+}

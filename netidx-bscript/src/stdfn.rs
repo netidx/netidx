@@ -8,7 +8,8 @@ use netidx::{
     path::Path,
     subscriber::{self, Dval, Typ, UpdatesFlags, Value},
 };
-use std::{collections::HashSet, marker::PhantomData, sync::Arc};
+use netidx_core::utils::Either;
+use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
 
 pub struct CachedVals(pub Vec<Option<Value>>);
 
@@ -31,6 +32,13 @@ impl CachedVals {
                     true
                 }
             }
+        })
+    }
+
+    pub fn flat_iter<'a>(&'a self) -> impl Iterator<Item = Option<Value>> + 'a {
+        self.0.iter().flat_map(|v| match v {
+            None => Either::Left(iter::once(None)),
+            Some(v) => Either::Right(v.clone().flatten().map(Some)),
         })
     }
 }
@@ -178,7 +186,7 @@ pub struct SumEv;
 
 impl CachedCurEval for SumEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.0.iter().fold(None, |res, v| match res {
+        from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => add_vals(res, v.clone()),
         })
@@ -204,7 +212,7 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl CachedCurEval for ProductEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.0.iter().fold(None, |res, v| match res {
+        from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => prod_vals(res, v.clone()),
         })
@@ -230,7 +238,7 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl CachedCurEval for DivideEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.0.iter().fold(None, |res, v| match res {
+        from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => div_vals(res, v.clone()),
         })
@@ -247,7 +255,7 @@ pub struct MinEv;
 
 impl CachedCurEval for MinEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.0.iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
+        from.flat_iter().filter_map(|v| v).fold(None, |res, v| match res {
             None => Some(v),
             Some(v0) => {
                 if v < v0 {
@@ -270,7 +278,7 @@ pub struct MaxEv;
 
 impl CachedCurEval for MaxEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.0.iter().filter_map(|v| v.clone()).fold(None, |res, v| match res {
+        from.flat_iter().filter_map(|v| v).fold(None, |res, v| match res {
             None => Some(v),
             Some(v0) => {
                 if v > v0 {
@@ -293,7 +301,7 @@ pub struct AndEv;
 
 impl CachedCurEval for AndEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        let res = from.0.iter().all(|v| match v {
+        let res = from.flat_iter().all(|v| match v {
             Some(Value::True) => true,
             _ => false,
         });
@@ -315,7 +323,7 @@ pub struct OrEv;
 
 impl CachedCurEval for OrEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        let res = from.0.iter().any(|v| match v {
+        let res = from.flat_iter().any(|v| match v {
             Some(Value::True) => true,
             _ => false,
         });
@@ -544,7 +552,9 @@ impl CachedCurEval for ReplaceEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(pat)), Some(Value::String(rep)), Some(Value::String(val))] => {
-                Some(Value::String(Chars::from(String::from(val.replace(&**pat, &**rep)))))
+                Some(Value::String(Chars::from(String::from(
+                    val.replace(&**pat, &**rep),
+                ))))
             }
             _ => Some(Value::Error(Chars::from("replace expected 3 arguments"))),
         }
@@ -1403,7 +1413,9 @@ impl<C: Ctx, E> Apply<C, E> for Load {
             Load::err()
         } else {
             self.cur.as_ref().and_then(|dv| match dv.last() {
-                subscriber::Event::Unsubscribed => Some(Value::Error(Chars::from("#LOST"))),
+                subscriber::Event::Unsubscribed => {
+                    Some(Value::Error(Chars::from("#LOST")))
+                }
                 subscriber::Event::Update(v) => Some(v),
             })
         }
