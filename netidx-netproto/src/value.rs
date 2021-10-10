@@ -328,16 +328,13 @@ impl PartialEq for Value {
             (Value::Ok | Value::Error(_), Value::Ok | Value::Error(_)) => false,
             (Value::Array(l), Value::Array(r)) => l == r,
             (Value::Array(_), _) | (_, Value::Array(_)) => false,
-            (l, r) => {
-                if Typ::get(l).number() || Typ::get(r).number() {
-                    match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                        (Ok(l), Ok(r)) => l == r,
-                        (_, _) => false,
-                    }
-                } else {
-                    false
+            (l, r) if l.number() || r.number() => {
+                match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
+                    (Ok(l), Ok(r)) => l == r,
+                    (_, _) => false,
                 }
             }
+            (_, _) => false,
         }
     }
 }
@@ -377,16 +374,13 @@ impl PartialOrd for Value {
             (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
             (Value::Array(_), _) => Some(Ordering::Less),
             (_, Value::Array(_)) => Some(Ordering::Greater),
-            (l, r) => {
-                if Typ::get(l).number() || Typ::get(r).number() {
-                    match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                        (Ok(l), Ok(r)) => l.partial_cmp(&r),
-                        (_, _) => None,
-                    }
-                } else {
-                    None
+            (l, r) if l.number() || r.number() => {
+                match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
+                    (Ok(l), Ok(r)) => l.partial_cmp(&r),
+                    (_, _) => format!("{}", l).partial_cmp(&format!("{}", r)),
                 }
             }
+            (l, r) => format!("{}", l).partial_cmp(&format!("{}", r)),
         }
     }
 }
@@ -1127,7 +1121,7 @@ impl Value {
 
     /// return true if the value is some kind of number, otherwise
     /// false.
-    pub fn is_number(&self) -> bool {
+    pub fn number(&self) -> bool {
         match self {
             Value::U32(_)
             | Value::V32(_)
