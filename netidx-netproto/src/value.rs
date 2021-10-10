@@ -7,6 +7,7 @@ use netidx_core::{
 };
 use smallvec::SmallVec;
 use std::{
+    cmp::{Ordering, PartialEq, PartialOrd},
     convert, error, fmt, iter, mem,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
@@ -114,6 +115,114 @@ impl Typ {
     pub fn all() -> &'static [Self] {
         &TYPES
     }
+
+    pub fn number(&self) -> bool {
+        match self {
+            Typ::U32
+            | Typ::V32
+            | Typ::I32
+            | Typ::Z32
+            | Typ::U64
+            | Typ::V64
+            | Typ::I64
+            | Typ::Z64
+            | Typ::F32
+            | Typ::F64 => true,
+            Typ::DateTime
+            | Typ::Duration
+            | Typ::Bool
+            | Typ::String
+            | Typ::Bytes
+            | Typ::Result
+            | Typ::Array
+            | Typ::Null => false,
+        }
+    }
+
+    pub fn integer(&self) -> bool {
+        match self {
+            Typ::U32
+            | Typ::V32
+            | Typ::I32
+            | Typ::Z32
+            | Typ::U64
+            | Typ::V64
+            | Typ::I64
+            | Typ::Z64 => true,
+            Typ::F32
+            | Typ::F64
+            | Typ::DateTime
+            | Typ::Duration
+            | Typ::Bool
+            | Typ::String
+            | Typ::Bytes
+            | Typ::Result
+            | Typ::Array
+            | Typ::Null => false,
+        }
+    }
+
+    pub fn signed_integer(&self) -> bool {
+        match self {
+            Typ::I32 | Typ::Z32 | Typ::I64 | Typ::Z64 => true,
+            Typ::U32
+            | Typ::V32
+            | Typ::U64
+            | Typ::V64
+            | Typ::F32
+            | Typ::F64
+            | Typ::DateTime
+            | Typ::Duration
+            | Typ::Bool
+            | Typ::String
+            | Typ::Bytes
+            | Typ::Result
+            | Typ::Array
+            | Typ::Null => false,
+        }
+    }
+
+    pub fn unsigned_integer(&self) -> bool {
+        match self {
+            Typ::U32 | Typ::V32 | Typ::U64 | Typ::V64 => true,
+            Typ::I32
+            | Typ::Z32
+            | Typ::I64
+            | Typ::Z64
+            | Typ::F32
+            | Typ::F64
+            | Typ::DateTime
+            | Typ::Duration
+            | Typ::Bool
+            | Typ::String
+            | Typ::Bytes
+            | Typ::Result
+            | Typ::Array
+            | Typ::Null => false,
+        }
+    }
+
+    pub fn float(&self) -> bool {
+        match self {
+            Typ::F32 | Typ::F64 => true,
+            Typ::U32
+            | Typ::V32
+            | Typ::U64
+            | Typ::V64
+            | Typ::I32
+            | Typ::Z32
+            | Typ::I64
+            | Typ::Z64
+            | Typ::DateTime
+            | Typ::Duration
+            | Typ::Bool
+            | Typ::String
+            | Typ::Bytes
+            | Typ::Result
+            | Typ::Array
+            | Typ::Null => false,
+        }
+    }
 }
 
 impl FromStr for Typ {
@@ -153,7 +262,7 @@ impl fmt::Display for Typ {
 
 // This enum is limited to 0x3F cases, because the high 2 bits of the
 // tag are reserved for zero cost wrapper types.
-#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     /// full 4 byte u32
     U32(u32),
@@ -195,6 +304,91 @@ pub enum Value {
     Error(Chars),
     /// An array of values
     Array(Arc<[Value]>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, rhs: &Value) -> bool {
+        match (self, rhs) {
+            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => l == r,
+            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => l == r,
+            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => l == r,
+            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => l == r,
+            (Value::F32(l), Value::F32(r)) => l == r,
+            (Value::F64(l), Value::F64(r)) => l == r,
+            (Value::DateTime(l), Value::DateTime(r)) => l == r,
+            (Value::Duration(l), Value::Duration(r)) => l == r,
+            (Value::String(l), Value::String(r)) => l == r,
+            (Value::Bytes(l), Value::Bytes(r)) => l == r,
+            (Value::True, Value::True) => true,
+            (Value::False, Value::False) => true,
+            (Value::True | Value::False, Value::True | Value::False) => false,
+            (Value::Null, Value::Null) => true,
+            (Value::Ok, Value::Ok) => true,
+            (Value::Error(l), Value::Error(r)) => l == r,
+            (Value::Ok | Value::Error(_), Value::Ok | Value::Error(_)) => false,
+            (Value::Array(l), Value::Array(r)) => l == r,
+            (Value::Array(_), _) | (_, Value::Array(_)) => false,
+            (l, r) => {
+                if Typ::get(l).number() || Typ::get(r).number() {
+                    match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
+                        (Ok(l), Ok(r)) => l == r,
+                        (_, _) => false,
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
+                l.partial_cmp(r)
+            }
+            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
+                l.partial_cmp(r)
+            }
+            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
+                l.partial_cmp(r)
+            }
+            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
+                l.partial_cmp(r)
+            }
+            (Value::F32(l), Value::F32(r)) => l.partial_cmp(r),
+            (Value::F64(l), Value::F64(r)) => l.partial_cmp(r),
+            (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
+            (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
+            (Value::String(l), Value::String(r)) => l.partial_cmp(r),
+            (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
+            (Value::True, Value::True) => Some(Ordering::Equal),
+            (Value::False, Value::False) => Some(Ordering::Equal),
+            (Value::False, Value::True) => Some(Ordering::Less),
+            (Value::True, Value::False) => Some(Ordering::Greater),
+            (Value::Null, Value::Null) => Some(Ordering::Equal),
+            (Value::Null, _) => Some(Ordering::Less),
+            (_, Value::Null) => Some(Ordering::Greater),
+            (Value::Ok, Value::Ok) => Some(Ordering::Equal),
+            (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
+            (Value::Error(_), _) => Some(Ordering::Less),
+            (_, Value::Error(_)) => Some(Ordering::Greater),
+            (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
+            (Value::Array(_), _) => Some(Ordering::Less),
+            (_, Value::Array(_)) => Some(Ordering::Greater),
+            (l, r) => {
+                if Typ::get(l).number() || Typ::get(r).number() {
+                    match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
+                        (Ok(l), Ok(r)) => l.partial_cmp(&r),
+                        (_, _) => None,
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for Value {
