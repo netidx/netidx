@@ -20,7 +20,7 @@ use netidx::{
     chars::Chars,
     path::Path,
     resolver,
-    subscriber::{Dval, Event, SubId, Typ, UpdatesFlags, Value},
+    subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
     utils::split_escaped,
 };
 use netidx_bscript::vm;
@@ -32,7 +32,6 @@ use std::{
     iter::FromIterator,
     rc::{Rc, Weak},
     result,
-    str::FromStr,
 };
 
 struct Subscription {
@@ -500,11 +499,6 @@ impl RaeifiedTable {
                 ],
             );
             let root = d.get_content_area();
-            let cb_lbl = gtk::Label::new(Some("Type:"));
-            let cb = gtk::ComboBoxText::new();
-            let cb_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-            cb_box.add(&cb_lbl);
-            cb_box.add(&cb);
             let data_lbl = gtk::Label::new(Some("value:"));
             let data = gtk::Entry::new();
             let data_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -514,51 +508,29 @@ impl RaeifiedTable {
             let err_attrs = pango::AttrList::new();
             err_attrs.insert(pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap());
             err.set_attributes(Some(&err_attrs));
-            for typ in Typ::all() {
-                let name = typ.name();
-                cb.append(Some(name), name);
-            }
-            let typ =
-                Rc::new(RefCell::new(val.borrow().as_ref().and_then(|v| Typ::get(v))));
-            let parse_val = Rc::new(clone!(
-                @strong typ,
-                @strong val,
-                @strong data,
-                @strong err => move || {
-                match &*typ.borrow() {
-                    None => { *val.borrow_mut() = Some(Value::Null); }
-                    Some(typ) => match typ.parse(&*data.get_text()) {
-                        Err(e) => {
-                            *val.borrow_mut() = None;
-                            err.set_text(&format!("{}", e));
-                            data.set_icon_from_icon_name(
-                                gtk::EntryIconPosition::Secondary,
-                                Some("dialog-error")
-                            );
-                        }
-                        Ok(v) => {
-                            err.set_text("");
-                            data.set_icon_from_icon_name(
-                                gtk::EntryIconPosition::Secondary,
-                                None
-                            );
-                            *val.borrow_mut() = Some(v)
-                        }
-                    }
-                }
-            }));
-            cb.set_active_id(typ.borrow().map(|t| t.name()));
-            cb.connect_changed(clone!(@strong typ, @strong parse_val => move |cb| {
-                *typ.borrow_mut() = cb.get_active_id().and_then(|s| {
-                    Typ::from_str(&*s).ok()
-                });
-                parse_val();
-            }));
             if let Some(v) = &*val.borrow() {
                 data.set_text(&format!("{}", v));
             }
-            data.connect_changed(clone!(@strong parse_val => move |_| parse_val()));
-            root.add(&cb_box);
+            data.connect_changed(clone!(
+                @strong val,
+                @strong err => move |data| match data.get_text().parse::<Value>() {
+                    Err(e) => {
+                        *val.borrow_mut() = None;
+                        err.set_text(&format!("{}", e));
+                        data.set_icon_from_icon_name(
+                            gtk::EntryIconPosition::Secondary,
+                            Some("dialog-error")
+                        );
+                    }
+                    Ok(v) => {
+                        err.set_text("");
+                        data.set_icon_from_icon_name(
+                            gtk::EntryIconPosition::Secondary,
+                            None
+                        );
+                        *val.borrow_mut() = Some(v)
+                    }
+            }));
             root.add(&data_box);
             root.add(&err);
             root.show_all();

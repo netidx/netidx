@@ -2,10 +2,7 @@ use super::super::{bscript, BSCtx};
 use super::{util::TwoColGrid, OnChange};
 use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use netidx::{
-    chars::Chars,
-    subscriber::{Typ, Value},
-};
+use netidx::{chars::Chars, subscriber::Value};
 use netidx_bscript::expr;
 use std::{
     cell::{Cell, RefCell},
@@ -29,23 +26,6 @@ fn set_dbg_expr(
     spec
 }
 
-static TYPES: [Typ; 14] = [
-    Typ::U32,
-    Typ::V32,
-    Typ::I32,
-    Typ::Z32,
-    Typ::U64,
-    Typ::V64,
-    Typ::I64,
-    Typ::Z64,
-    Typ::F32,
-    Typ::F64,
-    Typ::Bool,
-    Typ::String,
-    Typ::Bytes,
-    Typ::Result,
-];
-
 #[derive(Clone, Debug)]
 struct Constant {
     root: TwoColGrid,
@@ -64,42 +44,28 @@ impl Constant {
         let root = TwoColGrid::new();
         let mut t = Constant { root, spec: spec.clone() };
         let val = t.get_val();
-        let typlbl = gtk::Label::new(Some("Type: "));
-        let typsel = gtk::ComboBoxText::new();
         let vallbl = gtk::Label::new(Some("Value: "));
         let valent = gtk::Entry::new();
         let errlbl = gtk::Label::new(None);
         errlbl.set_use_markup(true);
-        t.root.add((typlbl.clone(), typsel.clone()));
         t.root.add((vallbl.clone(), valent.clone()));
         t.root.attach(&errlbl, 0, 2, 1);
-        for typ in &TYPES {
-            let name = typ.name();
-            typsel.append(Some(name), name);
-        }
-        typsel.set_active_id(Typ::get(&val).map(|t| t.name()));
         valent.set_text(&format!("{}", &val));
         let val_change = Rc::new(clone!(
             @strong on_change,
             @strong spec,
-            @weak typsel,
             @weak valent,
-            @weak errlbl => move || {
-            if let Some(Ok(typ)) = typsel.get_active_id().map(|s| s.parse::<Typ>()) {
-                match typ.parse(&*valent.get_text()) {
-                    Ok(value) => {
-                        errlbl.set_markup("");
-                        *spec.borrow_mut() = expr::ExprKind::Constant(value).to_expr();
-                        on_change()
-                    },
-                    Err(e) => {
-                        let msg = format!(r#"<span foreground="red">{}</span>"#, e);
-                        errlbl.set_markup(&msg);
-                    },
-                };
-            }
+            @weak errlbl => move || match valent.get_text().parse::<Value>() {
+                Ok(value) => {
+                    errlbl.set_markup("");
+                    *spec.borrow_mut() = expr::ExprKind::Constant(value).to_expr();
+                    on_change()
+                },
+                Err(e) => {
+                    let msg = format!(r#"<span foreground="red">{}</span>"#, e);
+                    errlbl.set_markup(&msg);
+                }
         }));
-        typsel.connect_changed(clone!(@strong val_change => move |_| val_change()));
         valent.connect_activate(clone!(@strong val_change => move |_| val_change()));
         store.set_value(iter, 0, &"constant".to_value());
         set_dbg_expr(ctx, store, iter, t.spec());

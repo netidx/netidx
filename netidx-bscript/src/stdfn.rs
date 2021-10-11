@@ -1483,7 +1483,6 @@ impl<C: Ctx, E> Register<C, E> for LoadVar {
     }
 }
 
-// CR estokes: what about unref variable?
 impl<C: Ctx, E> Apply<C, E> for LoadVar {
     fn current(&self) -> Option<Value> {
         if self.invalid {

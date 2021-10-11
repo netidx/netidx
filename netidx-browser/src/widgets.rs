@@ -562,7 +562,7 @@ impl Entry {
 }
 
 fn valid_typ(v: &Value) -> bool {
-    v.is_number() || Typ::get(v) == Some(Typ::DateTime)
+    v.number() || Typ::get(v) == Typ::DateTime
 }
 
 struct ValidTypIter<'a, I> {
@@ -788,11 +788,11 @@ impl LinePlot {
                 .margin(spec.margin)
                 .set_all_label_area_size(spec.label_area);
             let xtyp = match (Typ::get(&x_min), Typ::get(&x_max)) {
-                (Some(t0), Some(t1)) if t0 == t1 => Some(t0),
+                (t0, t1) if t0 == t1 => Some(t0),
                 (_, _) => None,
             };
             let ytyp = match (Typ::get(&y_min), Typ::get(&y_max)) {
-                (Some(t0), Some(t1)) if t0 == t1 => Some(t0),
+                (t0, t1) if t0 == t1 => Some(t0),
                 (_, _) => None,
             };
             match (xtyp, ytyp) {

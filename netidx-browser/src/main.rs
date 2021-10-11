@@ -179,8 +179,12 @@ impl vm::Ctx for WidgetCtx {
         dv
     }
 
+    fn unsubscribe(&mut self, _path: Path, _ref_id: ExprId) {}
+
     fn ref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
 
+    fn unref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
+    
     fn set_var(
         &mut self,
         variables: &mut HashMap<Chars, Value>,
