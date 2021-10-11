@@ -448,7 +448,7 @@ impl Ref {
             *ctx.user
                 .refs
                 .entry(path.clone())
-                .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+                .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
                 .entry(self.id)
                 .or_insert(0) += 1;
             ctx.user
