@@ -4,11 +4,7 @@ use crate::{
     stdfn,
 };
 use fxhash::FxBuildHasher;
-use netidx::{
-    chars::Chars,
-    path::Path,
-    subscriber::{Dval, SubId, UpdatesFlags, Value},
-};
+use netidx::{chars::Chars, path::Path, subscriber::{Dval, SubId, UpdatesFlags, Value}};
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -107,7 +103,7 @@ pub trait Ctx {
         path: Path,
         ref_by: ExprId,
     ) -> Dval;
-    fn unsubscribe(&mut self, path: Path, ref_by: ExprId);
+    fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
     fn ref_var(&mut self, name: Chars, ref_by: ExprId);
     fn unref_var(&mut self, name: Chars, ref_by: ExprId);
     fn set_var(

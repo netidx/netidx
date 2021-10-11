@@ -262,13 +262,38 @@ impl Ctx for Lc {
         dv
     }
 
-    // CR estokes: What about unref variable
+    fn unsubscribe(&mut self, path: Path, dv: Dval, ref_id: ExprId) {
+        if let Entry::Occupied(e) = self.sub.entry(dv.id()) {
+            let set = e.get_mut();
+            set.remove(&ref_id);
+            if set.is_empty() {
+                e.remove()
+            }
+        }
+        if let Some(subs) = self.forward_refs.get_mut(&ref_id) {
+            subs.remove(&dv.id());
+        }
+    }
+
     fn ref_var(&mut self, name: Chars, ref_id: ExprId) {
         self.var
             .entry(name.clone())
             .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
             .insert(ref_id);
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
+    }
+
+    fn unref_var(&mut self, name: Chars, ref_id: ExprId) {
+        if let Some(refs) = self.forward_refs.get_mut(&ref_id) {
+            refs.vars.remove(&name);
+        }
+        if let Entry::Occupied(e) = self.var.entry(name) {
+            let set = e.get_mut();
+            set.remove(&ref_id);
+            if set.is_empty() {
+                e.remove();
+            }
+        }
     }
 
     fn set_var(

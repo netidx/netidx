@@ -179,7 +179,7 @@ impl vm::Ctx for WidgetCtx {
         dv
     }
 
-    fn unsubscribe(&mut self, _path: Path, _ref_id: ExprId) {}
+    fn unsubscribe(&mut self, _path: Path, _dv: Dval, _ref_id: ExprId) {}
 
     fn ref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
 

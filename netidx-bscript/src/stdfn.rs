@@ -1210,8 +1210,8 @@ impl Store {
                         }
                     }
                     None | Some((_, _)) => {
-                        if let Some((cur, _)) = self.dv.take() {
-                            ctx.user.unsubscribe(cur, self.top_id);
+                        if let Some((cur, dv)) = self.dv.take() {
+                            ctx.user.unsubscribe(cur, dv, self.top_id);
                         }
                         let dv = ctx.user.durable_subscribe(
                             UpdatesFlags::empty(),
@@ -1442,8 +1442,8 @@ impl Load {
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         if let Some(path) = pathname(&mut self.invalid, name) {
             if Some(&path) != self.path.as_ref() {
-                if let Some(old_path) = self.path.take() {
-                    ctx.user.unsubscribe(old_path, self.top_id);
+                if let (Some(path), Some(dv)) = (self.path.take(), self.cur.take()) {
+                    ctx.user.unsubscribe(path, dv, self.top_id);
                 }
                 self.path = Some(path.clone());
                 self.cur = Some(ctx.user.durable_subscribe(
