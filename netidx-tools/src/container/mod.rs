@@ -245,6 +245,7 @@ impl Lc {
 impl Ctx for Lc {
     fn clear(&mut self) {}
 
+    // CR estokes: What about unsubscribe
     fn durable_subscribe(
         &mut self,
         flags: UpdatesFlags,
@@ -261,6 +262,7 @@ impl Ctx for Lc {
         dv
     }
 
+    // CR estokes: What about unref variable
     fn ref_var(&mut self, name: Chars, ref_id: ExprId) {
         self.var
             .entry(name.clone())

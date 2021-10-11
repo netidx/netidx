@@ -569,50 +569,6 @@ pub type Replace = CachedCur<ReplaceEv>;
 
 pub struct CmpEv;
 
-fn eval_op<T: PartialEq + PartialOrd>(op: &str, v0: T, v1: T) -> Value {
-    match op {
-        "eq" => {
-            if v0 == v1 {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        "lt" => {
-            if v0 < v1 {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        "gt" => {
-            if v0 > v1 {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        "lte" => {
-            if v0 <= v1 {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        "gte" => {
-            if v0 >= v1 {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        op => Value::Error(Chars::from(format!(
-            "invalid op {}, expected eq, lt, gt, lte, or gte",
-            op
-        ))),
-    }
-}
-
 impl CachedCurEval for CmpEv {
     fn name() -> &'static str {
         "cmp"
@@ -626,42 +582,47 @@ impl CachedCurEval for CmpEv {
                     (None, None) => Some(Value::False),
                     (_, None) => Some(Value::False),
                     (None, _) => Some(Value::False),
-                    (Some(v0), Some(v1)) => match (v0, v1) {
-                        (Value::U32(v0), Value::U32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::U32(v0), Value::V32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::V32(v0), Value::V32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::V32(v0), Value::U32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::I32(v0), Value::I32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::I32(v0), Value::Z32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::Z32(v0), Value::Z32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::Z32(v0), Value::I32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::U64(v0), Value::U64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::U64(v0), Value::V64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::V64(v0), Value::V64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::V64(v0), Value::U64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::I64(v0), Value::I64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::I64(v0), Value::Z64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::Z64(v0), Value::Z64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::Z64(v0), Value::I64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::F32(v0), Value::F32(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::F64(v0), Value::F64(v1)) => Some(eval_op(&*op, v0, v1)),
-                        (Value::String(v0), Value::String(v1)) => {
-                            Some(eval_op(&*op, v0, v1))
+                    (Some(v0), Some(v1)) => Some(match &**op {
+                        "eq" => {
+                            if v0 == v1 {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
                         }
-                        (Value::Bytes(v0), Value::Bytes(v1)) => {
-                            Some(eval_op(&*op, v0, v1))
+                        "lt" => {
+                            if v0 < v1 {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
                         }
-                        (Value::True, Value::True) => Some(eval_op(&*op, true, true)),
-                        (Value::True, Value::False) => Some(eval_op(&*op, true, false)),
-                        (Value::False, Value::True) => Some(eval_op(&*op, false, true)),
-                        (Value::False, Value::False) => Some(eval_op(&*op, false, false)),
-                        (Value::Ok, Value::Ok) => Some(eval_op(&*op, true, true)),
-                        (Value::Error(v0), Value::Error(v1)) => {
-                            Some(eval_op(&*op, v0, v1))
+                        "gt" => {
+                            if v0 > v1 {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
                         }
-                        (Value::Null, Value::Null) => Some(Value::True),
-                        (_, _) => Some(Value::False),
-                    },
+                        "lte" => {
+                            if v0 <= v1 {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
+                        }
+                        "gte" => {
+                            if v0 >= v1 {
+                                Value::True
+                            } else {
+                                Value::False
+                            }
+                        }
+                        op => Value::Error(Chars::from(format!(
+                            "invalid op {}, expected eq, lt, gt, lte, or gte",
+                            op
+                        ))),
+                    }),
                 },
                 Some(_) => Some(Value::Error(Chars::from(
                     "cmp(op, v0, v1): expected op to be a string",
@@ -1056,8 +1017,7 @@ impl<C: Ctx, E> Apply<C, E> for Mean {
         event: &Event<E>,
     ) -> Option<Value> {
         if self.from.update(ctx, from, event) {
-            // CR estokes: Is this correct? Think about it some more.
-            for v in &self.from.0 {
+            for v in self.from.flat_iter() {
                 if let Some(v) = v {
                     if let Ok(v) = v.clone().cast_to::<f64>() {
                         self.total += v;
@@ -1239,20 +1199,31 @@ impl Store {
                     dv.write(v);
                 }
             },
-            (Some(p), val) => {
-                let path = Path::from(p);
-                let dv = ctx.user.durable_subscribe(
-                    UpdatesFlags::empty(),
-                    path.clone(),
-                    self.top_id,
-                );
+            (Some(path), val) => {
                 if let Some(v) = val {
                     self.queue(v)
                 }
-                for v in self.queued.drain(..) {
-                    dv.write(v);
+                match &self.dv {
+                    Some((cur, dv)) if &path == cur => {
+                        for v in self.queued.drain(..) {
+                            dv.write(v);
+                        }
+                    }
+                    None | Some((_, _)) => {
+                        if let Some((cur, _)) = self.dv.take() {
+                            ctx.user.unsubscribe(cur, self.top_id);
+                        }
+                        let dv = ctx.user.durable_subscribe(
+                            UpdatesFlags::empty(),
+                            path.clone(),
+                            self.top_id,
+                        );
+                        for v in self.queued.drain(..) {
+                            dv.write(v);
+                        }
+                        self.dv = Some((path, dv));
+                    }
                 }
-                self.dv = Some((path, dv));
             }
         }
     }
@@ -1388,6 +1359,7 @@ impl StoreVar {
 }
 
 pub(crate) struct Load {
+    path: Option<Path>,
     cur: Option<Dval>,
     top_id: ExprId,
     invalid: bool,
@@ -1396,7 +1368,7 @@ pub(crate) struct Load {
 impl<C: Ctx, E> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
-            let mut t = Load { cur: None, invalid: false, top_id };
+            let mut t = Load { path: None, cur: None, invalid: false, top_id };
             match from {
                 [path] => t.subscribe(ctx, path.current()),
                 _ => t.invalid = true,
@@ -1429,9 +1401,13 @@ impl<C: Ctx, E> Apply<C, E> for Load {
     ) -> Option<Value> {
         match from {
             [name] => {
-                let target = name.update(ctx, event);
-                let up = target.is_some();
-                self.subscribe(ctx, target);
+                let up = match name.update(ctx, event) {
+                    None => false,
+                    Some(target) => {
+                        self.subscribe(ctx, Some(target));
+                        true
+                    }
+                };
                 if self.invalid {
                     if up {
                         Load::err()
@@ -1465,11 +1441,17 @@ impl<C: Ctx, E> Apply<C, E> for Load {
 impl Load {
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         if let Some(path) = pathname(&mut self.invalid, name) {
-            self.cur = Some(ctx.user.durable_subscribe(
-                UpdatesFlags::BEGIN_WITH_LAST,
-                path,
-                self.top_id,
-            ));
+            if Some(&path) != self.path.as_ref() {
+                if let Some(old_path) = self.path.take() {
+                    ctx.user.unsubscribe(old_path, self.top_id);
+                }
+                self.path = Some(path.clone());
+                self.cur = Some(ctx.user.durable_subscribe(
+                    UpdatesFlags::BEGIN_WITH_LAST,
+                    path,
+                    self.top_id,
+                ));
+            }
         }
     }
 
@@ -1501,6 +1483,7 @@ impl<C: Ctx, E> Register<C, E> for LoadVar {
     }
 }
 
+// CR estokes: what about unref variable?
 impl<C: Ctx, E> Apply<C, E> for LoadVar {
     fn current(&self) -> Option<Value> {
         if self.invalid {
@@ -1518,17 +1501,20 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
     ) -> Option<Value> {
         match from {
             [name] => {
-                let target = name.update(ctx, event);
+                let up = match name.update(ctx, event) {
+                    None => false,
+                    Some(target) => {
+                        self.subscribe(ctx, Some(target));
+                        true
+                    }
+                };
                 if self.invalid {
-                    if target.is_some() {
+                    if up {
                         LoadVar::err()
                     } else {
                         None
                     }
                 } else {
-                    if let Some(target) = target {
-                        self.subscribe(ctx, Some(target));
-                    }
                     match (self.name.as_ref(), event) {
                         (None, _)
                         | (Some(_), Event::Netidx(_, _))
@@ -1567,9 +1553,14 @@ impl LoadVar {
 
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         if let Some(name) = varname(&mut self.invalid, name) {
-            self.cur = ctx.variables.get(&name).cloned();
-            ctx.user.ref_var(name.clone(), self.top_id);
-            self.name = Some(name);
+            if Some(&name) != self.name.as_ref() {
+                if let Some(old) = self.name.take() {
+                    ctx.user.unref_var(old.clone(), self.top_id);
+                }
+                self.cur = ctx.variables.get(&name).cloned();
+                ctx.user.ref_var(name.clone(), self.top_id);
+                self.name = Some(name);
+            }
         }
     }
 }
