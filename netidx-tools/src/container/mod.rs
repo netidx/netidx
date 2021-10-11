@@ -151,10 +151,10 @@ enum LcEvent {
 struct Lc {
     current_path: Path,
     db: db::Db,
-    var: FxHashMap<Chars, FxHashSet<ExprId>>,
-    sub: FxHashMap<SubId, FxHashSet<ExprId>>,
-    rpc: FxHashMap<Path, FxHashSet<ExprId>>,
-    refs: FxHashMap<Path, FxHashSet<ExprId>>,
+    var: FxHashMap<Chars, FxHashMap<ExprId, usize>>,
+    sub: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
+    rpc: FxHashSet<Path, FxHashMap<ExprId>>,
+    refs: FxHashMap<Path, FxHashMap<ExprId, usize>>,
     rels: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
     subscriber: Subscriber,
@@ -165,6 +165,20 @@ struct Lc {
     by_id: FxHashMap<Id, Published>,
     by_path: HashMap<Path, Published>,
     events: mpsc::UnboundedSender<LcEvent>,
+}
+
+fn remove_eid_from_map<K: Hash + Eq>(
+    tbl: &mut FxHashMap<K, FxHashMap<ExprId, usize>>,
+    key: K,
+    expr_id: &ExprId,
+) {
+    if let Entry::Occupied(mut e) = tbl.entry(key) {
+        let set = e.get_mut();
+        set.remove(expr_id);
+        if set.is_empty() {
+            e.remove();
+        }
+    }
 }
 
 fn remove_eid_from_set<K: Hash + Eq>(
@@ -212,16 +226,16 @@ impl Lc {
     fn unref(&mut self, expr_id: ExprId) {
         if let Some(refs) = self.forward_refs.remove(&expr_id) {
             for path in refs.refs {
-                remove_eid_from_set(&mut self.refs, path, &expr_id);
+                remove_eid_from_map(&mut self.refs, path, &expr_id);
             }
             for path in refs.rpcs {
                 remove_eid_from_set(&mut self.rpc, path, &expr_id);
             }
             for id in refs.subs {
-                remove_eid_from_set(&mut self.sub, id, &expr_id);
+                remove_eid_from_map(&mut self.sub, id, &expr_id);
             }
             for name in refs.vars {
-                remove_eid_from_set(&mut self.var, name, &expr_id);
+                remove_eid_from_map(&mut self.var, name, &expr_id);
             }
         }
     }
@@ -245,7 +259,6 @@ impl Lc {
 impl Ctx for Lc {
     fn clear(&mut self) {}
 
-    // CR estokes: What about unsubscribe
     fn durable_subscribe(
         &mut self,
         flags: UpdatesFlags,
@@ -254,44 +267,58 @@ impl Ctx for Lc {
     ) -> Dval {
         let dv = self.subscriber.durable_subscribe(path);
         dv.updates(flags, self.sub_updates.clone());
-        self.sub
+        *self.sub
             .entry(dv.id())
-            .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
-            .insert(ref_id);
+            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .entry(ref_id)
+            .or_insert(0) += 1;
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).subs.insert(dv.id());
         dv
     }
 
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_id: ExprId) {
-        if let Entry::Occupied(e) = self.sub.entry(dv.id()) {
-            let set = e.get_mut();
-            set.remove(&ref_id);
-            if set.is_empty() {
-                e.remove()
+        if let Entry::Occupied(etbl) = self.sub.entry(dv.id()) {
+            let tbl = etbl.get_mut();
+            if let Entry::Occupied(ecnt) = etbl.entry(ref_id) {
+                let cnt = ecnt.get_mut();
+                *cnt -= 1;
+                if *cnt == 0 {
+                    ecnt.remove();
+                    if tbl.is_empty() {
+                        etbl.remove();
+                    }
+                    if let Some(refs) = self.forward_refs.get_mut(&ref_id) {
+                        refs.subs.remove(&dv.id());
+                    }
+                }
             }
-        }
-        if let Some(subs) = self.forward_refs.get_mut(&ref_id) {
-            subs.remove(&dv.id());
         }
     }
 
     fn ref_var(&mut self, name: Chars, ref_id: ExprId) {
-        self.var
+        *self.var
             .entry(name.clone())
             .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
-            .insert(ref_id);
+            .entry(ref_id)
+            .or_insert(0) += 1;
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
     }
 
     fn unref_var(&mut self, name: Chars, ref_id: ExprId) {
-        if let Some(refs) = self.forward_refs.get_mut(&ref_id) {
-            refs.vars.remove(&name);
-        }
-        if let Entry::Occupied(e) = self.var.entry(name) {
-            let set = e.get_mut();
-            set.remove(&ref_id);
-            if set.is_empty() {
-                e.remove();
+        if let Entry::Occupied(etbl) = self.var.entry(name) {
+            let tbl = etbl.get_mut();
+            if let Entry::Occupied(ecnt) = tbl.entry(ref_id) {
+                let cnt = ecnt.get_mut();
+                *cnt -= 1;
+                if *cnt == 0 {
+                    ecnt.remove();
+                    if tbl.is_empty() {
+                        etbl.remove();
+                    }
+                    if let Some(refs) = self.forward_refs.get_mut(&ref_id) {
+                        refs.vars.remove(&name);
+                    }
+                }
             }
         }
     }
@@ -399,25 +426,31 @@ impl Ref {
     fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Chars>) {
         if let Some(path) = self.path.take() {
             let path = Path::from(path);
-            ctx.user
-                .refs
-                .entry(path.clone())
-                .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
-                .remove(&self.id);
-            ctx.user
-                .forward_refs
-                .entry(self.id)
-                .or_insert_with(Refs::new)
-                .refs
-                .remove(&path);
+            if let Entry::Occupied(etbl) = ctx.user.refs.entry(path.clone()) {
+                let tbl = etbl.get_mut();
+                if let Entry::Occupied(ecnt) = tbl.entry(self.id) {
+                    let cnt = ecnt.get_mut();
+                    *cnt -= 1;
+                    if *cnt == 0 {
+                        ecnt.remove();
+                        if tbl.is_empty() {
+                            etbl.remove();
+                        }
+                        if let Some(refs) = ctx.user.forward_refs.get_mut(&self.id) {
+                            refs.remove(&path);
+                        }
+                    }
+                }
+            }
         }
         if let Some(path) = path.clone() {
             let path = Path::from(path);
-            ctx.user
+            *ctx.user
                 .refs
                 .entry(path.clone())
                 .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
-                .insert(self.id);
+                .entry(self.id)
+                .or_insert(0) += 1;
             ctx.user
                 .forward_refs
                 .entry(self.id)
