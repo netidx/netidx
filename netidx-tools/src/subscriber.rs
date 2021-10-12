@@ -12,7 +12,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     resolver::Auth,
-    subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
+    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
     utils::{split_escaped, splitn_escaped, BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
@@ -45,18 +45,16 @@ impl FromStr for In {
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(Path::from(ArcStr::from(&s[4..]))))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
-            let mut parts = s[6..].splitn(3, "|");
+            let mut parts = splitn_escaped(&s[6..], 2, '\\', '|');
             let path = parts.next().ok_or_else(|| anyhow!("expected | before path"))?;
             let path = Path::from(ArcStr::from(path));
-            let typ = parts
+            let val = parts
                 .next()
-                .ok_or_else(|| anyhow!("expected | before type"))?
-                .parse::<Typ>()?;
-            let val =
-                typ.parse(parts.next().ok_or_else(|| anyhow!("expected value"))?)?;
+                .ok_or_else(|| anyhow!("expected value"))?
+                .parse::<Value>()?;
             Ok(In::Write(path, val))
         } else if s.starts_with("CALL|") && s.len() > 5 {
-            let mut parts = s[5..].splitn(2, "|");
+            let mut parts = splitn_escaped(&s[5..], 2, '\\', '|');
             let path = parts.next().ok_or_else(|| anyhow!("expected| before path"))?;
             let path = Path::from(ArcStr::from(path));
             let args = match parts.next() {
@@ -67,19 +65,10 @@ impl FromStr for In {
                         let mut arg = splitn_escaped(arg.trim(), 2, '\\', '=');
                         let key =
                             arg.next().ok_or_else(|| anyhow!("expected keyword"))?;
-                        let val = arg.next().ok_or_else(|| anyhow!("expected value"))?;
-                        let val = if val == "null" {
-                            Value::Null
-                        } else {
-                            let mut val = splitn_escaped(val, 2, '\\', ':');
-                            let typ = val
-                                .next()
-                                .ok_or_else(|| anyhow!("expected typ:val"))?
-                                .parse::<Typ>()?;
-                            let val =
-                                val.next().ok_or_else(|| anyhow!("expected typ:val"))?;
-                            typ.parse(val)?
-                        };
+                        let val = arg
+                            .next()
+                            .ok_or_else(|| anyhow!("expected value"))?
+                            .parse::<Value>()?;
                         args.push((String::from(key), val));
                     }
                     args
@@ -122,11 +111,6 @@ impl<'a> Out<'a> {
             }
             Event::Update(v) => {
                 to_stdout.extend_from_slice(self.path.as_bytes());
-                to_stdout.extend_from_slice(b"|");
-                to_stdout.extend_from_slice(match Typ::get(&v) {
-                    None => b"none",
-                    Some(typ) => typ.name().as_bytes(),
-                });
                 to_stdout.extend_from_slice(b"|");
                 write!(&mut BytesWriter(to_stdout), "{}\n", v).unwrap();
             }

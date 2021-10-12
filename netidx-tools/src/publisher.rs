@@ -9,7 +9,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest},
+    publisher::{BindCfg, Id, Publisher, Val, Value, WriteRequest},
     resolver::Auth,
     utils,
 };
@@ -50,12 +50,8 @@ async fn handle_writes_loop(
             for req in batch.drain(..) {
                 if let Some(val) = by_id.get(&req.id) {
                     use std::io::Write;
-                    let typ = match Typ::get(&req.value) {
-                        None => "none",
-                        Some(t) => t.name(),
-                    };
                     if let Some(path) = publisher.path(val.id()) {
-                        write!(buf, "{}|{}|{}\n", path, typ, &req.value)?;
+                        write!(buf, "{}|{}\n", path, &req.value)?;
                     }
                 }
             }
@@ -128,24 +124,17 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                     }
                 }
             } else {
-                let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
+                let mut m = utils::splitn_escaped(buf.as_str().trim(), 2, '\\', '|');
                 let path = tryc!(
                     "missing path",
                     m.next().ok_or_else(|| anyhow!("missing path"))
                 );
-                let typ_or_null = tryc!(
-                    "missing type",
-                    m.next().ok_or_else(|| anyhow!("missing type"))
-                );
-                let val = if typ_or_null == "null" {
-                    Value::Null
-                } else {
-                    let typ = tryc!("invalid type", typ_or_null.parse::<Typ>());
+                let val = {
                     let v = tryc!(
                         "missing value",
                         m.next().ok_or_else(|| anyhow!("malformed data"))
                     );
-                    tryc!("parse val", typ.parse(v))
+                    tryc!("parse val", v.parse::<Value>())
                 };
                 match by_path.get(path) {
                     Some(p) => {

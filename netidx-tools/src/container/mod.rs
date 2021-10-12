@@ -276,10 +276,10 @@ impl Ctx for Lc {
         dv
     }
 
-    fn unsubscribe(&mut self, path: Path, dv: Dval, ref_id: ExprId) {
-        if let Entry::Occupied(etbl) = self.sub.entry(dv.id()) {
+    fn unsubscribe(&mut self, _path: Path, dv: Dval, ref_id: ExprId) {
+        if let Entry::Occupied(mut etbl) = self.sub.entry(dv.id()) {
             let tbl = etbl.get_mut();
-            if let Entry::Occupied(ecnt) = tbl.entry(ref_id) {
+            if let Entry::Occupied(mut ecnt) = tbl.entry(ref_id) {
                 let cnt = ecnt.get_mut();
                 *cnt -= 1;
                 if *cnt == 0 {
@@ -305,9 +305,9 @@ impl Ctx for Lc {
     }
 
     fn unref_var(&mut self, name: Chars, ref_id: ExprId) {
-        if let Entry::Occupied(etbl) = self.var.entry(name) {
+        if let Entry::Occupied(mut etbl) = self.var.entry(name.clone()) {
             let tbl = etbl.get_mut();
-            if let Entry::Occupied(ecnt) = tbl.entry(ref_id) {
+            if let Entry::Occupied(mut ecnt) = tbl.entry(ref_id) {
                 let cnt = ecnt.get_mut();
                 *cnt -= 1;
                 if *cnt == 0 {
@@ -426,9 +426,9 @@ impl Ref {
     fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Chars>) {
         if let Some(path) = self.path.take() {
             let path = Path::from(path);
-            if let Entry::Occupied(etbl) = ctx.user.refs.entry(path.clone()) {
+            if let Entry::Occupied(mut etbl) = ctx.user.refs.entry(path.clone()) {
                 let tbl = etbl.get_mut();
-                if let Entry::Occupied(ecnt) = tbl.entry(self.id) {
+                if let Entry::Occupied(mut ecnt) = tbl.entry(self.id) {
                     let cnt = ecnt.get_mut();
                     *cnt -= 1;
                     if *cnt == 0 {
