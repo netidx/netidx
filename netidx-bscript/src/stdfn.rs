@@ -47,7 +47,7 @@ pub struct Any(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             Box::new(Any(from.iter().find_map(|s| s.current())))
         });
         ctx.functions.insert("any".into(), f);
@@ -81,7 +81,7 @@ pub struct Do(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Do {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             Box::new(Do(from.iter().fold(None, |_, s| s.current())))
         });
         ctx.functions.insert("do".into(), f);
@@ -117,7 +117,7 @@ pub struct CachedCur<T: CachedCurEval> {
 
 impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_ctx, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             let cached = CachedVals::new(from);
             let current = T::eval(&cached);
             Box::new(CachedCur::<T> { cached, current, t: PhantomData })
@@ -828,6 +828,7 @@ pub type StringConcat = CachedCur<StringConcatEv>;
 pub struct Eval<C: Ctx, E> {
     cached: CachedVals,
     current: Result<Node<C, E>, Value>,
+    scope: Path,
 }
 
 impl<C: Ctx, E> Eval<C, E> {
@@ -836,7 +837,7 @@ impl<C: Ctx, E> Eval<C, E> {
             [None] => Err(Value::Null),
             [Some(v)] => match v {
                 Value::String(s) => match s.parse::<Expr>() {
-                    Ok(spec) => Ok(Node::compile(ctx, spec)),
+                    Ok(spec) => Ok(Node::compile(ctx, self.scope.clone(), spec)),
                     Err(e) => {
                         let e = format!("eval(src), error parsing formula {}, {}", s, e);
                         Err(Value::Error(Chars::from(e)))
@@ -854,8 +855,9 @@ impl<C: Ctx, E> Eval<C, E> {
 
 impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _| {
-            let mut t = Eval { cached: CachedVals::new(from), current: Err(Value::Null) };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, scope, _| {
+            let mut t =
+                Eval { cached: CachedVals::new(from), current: Err(Value::Null), scope };
             t.compile(ctx);
             Box::new(t)
         });
@@ -894,7 +896,7 @@ pub struct Count {
 
 impl<C: Ctx, E> Register<C, E> for Count {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             Box::new(Count { from: CachedVals::new(from), count: 0 })
         });
         ctx.functions.insert("count".into(), f);
@@ -931,7 +933,7 @@ pub struct Sample {
 
 impl<C: Ctx, E> Register<C, E> for Sample {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             let current = match from {
                 [trigger, source] => match trigger.current() {
                     None => None,
@@ -988,7 +990,7 @@ pub struct Mean {
 
 impl<C: Ctx, E> Register<C, E> for Mean {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             Box::new(Mean { from: CachedVals::new(from), total: 0., samples: 0 })
         });
         ctx.functions.insert("mean".into(), f);
@@ -1036,7 +1038,7 @@ pub(crate) struct Uniq(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Uniq {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _| {
+        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             let mut t = Uniq(None);
             match from {
                 [e] => t.0 = e.current(),
@@ -1118,7 +1120,7 @@ pub struct Store {
 
 impl<C: Ctx, E> Register<C, E> for Store {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = Store { queued: Vec::new(), dv: None, invalid: false, top_id };
             match from {
                 [to, val] => t.set(ctx, to.current(), val.current()),
@@ -1263,7 +1265,7 @@ pub struct StoreVar {
 
 impl<C: Ctx, E> Register<C, E> for StoreVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
             let mut t = StoreVar { queued: Vec::new(), name: None, invalid: false };
             match from {
                 [name, value] => t.set(ctx, name.current(), value.current()),
@@ -1367,7 +1369,7 @@ pub(crate) struct Load {
 
 impl<C: Ctx, E> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = Load { path: None, cur: None, invalid: false, top_id };
             match from {
                 [path] => t.subscribe(ctx, path.current()),
@@ -1471,7 +1473,7 @@ pub struct LoadVar {
 
 impl<C: Ctx, E> Register<C, E> for LoadVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = LoadVar { name: None, cur: None, invalid: false, top_id };
             match from {
                 [name] => t.subscribe(ctx, name.current()),
@@ -1575,7 +1577,7 @@ pub(crate) struct RpcCall {
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, top_id| {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = RpcCall {
                 args: CachedVals::new(match from {
                     [_, rest @ ..] => rest,

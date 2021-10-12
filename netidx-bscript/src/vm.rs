@@ -4,7 +4,11 @@ use crate::{
     stdfn,
 };
 use fxhash::FxBuildHasher;
-use netidx::{chars::Chars, path::Path, subscriber::{Dval, SubId, UpdatesFlags, Value}};
+use netidx::{
+    chars::Chars,
+    path::Path,
+    subscriber::{Dval, SubId, UpdatesFlags, Value},
+};
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -79,7 +83,7 @@ pub enum Event<E> {
 }
 
 pub type InitFn<C, E> =
-    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>], ExprId) -> Box<dyn Apply<C, E>>>;
+    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>], Path, ExprId) -> Box<dyn Apply<C, E>>>;
 
 pub trait Register<C: Ctx, E> {
     fn register(ctx: &mut ExecCtx<C, E>);
@@ -209,7 +213,12 @@ impl<C: Ctx, E> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx, E> Node<C, E> {
-    pub fn compile_int(ctx: &mut ExecCtx<C, E>, spec: Expr, top_id: ExprId) -> Self {
+    pub fn compile_int(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: Path,
+        top_id: ExprId,
+    ) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id } => {
                 ctx.dbg_ctx.add_event(*id, v.clone());
@@ -218,7 +227,7 @@ impl<C: Ctx, E> Node<C, E> {
             Expr { kind: ExprKind::Apply { args, function }, .. } => {
                 let args: Vec<Node<C, E>> = args
                     .iter()
-                    .map(|spec| Node::compile_int(ctx, spec.clone(), top_id))
+                    .map(|spec| Node::compile_int(ctx, spec.clone(), scope, top_id))
                     .collect();
                 match ctx.functions.get(function).map(Arc::clone) {
                     None => Node::Error(
@@ -229,7 +238,7 @@ impl<C: Ctx, E> Node<C, E> {
                         ))),
                     ),
                     Some(init) => {
-                        let function = init(ctx, &args, top_id);
+                        let function = init(ctx, &args, scope, top_id);
                         if let Some(v) = function.current() {
                             ctx.dbg_ctx.add_event(spec.id, v)
                         }
@@ -240,9 +249,9 @@ impl<C: Ctx, E> Node<C, E> {
         }
     }
 
-    pub fn compile(ctx: &mut ExecCtx<C, E>, spec: Expr) -> Self {
+    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: Path, spec: Expr) -> Self {
         let top_id = spec.id;
-        Self::compile_int(ctx, spec, top_id)
+        Self::compile_int(ctx, spec, scope, top_id)
     }
 
     pub fn current(&self) -> Option<Value> {
