@@ -153,7 +153,7 @@ struct Lc {
     db: db::Db,
     var: FxHashMap<Chars, FxHashMap<ExprId, usize>>,
     sub: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
-    rpc: FxHashSet<Path, FxHashMap<ExprId>>,
+    rpc: FxHashMap<Path, FxHashSet<ExprId>>,
     refs: FxHashMap<Path, FxHashMap<ExprId, usize>>,
     rels: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
@@ -279,7 +279,7 @@ impl Ctx for Lc {
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_id: ExprId) {
         if let Entry::Occupied(etbl) = self.sub.entry(dv.id()) {
             let tbl = etbl.get_mut();
-            if let Entry::Occupied(ecnt) = etbl.entry(ref_id) {
+            if let Entry::Occupied(ecnt) = tbl.entry(ref_id) {
                 let cnt = ecnt.get_mut();
                 *cnt -= 1;
                 if *cnt == 0 {
@@ -298,7 +298,7 @@ impl Ctx for Lc {
     fn ref_var(&mut self, name: Chars, ref_id: ExprId) {
         *self.var
             .entry(name.clone())
-            .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
+            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
             .entry(ref_id)
             .or_insert(0) += 1;
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
@@ -437,7 +437,7 @@ impl Ref {
                             etbl.remove();
                         }
                         if let Some(refs) = ctx.user.forward_refs.get_mut(&self.id) {
-                            refs.remove(&path);
+                            refs.refs.remove(&path);
                         }
                     }
                 }
@@ -975,7 +975,7 @@ impl Container {
             let r = REFS.take();
             for (path, value) in replace(&mut self.ctx.user.ref_updates, r).drain(..) {
                 if let Some(expr_ids) = self.ctx.user.refs.get(&path) {
-                    refs.extend(expr_ids.iter().copied());
+                    refs.extend(expr_ids.keys().copied());
                 }
                 self.update_expr_ids(
                     batch,
@@ -987,7 +987,7 @@ impl Container {
             let v = VARS.take();
             for (name, value) in replace(&mut self.ctx.user.var_updates, v).drain(..) {
                 if let Some(expr_ids) = self.ctx.user.var.get(&name) {
-                    refs.extend(expr_ids.iter().copied());
+                    refs.extend(expr_ids.keys().copied());
                 }
                 self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(name, value));
             }
@@ -1022,7 +1022,7 @@ impl Container {
         for (id, event) in updates.drain(..) {
             if let Event::Update(value) = event {
                 if let Some(expr_ids) = self.ctx.user.sub.get(&id) {
-                    refs.extend(expr_ids.iter().copied());
+                    refs.extend(expr_ids.keys().copied());
                 }
                 self.update_expr_ids(batch, &mut refs, &vm::Event::Netidx(id, value));
             }
