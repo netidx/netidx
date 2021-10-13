@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -108,8 +108,8 @@ pub trait Ctx {
         ref_by: ExprId,
     ) -> Dval;
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
-    fn ref_var(&mut self, name: Chars, ref_by: ExprId);
-    fn unref_var(&mut self, name: Chars, ref_by: ExprId);
+    fn ref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
+    fn unref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
     fn set_var(
         &mut self,
         variables: &mut HashMap<Chars, Value>,
@@ -130,13 +130,52 @@ pub trait Ctx {
 }
 
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
-    pub functions: HashMap<String, InitFn<C, E>>,
-    pub variables: HashMap<Chars, Value>,
+    pub functions: FxHashMap<String, InitFn<C, E>>,
+    pub variables: FxHashMap<Path, FxHashMap<Chars, Value>>,
     pub dbg_ctx: DbgCtx,
     pub user: C,
 }
 
 impl<C: Ctx, E> ExecCtx<C, E> {
+    pub fn lookup_var(&self, scope: &Path, name: &Chars) -> Option<(&Path, &Value)> {
+        let mut iter = Path::dirnames(scope);
+        loop {
+            match iter.next_back() {
+                Some(scope) => {
+                    if let Some((scope, vars)) = self.variables.get_key_value(scope) {
+                        if let Some(var) = vars.get(name) {
+                            break Some((scope, var));
+                        }
+                    }
+                }
+                None => break None,
+            }
+        }
+    }
+
+    pub fn set_var(&mut self, local: bool, scope: &Path, name: &Chars, value: Value) {
+        if local {
+            self.variables
+                .entry(scope.clone())
+                .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+                .insert(name.clone(), value);
+        } else {
+            let mut iter = Path::dirnames(scope);
+            loop {
+                match iter.next_back() {
+                    Some(scope) => {
+                        if let Some(vars) = self.variables.get_mut(scope) {
+                            if let Some(var) = vars.get_mut(name) {
+                                break *var = value;
+                            }
+                        }
+                    }
+                    None => break self.set_var(true, &Path::root(), name, value),
+                }
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.variables.clear();
         self.dbg_ctx.clear();
@@ -145,8 +184,8 @@ impl<C: Ctx, E> ExecCtx<C, E> {
 
     pub fn no_std(user: C) -> Self {
         ExecCtx {
-            functions: HashMap::new(),
-            variables: HashMap::new(),
+            functions: HashMap::with_hasher(FxBuildHasher::default()),
+            variables: HashMap::with_hasher(FxBuildHasher::default()),
             dbg_ctx: DbgCtx::new(),
             user,
         }

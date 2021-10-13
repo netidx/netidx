@@ -1465,6 +1465,7 @@ impl Load {
 }
 
 pub struct LoadVar {
+    scope: Path,
     name: Option<Chars>,
     cur: Option<Value>,
     top_id: ExprId,
@@ -1473,8 +1474,8 @@ pub struct LoadVar {
 
 impl<C: Ctx, E> Register<C, E> for LoadVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
-            let mut t = LoadVar { name: None, cur: None, invalid: false, top_id };
+        let f: InitFn<C, E> = Arc::new(|ctx, from, scope, top_id| {
+            let mut t = LoadVar { scope, name: None, cur: None, invalid: false, top_id };
             match from {
                 [name] => t.subscribe(ctx, name.current()),
                 _ => t.invalid = true,
@@ -1556,7 +1557,7 @@ impl LoadVar {
         if let Some(name) = varname(&mut self.invalid, name) {
             if Some(&name) != self.name.as_ref() {
                 if let Some(old) = self.name.take() {
-                    ctx.user.unref_var(old.clone(), self.top_id);
+                    ctx.user.unref_var(old.clone(), self.scope.clone(), self.top_id);
                 }
                 self.cur = ctx.variables.get(&name).cloned();
                 ctx.user.ref_var(name.clone(), self.top_id);

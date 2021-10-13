@@ -10,7 +10,7 @@ use std::{
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
-    iter::Iterator,
+    iter::{Iterator, DoubleEndedIterator},
     ops::Deref,
     result::Result,
     str::{self, FromStr},
@@ -156,7 +156,7 @@ impl FromStr for Path {
     }
 }
 
-enum DirNames<'a> {
+pub enum DirNames<'a> {
     Root(bool),
     Path { cur: &'a str, all: &'a str, base: usize },
 }
@@ -166,13 +166,8 @@ impl<'a> Iterator for DirNames<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            DirNames::Root(false) => None,
-            DirNames::Root(true) => {
-                *self = DirNames::Root(false);
-                Some("/")
-            }
-            DirNames::Path { ref mut cur, ref all, ref mut base } => {
-                if *base == all.len() {
+            DirNames::Path { ref mut cur, all, ref mut base } => {
+                if *base >= all.len() {
                     None
                 } else {
                     match Path::find_sep(cur) {
@@ -188,6 +183,34 @@ impl<'a> Iterator for DirNames<'a> {
                     }
                 }
             }
+            DirNames::Root(true) => {
+                *self = DirNames::Root(false);
+                Some("/")
+            }
+            DirNames::Root(false) => None,
+        }
+    }
+}
+
+impl<'a> DoubleEndedIterator for DirNames<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            DirNames::Path { cur: _, ref mut all, base: _} => match Path::dirname(*all) {
+                Some(dn) => {
+                    let res = *all;
+                    *all = dn;
+                    Some(res)
+                }
+                None => {
+                    *self = DirNames::Root(false);
+                    Some("/")
+                }
+            }
+            DirNames::Root(true) => {
+                *self = DirNames::Root(false);
+                Some("/")
+            }
+            DirNames::Root(false) => None,
         }
     }
 }
@@ -361,7 +384,7 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
     /// ```
-    pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> impl Iterator<Item = &str> {
+    pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> DirNames {
         let s = s.as_ref();
         if s == "/" {
             DirNames::Root(true)
@@ -401,7 +424,7 @@ impl Path {
     /// let p = Path::from("/foo");
     /// assert_eq!(Path::dirname(&p), None);
     /// ```
-    pub fn dirname<T: AsRef<str> + ?Sized>(s: &T) -> Option<&str> {
+    pub fn dirname<'a, T: AsRef<str> + ?Sized>(s: &'a T) -> Option<&'a str> {
         let s = s.as_ref();
         Path::rfind_sep(s).and_then(|i| if i == 0 { None } else { Some(&s[0..i]) })
     }
