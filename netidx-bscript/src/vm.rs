@@ -76,7 +76,7 @@ impl DbgCtx {
 
 #[derive(Debug)]
 pub enum Event<E> {
-    Variable(Chars, Value),
+    Variable(Path, Chars, Value),
     Netidx(SubId, Value),
     Rpc(RpcCallId, Value),
     User(E),
@@ -263,7 +263,12 @@ impl<C: Ctx, E> Node<C, E> {
                 ctx.dbg_ctx.add_event(*id, v.clone());
                 Node::Constant(spec.clone(), v.clone())
             }
-            Expr { kind: ExprKind::Apply { args, function }, .. } => {
+            Expr { kind: ExprKind::Apply { args, function }, id } => {
+                let scope = if function == "do" {
+                    scope.append(&format!("do{:?}", id))
+                } else {
+                    scope
+                };
                 let args: Vec<Node<C, E>> = args
                     .iter()
                     .map(|spec| Node::compile_int(ctx, spec.clone(), scope, top_id))

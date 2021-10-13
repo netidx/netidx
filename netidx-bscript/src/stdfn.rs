@@ -1464,10 +1464,15 @@ impl Load {
     }
 }
 
+struct BoundVar {
+    scope: Path,
+    value: Value,
+}
+
 pub struct LoadVar {
     scope: Path,
     name: Option<Chars>,
-    cur: Option<Value>,
+    var: Option<BoundVar>,
     top_id: ExprId,
     invalid: bool,
 }
@@ -1475,7 +1480,7 @@ pub struct LoadVar {
 impl<C: Ctx, E> Register<C, E> for LoadVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, scope, top_id| {
-            let mut t = LoadVar { scope, name: None, cur: None, invalid: false, top_id };
+            let mut t = LoadVar { scope, name: None, var: None, invalid: false, top_id };
             match from {
                 [name] => t.subscribe(ctx, name.current()),
                 _ => t.invalid = true,
@@ -1491,7 +1496,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
         if self.invalid {
             LoadVar::err()
         } else {
-            self.cur.to_owned()
+            self.var.map(|bv| bv.value.clone())
         }
     }
 
@@ -1517,16 +1522,30 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
                         None
                     }
                 } else {
-                    match (self.name.as_ref(), event) {
-                        (None, _)
-                        | (Some(_), Event::Netidx(_, _))
-                        | (Some(_), Event::User(_))
-                        | (Some(_), Event::Rpc(_, _)) => None,
-                        (Some(vn), Event::Variable(tn, v)) if vn == tn => {
-                            self.cur = Some(v.clone());
+                    match (self.name.as_ref(), self.var.as_mut(), event) {
+                        (Some(vn), Some(bv), Event::Variable(es, en, v))
+                            if vn == en
+                                && Path::is_parent(es, &self.scope)
+                                && Path::is_parent(&bv.scope, es) =>
+                        {
+                            if &bv.scope != es {
+                                bv.scope = es.clone();
+                            }
+                            bv.value = v.clone();
                             Some(v.clone())
                         }
-                        (Some(_), Event::Variable(_, _)) => None,
+                        (Some(vn), None, Event::Variable(es, en, v))
+                            if vn == en && Path::is_parent(es, &self.scope) =>
+                        {
+                            self.var =
+                                Some(BoundVar { scope: es.clone(), value: v.clone() });
+                            Some(v.clone())
+                        }
+                        (None, _, _)
+                        | (Some(_), _, Event::Netidx(_, _))
+                        | (Some(_), _, Event::User(_))
+                        | (Some(_), _, Event::Rpc(_, _))
+                        | (Some(_), _, Event::Variable(_, _, _)) => None,
                     }
                 }
             }
@@ -1554,13 +1573,23 @@ impl LoadVar {
     }
 
     fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
-        if let Some(name) = varname(&mut self.invalid, name) {
-            if Some(&name) != self.name.as_ref() {
+        match varname(&mut self.invalid, name) {
+            None => {
+                self.var = None;
+                self.name = None;
                 if let Some(old) = self.name.take() {
                     ctx.user.unref_var(old.clone(), self.scope.clone(), self.top_id);
                 }
-                self.cur = ctx.variables.get(&name).cloned();
-                ctx.user.ref_var(name.clone(), self.top_id);
+            }
+            Some(name) if self.name.as_ref() == Some(&name) => (),
+            Some(name) => {
+                if let Some(old) = self.name.take() {
+                    ctx.user.unref_var(old.clone(), self.scope.clone(), self.top_id);
+                }
+                self.var = ctx.lookup_var(&self.scope, &name).map(|(scope, value)| {
+                    BoundVar { scope: scope.clone(), value: value.clone() }
+                });
+                ctx.user.ref_var(name.clone(), self.scope.clone(), self.top_id);
                 self.name = Some(name);
             }
         }
