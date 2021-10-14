@@ -131,6 +131,35 @@ pub trait Ctx {
     );
 }
 
+pub fn store_var(
+    variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
+    local: bool,
+    scope: &Path,
+    name: &Chars,
+    value: Value,
+) {
+    if local {
+        variables
+            .entry(scope.clone())
+            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .insert(name.clone(), value);
+    } else {
+        let mut iter = Path::dirnames(scope);
+        loop {
+            match iter.next_back() {
+                Some(scope) => {
+                    if let Some(vars) = variables.get_mut(scope) {
+                        if let Some(var) = vars.get_mut(name) {
+                            break *var = value;
+                        }
+                    }
+                }
+                None => break store_var(variables, true, &Path::root(), name, value),
+            }
+        }
+    }
+}
+
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
     pub functions: FxHashMap<String, InitFn<C, E>>,
     pub variables: FxHashMap<Path, FxHashMap<Chars, Value>>,
@@ -151,29 +180,6 @@ impl<C: Ctx, E> ExecCtx<C, E> {
                     }
                 }
                 None => break None,
-            }
-        }
-    }
-
-    pub fn set_var(&mut self, local: bool, scope: &Path, name: &Chars, value: Value) {
-        if local {
-            self.variables
-                .entry(scope.clone())
-                .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
-                .insert(name.clone(), value);
-        } else {
-            let mut iter = Path::dirnames(scope);
-            loop {
-                match iter.next_back() {
-                    Some(scope) => {
-                        if let Some(vars) = self.variables.get_mut(scope) {
-                            if let Some(var) = vars.get_mut(name) {
-                                break *var = value;
-                            }
-                        }
-                    }
-                    None => break self.set_var(true, &Path::root(), name, value),
-                }
             }
         }
     }
@@ -273,7 +279,9 @@ impl<C: Ctx, E> Node<C, E> {
                 };
                 let args: Vec<Node<C, E>> = args
                     .iter()
-                    .map(|spec| Node::compile_int(ctx, spec.clone(), scope.clone(), top_id))
+                    .map(|spec| {
+                        Node::compile_int(ctx, spec.clone(), scope.clone(), top_id)
+                    })
                     .collect();
                 match ctx.functions.get(function).map(Arc::clone) {
                     None => Node::Error(

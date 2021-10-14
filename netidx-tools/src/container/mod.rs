@@ -57,7 +57,7 @@ use tokio::{
 };
 
 lazy_static! {
-    static ref VARS: Pool<Vec<(Chars, Value)>> = Pool::new(8, 2048);
+    static ref VARS: Pool<Vec<(Path, Chars, Value)>> = Pool::new(8, 2048);
     static ref REFS: Pool<Vec<(Path, Value)>> = Pool::new(8, 16384);
     static ref REFIDS: Pool<Vec<ExprId>> = Pool::new(8, 2048);
     static ref PKBUF: Pool<Vec<u8>> = Pool::new(8, 16384);
@@ -160,7 +160,7 @@ struct Lc {
     subscriber: Subscriber,
     publisher: Publisher,
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
-    var_updates: Pooled<Vec<(Chars, Value)>>,
+    var_updates: Pooled<Vec<(Path, Chars, Value)>>,
     ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
     by_path: HashMap<Path, Published>,
@@ -267,7 +267,8 @@ impl Ctx for Lc {
     ) -> Dval {
         let dv = self.subscriber.durable_subscribe(path);
         dv.updates(flags, self.sub_updates.clone());
-        *self.sub
+        *self
+            .sub
             .entry(dv.id())
             .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
             .entry(ref_id)
@@ -295,8 +296,10 @@ impl Ctx for Lc {
         }
     }
 
-    fn ref_var(&mut self, name: Chars, ref_id: ExprId) {
-        *self.var
+    // CR estokes: future optimization, use scope to avoid sending unecessary events
+    fn ref_var(&mut self, name: Chars, _scope: Path, ref_id: ExprId) {
+        *self
+            .var
             .entry(name.clone())
             .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
             .entry(ref_id)
@@ -304,7 +307,7 @@ impl Ctx for Lc {
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
     }
 
-    fn unref_var(&mut self, name: Chars, ref_id: ExprId) {
+    fn unref_var(&mut self, name: Chars, _scope: Path, ref_id: ExprId) {
         if let Entry::Occupied(mut etbl) = self.var.entry(name.clone()) {
             let tbl = etbl.get_mut();
             if let Entry::Occupied(mut ecnt) = tbl.entry(ref_id) {
@@ -325,12 +328,14 @@ impl Ctx for Lc {
 
     fn set_var(
         &mut self,
-        variables: &mut HashMap<Chars, Value>,
+        variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
+        local: bool,
+        scope: Path,
         name: Chars,
         value: Value,
     ) {
-        variables.insert(name.clone(), value.clone());
-        self.var_updates.push((name, value));
+        vm::store_var(variables, local, &scope, &name, value.clone());
+        self.var_updates.push((scope, name, value));
     }
 
     fn call_rpc(
@@ -419,7 +424,7 @@ impl Ref {
             | vm::Event::User(UserEv::Rel)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
-            | vm::Event::Variable(_, _) => None,
+            | vm::Event::Variable(_, _, _) => None,
         }
     }
 
@@ -464,7 +469,7 @@ impl Ref {
 
 impl Register<Lc, UserEv> for Ref {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
+        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _, id| {
             let path = Ref::get_path(from);
             let current = Ref::get_current(ctx, &path);
             let mut t = Box::new(Ref { id, path: None, current });
@@ -560,7 +565,7 @@ impl Rel {
 
 impl Register<Lc, UserEv> for Rel {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, id| {
+        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _, id| {
             let loc = ctx.user.current_path.clone();
             if let Some(table) = Path::dirname(&loc).and_then(Path::dirname) {
                 ctx.user
@@ -608,7 +613,7 @@ pub(crate) struct OnWriteEvent {
 
 impl Register<Lc, UserEv> for OnWriteEvent {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|_, from, _| {
+        let f: InitFn<Lc, UserEv> = Arc::new(|_, from, _, _| {
             Box::new(OnWriteEvent { cur: None, invalid: from.len() > 0 })
         });
         ctx.functions.insert("event".into(), f);
@@ -632,7 +637,7 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
     ) -> Option<Value> {
         self.invalid = from.len() > 0;
         match event {
-            vm::Event::Variable(_, _)
+            vm::Event::Variable(_, _, _)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
             | vm::Event::User(UserEv::Ref(_, _))
@@ -838,8 +843,12 @@ impl Container {
         let on_write_expr_id =
             on_write_expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
         self.ctx.user.current_path = path.clone();
-        let formula_node = expr.map(|e| Node::compile(&mut self.ctx, e));
-        let on_write_node = on_write_expr.map(|e| Node::compile(&mut self.ctx, e));
+        let scope = Path::dirname(&path)
+            .map(|s| Path::from(String::from(s)))
+            .unwrap_or_else(Path::root);
+        let formula_node = expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
+        let on_write_node =
+            on_write_expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
         let value =
             formula_node.as_ref().ok().and_then(|n| n.current()).unwrap_or(Value::Null);
         let src_path = path.append(".formula");
@@ -985,11 +994,17 @@ impl Container {
             }
             // update variable references
             let v = VARS.take();
-            for (name, value) in replace(&mut self.ctx.user.var_updates, v).drain(..) {
+            for (scope, name, value) in
+                replace(&mut self.ctx.user.var_updates, v).drain(..)
+            {
                 if let Some(expr_ids) = self.ctx.user.var.get(&name) {
                     refs.extend(expr_ids.keys().copied());
                 }
-                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(name, value));
+                self.update_expr_ids(
+                    batch,
+                    &mut refs,
+                    &vm::Event::Variable(scope, name, value),
+                );
             }
             n += 1;
         }
@@ -1045,7 +1060,10 @@ impl Container {
             Ok(expr) => {
                 *expr_id = expr.id;
                 self.ctx.user.current_path = fifo.data_path.clone();
-                let node = Node::compile(&mut self.ctx, expr);
+                let scope = Path::dirname(&fifo.data_path)
+                    .map(|s| Path::from(String::from(s)))
+                    .unwrap_or_else(Path::root);
+                let node = Node::compile(&mut self.ctx, scope, expr);
                 let dv = node.current().unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
                 self.compiled.insert(*expr_id, c);
@@ -1078,7 +1096,10 @@ impl Container {
             Ok(expr) => {
                 *expr_id = expr.id;
                 self.ctx.user.current_path = fifo.data_path.clone();
-                let node = Node::compile(&mut self.ctx, expr);
+                let scope = Path::dirname(&fifo.data_path)
+                    .map(|s| Path::from(String::from(s)))
+                    .unwrap_or_else(Path::root);
+                let node = Node::compile(&mut self.ctx, scope, expr);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
             }
             Err(_) => (), // CR estokes: log and report to user
