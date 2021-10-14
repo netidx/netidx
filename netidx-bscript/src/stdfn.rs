@@ -1259,21 +1259,32 @@ fn varname(invalid: &mut bool, name: Option<Value>) -> Option<Chars> {
 
 pub struct StoreVar {
     queued: Vec<Value>,
+    local: bool,
+    scope: Path,
     name: Option<Chars>,
     invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for StoreVar {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            let mut t = StoreVar { queued: Vec::new(), name: None, invalid: false };
-            match from {
-                [name, value] => t.set(ctx, name.current(), value.current()),
-                _ => t.invalid = true,
-            }
-            Box::new(t)
-        });
-        ctx.functions.insert("store_var".into(), f);
+        let f = |local| -> InitFn<C, E> {
+            Arc::new(move |ctx, from, scope, _| {
+                let mut t = StoreVar {
+                    queued: Vec::new(),
+                    local,
+                    scope,
+                    name: None,
+                    invalid: false,
+                };
+                match from {
+                    [name, value] => t.set(ctx, name.current(), value.current()),
+                    _ => t.invalid = true,
+                }
+                Box::new(t)
+            })
+        };
+        ctx.functions.insert("store_var".into(), f(false));
+        ctx.functions.insert("local_store_var".into(), f(true));
     }
 }
 
@@ -1340,14 +1351,26 @@ impl StoreVar {
     ) {
         if let Some(name) = varname(&mut self.invalid, name) {
             for v in self.queued.drain(..) {
-                ctx.user.set_var(&mut ctx.variables, name.clone(), v)
+                ctx.user.set_var(
+                    &mut ctx.variables,
+                    self.local,
+                    self.scope.clone(),
+                    name.clone(),
+                    v,
+                )
             }
             self.name = Some(name);
         }
         if let Some(value) = value {
             match self.name.as_ref() {
                 None => self.queue_set(value),
-                Some(name) => ctx.user.set_var(&mut ctx.variables, name.clone(), value),
+                Some(name) => ctx.user.set_var(
+                    &mut ctx.variables,
+                    self.local,
+                    self.scope.clone(),
+                    name.clone(),
+                    value,
+                ),
             }
         }
     }
@@ -1418,7 +1441,7 @@ impl<C: Ctx, E> Apply<C, E> for Load {
                     }
                 } else {
                     self.cur.as_ref().and_then(|dv| match event {
-                        Event::Variable(_, _) | Event::Rpc(_, _) | Event::User(_) => None,
+                        Event::Variable(_, _, _) | Event::Rpc(_, _) | Event::User(_) => None,
                         Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
                         Event::Netidx(_, _) => None,
                     })
@@ -1496,7 +1519,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
         if self.invalid {
             LoadVar::err()
         } else {
-            self.var.map(|bv| bv.value.clone())
+            self.var.as_ref().map(|bv| bv.value.clone())
         }
     }
 

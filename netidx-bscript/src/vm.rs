@@ -112,7 +112,9 @@ pub trait Ctx {
     fn unref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
     fn set_var(
         &mut self,
-        variables: &mut HashMap<Chars, Value>,
+        variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
+        local: bool,
+        scope: Path,
         name: Chars,
         value: Value,
     );
@@ -271,7 +273,7 @@ impl<C: Ctx, E> Node<C, E> {
                 };
                 let args: Vec<Node<C, E>> = args
                     .iter()
-                    .map(|spec| Node::compile_int(ctx, spec.clone(), scope, top_id))
+                    .map(|spec| Node::compile_int(ctx, spec.clone(), scope.clone(), top_id))
                     .collect();
                 match ctx.functions.get(function).map(Arc::clone) {
                     None => Node::Error(
