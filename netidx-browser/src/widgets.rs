@@ -9,6 +9,7 @@ use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{
     chars::Chars,
+    path::Path,
     subscriber::{Typ, Value},
 };
 use netidx_bscript::{expr::Expr, vm};
@@ -30,15 +31,16 @@ impl Button {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::Button,
+        scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
-        let label = BSNode::compile(ctx_r, spec.label.clone());
+        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
+        let label = BSNode::compile(ctx_r, scope.clone(), spec.label.clone());
         let on_click =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_click.clone())));
+            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_click.clone())));
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -91,15 +93,19 @@ impl LinkButton {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::LinkButton,
+        scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
-        let uri = BSNode::compile(ctx_r, spec.uri.clone());
-        let label = BSNode::compile(ctx_r, spec.label.clone());
-        let on_activate_link =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_activate_link.clone())));
+        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
+        let uri = BSNode::compile(ctx_r, scope.clone(), spec.uri.clone());
+        let label = BSNode::compile(ctx_r, scope.clone(), spec.label.clone());
+        let on_activate_link = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope,
+            spec.on_activate_link.clone(),
+        )));
         let cur_label = label.current().and_then(|v| v.get_as::<Chars>());
         let cur_label = cur_label.as_ref().map(|s| s.as_ref());
         let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
@@ -162,8 +168,13 @@ pub(super) struct Label {
 }
 
 impl Label {
-    pub(super) fn new(ctx: &BSCtx, spec: Expr, selected_path: gtk::Label) -> Label {
-        let text = BSNode::compile(&mut *ctx.borrow_mut(), spec.clone());
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: Expr,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Label {
+        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.clone());
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", v),
@@ -200,10 +211,10 @@ pub(super) struct Action {
 }
 
 impl Action {
-    pub(super) fn new(ctx: &BSCtx, spec: Expr) -> Self {
+    pub(super) fn new(ctx: &BSCtx, scope: Path, spec: Expr) -> Self {
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let mut action = BSNode::compile(ctx_r, spec.clone());
+        let mut action = BSNode::compile(ctx_r, scope, spec.clone());
         action.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Action { action }
     }
@@ -227,6 +238,7 @@ impl Selector {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::Selector,
+        scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
         let combo = gtk::ComboBoxText::new();
@@ -248,12 +260,15 @@ impl Selector {
         );
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
-        let choices = BSNode::compile(ctx_r, spec.choices.clone());
-        let selected =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.selected.clone())));
+        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
+        let choices = BSNode::compile(ctx_r, scope.clone(), spec.choices.clone());
+        let selected = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.selected.clone(),
+        )));
         let on_change =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_change.clone())));
+            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             combo.set_sensitive(val_to_bool(&v));
@@ -368,15 +383,20 @@ impl Toggle {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::Toggle,
+        scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
-        let value = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.value.clone())));
+        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
+        let value = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.value.clone(),
+        )));
         let on_change =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_change.clone())));
+            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
         if let Some(v) = enabled.current() {
             switch.set_sensitive(val_to_bool(&v));
@@ -456,17 +476,32 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    pub(super) fn new(ctx: &BSCtx, spec: view::Entry, selected_path: gtk::Label) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Entry,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
         let we_changed = Rc::new(Cell::new(false));
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, spec.enabled.clone());
-        let visible = BSNode::compile(ctx_r, spec.visible.clone());
-        let text = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.text.clone())));
-        let on_change =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_change.clone())));
-        let on_activate =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_activate.clone())));
+        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
+        let visible = BSNode::compile(ctx_r, scope.clone(), spec.visible.clone());
+        let text = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.text.clone(),
+        )));
+        let on_change = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.on_change.clone(),
+        )));
+        let on_activate = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope,
+            spec.on_activate.clone(),
+        )));
         let entry = gtk::Entry::new();
         if let Some(v) = enabled.current() {
             entry.set_sensitive(val_to_bool(&v));
@@ -618,6 +653,7 @@ impl LinePlot {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::LinePlot,
+        scope: Path,
         _selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -625,19 +661,19 @@ impl LinePlot {
         root.pack_start(&canvas, true, true, 0);
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let x_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.x_min.clone())));
-        let x_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.x_max.clone())));
-        let y_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.y_min.clone())));
-        let y_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.y_max.clone())));
+        let x_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.x_min.clone())));
+        let x_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.x_max.clone())));
+        let y_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.y_min.clone())));
+        let y_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.y_max.clone())));
         let keep_points =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.keep_points.clone())));
+            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.keep_points.clone())));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
                 .map(|series| Series {
                     line_color: series.line_color,
-                    x: BSNode::compile(ctx_r, series.x.clone()),
-                    y: BSNode::compile(ctx_r, series.y.clone()),
+                    x: BSNode::compile(ctx_r, scope.clone(), series.x.clone()),
+                    y: BSNode::compile(ctx_r, scope.clone(), series.y.clone()),
                     x_data: VecDeque::new(),
                     y_data: VecDeque::new(),
                 })

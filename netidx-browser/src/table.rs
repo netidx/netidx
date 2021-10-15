@@ -756,7 +756,9 @@ impl RaeifiedTable {
         event: &vm::Event<LocalEvent>,
     ) {
         match event {
-            vm::Event::User(_) | vm::Event::Variable(_, _) | vm::Event::Rpc(_, _) => (),
+            vm::Event::User(_) | vm::Event::Variable(_, _, _) | vm::Event::Rpc(_, _) => {
+                ()
+            }
             vm::Event::Netidx(id, value) => {
                 self.0.update.borrow_mut().insert(*id, value.clone());
                 if self.0.update.borrow().len() == 1 {
@@ -770,36 +772,51 @@ impl RaeifiedTable {
 }
 
 impl Table {
-    pub(super) fn new(ctx: BSCtx, spec: view::Table, selected_path: Label) -> Table {
-        let path_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.path);
+    pub(super) fn new(
+        ctx: BSCtx,
+        spec: view::Table,
+        scope: Path,
+        selected_path: Label,
+    ) -> Table {
+        let path_expr = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.path);
         let path = RefCell::new(path_expr.current().and_then(|v| match v {
             Value::String(path) => Some(Path::from(ArcStr::from(&*path))),
             _ => None,
         }));
-        let default_sort_column_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), spec.default_sort_column);
+        let default_sort_column_expr = BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            spec.default_sort_column,
+        );
         let default_sort_column =
             RefCell::new(default_sort_column_expr.current().and_then(|v| match v {
                 Value::String(c) => Some(String::from(&*c)),
                 _ => None,
             }));
-        let default_sort_column_direction_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), spec.default_sort_column_direction);
+        let default_sort_column_direction_expr = BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            spec.default_sort_column_direction,
+        );
         let default_sort_column_direction = RefCell::new(SortDir::new(
             default_sort_column_direction_expr.current().unwrap_or(Value::Null),
         ));
-        let column_mode_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.column_mode);
+        let column_mode_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_mode);
         let column_mode = RefCell::new(ColumnMode::new(
             column_mode_expr.current().unwrap_or(Value::Null),
         ));
-        let column_list_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.column_list);
+        let column_list_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_list);
         let column_list = RefCell::new(cols_from_val(
             column_list_expr.current().unwrap_or(Value::Null),
         ));
-        let row_filter_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.row_filter);
+        let row_filter_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.row_filter);
         let row_filter =
             RefCell::new(cols_from_val(row_filter_expr.current().unwrap_or(Value::Null)));
-        let editable_expr = BSNode::compile(&mut ctx.borrow_mut(), spec.editable);
+        let editable_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.editable);
         let editable =
             RefCell::new(EditMode::new(editable_expr.current().unwrap_or(Value::Null)));
         let state = RefCell::new(match &*path.borrow() {
@@ -809,14 +826,21 @@ impl Table {
                 TableState::Resolving(path.clone())
             }
         });
-        let on_select =
-            Rc::new(RefCell::new(BSNode::compile(&mut ctx.borrow_mut(), spec.on_select)));
+        let on_select = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            spec.on_select,
+        )));
         let on_activate = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
+            scope.clone(),
             spec.on_activate,
         )));
-        let on_edit =
-            Rc::new(RefCell::new(BSNode::compile(&mut ctx.borrow_mut(), spec.on_edit)));
+        let on_edit = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope,
+            spec.on_edit,
+        )));
         Table {
             ctx,
             state,
@@ -939,7 +963,7 @@ impl Table {
         match event {
             vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
-            | vm::Event::Variable(_, _)
+            | vm::Event::Variable(_, _, _)
             | vm::Event::User(LocalEvent::Event(_)) => (),
             vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                 let state = &mut *self.state.borrow_mut();

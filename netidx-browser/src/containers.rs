@@ -3,7 +3,7 @@ use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
-use netidx::chars::Chars;
+use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;
 use std::{boxed, cell::RefCell, cmp::max, rc::Rc};
 
@@ -21,18 +21,25 @@ pub(super) struct Paned {
 }
 
 impl Paned {
-    pub(super) fn new(ctx: &BSCtx, spec: view::Paned, selected_path: gtk::Label) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Paned,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
         let root = gtk::Paned::new(dir_to_gtk(&spec.direction));
         root.set_wide_handle(spec.wide_handle);
         let first_child = spec.first_child.map(|child| {
-            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            let scope = scope.append("p0");
+            let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
             if let Some(w) = w.root() {
                 root.pack1(w, true, true);
             }
             boxed::Box::new(w)
         });
         let second_child = spec.second_child.map(|child| {
-            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            let scope = scope.append("p1");
+            let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
             if let Some(w) = w.root() {
                 root.pack2(w, true, true);
             }
@@ -67,14 +74,20 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    pub(super) fn new(ctx: &BSCtx, spec: view::Frame, selected_path: gtk::Label) -> Self {
-        let label = BSNode::compile(&mut ctx.borrow_mut(), spec.label);
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Frame,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let label = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label);
         let label_val = label.current().and_then(|v| v.get_as::<Chars>());
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
         root.set_label_align(spec.label_align_horizontal, spec.label_align_vertical);
         let child = spec.child.map(|child| {
-            let w = Widget::new(ctx, (*child).clone(), selected_path.clone());
+            let w =
+                Widget::new(ctx, (*child).clone(), scope.clone(), selected_path.clone());
             if let Some(w) = w.root() {
                 root.add(w);
             }
@@ -113,14 +126,18 @@ impl Notebook {
     pub(super) fn new(
         ctx: &BSCtx,
         spec: view::Notebook,
+        scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Notebook::new();
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let page = BSNode::compile(ctx_r, spec.page);
-        let on_switch_page =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, spec.on_switch_page)));
+        let page = BSNode::compile(ctx_r, scope.clone(), spec.page);
+        let on_switch_page = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.on_switch_page,
+        )));
         root.set_show_tabs(spec.tabs_visible);
         root.set_tab_pos(match spec.tabs_position {
             view::TabPosition::Left => gtk::PositionType::Left,
@@ -130,14 +147,20 @@ impl Notebook {
         });
         root.set_property_enable_popup(spec.tabs_popup);
         let mut children = Vec::new();
-        for s in spec.children.iter() {
+        for (i, s) in spec.children.iter().enumerate() {
+            let scope = scope.append(&format!("n{}", i));
             match &s.kind {
                 view::WidgetKind::NotebookPage(view::NotebookPage {
                     label,
                     reorderable,
                     widget,
                 }) => {
-                    let w = Widget::new(ctx, (&**widget).clone(), selected_path.clone());
+                    let w = Widget::new(
+                        ctx,
+                        (&**widget).clone(),
+                        scope,
+                        selected_path.clone(),
+                    );
                     if let Some(r) = w.root() {
                         let lbl = gtk::Label::new(Some(label.as_str()));
                         root.append_page(r, Some(&lbl));
@@ -147,7 +170,7 @@ impl Notebook {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), selected_path.clone());
+                    let w = Widget::new(ctx, s.clone(), scope, selected_path.clone());
                     if let Some(r) = w.root() {
                         root.append_page(r, None::<&gtk::Label>);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -193,7 +216,12 @@ pub(super) struct Box {
 }
 
 impl Box {
-    pub(super) fn new(ctx: &BSCtx, spec: view::Box, selected_path: gtk::Label) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Box,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
         fn is_fill(a: view::Align) -> bool {
             match a {
                 view::Align::Fill | view::Align::Baseline => true,
@@ -204,10 +232,16 @@ impl Box {
         root.set_homogeneous(spec.homogeneous);
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
-        for s in spec.children.iter() {
+        for (i, s) in spec.children.iter().enumerate() {
+            let scope = scope.append(&format!("b{}", i));
             match &s.kind {
                 view::WidgetKind::BoxChild(view::BoxChild { pack, padding, widget }) => {
-                    let w = Widget::new(ctx, (&**widget).clone(), selected_path.clone());
+                    let w = Widget::new(
+                        ctx,
+                        (&**widget).clone(),
+                        scope,
+                        selected_path.clone(),
+                    );
                     if let Some(r) = w.root() {
                         let props = s.props.unwrap_or(DEFAULT_PROPS);
                         let (expand, fill) = match spec.direction {
@@ -231,7 +265,7 @@ impl Box {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), selected_path.clone());
+                    let w = Widget::new(ctx, s.clone(), scope, selected_path.clone());
                     if let Some(r) = w.root() {
                         root.add(r);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -265,7 +299,12 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    pub(super) fn new(ctx: &BSCtx, spec: view::Grid, selected_path: gtk::Label) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Grid,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
         let root = gtk::Grid::new();
         let attach_child = |props: view::WidgetProps,
                             spec: view::GridChild,
@@ -273,9 +312,11 @@ impl Grid {
                             i: &mut i32,
                             j: i32|
          -> Widget {
+            let scope = scope.append(&format!("g{}{}", i, j));
             let height = spec.height as i32;
             let width = spec.width as i32;
-            let w = Widget::new(ctx, (&*spec.widget).clone(), selected_path.clone());
+            let w =
+                Widget::new(ctx, (&*spec.widget).clone(), scope, selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, width, height);
                 set_common_props(props, r);
@@ -285,7 +326,8 @@ impl Grid {
             w
         };
         let attach_normal = |spec: view::Widget, i: &mut i32, j: i32| -> Widget {
-            let w = Widget::new(ctx, spec.clone(), selected_path.clone());
+            let scope = scope.append(&format!("g{}{}", i, j));
+            let w = Widget::new(ctx, spec.clone(), scope, selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, 1, 1);
                 set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);

@@ -17,6 +17,7 @@ use arcstr::ArcStr;
 use bscript::LocalEvent;
 use editor::Editor;
 use futures::channel::oneshot;
+use fxhash::FxHashMap;
 use gdk::{self, prelude::*};
 use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
@@ -138,7 +139,7 @@ enum ToGui {
     NavigateInWindow(ViewLoc),
     Highlight(Vec<WidgetPath>),
     Update(Batch),
-    UpdateVar(Chars, Value),
+    UpdateVar(Path, Chars, Value),
     UpdateRpc(RpcCallId, Value),
     TableResolved(Path, resolver::Table),
     ShowError(String),
@@ -181,18 +182,21 @@ impl vm::Ctx for WidgetCtx {
 
     fn unsubscribe(&mut self, _path: Path, _dv: Dval, _ref_id: ExprId) {}
 
-    fn ref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
+    fn ref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
 
-    fn unref_var(&mut self, _name: Chars, _ref_id: ExprId) {}
-    
+    fn unref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
+
     fn set_var(
         &mut self,
-        variables: &mut HashMap<Chars, Value>,
+        variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
+        local: bool,
+        scope: Path,
         name: Chars,
         value: Value,
     ) {
-        variables.insert(name.clone(), value.clone());
-        let _: Result<_, _> = self.backend.to_gui.send(ToGui::UpdateVar(name, value));
+        vm::store_var(variables, local, &scope, &name, value.clone());
+        let _: Result<_, _> =
+            self.backend.to_gui.send(ToGui::UpdateVar(scope, name, value));
     }
 
     fn call_rpc(
@@ -252,63 +256,68 @@ enum Widget {
 }
 
 impl Widget {
-    fn new(ctx: &BSCtx, spec: view::Widget, selected_path: gtk::Label) -> Widget {
+    fn new(
+        ctx: &BSCtx,
+        spec: view::Widget,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Widget {
         let w = match spec.kind {
             view::WidgetKind::Action(spec) => {
-                Widget::Action(widgets::Action::new(ctx, spec))
+                Widget::Action(widgets::Action::new(ctx, scope, spec))
             }
             view::WidgetKind::Table(spec) => {
-                Widget::Table(table::Table::new(ctx.clone(), spec, selected_path))
+                Widget::Table(table::Table::new(ctx.clone(), spec, scope, selected_path))
             }
             view::WidgetKind::Label(spec) => {
-                Widget::Label(widgets::Label::new(ctx, spec, selected_path))
+                Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Button(spec) => {
-                Widget::Button(widgets::Button::new(ctx, spec, selected_path))
+                Widget::Button(widgets::Button::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::LinkButton(spec) => {
-                Widget::LinkButton(widgets::LinkButton::new(ctx, spec, selected_path))
-            }
+            view::WidgetKind::LinkButton(spec) => Widget::LinkButton(
+                widgets::LinkButton::new(ctx, spec, scope, selected_path),
+            ),
             view::WidgetKind::Toggle(spec) => {
-                Widget::Toggle(widgets::Toggle::new(ctx, spec, selected_path))
+                Widget::Toggle(widgets::Toggle::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Selector(spec) => {
-                Widget::Selector(widgets::Selector::new(ctx, spec, selected_path))
+                Widget::Selector(widgets::Selector::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Entry(spec) => {
-                Widget::Entry(widgets::Entry::new(ctx, spec, selected_path))
+                Widget::Entry(widgets::Entry::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Frame(spec) => {
-                Widget::Frame(containers::Frame::new(ctx, spec, selected_path))
+                Widget::Frame(containers::Frame::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Box(spec) => {
-                Widget::Box(containers::Box::new(ctx, spec, selected_path))
+                Widget::Box(containers::Box::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), selected_path)
+                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
             }
             view::WidgetKind::Grid(spec) => {
-                Widget::Grid(containers::Grid::new(ctx, spec, selected_path))
+                Widget::Grid(containers::Grid::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), selected_path)
+                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
             }
             view::WidgetKind::GridRow(_) => {
                 let s = Value::String(Chars::from("orphaned grid row"));
                 let spec = ExprKind::Constant(s).to_expr();
-                Widget::Label(widgets::Label::new(ctx, spec, selected_path))
+                Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Paned(spec) => {
-                Widget::Paned(containers::Paned::new(ctx, spec, selected_path))
+                Widget::Paned(containers::Paned::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::NotebookPage(view::NotebookPage { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), selected_path)
+                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
             }
-            view::WidgetKind::Notebook(spec) => {
-                Widget::Notebook(containers::Notebook::new(ctx, spec, selected_path))
-            }
+            view::WidgetKind::Notebook(spec) => Widget::Notebook(
+                containers::Notebook::new(ctx, spec, scope, selected_path),
+            ),
             view::WidgetKind::LinePlot(spec) => {
-                Widget::LinePlot(widgets::LinePlot::new(ctx, spec, selected_path))
+                Widget::LinePlot(widgets::LinePlot::new(ctx, spec, scope, selected_path))
             }
         };
         if let Some(r) = w.root() {
@@ -530,7 +539,8 @@ impl View {
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
-        let widget = Widget::new(ctx, spec.root.clone(), selected_path.clone());
+        let widget =
+            Widget::new(ctx, spec.root.clone(), Path::root(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_property_margin(2);
         root.add(&make_crumbs(ctx, path));
@@ -852,11 +862,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ctx.borrow().user.window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
     to_gui.attach(None, move |m| match m {
-        ToGui::UpdateVar(name, value) => {
+        ToGui::UpdateVar(scope, name, value) => {
             update_single(
                 &current,
                 &mut ctx.borrow_mut(),
-                &vm::Event::Variable(name, value),
+                &vm::Event::Variable(scope, name, value),
             );
             Continue(true)
         }
