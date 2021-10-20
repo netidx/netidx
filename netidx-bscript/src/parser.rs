@@ -2,7 +2,7 @@ use crate::expr::{Expr, ExprId, ExprKind};
 use combine::{
     attempt, between, choice, many, none_of, not_followed_by,
     parser::{
-        char::spaces,
+        char::{spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
@@ -122,6 +122,14 @@ where
         attempt(interpolated()),
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         attempt(
+            between(
+                spaces().with(token('{')),
+                spaces().with(token('}')),
+                spaces().with(sep_by(expr(), spaces().with(token(';')))),
+            )
+            .map(|args| ExprKind::Apply { function: "do".into(), args }.to_expr()),
+        ),
+        attempt(
             (
                 fname(),
                 between(
@@ -132,7 +140,26 @@ where
             )
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
         ),
-        fname().skip(not_followed_by(none_of(" ),]".chars()))).map(|var| {
+        attempt((fname(), spaces().with(string("<-")), expr()).map(|(var, _, e)| {
+            ExprKind::Apply {
+                function: "store_var".into(),
+                args: vec![
+                    ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
+                    e,
+                ],
+            }
+            .to_expr()
+        })),
+        attempt((token('*'), expr(), spaces().with(string("<-")), expr()).map(
+            |(_, var_e, _, e)| {
+                ExprKind::Apply { function: "store_var".into(), args: vec![var_e, e] }
+                    .to_expr()
+            },
+        )),
+        attempt((token('*'), expr()).map(|(_, e)| {
+            ExprKind::Apply { function: "load_var".into(), args: vec![e] }.to_expr()
+        })),
+        fname().skip(not_followed_by(none_of(" ),]}".chars()))).map(|var| {
             ExprKind::Apply {
                 function: "load_var".into(),
                 args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],
