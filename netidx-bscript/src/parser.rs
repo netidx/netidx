@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind};
 use combine::{
-    attempt, between, choice, many, none_of, not_followed_by,
+    attempt, between, choice, many,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -11,7 +11,7 @@ use combine::{
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
 use netidx::{chars::Chars, publisher::Value};
-use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
+use netidx_netproto::value_parser::{close_expr, escaped_string, value as netidx_value};
 
 pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
@@ -27,6 +27,13 @@ where
             (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
         }),
     ))
+    .then(|s| {
+        if s == "true" || s == "false" || s == "ok" || s == "null" {
+            unexpected_any("can't use keyword as a function or variable name").left()
+        } else {
+            value(s).right()
+        }
+    })
 }
 
 fn interpolated_<I>() -> impl Parser<I, Output = Expr>
@@ -120,7 +127,6 @@ where
 {
     spaces().with(choice((
         attempt(interpolated()),
-        attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         attempt(
             between(
                 spaces().with(token('{')),
@@ -193,7 +199,8 @@ where
         attempt((token('*'), expr()).map(|(_, e)| {
             ExprKind::Apply { function: "load_var".into(), args: vec![e] }.to_expr()
         })),
-        fname().skip(not_followed_by(none_of(" ),]}".chars()))).map(|var| {
+        attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
+        fname().skip(close_expr()).map(|var| {
             ExprKind::Apply {
                 function: "load_var".into(),
                 args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],

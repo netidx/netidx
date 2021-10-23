@@ -118,6 +118,15 @@ where
     string(typ).with(token(':'))
 }
 
+pub fn close_expr<I>() -> impl Parser<I, Output = ()>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    not_followed_by(none_of(" ;),]}".chars()))
+}
+
 fn value_<I>(esc: &'static [char]) -> impl Parser<I, Output = Value>
 where
     I: RangeStream<Token = char>,
@@ -132,21 +141,9 @@ where
         attempt(quoted(esc)).map(|s| Value::String(Chars::from(s))),
         attempt(from_str(flt()).map(|v| Value::F64(v))),
         attempt(from_str(int()).map(|v| Value::I64(v))),
-        attempt(
-            string("true")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Value::True),
-        ),
-        attempt(
-            string("false")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Value::False),
-        ),
-        attempt(
-            string("null")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Value::Null),
-        ),
+        attempt(string("true").skip(close_expr()).map(|_| Value::True)),
+        attempt(string("false").skip(close_expr()).map(|_| Value::False)),
+        attempt(string("null").skip(close_expr()).map(|_| Value::Null)),
         attempt(constant("u32").with(from_str(uint())).map(|v| Value::U32(v))),
         attempt(constant("v32").with(from_str(uint())).map(|v| Value::V32(v))),
         attempt(constant("i32").with(from_str(int())).map(|v| Value::I32(v))),
@@ -162,12 +159,12 @@ where
                 .with(from_str(base64str()))
                 .map(|Base64Encoded(v)| Value::Bytes(Bytes::from(v))),
         ),
+        attempt(string("ok").skip(close_expr()).map(|_| Value::Ok)),
         attempt(
-            string("ok")
-                .skip(not_followed_by(none_of(" ),]".chars())))
-                .map(|_| Value::Ok),
+            constant("error")
+                .with(quoted(esc))
+                .map(|s| dbg!(Value::Error(Chars::from(s)))),
         ),
-        attempt(constant("error").with(quoted(esc)).map(|s| dbg!(Value::Error(Chars::from(s))))),
         attempt(
             constant("datetime").with(from_str(quoted(esc))).map(|d| Value::DateTime(d)),
         ),
