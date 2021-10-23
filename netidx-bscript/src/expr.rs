@@ -70,6 +70,14 @@ impl fmt::Display for ExprKind {
                 } else if function == "store_var" && args.len() == 2 {
                     // deref variable store
                     write!(f, "*{} <- {}", &args[0], &args[1])
+                } else if function == "local_store_var" && args.len() == 2 && args[0].is_fn() {
+                    // constant variable store
+                    match &args[0].kind {
+                        ExprKind::Constant(Value::String(c)) => write!(f, "*{} <- {}", c, &args[1]),
+                        _ => unreachable!()
+                    }                    
+                } else if function == "local_store_var" && args.len() == 2 {
+                    write!(f, "*{} <- {}", &args[0], &args[1])
                 } else if function == "do" {
                     // do block
                     writeln!(f, "{}", '{')?;

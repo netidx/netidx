@@ -140,6 +140,24 @@ where
             )
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
         ),
+        attempt(
+            (
+                string("local"),
+                spaces().with(fname()),
+                spaces().with(string("<-")),
+                expr(),
+            )
+                .map(|(_, var, _, e)| {
+                    ExprKind::Apply {
+                        function: "local_store_var".into(),
+                        args: vec![
+                            ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
+                            e,
+                        ],
+                    }
+                    .to_expr()
+                }),
+        ),
         attempt((fname(), spaces().with(string("<-")), expr()).map(|(var, _, e)| {
             ExprKind::Apply {
                 function: "store_var".into(),
@@ -150,6 +168,22 @@ where
             }
             .to_expr()
         })),
+        attempt(
+            (
+                string("local"),
+                spaces().with(token('*')),
+                expr(),
+                spaces().with(string("<-")),
+                expr(),
+            )
+                .map(|(_, _, var_e, _, e)| {
+                    ExprKind::Apply {
+                        function: "local_store_var".into(),
+                        args: vec![var_e, e],
+                    }
+                    .to_expr()
+                }),
+        ),
         attempt((token('*'), expr(), spaces().with(string("<-")), expr()).map(
             |(_, var_e, _, e)| {
                 ExprKind::Apply { function: "store_var".into(), args: vec![var_e, e] }
