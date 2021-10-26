@@ -58,26 +58,18 @@ impl fmt::Display for ExprKind {
                         ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
-                } else if function == "load_var" && args.len() == 1 {
-                    // deref variable load
-                    write!(f, "*{}", &args[0])
                 } else if function == "store_var" && args.len() == 2 && args[0].is_fn() {
                     // constant variable store
                     match &args[0].kind {
                         ExprKind::Constant(Value::String(c)) => write!(f, "{} <- {}", c, &args[1]),
                         _ => unreachable!()
                     }                    
-                } else if function == "store_var" && args.len() == 2 {
-                    // deref variable store
-                    write!(f, "*{} <- {}", &args[0], &args[1])
                 } else if function == "local_store_var" && args.len() == 2 && args[0].is_fn() {
                     // constant variable store
                     match &args[0].kind {
                         ExprKind::Constant(Value::String(c)) => write!(f, "local {} <- {}", c, &args[1]),
                         _ => unreachable!()
                     }                    
-                } else if function == "local_store_var" && args.len() == 2 {
-                    write!(f, "local *{} <- {}", &args[0], &args[1])
                 } else if function == "do" {
                     // do block
                     write!(f, "{}", '{')?;

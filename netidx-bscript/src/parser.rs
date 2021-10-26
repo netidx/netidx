@@ -174,31 +174,6 @@ where
             }
             .to_expr()
         })),
-        attempt(
-            (
-                string("local"),
-                spaces().with(token('*')),
-                expr(),
-                spaces().with(string("<-")),
-                expr(),
-            )
-                .map(|(_, _, var_e, _, e)| {
-                    ExprKind::Apply {
-                        function: "local_store_var".into(),
-                        args: vec![var_e, e],
-                    }
-                    .to_expr()
-                }),
-        ),
-        attempt((token('*'), expr(), spaces().with(string("<-")), expr()).map(
-            |(_, var_e, _, e)| {
-                ExprKind::Apply { function: "store_var".into(), args: vec![var_e, e] }
-                    .to_expr()
-            },
-        )),
-        attempt((token('*'), expr()).map(|(_, e)| {
-            ExprKind::Apply { function: "load_var".into(), args: vec![e] }.to_expr()
-        })),
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         fname().skip(close_expr()).map(|var| {
             ExprKind::Apply {
