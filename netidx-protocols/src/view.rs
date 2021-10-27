@@ -20,43 +20,30 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
+    /// expr should resolve to the path of the table you want to
+    /// display. If the expr updates, the table will display the
+    /// updated path.
     pub path: Expr,
-    /// column name or Null, Null means no sorting by default
+    /// (null | column | [column, (ascending|descending)]) null means
+    /// no default sort. column alone means sort by that column
+    /// descending. Otherwise, as specified.
     pub default_sort_column: Expr,
-    /// ascending, descending, or Null (same as descending)
-    pub default_sort_column_direction: Expr,
-    /// auto, exactly, hide, or Null (same as auto)
-    ///
-    /// auto: the default, automatically determine the column set, and
-    /// show columns that are present in 50% or more of the rows.
-    ///
-    /// exactly: column_list specifies the exact list of columns that
-    /// will appear, no auto discovery will happen, listed columns
-    /// will appear even if they do not exist in the table.
-    ///
-    /// hide: column_list specifies the columns that will be omitted
-    /// from the table. All columns not specified in the list will be
-    /// shown, reguardless of whether or not they appear in 50% or
-    /// more of the rows.
-    pub column_mode: Expr,
-    /// csv or json list of column names, interpreted according to
-    /// column_mode.
-    ///
-    /// csv form: col1,col2,col\,3,col4 note the escaped
-    /// comma
-    ///
-    /// json form: ["col1", "col2", "col,3", "col4"]
-    pub column_list: Expr,
-    /// csv or json list of rows to hide
-    ///
-    /// csv form: row1,row2,row\,3,row4 note the escaped
-    /// comma
-    ///
-    /// json form: ["row1", "row2", "row,3", "row4"]
+    /// (null | true | false | [mode, (col | [cols])])
+    /// modes
+    /// include: col/cols is a list of columns to show
+    /// exclude: col/cols is a list of columns to hide
+    /// include_match: col/cols is a list of regex patterns of columns to show
+    /// exclude_match: col/cols is a list of regex patterns of columns to hide
+    pub column_filter: Expr,
+    /// (null | true | false | [mode, (col | [cols])])
+    /// null/true: show all rows
+    /// otherwise, the same format as the column filter
     pub row_filter: Expr,
-    /// either a boolean, which effects the entire table, or a csv or
-    /// json list of columns that that are editable.
-    pub editable: Expr,
+    /// (null | true | false | [mode, (col | [cols])])
+    /// null: not editable
+    /// true: every column is editable
+    /// otherwise exactly the same format as the column/row filter
+    pub column_editable: Expr,
     /// event() will yield the selected path when the user selects a
     /// cell
     pub on_select: Expr,

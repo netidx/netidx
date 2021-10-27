@@ -272,7 +272,7 @@ impl<C: Ctx, E> Node<C, E> {
                 Node::Constant(spec.clone(), v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
-                let scope = if function == "do" {
+                let scope = if function == "do" && id != &top_id {
                     scope.append(&format!("do{:?}", id))
                 } else {
                     scope

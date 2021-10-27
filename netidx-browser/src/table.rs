@@ -3,6 +3,7 @@ use super::{
     BSCtx, BSCtxRef, BSNode,
 };
 use crate::bscript::LocalEvent;
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::FxBuildHasher;
@@ -21,10 +22,10 @@ use netidx::{
     path::Path,
     resolver,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
-    utils::split_escaped,
 };
 use netidx_bscript::vm;
 use netidx_protocols::view;
+use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
     cmp::Ordering,
@@ -68,6 +69,83 @@ struct RaeifiedTable(Rc<RaeifiedTableInner>);
 
 struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SortSpec {
+    None,
+    Ascending(String),
+    Descending(String),
+}
+
+impl SortSpec {
+    fn new(v: Value) -> Result<Self> {
+        match v {
+            Value::Null => Ok(SortSpec::None),
+            Value::String(col) => Ok(SortSpec::Descending(String::from(&*col))),
+            Value::Array(a) if a.len() == 2 => {
+                let column = a[0].clone().cast_to::<String>()?;
+                match a[1].clone().cast_to::<String>()?.as_str() {
+                    "ascending" => Ok(SortSpec::Ascending(column)),
+                    "descending" => Ok(SortSpec::Descending(column)),
+                    _ => bail!("invalid mode"),
+                }
+            }
+            _ => bail!("expected null, col, or a pair of [column, mode]"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Filter {
+    All,
+    Auto,
+    None,
+    Include(HashSet<String>),
+    Exclude(HashSet<String>),
+    IncludeMatch(RegexSet),
+    ExcludeMatch(RegexSet),
+}
+
+impl Filter {
+    fn new(v: Value) -> Result<Self> {
+        match v {
+            Value::Null => Ok(Filter::Auto),
+            Value::True => Ok(Filter::All),
+            Value::False => Ok(Filter::None),
+            Value::Array(a) if a.len() == 2 => {
+                let mode = a[0].clone().cast_to::<Chars>()?;
+                let mut i = a[1].flatten().map(|v| v.cast_to::<String>());
+                if &*mode == "include" {
+                    Ok(Filter::Include(i.collect::<Result<HashSet<_, _>, _>>()?))
+                } else if &*mode == "exclude" {
+                    Ok(Filter::Exclude(i.collect::<Result<HashSet<_, _>, _>>()?))
+                } else if &*mode == "include_match" {
+                    Ok(Filter::IncludeMatch(RegexSet::new(
+                        i.collect::<Result<Vec<_>, _>>()?,
+                    )?))
+                } else if &*mode == "exclude_match" {
+                    Ok(Filter::ExcludeMatch(RegexSet::new(
+                        i.collect::<Result<Vec<_>, _>>()?,
+                    )?))
+                } else {
+                    bail!("invalid filter mode")
+                }
+            }
+            _ => bail!("expected null, true, false, or a pair"),
+        }
+    }
+
+    fn is_match(&self, s: &str) -> bool {
+        match self {
+            Filter::All | Filter::Auto => true,
+            Filter::None => false,
+            Filter::Include(set) => set.contains(s),
+            Filter::Exclude(set) => !set.contains(s),
+            Filter::IncludeMatch(set) => set.is_match(s),
+            Filter::ExcludeMatch(set) => !set.is_match(s),
+        }
+    }
+}
+
 enum TableState {
     Empty,
     Resolving(Path),
@@ -82,17 +160,13 @@ pub(super) struct Table {
     path_expr: BSNode,
     path: RefCell<Option<Path>>,
     default_sort_column_expr: BSNode,
-    default_sort_column: RefCell<Option<String>>,
-    default_sort_column_direction_expr: BSNode,
-    default_sort_column_direction: RefCell<SortDir>,
-    column_mode_expr: BSNode,
-    column_mode: RefCell<ColumnMode>,
-    column_list_expr: BSNode,
-    column_list: RefCell<Vec<String>>,
+    default_sort_column: RefCell<Result<SortSpec>>,
+    column_filter_expr: BSNode,
+    column_filter: RefCell<Result<Filter>>,
     row_filter_expr: BSNode,
-    row_filter: RefCell<Vec<String>>,
-    editable_expr: BSNode,
-    editable: RefCell<EditMode>,
+    row_filter: RefCell<Result<Filter>>,
+    column_editable_expr: BSNode,
+    column_editable: RefCell<Result<Filter>>,
     on_select: Rc<RefCell<BSNode>>,
     on_activate: Rc<RefCell<BSNode>>,
     on_edit: Rc<RefCell<BSNode>>,
@@ -130,113 +204,6 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortDir {
-    Ascending,
-    Descending,
-}
-
-impl SortDir {
-    fn new(v: Value) -> Self {
-        match v {
-            Value::String(c) if &*c == "ascending" => SortDir::Ascending,
-            _ => SortDir::Descending,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColumnMode {
-    Auto,
-    Hide,
-    Exactly,
-}
-
-impl ColumnMode {
-    fn new(v: Value) -> Self {
-        match v {
-            Value::String(c) if &*c == "hide" => ColumnMode::Hide,
-            Value::String(c) if &*c == "exactly" => ColumnMode::Exactly,
-            _ => ColumnMode::Auto,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum EditMode {
-    Full(bool),
-    Partial(HashSet<String>),
-}
-
-impl EditMode {
-    fn new(v: Value) -> Self {
-        match v {
-            Value::True => EditMode::Full(true),
-            Value::False => EditMode::Full(false),
-            Value::String(s) => match serde_json::from_str::<HashSet<String>>(&*s) {
-                Ok(cols) => EditMode::Partial(cols),
-                Err(_) => EditMode::Partial(
-                    split_escaped(&*s, '\\', ',')
-                        .map(|s| String::from(s.trim()))
-                        .collect(),
-                ),
-            },
-            _ => EditMode::Full(false),
-        }
-    }
-}
-
-fn cols_from_val(v: Value) -> Vec<String> {
-    match v {
-        Value::String(c) => match serde_json::from_str::<Vec<String>>(&*c) {
-            Ok(cols) => cols,
-            Err(_) => {
-                split_escaped(&*c, '\\', ',').map(|s| String::from(s.trim())).collect()
-            }
-        },
-        _ => vec![],
-    }
-}
-
-fn apply_spec(
-    mode: ColumnMode,
-    cols: &[String],
-    row_filter: Vec<String>,
-    descr: &mut resolver::Table,
-) {
-    fn filter_cols(
-        cols: &[String],
-        descr: &mut resolver::Table,
-        f: impl Fn(bool) -> bool,
-    ) {
-        let set: HashSet<Path> = HashSet::from_iter(cols.iter().cloned().map(Path::from));
-        let mut i = 0;
-        while i < descr.cols.len() {
-            if f(set.contains(&descr.cols[i].0)) {
-                descr.cols.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-    match mode {
-        ColumnMode::Hide => filter_cols(cols, descr, |x| x),
-        ColumnMode::Exactly => {
-            let order: HashMap<Path, usize> = HashMap::from_iter(
-                cols.iter().cloned().map(Path::from).enumerate().map(|(i, c)| (c, i)),
-            );
-            filter_cols(&cols, descr, |x| !x);
-            descr.cols.sort_by(|(c0, _), (c1, _)| order[c0].cmp(&order[c1]));
-        }
-        _ => (),
-    }
-    let row_filter: HashSet<String> = row_filter.into_iter().collect();
-    descr.rows.retain(|row| match Path::basename(&row) {
-        None => true,
-        Some(row) => !row_filter.contains(row),
-    })
-}
-
 impl clone::Downgrade for RaeifiedTable {
     type Weak = RaeifiedTableWeak;
 
@@ -258,19 +225,32 @@ impl RaeifiedTable {
         ctx: BSCtx,
         root: ScrolledWindow,
         path: Path,
-        default_sort_column: Option<String>,
-        default_sort_column_direction: SortDir,
-        column_mode: ColumnMode,
-        column_list: Vec<String>,
-        row_filter: Vec<String>,
-        editable: EditMode,
+        default_sort_column: Result<SortSpec>,
+        column_filter: Result<Filter>,
+        row_filter: Result<Filter>,
+        column_editable: Result<Filter>,
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
         on_edit: Rc<RefCell<BSNode>>,
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
-        apply_spec(column_mode, &column_list, row_filter, &mut descriptor);
+        descriptor.cols.sort_by_key(|(p, _)| p);
+        descriptor.rows.sort();
+        descriptor.rows.retain(|row| match Path::basename(&row) {
+            None => true,
+            Some(row) => row_filter.is_match(row),
+        });
+        match column_filter {
+            Filter::Auto => {
+                let nrows = (descriptor.rows.len() >> 1) as u64;
+                descriptor.cols.retain(|(_, i)| i.0 >= nrows)
+            }
+            filter => descriptor.cols.retain(|col| match Path::basename(&col.0) {
+                None => true,
+                Some(col) => filter.is_match(&col),
+            }),
+        }
         let view = TreeView::new();
         root.add(&view);
         let nrows = descriptor.rows.len();
