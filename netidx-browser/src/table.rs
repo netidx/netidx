@@ -235,6 +235,23 @@ impl RaeifiedTable {
         mut descriptor: resolver::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
+        let mut filter_errors = Vec::new();
+        let row_filter = row_filter.unwrap_or_else(|e| {
+            filter_errors.push(format!("invalid row filter: {}", e));
+            Filter::All
+        });
+        let column_filter = column_filter.unwrap_or_else(|e| {
+            filter_errors.push(format!("invalid column filter {}", e));
+            Filter::Auto
+        });
+        let column_editable = column_editable.unwrap_or_else(|e| {
+            filter_errors.push(format!("invalid column editable {}", e));
+            Filter::None
+        });
+        let default_sort_column = default_sort_column.unwrap_or_else(|e| {
+            filter_errors.push(format!("invalid default sort column {}", e));
+            SortSpec::None
+        });
         descriptor.cols.sort_by_key(|(p, _)| p);
         descriptor.rows.sort();
         descriptor.rows.retain(|row| match Path::basename(&row) {
@@ -253,15 +270,6 @@ impl RaeifiedTable {
         }
         let view = TreeView::new();
         root.add(&view);
-        let nrows = descriptor.rows.len();
-        descriptor.rows.sort();
-        match column_mode {
-            ColumnMode::Exactly => (),
-            ColumnMode::Auto | ColumnMode::Hide => {
-                descriptor.cols.sort_by_key(|(p, _)| p.clone());
-                descriptor.cols.retain(|(_, i)| i.0 >= (nrows / 2) as u64);
-            }
-        }
         view.get_selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
@@ -323,13 +331,8 @@ impl RaeifiedTable {
                 t.0.descriptor.cols[col].0.clone()
             };
             column.pack_start(&cell, true);
-            match &editable {
-                EditMode::Full(v) => cell.set_property_editable(*v),
-                EditMode::Partial(allowed) => {
-                    if allowed.contains(&*name) {
-                        cell.set_property_editable(true);
-                    }
-                }
+            if column_editable.is_match(&*name) {
+                cell.set_property_editable(true);
             }
             let f = Box::new(clone!(@weak t =>
                 move |c: &TreeViewColumn,
@@ -393,21 +396,26 @@ impl RaeifiedTable {
                 }));
             }));
         });
-        if let Some(col) = &default_sort_column {
-            let col = Path::from(col.clone());
-            let idx = t.0.descriptor.cols.iter().enumerate().find_map(|(i, (c, _))| {
-                if c == &col {
-                    Some(i + 1)
-                } else {
-                    None
+        match &default_sort_column {
+            SortSpec::None => (),
+            SortSpec::Ascending(col) | SortSpec::Descending(col) => {
+                let col = Path::from(col.clone());
+                let idx =
+                    t.0.descriptor.cols.iter().enumerate().find_map(|(i, (c, _))| {
+                        if c == &col {
+                            Some(i + 1)
+                        } else {
+                            None
+                        }
+                    });
+                let dir = match &default_sort_column {
+                    SortSpec::Ascending(_) => gtk::SortType::Ascending,
+                    SortSpec::Descending(_) => gtk::SortType::Descending,
+                    SortSpec::None => unreachable!(),
+                };
+                if let Some(i) = idx {
+                    t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
                 }
-            });
-            let dir = match default_sort_column_direction {
-                SortDir::Ascending => gtk::SortType::Ascending,
-                SortDir::Descending => gtk::SortType::Descending,
-            };
-            if let Some(i) = idx {
-                t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
             }
         }
         t.0.root.show_all();
@@ -768,37 +776,23 @@ impl Table {
             scope.clone(),
             spec.default_sort_column,
         );
-        let default_sort_column =
-            RefCell::new(default_sort_column_expr.current().and_then(|v| match v {
-                Value::String(c) => Some(String::from(&*c)),
-                _ => None,
-            }));
-        let default_sort_column_direction_expr = BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope.clone(),
-            spec.default_sort_column_direction,
-        );
-        let default_sort_column_direction = RefCell::new(SortDir::new(
-            default_sort_column_direction_expr.current().unwrap_or(Value::Null),
+        let default_sort_column = RefCell::new(SortSpec::new(
+            default_sort_column_expr.current().unwrap_or(Value::Null),
         ));
-        let column_mode_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_mode);
-        let column_mode = RefCell::new(ColumnMode::new(
-            column_mode_expr.current().unwrap_or(Value::Null),
-        ));
-        let column_list_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_list);
-        let column_list = RefCell::new(cols_from_val(
-            column_list_expr.current().unwrap_or(Value::Null),
+        let column_filter_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_filter);
+        let column_filter = RefCell::new(Filter::new(
+            column_filter_expr.current().unwrap_or(Value::Null),
         ));
         let row_filter_expr =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.row_filter);
         let row_filter =
-            RefCell::new(cols_from_val(row_filter_expr.current().unwrap_or(Value::Null)));
-        let editable_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.editable);
-        let editable =
-            RefCell::new(EditMode::new(editable_expr.current().unwrap_or(Value::Null)));
+            RefCell::new(Filter::new(row_filter_expr.current().unwrap_or(Value::Null)));
+        let column_editable_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_editable);
+        let column_editable = RefCell::new(Filter::new(
+            column_editable_expr.current().unwrap_or(Value::Null),
+        ));
         let state = RefCell::new(match &*path.borrow() {
             None => TableState::Empty,
             Some(path) => {
@@ -833,16 +827,12 @@ impl Table {
             on_edit,
             default_sort_column_expr,
             default_sort_column,
-            default_sort_column_direction_expr,
-            default_sort_column_direction,
-            column_mode_expr,
-            column_mode,
-            column_list_expr,
-            column_list,
+            column_filter_expr,
+            column_filter,
             row_filter_expr,
             row_filter,
-            editable_expr,
-            editable,
+            column_editable_expr,
+            column_editable,
         }
     }
 
