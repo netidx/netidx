@@ -102,11 +102,9 @@ pub(super) struct Table {
     spec: Rc<RefCell<view::Table>>,
     dbg_path: DbgExpr,
     dbg_default_sort_column: DbgExpr,
-    dbg_default_sort_column_direction: DbgExpr,
-    dbg_column_mode: DbgExpr,
-    dbg_column_list: DbgExpr,
+    dbg_column_filter: DbgExpr,
     dbg_row_filter: DbgExpr,
-    dbg_editable: DbgExpr,
+    dbg_column_editable: DbgExpr,
     dbg_on_activate: DbgExpr,
     dbg_on_select: DbgExpr,
     dbg_on_edit: DbgExpr,
@@ -136,32 +134,12 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_default_sort_column_direction) = expr(
+        let (l, e, dbg_column_filter) = expr(
             ctx,
-            "Default Sort Column Direction:",
-            &spec.borrow().default_sort_column_direction,
+            "Column Filter:",
+            &spec.borrow().column_filter,
             clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().default_sort_column_direction = e;
-                on_change();
-            }),
-        );
-        root.add((l, e));
-        let (l, e, dbg_column_mode) = expr(
-            ctx,
-            "Column Filter Mode:",
-            &spec.borrow().column_mode,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().column_mode = e;
-                on_change()
-            }),
-        );
-        root.add((l, e));
-        let (l, e, dbg_column_list) = expr(
-            ctx,
-            "Column Filter List:",
-            &spec.borrow().column_list,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().column_list = e;
+                spec.borrow_mut().column_filter = e;
                 on_change()
             }),
         );
@@ -176,12 +154,12 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_editable) = expr(
+        let (l, e, dbg_column_editable) = expr(
             ctx,
-            "Editable:",
-            &spec.borrow().editable,
+            "Column Editable:",
+            &spec.borrow().column_editable,
             clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().editable = e;
+                spec.borrow_mut().column_editable = e;
                 on_change()
             }),
         );
@@ -221,11 +199,9 @@ impl Table {
             spec,
             dbg_path,
             dbg_default_sort_column,
-            dbg_default_sort_column_direction,
-            dbg_column_mode,
-            dbg_column_list,
+            dbg_column_filter,
             dbg_row_filter,
-            dbg_editable,
+            dbg_column_editable,
             dbg_on_activate,
             dbg_on_select,
             dbg_on_edit,

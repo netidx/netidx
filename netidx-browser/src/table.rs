@@ -29,7 +29,6 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
     collections::{HashMap, HashSet},
-    iter::FromIterator,
     rc::{Rc, Weak},
     result::{self, Result},
 };
@@ -81,8 +80,14 @@ impl SortSpec {
             Value::Null => Ok(SortSpec::None),
             Value::String(col) => Ok(SortSpec::Descending(String::from(&*col))),
             Value::Array(a) if a.len() == 2 => {
-                let column = a[0].clone().cast_to::<String>().map_err(|e| format!("{}", e))?;
-                match a[1].clone().cast_to::<String>().map_err(|e| format!("{}", e))?.as_str() {
+                let column =
+                    a[0].clone().cast_to::<String>().map_err(|e| format!("{}", e))?;
+                match a[1]
+                    .clone()
+                    .cast_to::<String>()
+                    .map_err(|e| format!("{}", e))?
+                    .as_str()
+                {
                     "ascending" => Ok(SortSpec::Ascending(column)),
                     "descending" => Ok(SortSpec::Descending(column)),
                     _ => Err("invalid mode".into()),
@@ -110,24 +115,22 @@ impl PartialEq for Filter {
             (Filter::All, Filter::All)
             | (Filter::Auto, Filter::Auto)
             | (Filter::None, Filter::None) => true,
+            (Filter::Include(s0), Filter::Include(s1)) => s0 == s1,
+            (Filter::Exclude(s0), Filter::Exclude(s1)) => s0 == s1,
+            (Filter::IncludeMatch(s0, _), Filter::IncludeMatch(s1, _)) => s0 == s1,
+            (Filter::ExcludeMatch(s0, _), Filter::ExcludeMatch(s1, _)) => s0 == s1,
             (Filter::All, _)
             | (_, Filter::All)
             | (Filter::Auto, _)
             | (_, Filter::Auto)
             | (Filter::None, _)
-            | (_, Filter::None) => false,
-            (Filter::Include(s0), Filter::Include(s1)) => s0 == s1,
-            (Filter::Exclude(s0), Filter::Exclude(s1)) => s0 == s1,
-            (Filter::IncludeMatch(s0, _), Filter::IncludeMatch(s1, _)) => s0 == s1,
-            (Filter::ExcludeMatch(s0, _), Filter::ExcludeMatch(s1, _)) => s0 == s1,
-            (Filter::Include(_), _)
+            | (_, Filter::None)
+            | (Filter::Include(_), _)
             | (_, Filter::Include(_))
             | (Filter::Exclude(_), _)
             | (_, Filter::Exclude(_))
             | (Filter::IncludeMatch(_, _), _)
-            | (_, Filter::IncludeMatch(_, _))
-            | (Filter::ExcludeMatch(_, _), _)
-            | (_, Filter::ExcludeMatch(_, _)) => false,
+            | (_, Filter::IncludeMatch(_, _)) => false,
         }
     }
 }
@@ -139,8 +142,11 @@ impl Filter {
             Value::True => Ok(Filter::All),
             Value::False => Ok(Filter::None),
             Value::Array(a) if a.len() == 2 => {
-                let mode = a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
-                let mut i = a[1].flatten().map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
+                let mode =
+                    a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
+                let i = a[1].clone()
+                    .flatten()
+                    .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
                 if &*mode == "include" {
                     Ok(Filter::Include(i.collect::<Result<HashSet<_, _>, _>>()?))
                 } else if &*mode == "exclude" {
@@ -279,7 +285,7 @@ impl RaeifiedTable {
             filter_errors.push(format!("invalid default sort column {}", e));
             SortSpec::None
         });
-        descriptor.cols.sort_by_key(|(p, _)| p);
+        descriptor.cols.sort_by_key(|(p, _)| p.clone());
         descriptor.rows.sort();
         descriptor.rows.retain(|row| match Path::basename(&row) {
             None => true,
@@ -956,11 +962,9 @@ impl Table {
                                 self.root.clone(),
                                 path.clone(),
                                 self.default_sort_column.borrow().clone(),
-                                self.default_sort_column_direction.borrow().clone(),
-                                self.column_mode.borrow().clone(),
-                                self.column_list.borrow().clone(),
+                                self.column_filter.borrow().clone(),
                                 self.row_filter.borrow().clone(),
-                                self.editable.borrow().clone(),
+                                self.column_editable.borrow().clone(),
                                 self.on_select.clone(),
                                 self.on_activate.clone(),
                                 self.on_edit.clone(),
