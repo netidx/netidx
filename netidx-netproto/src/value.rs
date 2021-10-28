@@ -826,6 +826,10 @@ pub trait FromValue {
 }
 
 impl Value {
+    pub fn fmt_notyp(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_ext(f, &value_parser::VAL_ESC, false)
+    }
+
     pub fn fmt_ext(
         &self,
         f: &mut fmt::Formatter<'_>,

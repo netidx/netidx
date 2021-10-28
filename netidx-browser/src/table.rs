@@ -31,7 +31,16 @@ use std::{
     collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     result::{self, Result},
+    fmt
 };
+
+struct WVal<'a>(&'a Value);
+
+impl<'a> fmt::Display for WVal<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt_notyp(f)
+    }
+}
 
 struct Subscription {
     _sub: Dval,
@@ -530,7 +539,7 @@ impl RaeifiedTable {
             err_attrs.insert(pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap());
             err.set_attributes(Some(&err_attrs));
             if let Some(v) = &*val.borrow() {
-                data.set_text(&format!("{}", v));
+                data.set_text(&format!("{}", WVal(v)));
             }
             data.connect_changed(clone!(
                 @strong val,
