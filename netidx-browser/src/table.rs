@@ -3,7 +3,6 @@ use super::{
     BSCtx, BSCtxRef, BSNode,
 };
 use crate::bscript::LocalEvent;
-use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::FxBuildHasher;
@@ -28,11 +27,11 @@ use netidx_protocols::view;
 use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
-    cmp::Ordering,
+    cmp::{Ordering, PartialEq},
     collections::{HashMap, HashSet},
     iter::FromIterator,
     rc::{Rc, Weak},
-    result,
+    result::{self, Result},
 };
 
 struct Subscription {
@@ -77,19 +76,19 @@ enum SortSpec {
 }
 
 impl SortSpec {
-    fn new(v: Value) -> Result<Self> {
+    fn new(v: Value) -> Result<Self, String> {
         match v {
             Value::Null => Ok(SortSpec::None),
             Value::String(col) => Ok(SortSpec::Descending(String::from(&*col))),
             Value::Array(a) if a.len() == 2 => {
-                let column = a[0].clone().cast_to::<String>()?;
-                match a[1].clone().cast_to::<String>()?.as_str() {
+                let column = a[0].clone().cast_to::<String>().map_err(|e| format!("{}", e))?;
+                match a[1].clone().cast_to::<String>().map_err(|e| format!("{}", e))?.as_str() {
                     "ascending" => Ok(SortSpec::Ascending(column)),
                     "descending" => Ok(SortSpec::Descending(column)),
-                    _ => bail!("invalid mode"),
+                    _ => Err("invalid mode".into()),
                 }
             }
-            _ => bail!("expected null, col, or a pair of [column, mode]"),
+            _ => Err("expected null, col, or a pair of [column, mode]".into()),
         }
     }
 }
@@ -101,36 +100,64 @@ enum Filter {
     None,
     Include(HashSet<String>),
     Exclude(HashSet<String>),
-    IncludeMatch(RegexSet),
-    ExcludeMatch(RegexSet),
+    IncludeMatch(HashSet<String>, RegexSet),
+    ExcludeMatch(HashSet<String>, RegexSet),
+}
+
+impl PartialEq for Filter {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Filter::All, Filter::All)
+            | (Filter::Auto, Filter::Auto)
+            | (Filter::None, Filter::None) => true,
+            (Filter::All, _)
+            | (_, Filter::All)
+            | (Filter::Auto, _)
+            | (_, Filter::Auto)
+            | (Filter::None, _)
+            | (_, Filter::None) => false,
+            (Filter::Include(s0), Filter::Include(s1)) => s0 == s1,
+            (Filter::Exclude(s0), Filter::Exclude(s1)) => s0 == s1,
+            (Filter::IncludeMatch(s0, _), Filter::IncludeMatch(s1, _)) => s0 == s1,
+            (Filter::ExcludeMatch(s0, _), Filter::ExcludeMatch(s1, _)) => s0 == s1,
+            (Filter::Include(_), _)
+            | (_, Filter::Include(_))
+            | (Filter::Exclude(_), _)
+            | (_, Filter::Exclude(_))
+            | (Filter::IncludeMatch(_, _), _)
+            | (_, Filter::IncludeMatch(_, _))
+            | (Filter::ExcludeMatch(_, _), _)
+            | (_, Filter::ExcludeMatch(_, _)) => false,
+        }
+    }
 }
 
 impl Filter {
-    fn new(v: Value) -> Result<Self> {
+    fn new(v: Value) -> Result<Self, String> {
         match v {
             Value::Null => Ok(Filter::Auto),
             Value::True => Ok(Filter::All),
             Value::False => Ok(Filter::None),
             Value::Array(a) if a.len() == 2 => {
-                let mode = a[0].clone().cast_to::<Chars>()?;
-                let mut i = a[1].flatten().map(|v| v.cast_to::<String>());
+                let mode = a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
+                let mut i = a[1].flatten().map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
                 if &*mode == "include" {
                     Ok(Filter::Include(i.collect::<Result<HashSet<_, _>, _>>()?))
                 } else if &*mode == "exclude" {
                     Ok(Filter::Exclude(i.collect::<Result<HashSet<_, _>, _>>()?))
                 } else if &*mode == "include_match" {
-                    Ok(Filter::IncludeMatch(RegexSet::new(
-                        i.collect::<Result<Vec<_>, _>>()?,
-                    )?))
+                    let set = i.collect::<Result<HashSet<_>, _>>()?;
+                    let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                    Ok(Filter::IncludeMatch(set, matcher))
                 } else if &*mode == "exclude_match" {
-                    Ok(Filter::ExcludeMatch(RegexSet::new(
-                        i.collect::<Result<Vec<_>, _>>()?,
-                    )?))
+                    let set = i.collect::<Result<HashSet<_>, _>>()?;
+                    let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                    Ok(Filter::ExcludeMatch(set, matcher))
                 } else {
-                    bail!("invalid filter mode")
+                    Err("invalid filter mode".into())
                 }
             }
-            _ => bail!("expected null, true, false, or a pair"),
+            _ => Err("expected null, true, false, or a pair".into()),
         }
     }
 
@@ -140,8 +167,8 @@ impl Filter {
             Filter::None => false,
             Filter::Include(set) => set.contains(s),
             Filter::Exclude(set) => !set.contains(s),
-            Filter::IncludeMatch(set) => set.is_match(s),
-            Filter::ExcludeMatch(set) => !set.is_match(s),
+            Filter::IncludeMatch(_, set) => set.is_match(s),
+            Filter::ExcludeMatch(_, set) => !set.is_match(s),
         }
     }
 }
@@ -160,13 +187,13 @@ pub(super) struct Table {
     path_expr: BSNode,
     path: RefCell<Option<Path>>,
     default_sort_column_expr: BSNode,
-    default_sort_column: RefCell<Result<SortSpec>>,
+    default_sort_column: RefCell<Result<SortSpec, String>>,
     column_filter_expr: BSNode,
-    column_filter: RefCell<Result<Filter>>,
+    column_filter: RefCell<Result<Filter, String>>,
     row_filter_expr: BSNode,
-    row_filter: RefCell<Result<Filter>>,
+    row_filter: RefCell<Result<Filter, String>>,
     column_editable_expr: BSNode,
-    column_editable: RefCell<Result<Filter>>,
+    column_editable: RefCell<Result<Filter, String>>,
     on_select: Rc<RefCell<BSNode>>,
     on_activate: Rc<RefCell<BSNode>>,
     on_edit: Rc<RefCell<BSNode>>,
@@ -225,10 +252,10 @@ impl RaeifiedTable {
         ctx: BSCtx,
         root: ScrolledWindow,
         path: Path,
-        default_sort_column: Result<SortSpec>,
-        column_filter: Result<Filter>,
-        row_filter: Result<Filter>,
-        column_editable: Result<Filter>,
+        default_sort_column: Result<SortSpec, String>,
+        column_filter: Result<Filter, String>,
+        row_filter: Result<Filter, String>,
+        column_editable: Result<Filter, String>,
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
         on_edit: Rc<RefCell<BSNode>>,
@@ -879,47 +906,30 @@ impl Table {
             }
         }
         if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
-            let new_col = match col {
-                Value::String(c) => Some(String::from(&*c)),
-                _ => None,
-            };
+            let new_col = SortSpec::new(col);
             if &*self.default_sort_column.borrow() != &new_col {
                 *self.default_sort_column.borrow_mut() = new_col;
                 self.refresh();
             }
         }
-        if let Some(dir) = self.default_sort_column_direction_expr.update(ctx, event) {
-            let new_dir = SortDir::new(dir);
-            if &*self.default_sort_column_direction.borrow() != &new_dir {
-                *self.default_sort_column_direction.borrow_mut() = new_dir;
-                self.refresh();
-            }
-        }
-        if let Some(mode) = self.column_mode_expr.update(ctx, event) {
-            let new_mode = ColumnMode::new(mode);
-            if &*self.column_mode.borrow() != &new_mode {
-                *self.column_mode.borrow_mut() = new_mode;
-                self.refresh();
-            }
-        }
-        if let Some(cols) = self.column_list_expr.update(ctx, event) {
-            let new_lst = cols_from_val(cols);
-            if &*self.column_list.borrow() != &new_lst {
-                *self.column_list.borrow_mut() = new_lst;
+        if let Some(mode) = self.column_filter_expr.update(ctx, event) {
+            let new_filter = Filter::new(mode);
+            if &*self.column_filter.borrow() != &new_filter {
+                *self.column_filter.borrow_mut() = new_filter;
                 self.refresh();
             }
         }
         if let Some(row_filter) = self.row_filter_expr.update(ctx, event) {
-            let new_lst = cols_from_val(row_filter);
-            if &*self.row_filter.borrow() != &new_lst {
-                *self.row_filter.borrow_mut() = new_lst;
+            let new_filter = Filter::new(row_filter);
+            if &*self.row_filter.borrow() != &new_filter {
+                *self.row_filter.borrow_mut() = new_filter;
                 self.refresh();
             }
         }
-        if let Some(v) = self.editable_expr.update(ctx, event) {
-            let new_mode = EditMode::new(v);
-            if &*self.editable.borrow() != &new_mode {
-                *self.editable.borrow_mut() = new_mode;
+        if let Some(v) = self.column_editable_expr.update(ctx, event) {
+            let new_ed = Filter::new(v);
+            if &*self.column_editable.borrow() != &new_ed {
+                *self.column_editable.borrow_mut() = new_ed;
                 self.refresh();
             }
         }
