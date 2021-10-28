@@ -774,9 +774,9 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     ctx.borrow().user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
-            let u = &ctx.borrow().user;
-            if u.view_saved.get() || ask_modal(w, "Unsaved view will be lost.") {
-                u.backend.terminate();
+            let saved = ctx.borrow().user.view_saved.get();
+            if saved || ask_modal(w, "Unsaved view will be lost.") {
+                ctx.borrow().user.backend.terminate();
                 Inhibit(false)
             } else {
                 Inhibit(true)
