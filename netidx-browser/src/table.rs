@@ -750,7 +750,7 @@ impl RaeifiedTable {
                     match t.0.update.borrow_mut().pop() {
                         None => break,
                         Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(&id) {
-                            let s = &format!("{}", v).to_value();
+                            let s = &format!("{}", WVal(&v)).to_value();
                             t.store().set_value(&sub.row, sub.col, s);
                         }
                     }
