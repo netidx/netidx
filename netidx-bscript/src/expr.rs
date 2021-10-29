@@ -257,6 +257,10 @@ impl Expr {
             ExprKind::Constant(_) | ExprKind::Apply { .. } => false,
         }
     }
+
+    pub fn to_string_pretty(&self, col_limit: usize) -> String {
+        self.kind.to_string_pretty(col_limit)
+    }
 }
 
 impl fmt::Display for Expr {
@@ -449,6 +453,11 @@ mod tests {
         #[test]
         fn expr_round_trip(s in expr()) {
             assert!(check(dbg!(&s), &dbg!(dbg!(s.to_string()).parse::<Expr>().unwrap())))
+        }
+
+        #[test]
+        fn expr_pp_round_trip(s in expr()) {
+            assert!(check(dbg!(&s), &dbg!(dbg!(s.to_string_pretty(80)).parse::<Expr>().unwrap())))
         }
     }
 }
