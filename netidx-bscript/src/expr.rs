@@ -7,7 +7,8 @@ use serde::{
 };
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
-    fmt, result,
+    fmt::{self, Write},
+    result,
     str::FromStr,
 };
 
@@ -26,6 +27,85 @@ pub enum ExprKind {
 impl ExprKind {
     pub fn to_expr(self) -> Expr {
         Expr { id: ExprId::new(), kind: self }
+    }
+
+    pub fn to_string_pretty(&self, col_limit: usize) -> String {
+        let mut buf = String::new();
+        self.pretty_print(0, col_limit, &mut buf).unwrap();
+        buf
+    }
+
+    fn pretty_print(&self, indent: usize, limit: usize, buf: &mut String) -> fmt::Result {
+        fn push_indent(indent: usize, buf: &mut String) {
+            buf.extend((0..indent).into_iter().map(|_| ' '));
+        }
+        match self {
+            ExprKind::Constant(v) => {
+                push_indent(indent, buf);
+                write!(buf, "{}", v)
+            }
+            ExprKind::Apply { function, args } => {
+                let mut tmp = String::new();
+                push_indent(indent, &mut tmp);
+                write!(tmp, "{}", self)?;
+                if tmp.len() < limit {
+                    buf.push_str(&*tmp);
+                    Ok(())
+                } else {
+                    if function == "string_concat" {
+                        buf.push_str(&*tmp);
+                        Ok(())
+                    } else if function == "load_var" && args.len() == 1 && args[0].is_fn()
+                    {
+                        buf.push_str(&*tmp);
+                        Ok(())
+                    } else if (function == "store_var" || function == "local_store_var")
+                        && args.len() == 2
+                        && args[0].is_fn()
+                    {
+                        match &args[0].kind {
+                            ExprKind::Constant(Value::String(c)) => {
+                                push_indent(indent, buf);
+                                let local = if function == "local_store_var" {
+                                    "local "
+                                } else {
+                                    ""
+                                };
+                                writeln!(buf, "{}{} <-", local, c)?;
+                                args[1].kind.pretty_print(indent + 2, limit, buf)
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else if function == "do" {
+                        push_indent(indent, buf);
+                        writeln!(buf, "{}", "{")?;
+                        for i in 0..args.len() {
+                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
+                            if i < args.len() - 1 {
+                                writeln!(buf, ";")?
+                            } else {
+                                writeln!(buf, "")?
+                            }
+                        }
+                        push_indent(indent, buf);
+                        writeln!(buf, "{}", "}")
+                    } else {
+                        push_indent(indent, buf);
+                        writeln!(buf, "{}(", function)?;
+                        for i in 0..args.len() {
+                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
+                            if i < args.len() - 1 {
+                                writeln!(buf, ", ")?;
+                            } else {
+                                writeln!(buf, "")?;
+                            }
+                        }
+                        push_indent(indent, buf);
+                        writeln!(buf, ")")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -58,18 +138,19 @@ impl fmt::Display for ExprKind {
                         ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
-                } else if function == "store_var" && args.len() == 2 && args[0].is_fn() {
+                } else if (function == "store_var" || function == "local_store_var")
+                    && args.len() == 2
+                    && args[0].is_fn()
+                {
                     // constant variable store
                     match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => write!(f, "{} <- {}", c, &args[1]),
-                        _ => unreachable!()
-                    }                    
-                } else if function == "local_store_var" && args.len() == 2 && args[0].is_fn() {
-                    // constant variable store
-                    match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => write!(f, "local {} <- {}", c, &args[1]),
-                        _ => unreachable!()
-                    }                    
+                        ExprKind::Constant(Value::String(c)) => {
+                            let local =
+                                if function == "local_store_var" { "local " } else { "" };
+                            write!(f, "{}{} <- {}", local, c, &args[1])
+                        }
+                        _ => unreachable!(),
+                    }
                 } else if function == "do" {
                     // do block
                     write!(f, "{}", '{')?;
