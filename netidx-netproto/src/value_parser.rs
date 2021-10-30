@@ -124,7 +124,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    not_followed_by(none_of(" ;),]}".chars()))
+    not_followed_by(none_of([' ', '\n', '\t', ';', ')', ',', ']', '}', '"']))
 }
 
 fn value_<I>(esc: &'static [char]) -> impl Parser<I, Output = Value>

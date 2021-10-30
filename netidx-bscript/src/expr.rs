@@ -40,9 +40,9 @@ impl ExprKind {
             buf.extend((0..indent).into_iter().map(|_| ' '));
         }
         match self {
-            ExprKind::Constant(v) => {
+            ExprKind::Constant(_) => {
                 push_indent(indent, buf);
-                write!(buf, "{}", v)
+                write!(buf, "{}", self)
             }
             ExprKind::Apply { function, args } => {
                 let mut tmp = String::new();

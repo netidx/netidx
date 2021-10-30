@@ -126,12 +126,11 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(interpolated()),
         attempt(
             between(
                 spaces().with(token('{')),
                 spaces().with(token('}')),
-                spaces().with(sep_by(expr(), spaces().with(token(';')))),
+                spaces().with(sep_by(expr(), attempt(spaces().with(token(';'))))),
             )
             .map(|args| ExprKind::Apply { function: "do".into(), args }.to_expr()),
         ),
@@ -141,7 +140,7 @@ where
                 between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
-                    spaces().with(sep_by(expr(), spaces().with(token(',')))),
+                    spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
                 ),
             )
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
@@ -174,6 +173,7 @@ where
             }
             .to_expr()
         })),
+        attempt(interpolated()),
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         fname().skip(close_expr()).map(|var| {
             ExprKind::Apply {
