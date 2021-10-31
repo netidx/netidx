@@ -62,6 +62,7 @@ fn expr(
         @strong ctx,
         @strong inspector,
         @strong source,
+        @strong on_change,
         @weak entry => move |b| {
         if !b.get_active() {
             if let Some((w, _)) = inspector.borrow_mut().take() {
@@ -72,9 +73,10 @@ fn expr(
             w.set_default_size(640, 480);
             let on_change = {
                 let entry = entry.clone();
+                let on_change = on_change.clone();
                 move |s: expr::Expr| {
                     entry.set_text(&s.to_string());
-                    entry.emit_activate();
+                    on_change(s);
                 }
             };
             let si = ExprInspector::new(
