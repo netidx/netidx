@@ -96,7 +96,7 @@ fn expr(
     (lbl, ibox, inspector)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Table {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Table>>,
@@ -217,7 +217,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<expr::Expr>>,
@@ -274,7 +274,7 @@ impl Action {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<expr::Expr>>,
@@ -310,7 +310,7 @@ impl Label {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
@@ -365,7 +365,7 @@ impl Button {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct LinkButton {
     root: TwoColGrid,
     spec: Rc<RefCell<view::LinkButton>>,
@@ -438,7 +438,7 @@ impl LinkButton {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Toggle {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Toggle>>,
@@ -493,7 +493,7 @@ impl Toggle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Selector {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Selector>>,
@@ -559,7 +559,7 @@ impl Selector {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
@@ -644,14 +644,14 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Series {
     x: DbgExpr,
     y: DbgExpr,
     spec: Rc<RefCell<view::Series>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct LinePlot {
     root: gtk::Box,
     spec: Rc<RefCell<view::LinePlot>>,
@@ -1002,7 +1002,7 @@ impl LinePlot {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct BoxChild {
     root: TwoColGrid,
     spec: Rc<RefCell<view::BoxChild>>,
@@ -1070,7 +1070,7 @@ fn dirselect(
     dircb
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Paned {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Paned>>,
@@ -1107,7 +1107,7 @@ impl Paned {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Frame {
     root: TwoColGrid,
     label_expr: DbgExpr,
@@ -1156,7 +1156,7 @@ impl Frame {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct BoxContainer {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Box>>,
@@ -1201,7 +1201,7 @@ impl BoxContainer {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct NotebookPage {
     root: TwoColGrid,
     spec: Rc<RefCell<view::NotebookPage>>,
@@ -1238,7 +1238,7 @@ impl NotebookPage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Notebook {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Notebook>>,
@@ -1331,7 +1331,7 @@ impl Notebook {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct GridChild {
     root: TwoColGrid,
     spec: Rc<RefCell<view::GridChild>>,
@@ -1369,7 +1369,7 @@ impl GridChild {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Grid {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Grid>>,

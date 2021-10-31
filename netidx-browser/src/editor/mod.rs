@@ -16,7 +16,7 @@ use util::{parse_entry, TwoColGrid};
 
 type OnChange = Rc<dyn Fn()>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WidgetProps {
     root: gtk::Expander,
     spec: Rc<RefCell<Option<view::WidgetProps>>>,
@@ -173,7 +173,7 @@ impl WidgetProps {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum WidgetKind {
     Action(widgets::Action),
     Table(widgets::Table),
@@ -220,7 +220,7 @@ impl WidgetKind {
     }
 }
 
-#[derive(Clone, Debug, GBoxed)]
+#[derive(Clone, GBoxed)]
 #[gboxed(type_name = "NetidxEditorWidget")]
 struct Widget {
     root: gtk::Box,

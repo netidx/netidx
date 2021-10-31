@@ -13,7 +13,7 @@ use std::{
 };
 
 lazy_static! {
-    pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]+$").unwrap();
+    pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
 }
 
 atomic_id!(ExprId);
