@@ -60,7 +60,7 @@ impl CallTree {
             });
         }
         view.set_model(Some(&store));
-        view.set_reorderable(true);
+        view.set_reorderable(false);
         view.set_enable_tree_lines(true);
         CallTree { root, store, ctx }
     }
@@ -85,40 +85,61 @@ impl CallTree {
             }
         }
     }
+
+    fn display(&self, e: &expr::Expr) {
+        self.clear();
+        self.display_expr(None, e)
+    }
 }
 
 struct ExprEditor {
     ctx: BSCtx,
     view: gtksv::View,
-    root: gtk::ScrolledWindow,
+    error: gtk::Label,
+    root: gtk::Box,
 }
 
 impl ExprEditor {
-    fn new(
-        ctx: BSCtx,
-        on_change: impl Fn(expr::Expr) + 'static,
-        init: &expr::Expr,
-    ) -> Self {
-        let root =
+    fn new(ctx: BSCtx, on_change: Rc<dyn Fn(expr::Expr)>, init: &expr::Expr) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let error = gtk::Label::new(None);
+        root.pack_start(&error, false, false, 0);
+        let editorwin =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.set_property_expand(true);
+        editorwin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        editorwin.set_property_expand(true);
+        root.pack_start(&editorwin, true, true, 0);
         let view = gtksv::ViewBuilder::new()
             .insert_spaces_instead_of_tabs(true)
             .show_line_numbers(true)
             .build();
-        root.add(&view);
+        view.set_property_expand(true);
+        editorwin.add(&view);
         if let Some(buf) = view.get_buffer() {
-            buf.insert_at_cursor(&init.to_string_pretty(80));
+            buf.set_text(&init.to_string_pretty(80));
+            buf.connect_changed(clone!(@strong on_change, @weak error => move |buf: &gtk::TextBuffer| {
+                if let Some(text) = buf.get_slice(&buf.get_start_iter(), &buf.get_end_iter(), false) {
+                    match text.parse::<expr::Expr>() {
+                        Err(e) => {
+                            let m = glib::markup_escape_text(&format!("{}", e));
+                            error.set_markup(&format!("<span foreground='red'>{}</span>", m));
+                        }
+                        Ok(expr) => {
+                            error.set_markup("<span></span>");
+                            on_change(expr);
+                        }
+                    }
+                }
+            }));
         }
-        ExprEditor { ctx: ctx.clone(), view, root }
+        ExprEditor { ctx: ctx.clone(), view, error, root }
     }
 }
 
 pub(super) struct ExprInspector {
     root: gtk::Box,
-    call_tree: CallTree,
-    editor: ExprEditor,
+    _call_tree: Rc<CallTree>,
+    _editor: ExprEditor,
 }
 
 impl ExprInspector {
@@ -129,40 +150,20 @@ impl ExprInspector {
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let edit_dbg_pane = gtk::Paned::new(gtk::Orientation::Vertical);
-        let call_tree = CallTree::new(ctx.clone());
+        let call_tree = Rc::new(CallTree::new(ctx.clone()));
+        let on_change: Rc<dyn Fn(expr::Expr)> = Rc::new({
+            let call_tree = call_tree.clone();
+            move |e: expr::Expr| {
+                call_tree.display(&e);
+                on_change(e);
+            }
+        });
         let editor = ExprEditor::new(ctx.clone(), on_change, &init);
         edit_dbg_pane.pack1(&editor.root, true, false);
         edit_dbg_pane.pack2(&call_tree.root, true, true);
         root.pack_start(&edit_dbg_pane, true, true, 5);
-        /*
-        let on_change: Rc<dyn Fn()> = Rc::new({
-            let ctx = ctx.clone();
-            let call_tree = call_tree.clone();
-            let scheduled = Rc::new(Cell::new(false));
-            let on_change = Rc::new(on_change);
-            move || {
-                if !scheduled.get() {
-                    scheduled.set(true);
-                    idle_add_local(clone!(
-                        @strong ctx,
-                        @strong call_tree,
-                        @strong scheduled,
-                        @strong on_change => move || {
-                            if let Some(root) = store.get_iter_first() {
-                                let expr = build_expr(&ctx, &store, &root);
-                                on_change(expr)
-                            }
-                            scheduled.set(false);
-                            glib::Continue(false)
-                        }
-                    ));
-                }
-            }
-        });
-        build_tree(&ctx, &store, None, &init);
-         */
-        call_tree.display_expr(None, &init);
-        ExprInspector { root, call_tree, editor }
+        call_tree.display(&init);
+        ExprInspector { root, _call_tree: call_tree, _editor: editor }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
