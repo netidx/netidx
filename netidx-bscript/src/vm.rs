@@ -70,6 +70,10 @@ impl DbgCtx {
     pub fn clear(&mut self) {
         self.events.clear();
         self.current.clear();
+        self.watch.retain(|_, v| {
+            v.retain(|w| Weak::upgrade(w).is_some());
+            v.len() > 0
+        });
     }
 }
 
