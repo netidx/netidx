@@ -92,53 +92,60 @@ impl CallTree {
     }
 }
 
+struct ErrorDisplay {
+    root: gtk::ScrolledWindow,
+    error_body: gtk::Label,
+    error_lbl: gtk::Label,
+}
+
+impl ErrorDisplay {
+    fn new() -> Self {
+        let root =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        let error_body = gtk::Label::new(None);
+        let error_lbl = gtk::Label::new(None);
+        error_lbl.set_markup("<span>Errors</span>");
+        root.add(&error_body);
+        ErrorDisplay { root, error_body, error_lbl }
+    }
+
+    fn clear(&self) {
+        self.error_lbl.set_markup("<span>Errors</span>");
+        self.error_body.set_markup("<span></span>");
+    }
+
+    fn display(&self, msg: &str) {
+        self.error_lbl.set_markup("<span foreground='red'>Errors</span>");
+        let m = glib::markup_escape_text(msg);
+        self.error_body.set_markup(&format!("<span foreground='red'>{}</span>", m));
+    }
+}
+
 struct Tools {
     root: gtk::Notebook,
     call_tree: CallTree,
-    error_body: gtk::Label,
-    error_lbl: gtk::Label,
+    error: ErrorDisplay,
 }
 
 impl Tools {
     fn new(ctx: BSCtx) -> Self {
         let root = gtk::Notebook::new();
-        /*
-        let set_collapsed = {
-            let mut collapsed = true;
-            let mut prev = paned.get_position();
-            let paned = paned.clone();
-            Rc::new(move |desired| {
-                if desired && collapsed {
-                    collapsed = false;
-                    paned.set_position(prev);
-                } else if !desired && !collapsed {
-                    collapsed = true;
-                    prev = paned.get_position();
-                    paned.set_position(0)
-                }
-            })
-        };
-         */
         let call_tree = CallTree::new(ctx.clone());
         let call_tree_lbl = gtk::Label::new(Some("Call Tree"));
         root.append_page(&call_tree.root, Some(&call_tree_lbl));
-        let error_body = gtk::Label::new(None);
-        let error_lbl = gtk::Label::new(None);
-        error_lbl.set_markup("<span>Errors</span>");
-        root.append_page(&error_body, Some(&error_lbl));
-        Tools { root, call_tree, error_body, error_lbl }
+        let error = ErrorDisplay::new();
+        root.append_page(&error.root, Some(&error.error_lbl));
+        Tools { root, call_tree, error }
     }
 
     fn display(&self, e: &expr::Expr) {
         self.call_tree.display(e);
-        self.error_lbl.set_markup("<span>Errors</span>");
-        self.error_body.set_markup("<span></span>");
+        self.error.clear()
     }
 
     fn set_error(&self, msg: &str) {
-        self.error_lbl.set_markup("<span foreground='red'>Errors</span>");
-        let m = glib::markup_escape_text(msg);
-        self.error_body.set_markup(&format!("<span foreground='red'>{}</span>", m));
+        self.error.display(msg)
     }
 }
 
