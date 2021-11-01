@@ -92,53 +92,97 @@ impl CallTree {
     }
 }
 
+struct Tools {
+    root: gtk::Notebook,
+    call_tree: CallTree,
+    error_body: gtk::Label,
+    error_lbl: gtk::Label,
+}
+
+impl Tools {
+    fn new(ctx: BSCtx) -> Self {
+        let root = gtk::Notebook::new();
+        /*
+        let set_collapsed = {
+            let mut collapsed = true;
+            let mut prev = paned.get_position();
+            let paned = paned.clone();
+            Rc::new(move |desired| {
+                if desired && collapsed {
+                    collapsed = false;
+                    paned.set_position(prev);
+                } else if !desired && !collapsed {
+                    collapsed = true;
+                    prev = paned.get_position();
+                    paned.set_position(0)
+                }
+            })
+        };
+         */
+        let call_tree = CallTree::new(ctx.clone());
+        let call_tree_lbl = gtk::Label::new(Some("Call Tree"));
+        root.append_page(&call_tree.root, Some(&call_tree_lbl));
+        let error_body = gtk::Label::new(None);
+        let error_lbl = gtk::Label::new(None);
+        error_lbl.set_markup("<span>Errors</span>");
+        root.append_page(&error_body, Some(&error_lbl));
+        Tools { root, call_tree, error_body, error_lbl }
+    }
+
+    fn display(&self, e: &expr::Expr) {
+        self.call_tree.display(e);
+        self.error_lbl.set_markup("<span>Errors</span>");
+        self.error_body.set_markup("<span></span>");
+    }
+
+    fn set_error(&self, msg: &str) {
+        self.error_lbl.set_markup("<span foreground='red'>Errors</span>");
+        let m = glib::markup_escape_text(msg);
+        self.error_body.set_markup(&format!("<span foreground='red'>{}</span>", m));
+    }
+}
+
 struct ExprEditor {
-    ctx: BSCtx,
-    view: gtksv::View,
-    error: gtk::Label,
-    root: gtk::Box,
+    root: gtk::ScrolledWindow,
 }
 
 impl ExprEditor {
-    fn new(ctx: BSCtx, on_change: Rc<dyn Fn(expr::Expr)>, init: &expr::Expr) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let error = gtk::Label::new(None);
-        root.pack_start(&error, false, false, 0);
-        let editorwin =
+    fn new(
+        on_change: impl Fn(expr::Expr) + 'static,
+        tools: Rc<Tools>,
+        init: &expr::Expr,
+    ) -> Self {
+        let root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        editorwin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        editorwin.set_property_expand(true);
-        root.pack_start(&editorwin, true, true, 0);
+        root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        root.set_property_expand(true);
         let view = gtksv::ViewBuilder::new()
             .insert_spaces_instead_of_tabs(true)
             .show_line_numbers(true)
             .build();
         view.set_property_expand(true);
-        editorwin.add(&view);
+        root.add(&view);
         if let Some(buf) = view.get_buffer() {
             buf.set_text(&init.to_string_pretty(80));
-            buf.connect_changed(clone!(@strong on_change, @weak error => move |buf: &gtk::TextBuffer| {
+            buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
                 if let Some(text) = buf.get_slice(&buf.get_start_iter(), &buf.get_end_iter(), false) {
                     match text.parse::<expr::Expr>() {
-                        Err(e) => {
-                            let m = glib::markup_escape_text(&format!("{}", e));
-                            error.set_markup(&format!("<span foreground='red'>{}</span>", m));
-                        }
+                        Err(e) => tools.set_error(&format!("{}", e)),
                         Ok(expr) => {
-                            error.set_markup("<span></span>");
-                            on_change(expr);
-                        }
+                            tools.display(&expr);
+                            on_change(expr)
+                        },
                     }
                 }
             }));
         }
-        ExprEditor { ctx: Rc::clone(&ctx), view, error, root }
+        ExprEditor { root }
     }
 }
 
 pub(super) struct ExprInspector {
-    root: gtk::Box,
-    _call_tree: Rc<CallTree>,
+    root: gtk::Paned,
+    _tools: Rc<Tools>,
     _editor: ExprEditor,
 }
 
@@ -148,22 +192,13 @@ impl ExprInspector {
         on_change: impl Fn(expr::Expr) + 'static,
         init: expr::Expr,
     ) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let edit_dbg_pane = gtk::Paned::new(gtk::Orientation::Vertical);
-        let call_tree = Rc::new(CallTree::new(Rc::clone(&ctx)));
-        let on_change: Rc<dyn Fn(expr::Expr)> = Rc::new({
-            let call_tree = call_tree.clone();
-            move |e: expr::Expr| {
-                call_tree.display(&e);
-                on_change(e);
-            }
-        });
-        let editor = ExprEditor::new(Rc::clone(&ctx), on_change, &init);
-        edit_dbg_pane.pack1(&editor.root, true, false);
-        edit_dbg_pane.pack2(&call_tree.root, true, true);
-        root.pack_start(&edit_dbg_pane, true, true, 5);
-        call_tree.display(&init);
-        ExprInspector { root, _call_tree: call_tree, _editor: editor }
+        let root = gtk::Paned::new(gtk::Orientation::Vertical);
+        let tools = Rc::new(Tools::new(ctx.clone()));
+        let editor = ExprEditor::new(on_change, tools.clone(), &init);
+        root.pack1(&editor.root, true, false);
+        root.pack2(&tools.root, true, true);
+        tools.display(&init);
+        ExprInspector { root, _tools: tools, _editor: editor }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
