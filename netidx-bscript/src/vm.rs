@@ -31,7 +31,7 @@ impl DbgCtx {
     }
 
     pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Value)>) {
-        let watches = self.watch.entry(id).or_insert(vec![]);
+        let watches = self.watch.entry(id).or_insert_with(Vec::new);
         if let Some(v) = self.current.get(&id) {
             watch(v);
         }
@@ -70,7 +70,6 @@ impl DbgCtx {
     pub fn clear(&mut self) {
         self.events.clear();
         self.current.clear();
-        self.watch.clear();
     }
 }
 

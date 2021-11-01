@@ -71,14 +71,11 @@ fn expr(
         } else {
             let w = gtk::Window::new(gtk::WindowType::Toplevel);
             w.set_default_size(640, 480);
-            let on_change = {
-                let entry = entry.clone();
-                let on_change = on_change.clone();
-                move |s: expr::Expr| {
-                    entry.set_text(&s.to_string());
-                    on_change(s);
-                }
-            };
+            let on_change = clone!(@strong entry, @strong on_change => move |s: expr::Expr| {
+                entry.set_text(&s.to_string());
+                entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
+                on_change(s);
+            });
             let si = ExprInspector::new(
                 ctx.clone(),
                 on_change,

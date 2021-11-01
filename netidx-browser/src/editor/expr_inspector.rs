@@ -132,7 +132,7 @@ impl ExprEditor {
                 }
             }));
         }
-        ExprEditor { ctx: ctx.clone(), view, error, root }
+        ExprEditor { ctx: Rc::clone(&ctx), view, error, root }
     }
 }
 
@@ -150,7 +150,7 @@ impl ExprInspector {
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let edit_dbg_pane = gtk::Paned::new(gtk::Orientation::Vertical);
-        let call_tree = Rc::new(CallTree::new(ctx.clone()));
+        let call_tree = Rc::new(CallTree::new(Rc::clone(&ctx)));
         let on_change: Rc<dyn Fn(expr::Expr)> = Rc::new({
             let call_tree = call_tree.clone();
             move |e: expr::Expr| {
@@ -158,7 +158,7 @@ impl ExprInspector {
                 on_change(e);
             }
         });
-        let editor = ExprEditor::new(ctx.clone(), on_change, &init);
+        let editor = ExprEditor::new(Rc::clone(&ctx), on_change, &init);
         edit_dbg_pane.pack1(&editor.root, true, false);
         edit_dbg_pane.pack2(&call_tree.root, true, true);
         root.pack_start(&edit_dbg_pane, true, true, 5);
