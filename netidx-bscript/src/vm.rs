@@ -71,7 +71,7 @@ impl DbgCtx {
         self.events.clear();
         self.current.clear();
         self.watch.retain(|_, v| {
-            v.retain(|w| Weak::upgrade(w).is_some());
+            v.retain(|w| Weak::strong_count(w) > 0);
             v.len() > 0
         });
     }
