@@ -147,7 +147,9 @@ mod publish {
             } else if s.as_str() == "tail" {
                 Ok(State::Tail)
             } else {
-                bail!("expected state {play, pause, tail}")
+                // Hide '{' in this error message from the formatting machinery in bail macro
+                let msg = "expected state {play, pause, tail}";
+                bail!(msg)
             }
         }
     }
