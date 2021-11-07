@@ -1,12 +1,9 @@
-use super::super::{bscript, BSCtx};
-use super::{util::TwoColGrid, OnChange};
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*};
+use super::super::BSCtx;
+use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use netidx::{chars::Chars, subscriber::Value};
+use netidx::subscriber::Value;
 use netidx_bscript::expr;
-use sourceview4 as gtksv;
 use std::{
-    cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
 };
@@ -72,7 +69,7 @@ impl CallTree {
     fn display_expr(&self, parent: Option<&gtk::TreeIter>, s: &expr::Expr) {
         let iter = self.store.insert_before(parent, None);
         match s {
-            expr::Expr { kind: expr::ExprKind::Constant(v), id } => {
+            expr::Expr { kind: expr::ExprKind::Constant(_), id } => {
                 self.store.set_value(&iter, 0, &"constant".to_value());
                 add_watch(&self.ctx, &self.store, &iter, *id);
             }
@@ -163,10 +160,7 @@ impl ExprEditor {
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root.set_property_expand(true);
-        let view = gtksv::ViewBuilder::new()
-            .insert_spaces_instead_of_tabs(true)
-            .show_line_numbers(true)
-            .build();
+        let view = gtk::TextView::new();
         view.set_property_expand(true);
         root.add(&view);
         if let Some(buf) = view.get_buffer() {

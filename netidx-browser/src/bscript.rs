@@ -261,39 +261,6 @@ impl Navigate {
     }
 }
 
-pub(crate) static FORMULAS: [&'static str; 30] = [
-    "load",
-    "load_var",
-    "store",
-    "store_var",
-    "any",
-    "all",
-    "sum",
-    "product",
-    "divide",
-    "mean",
-    "min",
-    "max",
-    "and",
-    "or",
-    "not",
-    "cmp",
-    "if",
-    "filter",
-    "cast",
-    "isa",
-    "eval",
-    "count",
-    "sample",
-    "uniq",
-    "string_join",
-    "string_concat",
-    "event",
-    "confirm",
-    "navigate",
-    "call",
-];
-
 pub(crate) fn create_ctx(ctx: WidgetCtx) -> ExecCtx<WidgetCtx, LocalEvent> {
     let mut t = ExecCtx::new(ctx);
     Event::register(&mut t);
