@@ -1,9 +1,10 @@
-use super::super::BSCtx;
+use super::super::{util::ask_modal, BSCtx};
 use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
 use std::{
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
 };
@@ -152,9 +153,10 @@ struct ExprEditor {
 
 impl ExprEditor {
     fn new(
-        on_change: impl Fn(expr::Expr) + 'static,
         tools: Rc<Tools>,
-        init: &expr::Expr,
+        save_button: gtk::ToolButton,
+        unsaved: Rc<Cell<bool>>,
+        expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
         let root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
@@ -164,14 +166,18 @@ impl ExprEditor {
         view.set_property_expand(true);
         root.add(&view);
         if let Some(buf) = view.get_buffer() {
-            buf.set_text(&init.to_string_pretty(80));
+            buf.set_text(&expr.borrow().to_string_pretty(80));
             buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
+                unsaved.set(true);
                 if let Some(text) = buf.get_slice(&buf.get_start_iter(), &buf.get_end_iter(), false) {
                     match text.parse::<expr::Expr>() {
-                        Err(e) => tools.set_error(&format!("{}", e)),
-                        Ok(expr) => {
-                            tools.display(&expr);
-                            on_change(expr)
+                        Err(e) => {
+                            tools.set_error(&format!("{}", e));
+                            save_button.set_sensitive(false);
+                        },
+                        Ok(e) => {
+                            *expr.borrow_mut() = e;
+                            save_button.set_sensitive(true);
                         },
                     }
                 }
@@ -190,15 +196,46 @@ pub(super) struct ExprInspector {
 impl ExprInspector {
     pub(super) fn new(
         ctx: BSCtx,
+        window: &gtk::Window,
         on_change: impl Fn(expr::Expr) + 'static,
         init: expr::Expr,
     ) -> Self {
+        let unsaved = Rc::new(Cell::new(false));
+        let expr = Rc::new(RefCell::new(init));
+        let headerbar = gtk::HeaderBar::new();
+        let save_img =
+            gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
+        let save_button = gtk::ToolButton::new(Some(&save_img), None);
+        headerbar.pack_start(&save_button);
+        window.set_titlebar(Some(&headerbar));
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         let tools = Rc::new(Tools::new(ctx.clone()));
-        let editor = ExprEditor::new(on_change, tools.clone(), &init);
+        let editor = ExprEditor::new(
+            tools.clone(),
+            save_button.clone(),
+            unsaved.clone(),
+            expr.clone(),
+        );
+        save_button.connect_clicked(
+            clone!(@strong unsaved, @strong expr, @strong tools => move |b| {
+                let expr = &*expr.borrow();
+                tools.display(expr);
+                on_change(expr.clone());
+                b.set_sensitive(false);
+                unsaved.set(false);
+            }),
+        );
+        window.connect_delete_event(clone!(@strong unsaved => move |w, _| {
+            if unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
+                ctx.borrow().user.backend.terminate();
+                Inhibit(false)
+            } else {
+                Inhibit(true)
+            }
+        }));
         root.pack1(&editor.root, true, false);
         root.pack2(&tools.root, true, true);
-        tools.display(&init);
+        tools.display(&*expr.borrow());
         ExprInspector { root, _tools: tools, _editor: editor }
     }
 

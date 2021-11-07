@@ -80,6 +80,7 @@ fn expr(
                 });
             let si = ExprInspector::new(
                 ctx.clone(),
+                &w,
                 on_change,
                 source.borrow().clone()
             );
