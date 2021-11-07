@@ -145,6 +145,10 @@ impl Tools {
     fn set_error(&self, msg: &str) {
         self.error.display(msg)
     }
+
+    fn clear_error(&self) {
+        self.error.clear()
+    }
 }
 
 struct ExprEditor {
@@ -178,6 +182,7 @@ impl ExprEditor {
                         Ok(e) => {
                             *expr.borrow_mut() = e;
                             save_button.set_sensitive(true);
+                            tools.clear_error();
                         },
                     }
                 }
@@ -222,13 +227,13 @@ impl ExprInspector {
             clone!(@strong unsaved, @strong expr, @strong tools => move |b| {
                 let expr = &*expr.borrow();
                 tools.display(expr);
-                on_change(expr.clone());
                 b.set_sensitive(false);
                 unsaved.set(false);
+                on_change(expr.clone());
             }),
         );
         window.connect_delete_event(clone!(@strong unsaved => move |w, _| {
-            if unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
+            if !unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
                 ctx.borrow().user.backend.terminate();
                 Inhibit(false)
             } else {

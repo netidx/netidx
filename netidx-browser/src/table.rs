@@ -878,7 +878,7 @@ impl Table {
         }
     }
 
-    fn refresh(&self) {
+    fn refresh(&self, ctx: BSCtxRef) {
         let state = &mut *self.state.borrow_mut();
         let path = &*self.path.borrow();
         match state {
@@ -890,7 +890,7 @@ impl Table {
                     *state = TableState::Empty;
                 }
                 Some(path) => {
-                    self.ctx.borrow().user.backend.resolve_table(path.clone());
+                    ctx.user.backend.resolve_table(path.clone());
                     *state = TableState::Resolving(path.clone());
                 }
             },
@@ -917,35 +917,35 @@ impl Table {
             };
             if &*self.path.borrow() != &new_path {
                 *self.path.borrow_mut() = new_path;
-                self.refresh();
+                self.refresh(ctx);
             }
         }
         if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
             let new_col = SortSpec::new(col);
             if &*self.default_sort_column.borrow() != &new_col {
                 *self.default_sort_column.borrow_mut() = new_col;
-                self.refresh();
+                self.refresh(ctx);
             }
         }
         if let Some(mode) = self.column_filter_expr.update(ctx, event) {
             let new_filter = Filter::new(mode);
             if &*self.column_filter.borrow() != &new_filter {
                 *self.column_filter.borrow_mut() = new_filter;
-                self.refresh();
+                self.refresh(ctx);
             }
         }
         if let Some(row_filter) = self.row_filter_expr.update(ctx, event) {
             let new_filter = Filter::new(row_filter);
             if &*self.row_filter.borrow() != &new_filter {
                 *self.row_filter.borrow_mut() = new_filter;
-                self.refresh();
+                self.refresh(ctx);
             }
         }
         if let Some(v) = self.column_editable_expr.update(ctx, event) {
             let new_ed = Filter::new(v);
             if &*self.column_editable.borrow() != &new_ed {
                 *self.column_editable.borrow_mut() = new_ed;
-                self.refresh();
+                self.refresh(ctx);
             }
         }
         self.on_activate.borrow_mut().update(ctx, event);
