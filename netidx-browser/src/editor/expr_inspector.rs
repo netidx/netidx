@@ -70,9 +70,9 @@ impl CallTree {
     fn display_expr(&self, parent: Option<&gtk::TreeIter>, s: &expr::Expr) {
         let iter = self.store.insert_before(parent, None);
         match s {
-            expr::Expr { kind: expr::ExprKind::Constant(_), id } => {
+            expr::Expr { kind: expr::ExprKind::Constant(v), .. } => {
                 self.store.set_value(&iter, 0, &"constant".to_value());
-                add_watch(&self.ctx, &self.store, &iter, *id);
+                self.store.set_value(&iter, 1, &format!("{}", v).to_value())
             }
             expr::Expr { kind: expr::ExprKind::Apply { args, function }, id } => {
                 self.store.set_value(&iter, 0, &function.to_value());
