@@ -206,7 +206,9 @@ impl ExprInspector {
         let save_img =
             gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
         let save_button = gtk::ToolButton::new(Some(&save_img), None);
+        save_button.set_sensitive(false);
         headerbar.pack_start(&save_button);
+        headerbar.set_show_close_button(true);
         window.set_titlebar(Some(&headerbar));
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         let tools = Rc::new(Tools::new(ctx.clone()));
