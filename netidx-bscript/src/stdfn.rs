@@ -358,7 +358,6 @@ impl CachedCurEval for NotEv {
 
 pub type Not = CachedCur<NotEv>;
 
-// CR estokes: document
 pub struct IsErrEv;
 
 impl CachedCurEval for IsErrEv {

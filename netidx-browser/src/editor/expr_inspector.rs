@@ -234,7 +234,6 @@ impl ExprInspector {
         );
         window.connect_delete_event(clone!(@strong unsaved => move |w, _| {
             if !unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
-                ctx.borrow().user.backend.terminate();
                 Inhibit(false)
             } else {
                 Inhibit(true)
