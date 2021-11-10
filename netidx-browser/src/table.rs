@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSCtxRef, BSNode,
+    BSCtx, BSCtxRef, BSNode, WVal,
 };
 use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
@@ -31,16 +31,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     result::{self, Result},
-    fmt
 };
-
-struct WVal<'a>(&'a Value);
-
-impl<'a> fmt::Display for WVal<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt_naked(f)
-    }
-}
 
 struct Subscription {
     _sub: Dval,
@@ -153,7 +144,8 @@ impl Filter {
             Value::Array(a) if a.len() == 2 => {
                 let mode =
                     a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
-                let i = a[1].clone()
+                let i = a[1]
+                    .clone()
                     .flatten()
                     .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
                 if &*mode == "include" {

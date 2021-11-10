@@ -1,4 +1,4 @@
-use super::{val_to_bool, BSCtx, BSCtxRef, BSNode};
+use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, WVal};
 use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, Result};
 use cairo;
@@ -45,7 +45,7 @@ impl Button {
             button.set_sensitive(val_to_bool(&v));
         }
         if let Some(v) = label.current() {
-            button.set_label(&format!("{}", v));
+            button.set_label(&format!("{}", WVal(&v)));
         }
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
             on_click.borrow_mut().update(
@@ -75,7 +75,7 @@ impl Button {
             self.button.set_sensitive(val_to_bool(&new));
         }
         if let Some(new) = self.label.update(ctx, event) {
-            self.button.set_label(&format!("{}", new));
+            self.button.set_label(&format!("{}", WVal(&new)));
         }
         self.on_click.borrow_mut().update(ctx, event);
     }
@@ -177,7 +177,7 @@ impl Label {
         let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.clone());
         let txt = match text.current() {
             None => String::new(),
-            Some(v) => format!("{}", v),
+            Some(v) => format!("{}", WVal(&v)),
         };
         let label = gtk::Label::new(Some(txt.as_str()));
         label.set_selectable(true);
@@ -201,7 +201,7 @@ impl Label {
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
         if let Some(new) = self.text.update(ctx, event) {
-            self.label.set_label(&format!("{}", new));
+            self.label.set_label(&format!("{}", WVal(&new)));
         }
     }
 }

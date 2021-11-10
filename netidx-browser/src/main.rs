@@ -50,6 +50,14 @@ use std::{
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
 
+struct WVal<'a>(&'a Value);
+
+impl<'a> fmt::Display for WVal<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt_naked(f)
+    }
+}
+
 type BSNode = Node<WidgetCtx, LocalEvent>;
 type BSCtx = Rc<RefCell<ExecCtx<WidgetCtx, LocalEvent>>>;
 type BSCtxRef<'a> = &'a mut ExecCtx<WidgetCtx, LocalEvent>;
