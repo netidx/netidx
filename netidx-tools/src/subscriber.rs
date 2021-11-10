@@ -12,7 +12,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     resolver::Auth,
-    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
+    subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{split_escaped, splitn_escaped, BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
@@ -45,13 +45,13 @@ impl FromStr for In {
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(Path::from(ArcStr::from(&s[4..]))))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
-            let mut parts = splitn_escaped(&s[6..], 2, '\\', '|');
+            let mut parts = splitn_escaped(&s[6..], 3, '\\', '|');
             let path = parts.next().ok_or_else(|| anyhow!("expected | before path"))?;
             let path = Path::from(ArcStr::from(path));
-            let val = parts
-                .next()
-                .ok_or_else(|| anyhow!("expected value"))?
-                .parse::<Value>()?;
+            let typ =
+                parts.next().ok_or_else(|| anyhow!("expected type"))?.parse::<Typ>()?;
+            let val = parts.next().ok_or_else(|| anyhow!("expected value"))?;
+            let val = typ.parse(val)?;
             Ok(In::Write(path, val))
         } else if s.starts_with("CALL|") && s.len() > 5 {
             let mut parts = splitn_escaped(&s[5..], 2, '\\', '|');
@@ -112,7 +112,34 @@ impl<'a> Out<'a> {
             Event::Update(v) => {
                 to_stdout.extend_from_slice(self.path.as_bytes());
                 to_stdout.extend_from_slice(b"|");
-                write!(&mut BytesWriter(to_stdout), "{}\n", v).unwrap();
+                let typ = Typ::get(v);
+                let w = &mut BytesWriter(to_stdout);
+                write!(w, "{}|", typ).unwrap();
+                match v {
+                    Value::U32(v) | Value::V32(v) => writeln!(w, "{}", v),
+                    Value::I32(v) | Value::Z32(v) => writeln!(w, "{}", v),
+                    Value::U64(v) | Value::V64(v) => writeln!(w, "{}", v),
+                    Value::I64(v) | Value::Z64(v) => writeln!(w, "{}", v),
+                    Value::F32(v) => writeln!(w, "{}", v),
+                    Value::F64(v) => writeln!(w, "{}", v),
+                    Value::DateTime(v) => writeln!(w, "{}", v),
+                    Value::Duration(v) => {
+                        let v = v.as_secs_f64();
+                        if v.fract() == 0. {
+                            writeln!(w, "{}.s", v)
+                        } else {
+                            writeln!(w, "{}s", v)
+                        }
+                    }
+                    Value::String(s) => writeln!(w, "{}", s),
+                    Value::Bytes(b) => writeln!(w, "{}", base64::encode(&*b)),
+                    Value::True => writeln!(w, "true"),
+                    Value::False => writeln!(w, "false"),
+                    Value::Null => writeln!(w, "null"),
+                    Value::Ok => writeln!(w, "ok"),
+                    v@ Value::Error(_) => writeln!(w, "{}", v),
+                    v@ Value::Array(_) => writeln!(w, "{}", v),
+                }.unwrap()
             }
         }
     }

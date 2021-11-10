@@ -9,7 +9,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Val, Value, WriteRequest},
+    publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest},
     resolver::Auth,
     utils,
 };
@@ -18,8 +18,7 @@ use std::{collections::HashMap, convert::From, sync::Arc, time::Duration};
 use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
-    task,
-    signal,
+    signal, task,
 };
 
 macro_rules! tryc {
@@ -124,17 +123,24 @@ pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Aut
                     }
                 }
             } else {
-                let mut m = utils::splitn_escaped(buf.as_str().trim(), 2, '\\', '|');
+                let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
                 let path = tryc!(
                     "missing path",
                     m.next().ok_or_else(|| anyhow!("missing path"))
                 );
+                let typ = {
+                    let v = tryc!(
+                        "missing type",
+                        m.next().ok_or_else(|| anyhow!("malformed line"))
+                    );
+                    tryc!("parse type", v.parse::<Typ>())
+                };
                 let val = {
                     let v = tryc!(
                         "missing value",
                         m.next().ok_or_else(|| anyhow!("malformed data"))
                     );
-                    tryc!("parse val", v.parse::<Value>())
+                    tryc!("parse val", typ.parse(v))
                 };
                 match by_path.get(path) {
                     Some(p) => {

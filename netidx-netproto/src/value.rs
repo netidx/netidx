@@ -66,6 +66,46 @@ static TYPES: [Typ; 18] = [
 ];
 
 impl Typ {
+    pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
+        match self {
+            Typ::U32 => Ok(Value::U32(s.parse::<u32>()?)),
+            Typ::V32 => Ok(Value::V32(s.parse::<u32>()?)),
+            Typ::I32 => Ok(Value::I32(s.parse::<i32>()?)),
+            Typ::Z32 => Ok(Value::Z32(s.parse::<i32>()?)),
+            Typ::U64 => Ok(Value::U64(s.parse::<u64>()?)),
+            Typ::V64 => Ok(Value::V64(s.parse::<u64>()?)),
+            Typ::I64 => Ok(Value::I64(s.parse::<i64>()?)),
+            Typ::Z64 => Ok(Value::Z64(s.parse::<i64>()?)),
+            Typ::F32 => Ok(Value::F32(s.parse::<f32>()?)),
+            Typ::F64 => Ok(Value::F64(s.parse::<f64>()?)),
+            Typ::DateTime => Ok(Value::DateTime(DateTime::from_str(s)?)),
+            Typ::Duration => {
+                let mut tmp = String::from("duration:");
+                tmp.push_str(s);
+                Ok(tmp.parse::<Value>()?)
+            }
+            Typ::Bool => match s.parse::<bool>()? {
+                true => Ok(Value::True),
+                false => Ok(Value::False),
+            }
+            Typ::String => Ok(Value::String(Chars::from(String::from(s)))),
+            Typ::Bytes => {
+                let mut tmp = String::from("bytes:");
+                tmp.push_str(s);
+                Ok(tmp.parse::<Value>()?)
+            }
+            Typ::Result => Ok(s.parse::<Value>()?),
+            Typ::Array => Ok(s.parse::<Value>()?),
+            Typ::Null => {
+                if s.trim() == "null" {
+                    Ok(Value::Null)
+                } else {
+                    bail!("expected null")
+                }
+            }
+        }
+    }
+    
     pub fn name(&self) -> &'static str {
         match self {
             Typ::U32 => "u32",
