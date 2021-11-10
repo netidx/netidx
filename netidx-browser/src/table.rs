@@ -353,6 +353,7 @@ impl RaeifiedTable {
             column.add_attribute(&cell, "text", 0);
             column.set_sort_column_id(0);
             column.set_sizing(TreeViewColumnSizing::Fixed);
+            column.set_resizable(true);
             column
         });
         for col in 0..ncols {
@@ -387,6 +388,7 @@ impl RaeifiedTable {
             });
             column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
+            column.set_resizable(true);
             t.view().append_column(&column);
         }
         t.store().connect_sort_column_changed(clone!(@weak t => move |_| {
@@ -608,8 +610,7 @@ impl RaeifiedTable {
             let v = Value::from(String::from(&*path));
             let ev = vm::Event::User(LocalEvent::Event(v));
             self.0.on_select.borrow_mut().update(&mut self.0.ctx.borrow_mut(), &ev);
-        }
-        self.view().columns_autosize();
+        } 
     }
 
     pub(super) fn update_subscriptions(&self) {
@@ -764,7 +765,6 @@ impl RaeifiedTable {
                         }
                         start.next();
                     }
-                    t.view().columns_autosize();
                     Continue(false)
                 }
             }
