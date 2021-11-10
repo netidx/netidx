@@ -21,6 +21,7 @@ use std::{
     io::Write,
     str::FromStr,
     time::{Duration, Instant},
+    fmt,
 };
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -94,6 +95,14 @@ impl Write for BytesWriter<'_> {
     }
 }
 
+struct WVal<'a>(&'a Value);
+
+impl<'a> fmt::Display for WVal<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt_naked(f)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Out<'a> {
     path: &'a str,
@@ -115,31 +124,7 @@ impl<'a> Out<'a> {
                 let typ = Typ::get(v);
                 let w = &mut BytesWriter(to_stdout);
                 write!(w, "{}|", typ).unwrap();
-                match v {
-                    Value::U32(v) | Value::V32(v) => writeln!(w, "{}", v),
-                    Value::I32(v) | Value::Z32(v) => writeln!(w, "{}", v),
-                    Value::U64(v) | Value::V64(v) => writeln!(w, "{}", v),
-                    Value::I64(v) | Value::Z64(v) => writeln!(w, "{}", v),
-                    Value::F32(v) => writeln!(w, "{}", v),
-                    Value::F64(v) => writeln!(w, "{}", v),
-                    Value::DateTime(v) => writeln!(w, "{}", v),
-                    Value::Duration(v) => {
-                        let v = v.as_secs_f64();
-                        if v.fract() == 0. {
-                            writeln!(w, "{}.s", v)
-                        } else {
-                            writeln!(w, "{}s", v)
-                        }
-                    }
-                    Value::String(s) => writeln!(w, "{}", s),
-                    Value::Bytes(b) => writeln!(w, "{}", base64::encode(&*b)),
-                    Value::True => writeln!(w, "true"),
-                    Value::False => writeln!(w, "false"),
-                    Value::Null => writeln!(w, "null"),
-                    Value::Ok => writeln!(w, "ok"),
-                    v@ Value::Error(_) => writeln!(w, "{}", v),
-                    v@ Value::Array(_) => writeln!(w, "{}", v),
-                }.unwrap()
+                writeln!(w, "{}", WVal(v)).unwrap()
             }
         }
     }

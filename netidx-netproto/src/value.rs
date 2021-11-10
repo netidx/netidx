@@ -866,6 +866,34 @@ pub trait FromValue {
 }
 
 impl Value {
+    pub fn fmt_naked(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::U32(v) | Value::V32(v) => writeln!(f, "{}", v),
+            Value::I32(v) | Value::Z32(v) => writeln!(f, "{}", v),
+            Value::U64(v) | Value::V64(v) => writeln!(f, "{}", v),
+            Value::I64(v) | Value::Z64(v) => writeln!(f, "{}", v),
+            Value::F32(v) => writeln!(f, "{}", v),
+            Value::F64(v) => writeln!(f, "{}", v),
+            Value::DateTime(v) => writeln!(f, "{}", v),
+            Value::Duration(v) => {
+                let v = v.as_secs_f64();
+                if v.fract() == 0. {
+                    writeln!(f, "{}.s", v)
+                } else {
+                    writeln!(f, "{}s", v)
+                }
+            }
+            Value::String(s) => writeln!(f, "{}", s),
+            Value::Bytes(b) => writeln!(f, "{}", base64::encode(&*b)),
+            Value::True => writeln!(f, "true"),
+            Value::False => writeln!(f, "false"),
+            Value::Null => writeln!(f, "null"),
+            Value::Ok => writeln!(f, "ok"),
+            v@ Value::Error(_) => writeln!(f, "{}", v),
+            v@ Value::Array(_) => writeln!(f, "{}", v),
+        }
+    }
+
     pub fn fmt_notyp(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_ext(f, &value_parser::VAL_ESC, false)
     }

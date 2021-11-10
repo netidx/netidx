@@ -38,7 +38,7 @@ struct WVal<'a>(&'a Value);
 
 impl<'a> fmt::Display for WVal<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt_notyp(f)
+        self.0.fmt_naked(f)
     }
 }
 
