@@ -287,13 +287,14 @@ impl<C: Ctx, E> Node<C, E> {
                     })
                     .collect();
                 match ctx.functions.get(function).map(Arc::clone) {
-                    None => Node::Error(
-                        spec.clone(),
-                        Value::Error(Chars::from(format!(
+                    None => {
+                        let e = Value::Error(Chars::from(format!(
                             "unknown function {}",
                             function
-                        ))),
-                    ),
+                        )));
+                        ctx.dbg_ctx.add_event(spec.id, e.clone());
+                        Node::Error(spec.clone(), e)
+                    }
                     Some(init) => {
                         let function = init(ctx, &args, scope, top_id);
                         if let Some(v) = function.current() {

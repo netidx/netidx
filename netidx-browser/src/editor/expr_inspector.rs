@@ -3,6 +3,7 @@ use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
+use sourceview4 as sv;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -17,38 +18,56 @@ fn add_watch(
     ctx: &BSCtx,
     store: &gtk::TreeStore,
     iter: &gtk::TreeIter,
-    id: expr::ExprId,
+    log: &gtk::ListStore,
+    expr: expr::Expr,
 ) {
+    let id = expr.id;
     let watch: Arc<dyn Fn(&Value)> = {
         let store = store.clone();
         let iter = iter.clone();
-        Arc::new(move |v: &Value| store.set_value(&iter, 1, &format!("{}", v).to_value()))
+        let log = log.clone();
+        Arc::new(move |v: &Value| {
+            store.set_value(&iter, 1, &format!("{}", v).to_value());
+            let i = log.append();
+            log.set_value(&i, 0, &format!("{}", expr).to_value());
+            log.set_value(&i, 1, &format!("{}", v).to_value());
+        })
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);
     store.set_value(&iter, 2, &ExprWrap(watch).to_value());
 }
 
-struct CallTree {
-    root: gtk::ScrolledWindow,
-    store: gtk::TreeStore,
+struct DataFlow {
+    call_root: gtk::ScrolledWindow,
+    call_store: gtk::TreeStore,
+    event_root: gtk::ScrolledWindow,
+    event_store: gtk::ListStore,
     ctx: BSCtx,
 }
 
-impl CallTree {
+impl DataFlow {
     fn new(ctx: BSCtx) -> Self {
-        let root =
+        let call_root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.set_property_expand(false);
-        let store = gtk::TreeStore::new(&[
+        call_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        call_root.set_property_expand(false);
+        let event_root =
+            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        event_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        event_root.set_property_expand(false);
+        let call_store = gtk::TreeStore::new(&[
             String::static_type(),
             String::static_type(),
             ExprWrap::static_type(),
         ]);
-        let view = gtk::TreeView::new();
-        root.add(&view);
+        let event_store =
+            gtk::ListStore::new(&[String::static_type(), String::static_type()]);
+        let call_view = gtk::TreeView::new();
+        let event_view = gtk::TreeView::new();
+        call_root.add(&call_view);
+        event_root.add(&event_view);
         for (i, name) in ["kind", "current"].iter().enumerate() {
-            view.append_column(&{
+            call_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
                 column.pack_start(&cell, true);
@@ -57,26 +76,46 @@ impl CallTree {
                 column
             });
         }
-        view.set_model(Some(&store));
-        view.set_reorderable(false);
-        view.set_enable_tree_lines(true);
-        CallTree { root, store, ctx }
+        for (i, name) in ["expr", "value"].iter().enumerate() {
+            event_view.append_column(&{
+                let column = gtk::TreeViewColumn::new();
+                let cell = gtk::CellRendererText::new();
+                column.pack_start(&cell, true);
+                column.set_title(name);
+                column.add_attribute(&cell, "text", i as i32);
+                column
+            });
+        }
+        call_view.set_model(Some(&call_store));
+        call_view.set_reorderable(false);
+        call_view.set_enable_tree_lines(true);
+        DataFlow { call_root, call_store, event_root, event_store, ctx }
     }
 
     fn clear(&self) {
-        self.store.clear()
+        self.call_store.clear();
+        self.event_store.clear();
     }
 
     fn display_expr(&self, parent: Option<&gtk::TreeIter>, s: &expr::Expr) {
-        let iter = self.store.insert_before(parent, None);
+        let iter = self.call_store.insert_before(parent, None);
         match s {
             expr::Expr { kind: expr::ExprKind::Constant(v), .. } => {
-                self.store.set_value(&iter, 0, &"constant".to_value());
-                self.store.set_value(&iter, 1, &format!("{}", v).to_value())
+                self.call_store.set_value(&iter, 0, &"constant".to_value());
+                self.call_store.set_value(&iter, 1, &format!("{}", v).to_value());
+                let i = self.event_store.append();
+                self.event_store.set_value(&i, 0, &format!("{}", s).to_value());
+                self.event_store.set_value(&i, 1, &format!("{}", v).to_value());
             }
-            expr::Expr { kind: expr::ExprKind::Apply { args, function }, id } => {
-                self.store.set_value(&iter, 0, &function.to_value());
-                add_watch(&self.ctx, &self.store, &iter, *id);
+            expr::Expr { kind: expr::ExprKind::Apply { args, function }, .. } => {
+                self.call_store.set_value(&iter, 0, &function.to_value());
+                add_watch(
+                    &self.ctx,
+                    &self.call_store,
+                    &iter,
+                    &self.event_store,
+                    s.clone(),
+                );
                 for s in args {
                     self.display_expr(Some(&iter), s)
                 }
@@ -122,23 +161,25 @@ impl ErrorDisplay {
 
 struct Tools {
     root: gtk::Notebook,
-    call_tree: CallTree,
+    data_flow: DataFlow,
     error: ErrorDisplay,
 }
 
 impl Tools {
     fn new(ctx: BSCtx) -> Self {
         let root = gtk::Notebook::new();
-        let call_tree = CallTree::new(ctx.clone());
+        let data_flow = DataFlow::new(ctx.clone());
         let call_tree_lbl = gtk::Label::new(Some("Call Tree"));
-        root.append_page(&call_tree.root, Some(&call_tree_lbl));
+        let event_log_lbl = gtk::Label::new(Some("Event Log"));
+        root.append_page(&data_flow.call_root, Some(&call_tree_lbl));
+        root.append_page(&data_flow.event_root, Some(&event_log_lbl));
         let error = ErrorDisplay::new();
         root.append_page(&error.root, Some(&error.error_lbl));
-        Tools { root, call_tree, error }
+        Tools { root, data_flow, error }
     }
 
     fn display(&self, e: &expr::Expr) {
-        self.call_tree.display(e);
+        self.data_flow.display(e);
         self.error.clear()
     }
 
@@ -166,7 +207,11 @@ impl ExprEditor {
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root.set_property_expand(true);
-        let view = gtk::TextView::new();
+        let view = sv::ViewBuilder::new()
+            .insert_spaces_instead_of_tabs(true)
+            .show_line_numbers(true)
+            .auto_indent(true)
+            .build();
         view.set_property_expand(true);
         root.add(&view);
         if let Some(buf) = view.get_buffer() {
