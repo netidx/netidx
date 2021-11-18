@@ -53,7 +53,8 @@ use triomphe::Arc as TArc;
 type StreamsInner<T> = Arc<Vec<(T, ChanWrap<Pooled<Vec<(SubId, Event)>>>)>>;
 
 lazy_static! {
-    static ref HCSTREAMS: Mutex<HashSet<StreamsInner<ChanId>>> = Mutex::new(HashSet::new());
+    static ref HCSTREAMS: Mutex<HashSet<StreamsInner<ChanId>>> =
+        Mutex::new(HashSet::new());
     static ref HCDVSTREAMS: Mutex<HashSet<StreamsInner<UpdatesFlags>>> =
         Mutex::new(HashSet::new());
     static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);
@@ -164,7 +165,11 @@ bitflags! {
 bitflags! {
     pub struct UpdatesFlags: u32 {
         /// if set, then an immediate update will be sent consisting
-        /// of the last value received from the publisher.
+        /// of the last value received from the publisher. If you
+        /// reregister the same channel the last will be sent to that
+        /// channel again, even though other events will not be sent
+        /// twice. If you don't want this behavior you must also set
+        /// NO_SPURIOUS.
         const BEGIN_WITH_LAST      = 0x01;
 
         /// If set then the subscriber will stop storing the last
@@ -174,6 +179,11 @@ bitflags! {
         /// subscription. This improves performance at the expense of
         /// flexibility.
         const STOP_COLLECTING_LAST = 0x02;
+
+        /// If BEGIN_WITH_LAST is set, and you reregister the same
+        /// channel, do not send the last again to that
+        /// channel.
+        const NO_SPURIOUS          = 0x04;
     }
 }
 
@@ -1550,7 +1560,9 @@ async fn connection(
                                             by_receiver.remove(&c);
                                         }
                                     }
-                                    if flags.contains(UpdatesFlags::BEGIN_WITH_LAST) {
+                                    if flags.contains(UpdatesFlags::BEGIN_WITH_LAST)
+                                        && !(already_have && flags.contains(UpdatesFlags::NO_SPURIOUS))
+                                    {
                                         if let Some(last) = &sub.last {
                                             let m = last.lock().clone();
                                             let mut b = BATCHES.take();

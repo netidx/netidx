@@ -1471,7 +1471,7 @@ impl Load {
                 }
                 self.path = Some(path.clone());
                 self.cur = Some(ctx.user.durable_subscribe(
-                    UpdatesFlags::BEGIN_WITH_LAST,
+                    UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::NO_SPURIOUS,
                     path,
                     self.top_id,
                 ));

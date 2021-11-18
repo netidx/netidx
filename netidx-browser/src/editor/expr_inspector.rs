@@ -14,6 +14,13 @@ use std::{
 #[gboxed(type_name = "NetidxExprInspectorWrap")]
 struct ExprWrap(Arc<dyn Fn(&Value)>);
 
+fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, v: &Value) {
+    let i = log.append();
+    log.set_value(&i, 0, &format!("{}", chrono::Local::now()).to_value());
+    log.set_value(&i, 1, &format!("{}", expr).to_value());
+    log.set_value(&i, 2, &format!("{}", v).to_value());
+}
+
 fn add_watch(
     ctx: &BSCtx,
     store: &gtk::TreeStore,
@@ -28,9 +35,7 @@ fn add_watch(
         let log = log.clone();
         Arc::new(move |v: &Value| {
             store.set_value(&iter, 1, &format!("{}", v).to_value());
-            let i = log.append();
-            log.set_value(&i, 0, &format!("{}", expr).to_value());
-            log.set_value(&i, 1, &format!("{}", v).to_value());
+            log_expr_val(&log, &expr, v)
         })
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);
@@ -60,8 +65,11 @@ impl DataFlow {
             String::static_type(),
             ExprWrap::static_type(),
         ]);
-        let event_store =
-            gtk::ListStore::new(&[String::static_type(), String::static_type()]);
+        let event_store = gtk::ListStore::new(&[
+            String::static_type(),
+            String::static_type(),
+            String::static_type(),
+        ]);
         let call_view = gtk::TreeView::new();
         let event_view = gtk::TreeView::new();
         call_root.add(&call_view);
@@ -76,7 +84,7 @@ impl DataFlow {
                 column
             });
         }
-        for (i, name) in ["expr", "value"].iter().enumerate() {
+        for (i, name) in ["timestamp", "expr", "value"].iter().enumerate() {
             event_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
@@ -89,6 +97,8 @@ impl DataFlow {
         call_view.set_model(Some(&call_store));
         call_view.set_reorderable(false);
         call_view.set_enable_tree_lines(true);
+        event_view.set_model(Some(&event_store));
+        event_view.set_reorderable(false);
         DataFlow { call_root, call_store, event_root, event_store, ctx }
     }
 
@@ -103,9 +113,7 @@ impl DataFlow {
             expr::Expr { kind: expr::ExprKind::Constant(v), .. } => {
                 self.call_store.set_value(&iter, 0, &"constant".to_value());
                 self.call_store.set_value(&iter, 1, &format!("{}", v).to_value());
-                let i = self.event_store.append();
-                self.event_store.set_value(&i, 0, &format!("{}", s).to_value());
-                self.event_store.set_value(&i, 1, &format!("{}", v).to_value());
+                log_expr_val(&self.event_store, s, v);
             }
             expr::Expr { kind: expr::ExprKind::Apply { args, function }, .. } => {
                 self.call_store.set_value(&iter, 0, &function.to_value());
