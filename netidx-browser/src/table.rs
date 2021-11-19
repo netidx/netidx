@@ -610,7 +610,7 @@ impl RaeifiedTable {
             let v = Value::from(String::from(&*path));
             let ev = vm::Event::User(LocalEvent::Event(v));
             self.0.on_select.borrow_mut().update(&mut self.0.ctx.borrow_mut(), &ev);
-        } 
+        }
     }
 
     pub(super) fn update_subscriptions(&self) {

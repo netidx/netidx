@@ -1440,7 +1440,9 @@ impl<C: Ctx, E> Apply<C, E> for Load {
                     }
                 } else {
                     self.cur.as_ref().and_then(|dv| match event {
-                        Event::Variable(_, _, _) | Event::Rpc(_, _) | Event::User(_) => None,
+                        Event::Variable(_, _, _) | Event::Rpc(_, _) | Event::User(_) => {
+                            None
+                        }
                         Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
                         Event::Netidx(_, _) => None,
                     })
@@ -1471,7 +1473,7 @@ impl Load {
                 }
                 self.path = Some(path.clone());
                 self.cur = Some(ctx.user.durable_subscribe(
-                    UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::NO_SPURIOUS,
+                    UpdatesFlags::BEGIN_WITH_LAST,
                     path,
                     self.top_id,
                 ));
