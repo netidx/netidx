@@ -19,16 +19,16 @@ use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
 
 pub static VAL_ESC: [char; 2] = ['\\', '"'];
 
-pub fn escaped_string<I>(esc: &'static [char]) -> impl Parser<I, Output = String>
+pub fn escaped_string<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     recognize(escaped(
-        take_while1(move |c| !esc.contains(&c)),
+        take_while1(move |c| !VAL_ESC.contains(&c)),
         '\\',
-        one_of(esc.iter().copied()),
+        one_of(VAL_ESC.iter().copied()),
     ))
     .map(|s| match utils::unescape(&s, '\\') {
         Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
@@ -36,13 +36,13 @@ where
     })
 }
 
-fn quoted<I>(esc: &'static [char]) -> impl Parser<I, Output = String>
+fn quoted<I>() -> impl Parser<I, Output = String>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces().with(between(token('"'), token('"'), escaped_string(esc)))
+    spaces().with(between(token('"'), token('"'), escaped_string()))
 }
 
 fn uint<I>() -> impl Parser<I, Output = String>
@@ -124,10 +124,10 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    not_followed_by(none_of([' ', '\n', '\t', ';', ')', ',', ']', '}', '"']))
+    not_followed_by(none_of([' ', '\n', '\t', ')', ',', ']', '"']))
 }
 
-fn value_<I>(esc: &'static [char]) -> impl Parser<I, Output = Value>
+fn value_<I>() -> impl Parser<I, Output = Value>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -135,10 +135,10 @@ where
 {
     spaces().with(choice((
         attempt(
-            between(token('['), token(']'), sep_by(value(esc), token(',')))
+            between(token('['), token(']'), sep_by(value(), token(',')))
                 .map(|vals: Vec<Value>| Value::Array(Arc::from(vals))),
         ),
-        attempt(quoted(esc)).map(|s| Value::String(Chars::from(s))),
+        attempt(quoted()).map(|s| Value::String(Chars::from(s))),
         attempt(from_str(flt()).map(|v| Value::F64(v))),
         attempt(from_str(int()).map(|v| Value::I64(v))),
         attempt(string("true").skip(close_expr()).map(|_| Value::True)),
@@ -162,11 +162,11 @@ where
         attempt(string("ok").skip(close_expr()).map(|_| Value::Ok)),
         attempt(
             constant("error")
-                .with(quoted(esc))
+                .with(quoted())
                 .map(|s| dbg!(Value::Error(Chars::from(s)))),
         ),
         attempt(
-            constant("datetime").with(from_str(quoted(esc))).map(|d| Value::DateTime(d)),
+            constant("datetime").with(from_str(quoted())).map(|d| Value::DateTime(d)),
         ),
         attempt(
             constant("duration")
@@ -191,15 +191,15 @@ where
 }
 
 parser! {
-    pub fn value[I](escaped: &'static [char])(I) -> Value
+    pub fn value[I]()(I) -> Value
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        value_(escaped)
+        value_()
     }
 }
 
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
-    value(&VAL_ESC)
+    value()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))

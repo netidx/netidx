@@ -1,5 +1,5 @@
 use crate::parser;
-use netidx::{subscriber::Value, utils};
+use netidx::subscriber::Value;
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -52,57 +52,18 @@ impl ExprKind {
                     buf.push_str(&*tmp);
                     Ok(())
                 } else {
-                    if function == "string_concat" {
-                        buf.push_str(&*tmp);
-                        Ok(())
-                    } else if function == "load_var" && args.len() == 1 && args[0].is_fn()
-                    {
-                        buf.push_str(&*tmp);
-                        Ok(())
-                    } else if (function == "store_var" || function == "local_store_var")
-                        && args.len() == 2
-                        && args[0].is_fn()
-                    {
-                        match &args[0].kind {
-                            ExprKind::Constant(Value::String(c)) => {
-                                push_indent(indent, buf);
-                                let local = if function == "local_store_var" {
-                                    "local "
-                                } else {
-                                    ""
-                                };
-                                writeln!(buf, "{}{} <-", local, c)?;
-                                args[1].kind.pretty_print(indent + 2, limit, buf)
-                            }
-                            _ => unreachable!(),
+                    push_indent(indent, buf);
+                    writeln!(buf, "{}(", function)?;
+                    for i in 0..args.len() {
+                        args[i].kind.pretty_print(indent + 2, limit, buf)?;
+                        if i < args.len() - 1 {
+                            writeln!(buf, ", ")?;
+                        } else {
+                            writeln!(buf, "")?;
                         }
-                    } else if function == "do" {
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "{")?;
-                        for i in 0..args.len() {
-                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
-                            if i < args.len() - 1 {
-                                writeln!(buf, ";")?
-                            } else {
-                                writeln!(buf, "")?
-                            }
-                        }
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "}")
-                    } else {
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}(", function)?;
-                        for i in 0..args.len() {
-                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
-                            if i < args.len() - 1 {
-                                writeln!(buf, ", ")?;
-                            } else {
-                                writeln!(buf, "")?;
-                            }
-                        }
-                        push_indent(indent, buf);
-                        writeln!(buf, ")")
                     }
+                    push_indent(indent, buf);
+                    writeln!(buf, ")")
                 }
             }
         }
@@ -112,67 +73,17 @@ impl ExprKind {
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
+            ExprKind::Constant(v) => v.fmt_ext(f, true),
             ExprKind::Apply { args, function } => {
-                if function == "string_concat" && args.len() > 0 {
-                    // interpolation
-                    write!(f, "\"")?;
-                    for s in args {
-                        match &s.kind {
-                            ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
-                                write!(
-                                    f,
-                                    "{}",
-                                    utils::escape(&*s, '\\', &parser::BSCRIPT_ESC)
-                                )?;
-                            }
-                            s => {
-                                write!(f, "[{}]", s)?;
-                            }
-                        }
-                    }
-                    write!(f, "\"")
-                } else if function == "load_var" && args.len() == 1 && args[0].is_fn() {
-                    // constant variable load
-                    match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
-                        _ => unreachable!(),
-                    }
-                } else if (function == "store_var" || function == "local_store_var")
-                    && args.len() == 2
-                    && args[0].is_fn()
-                {
-                    // constant variable store
-                    match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => {
-                            let local =
-                                if function == "local_store_var" { "local " } else { "" };
-                            write!(f, "{}{} <- {}", local, c, &args[1])
-                        }
-                        _ => unreachable!(),
-                    }
-                } else if function == "do" {
-                    // do block
-                    write!(f, "{}", '{')?;
-                    for i in 0..args.len() {
-                        if i < args.len() - 1 {
-                            write!(f, "{};", &args[i])?
-                        } else {
-                            write!(f, "{}", &args[i])?
-                        }
-                    }
-                    write!(f, "{}", '}')
-                } else {
-                    // it's a normal function
-                    write!(f, "{}(", function)?;
-                    for i in 0..args.len() {
+                write!(f, "{}(", function)?;
+                for i in 0..args.len() {
+                    if i < args.len() - 1 {
+                        write!(f, "{}, ", &args[i])?;
+                    } else {
                         write!(f, "{}", &args[i])?;
-                        if i < args.len() - 1 {
-                            write!(f, ", ")?;
-                        }
                     }
-                    write!(f, ")")
                 }
+                write!(f, ")")
             }
         }
     }
@@ -388,31 +299,6 @@ mod tests {
         })
     }
 
-    fn acc_strings(args: &Vec<Expr>) -> Vec<Expr> {
-        let mut v: Vec<Expr> = Vec::new();
-        for s in args {
-            let s = s.clone();
-            match s.kind {
-                ExprKind::Constant(Value::String(ref c1)) => match v.last_mut() {
-                    None => v.push(s),
-                    Some(e0) => match &mut e0.kind {
-                        ExprKind::Constant(Value::String(c0))
-                            if c1.len() > 0 && c0.len() > 0 =>
-                        {
-                            let mut st = String::new();
-                            st.push_str(&*c0);
-                            st.push_str(&*c1);
-                            *c0 = Chars::from(st);
-                        }
-                        _ => v.push(s),
-                    },
-                },
-                _ => v.push(s),
-            }
-        }
-        v
-    }
-
     fn check(s0: &Expr, s1: &Expr) -> bool {
         match (&s0.kind, &s1.kind) {
             (ExprKind::Constant(v0), ExprKind::Constant(v1)) => match (v0, v1) {
@@ -425,20 +311,6 @@ mod tests {
                 (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
                 (v0, v1) => dbg!(dbg!(v0) == dbg!(v1)),
             },
-            (
-                ExprKind::Apply { args: srs0, function: fn0 },
-                ExprKind::Constant(Value::String(c1)),
-            ) if fn0 == "string_concat" => match &acc_strings(srs0)[..] {
-                [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => c0 == c1,
-                _ => false,
-            },
-            (
-                ExprKind::Apply { args: srs0, function: fn0 },
-                ExprKind::Apply { args: srs1, function: fn1 },
-            ) if fn0 == fn1 && fn0.as_str() == "string_concat" => {
-                let srs0 = acc_strings(srs0);
-                srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
-            }
             (
                 ExprKind::Apply { args: srs0, function: f0 },
                 ExprKind::Apply { args: srs1, function: f1 },

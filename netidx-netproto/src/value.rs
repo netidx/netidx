@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use crate::value_parser;
+use crate::value_parser::{self, VAL_ESC};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -87,7 +87,7 @@ impl Typ {
             Typ::Bool => match s.parse::<bool>()? {
                 true => Ok(Value::True),
                 false => Ok(Value::False),
-            }
+            },
             Typ::String => Ok(Value::String(Chars::from(String::from(s)))),
             Typ::Bytes => {
                 let mut tmp = String::from("bytes:");
@@ -105,7 +105,7 @@ impl Typ {
             }
         }
     }
-    
+
     pub fn name(&self) -> &'static str {
         match self {
             Typ::U32 => "u32",
@@ -427,7 +427,7 @@ impl PartialOrd for Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_ext(f, &value_parser::VAL_ESC, true)
+        self.fmt_ext(f, true)
     }
 }
 
@@ -889,21 +889,16 @@ impl Value {
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
             Value::Ok => write!(f, "ok"),
-            v@ Value::Error(_) => write!(f, "{}", v),
-            v@ Value::Array(_) => write!(f, "{}", v),
+            v @ Value::Error(_) => write!(f, "{}", v),
+            v @ Value::Array(_) => write!(f, "{}", v),
         }
     }
 
     pub fn fmt_notyp(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_ext(f, &value_parser::VAL_ESC, false)
+        self.fmt_ext(f, false)
     }
 
-    pub fn fmt_ext(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        esc: &[char],
-        types: bool,
-    ) -> fmt::Result {
+    pub fn fmt_ext(&self, f: &mut fmt::Formatter<'_>, types: bool) -> fmt::Result {
         match self {
             Value::U32(v) => {
                 if types {
@@ -994,7 +989,7 @@ impl Value {
                 }
             }
             Value::String(s) => {
-                write!(f, r#""{}""#, utils::escape(&*s, '\\', esc))
+                write!(f, r#""{}""#, utils::escape(&*s, '\\', &VAL_ESC))
             }
             Value::Bytes(b) => {
                 let pfx = if types { "bytes:" } else { "" };
@@ -1005,16 +1000,16 @@ impl Value {
             Value::Null => write!(f, "null"),
             Value::Ok => write!(f, "ok"),
             Value::Error(v) => {
-                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', esc))
+                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', &VAL_ESC))
             }
             Value::Array(elts) => {
                 write!(f, "[")?;
                 for (i, v) in elts.iter().enumerate() {
                     if i < elts.len() - 1 {
-                        v.fmt_ext(f, esc, types)?;
+                        v.fmt_ext(f, types)?;
                         write!(f, ", ")?
                     } else {
-                        v.fmt_ext(f, esc, types)?
+                        v.fmt_ext(f, types)?
                     }
                 }
                 write!(f, "]")
