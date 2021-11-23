@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -39,7 +39,7 @@ netidx-archive = { path = "../netidx-archive", version = "0.10", default_feature
 netidx-core = { path = "../netidx-core", version = "0.10" }
 netidx = { path = "../netidx", version = "0.10" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.10", default_features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.10" }
+netidx-bscript = { path = "../netidx-bscript", version = "^0.10.1" }
 parking_lot = "0.11"
 serde = "1"
 serde_derive = "1"

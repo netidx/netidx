@@ -1282,8 +1282,8 @@ impl<C: Ctx, E> Register<C, E> for Set {
                 Box::new(t)
             })
         };
-        ctx.functions.insert("global_set".into(), f(false));
-        ctx.functions.insert("set".into(), f(true));
+        ctx.functions.insert("set".into(), f(false));
+        ctx.functions.insert("let".into(), f(true));
     }
 }
 
@@ -1291,7 +1291,7 @@ impl<C: Ctx, E> Apply<C, E> for Set {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Some(Value::Error(Chars::from(
-                "set(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
+                "set/let(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
             )))
         } else {
             None
