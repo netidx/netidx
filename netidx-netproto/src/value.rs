@@ -440,7 +440,7 @@ impl FromStr for Value {
 }
 
 macro_rules! apply_op {
-    ($self:expr, $rhs:expr, $id:expr, $op:tt, $($($pat:pat)|+ => $blk:block),+) => {
+    ($self:expr, $rhs:expr, $id:expr, $op:tt, $($pat:pat => $blk:block),+) => {
         match ($self, $rhs) {
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
                 Value::U32((Wrapping(l) $op Wrapping(r)).0)
@@ -553,7 +553,7 @@ macro_rules! apply_op {
             (n, Value::True) => n $op Value::U32(1),
             (Value::False, n) => Value::U32(0) $op n,
             (n, Value::False) => n $op Value::U32(0),
-            $($($pat)|+ => $blk),+
+            $($pat => $blk),+
         }
     }
 }

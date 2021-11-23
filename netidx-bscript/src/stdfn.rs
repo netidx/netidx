@@ -1256,7 +1256,7 @@ fn varname(invalid: &mut bool, name: Option<Value>) -> Option<Chars> {
     }
 }
 
-pub struct StoreVar {
+pub struct Set {
     queued: Vec<Value>,
     local: bool,
     scope: Path,
@@ -1264,11 +1264,11 @@ pub struct StoreVar {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for StoreVar {
+impl<C: Ctx, E> Register<C, E> for Set {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f = |local| -> InitFn<C, E> {
             Arc::new(move |ctx, from, scope, _| {
-                let mut t = StoreVar {
+                let mut t = Set {
                     queued: Vec::new(),
                     local,
                     scope,
@@ -1282,16 +1282,16 @@ impl<C: Ctx, E> Register<C, E> for StoreVar {
                 Box::new(t)
             })
         };
-        ctx.functions.insert("store_var".into(), f(false));
-        ctx.functions.insert("local_store_var".into(), f(true));
+        ctx.functions.insert("global_set".into(), f(false));
+        ctx.functions.insert("set".into(), f(true));
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for StoreVar {
+impl<C: Ctx, E> Apply<C, E> for Set {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Some(Value::Error(Chars::from(
-                "store_var(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
+                "set(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
             )))
         } else {
             None
@@ -1337,7 +1337,7 @@ impl<C: Ctx, E> Apply<C, E> for StoreVar {
     }
 }
 
-impl StoreVar {
+impl Set {
     fn queue_set(&mut self, v: Value) {
         self.queued.push(v)
     }
@@ -1493,7 +1493,7 @@ struct BoundVar {
     value: Value,
 }
 
-pub struct LoadVar {
+pub struct Get {
     scope: Path,
     name: Option<Chars>,
     var: Option<BoundVar>,
@@ -1501,24 +1501,24 @@ pub struct LoadVar {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for LoadVar {
+impl<C: Ctx, E> Register<C, E> for Get {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, scope, top_id| {
-            let mut t = LoadVar { scope, name: None, var: None, invalid: false, top_id };
+            let mut t = Get { scope, name: None, var: None, invalid: false, top_id };
             match from {
                 [name] => t.subscribe(ctx, name.current()),
                 _ => t.invalid = true,
             }
             Box::new(t)
         });
-        ctx.functions.insert("load_var".into(), f);
+        ctx.functions.insert("get".into(), f);
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for LoadVar {
+impl<C: Ctx, E> Apply<C, E> for Get {
     fn current(&self) -> Option<Value> {
         if self.invalid {
-            LoadVar::err()
+            Get::err()
         } else {
             self.var.as_ref().map(|bv| bv.value.clone())
         }
@@ -1541,7 +1541,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
                 };
                 if self.invalid {
                     if up {
-                        LoadVar::err()
+                        Get::err()
                     } else {
                         None
                     }
@@ -1580,7 +1580,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
                 }
                 self.invalid = true;
                 if up {
-                    LoadVar::err()
+                    Get::err()
                 } else {
                     None
                 }
@@ -1589,7 +1589,7 @@ impl<C: Ctx, E> Apply<C, E> for LoadVar {
     }
 }
 
-impl LoadVar {
+impl Get {
     fn err() -> Option<Value> {
         Some(Value::Error(Chars::from(
             "load_var(expr: variable name): expected 1 variable name as argument",

@@ -221,7 +221,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Isa::register(&mut t);
         stdfn::IsErr::register(&mut t);
         stdfn::Load::register(&mut t);
-        stdfn::LoadVar::register(&mut t);
+        stdfn::Get::register(&mut t);
         stdfn::Max::register(&mut t);
         stdfn::Mean::register(&mut t);
         stdfn::Min::register(&mut t);
@@ -232,7 +232,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Sample::register(&mut t);
         stdfn::StartsWith::register(&mut t);
         stdfn::Store::register(&mut t);
-        stdfn::StoreVar::register(&mut t);
+        stdfn::Set::register(&mut t);
         stdfn::StringConcat::register(&mut t);
         stdfn::StringJoin::register(&mut t);
         stdfn::StripPrefix::register(&mut t);

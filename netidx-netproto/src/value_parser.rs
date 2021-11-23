@@ -163,7 +163,7 @@ where
         attempt(
             constant("error")
                 .with(quoted())
-                .map(|s| dbg!(Value::Error(Chars::from(s)))),
+                .map(|s| Value::Error(Chars::from(s))),
         ),
         attempt(
             constant("datetime").with(from_str(quoted())).map(|d| Value::DateTime(d)),

@@ -1,8 +1,8 @@
 [package]
 name = "netidx"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 description = "Secure, fast, cross platform, discoverable, pub/sub messaging"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -23,8 +23,8 @@ libgssapi = { version = "0.4", default_features = false }
 winapi = { version = "0.3",  features = ["sspi", "winnt", "impl-default", "winerror", "winbase", "sysinfoapi", "timezoneapi", "ntsecapi"] }
 
 [dependencies]
-netidx-core = { version = "0.9", path = "../netidx-core" }
-netidx-netproto = { version = "0.9", path = "../netidx-netproto" }
+netidx-core = { version = "0.10", path = "../netidx-core" }
+netidx-netproto = { version = "0.10", path = "../netidx-netproto" }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"

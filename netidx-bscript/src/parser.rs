@@ -46,7 +46,7 @@ where
                 between(
                     spaces().with(token('(')),
                     spaces().with(token(')')),
-                    sep_by(expr(), spaces().with(token(','))),
+                    sep_by(expr(), attempt(spaces().with(token(',')))),
                 ),
             )
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn expr_parse() {
-        let s = r#"load(concat_path("foo", "bar", load_var("baz")))"#;
+        let s = "load(\n  concat_path(\"foo\", \"bar\", load_var(\"baz\"))\n)";
         assert_eq!(
             ExprKind::Apply {
                 args: vec![ExprKind::Apply {

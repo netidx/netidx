@@ -1,8 +1,8 @@
 [package]
 name = "netidx-netproto"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2018"
+edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 description = "netidx wire protocol"
@@ -13,7 +13,7 @@ license = "MIT"
 [dependencies]
 immutable-chunkmap = "1"
 combine = "4"
-netidx-core = { version = "0.9", path = "../netidx-core" }
+netidx-core = { version = "0.10", path = "../netidx-core" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
