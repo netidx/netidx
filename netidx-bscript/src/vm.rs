@@ -322,8 +322,7 @@ impl<C: Ctx, E> Node<C, E> {
 
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
-            Node::Error(_, v) => Some(v.clone()),
-            Node::Constant(_, _) => None,
+            Node::Error(_, _) | Node::Constant(_, _) => None,
             Node::Apply { spec, args, function } => {
                 let res = function.update(ctx, args, event);
                 if let Some(v) = &res {
