@@ -221,7 +221,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Isa::register(&mut t);
         stdfn::IsErr::register(&mut t);
         stdfn::Load::register(&mut t);
-        stdfn::LoadVar::register(&mut t);
+        stdfn::Get::register(&mut t);
         stdfn::Max::register(&mut t);
         stdfn::Mean::register(&mut t);
         stdfn::Min::register(&mut t);
@@ -232,7 +232,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Sample::register(&mut t);
         stdfn::StartsWith::register(&mut t);
         stdfn::Store::register(&mut t);
-        stdfn::StoreVar::register(&mut t);
+        stdfn::Set::register(&mut t);
         stdfn::StringConcat::register(&mut t);
         stdfn::StringJoin::register(&mut t);
         stdfn::StripPrefix::register(&mut t);
@@ -322,8 +322,7 @@ impl<C: Ctx, E> Node<C, E> {
 
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
-            Node::Error(_, v) => Some(v.clone()),
-            Node::Constant(_, _) => None,
+            Node::Error(_, _) | Node::Constant(_, _) => None,
             Node::Apply { spec, args, function } => {
                 let res = function.update(ctx, args, event);
                 if let Some(v) = &res {

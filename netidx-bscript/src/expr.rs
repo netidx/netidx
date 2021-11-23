@@ -55,19 +55,19 @@ impl ExprKind {
                     if function == "string_concat" {
                         buf.push_str(&*tmp);
                         Ok(())
-                    } else if function == "load_var" && args.len() == 1 && args[0].is_fn()
+                    } else if function == "get" && args.len() == 1 && args[0].is_fn()
                     {
                         buf.push_str(&*tmp);
                         Ok(())
-                    } else if (function == "store_var" || function == "local_store_var")
+                    } else if (function == "set" || function == "let")
                         && args.len() == 2
                         && args[0].is_fn()
                     {
                         match &args[0].kind {
                             ExprKind::Constant(Value::String(c)) => {
                                 push_indent(indent, buf);
-                                let local = if function == "local_store_var" {
-                                    "local "
+                                let local = if function == "let" {
+                                    "let "
                                 } else {
                                     ""
                                 };
@@ -132,13 +132,13 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == "load_var" && args.len() == 1 && args[0].is_fn() {
+                } else if function == "get" && args.len() == 1 && args[0].is_fn() {
                     // constant variable load
                     match &args[0].kind {
                         ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
                         _ => unreachable!(),
                     }
-                } else if (function == "store_var" || function == "local_store_var")
+                } else if (function == "set" || function == "let")
                     && args.len() == 2
                     && args[0].is_fn()
                 {
@@ -146,7 +146,7 @@ impl fmt::Display for ExprKind {
                     match &args[0].kind {
                         ExprKind::Constant(Value::String(c)) => {
                             let local =
-                                if function == "local_store_var" { "local " } else { "" };
+                                if function == "let" { "let " } else { "" };
                             write!(f, "{}{} <- {}", local, c, &args[1])
                         }
                         _ => unreachable!(),
@@ -368,10 +368,10 @@ mod tests {
             Just(String::from("navigate")),
             Just(String::from("confirm")),
             Just(String::from("load")),
-            Just(String::from("load_var")),
+            Just(String::from("get")),
             Just(String::from("store")),
-            Just(String::from("store_var")),
-            Just(String::from("local_store_var")),
+            Just(String::from("set")),
+            Just(String::from("let")),
         ]
     }
 

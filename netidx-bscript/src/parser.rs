@@ -147,14 +147,14 @@ where
         ),
         attempt(
             (
-                string("local"),
+                string("let"),
                 spaces().with(fname()),
                 spaces().with(string("<-")),
                 expr(),
             )
                 .map(|(_, var, _, e)| {
                     ExprKind::Apply {
-                        function: "local_store_var".into(),
+                        function: "let".into(),
                         args: vec![
                             ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
                             e,
@@ -165,7 +165,7 @@ where
         ),
         attempt((fname(), spaces().with(string("<-")), expr()).map(|(var, _, e)| {
             ExprKind::Apply {
-                function: "store_var".into(),
+                function: "set".into(),
                 args: vec![
                     ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
                     e,
@@ -177,7 +177,7 @@ where
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
         fname().skip(close_expr()).map(|var| {
             ExprKind::Apply {
-                function: "load_var".into(),
+                function: "get".into(),
                 args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],
             }
             .to_expr()
@@ -222,11 +222,11 @@ mod tests {
                 args: vec![
                     ExprKind::Constant(Value::from("/foo/")).to_expr(),
                     ExprKind::Apply {
-                        function: "load_var".into(),
+                        function: "get".into(),
                         args: vec![ExprKind::Apply {
                             args: vec![
                                 ExprKind::Apply {
-                                    function: "load_var".into(),
+                                    function: "get".into(),
                                     args: vec![
                                         ExprKind::Constant(Value::from("sid")).to_expr()
                                     ],
@@ -246,7 +246,7 @@ mod tests {
             .to_expr()],
         }
         .to_expr();
-        let s = r#"load("/foo/[load_var("[sid]_var")]/baz")"#;
+        let s = r#"load("/foo/[get("[sid]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#""[true]""#;
         let p = ExprKind::Apply {
@@ -255,7 +255,7 @@ mod tests {
         }
         .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
-        let s = r#"a(a(a(load_var("[true]"))))"#;
+        let s = r#"a(a(a(get("[true]"))))"#;
         let p = ExprKind::Apply {
             args: vec![ExprKind::Apply {
                 args: vec![ExprKind::Apply {
@@ -265,7 +265,7 @@ mod tests {
                             function: "string_concat".into(),
                         }
                         .to_expr()],
-                        function: "load_var".into(),
+                        function: "get".into(),
                     }
                     .to_expr()],
                     function: "a".into(),
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn expr_parse() {
-        let s = r#"load(concat_path("foo", "bar", baz)))"#;
+        let s = r#"load(concat_path("foo", "bar", baz))"#;
         assert_eq!(
             ExprKind::Apply {
                 args: vec![ExprKind::Apply {
@@ -294,7 +294,7 @@ mod tests {
                                 "baz"
                             )))
                             .to_expr()],
-                            function: "load_var".into(),
+                            function: "get".into(),
                         }
                         .to_expr()
                     ],
@@ -308,7 +308,7 @@ mod tests {
         );
         assert_eq!(
             ExprKind::Apply {
-                function: "load_var".into(),
+                function: "get".into(),
                 args: vec![
                     ExprKind::Constant(Value::String(Chars::from("sum"))).to_expr()
                 ]
