@@ -179,7 +179,7 @@ impl vm::Ctx for WidgetCtx {
         _ref_id: ExprId,
     ) -> Dval {
         let dv = self.backend.subscriber.durable_subscribe(path);
-        dv.updates(flags | UpdatesFlags::NO_SPURIOUS, self.backend.updates.clone());
+        dv.updates(flags, self.backend.updates.clone());
         dv
     }
 

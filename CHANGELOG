@@ -1,4 +1,4 @@
-* 0.10(.1)
+* 0.10.0-0.10.2
 
   - Add arrays to the value datatype. This has some pretty big
     implications,
@@ -22,16 +22,6 @@
       can talk to old subscribers as long as they don't use arrays. In
       case they do, the old subscriber should not crash, however it
       won't be able to read the array data.
-
-  - bscript has been simplified, string interpolation is removed, the
-    expression editor in the browser has been changed to use
-    gtksourceview, and adds an event log to it's tool box. The event
-    log will print a line for every event an expression received while
-    the expression editor was open, as well as when it received it.
-
-    The philosophy of bscript going forward will be to keep the syntax
-    as simple as possible, and to add functionality as and when it is
-    required. No more crazy syntactic sugar.
 
 * 0.9.1 bscript, tools, browser
 
