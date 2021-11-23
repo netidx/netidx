@@ -670,17 +670,7 @@ impl RaeifiedTable {
                 };
                 let user_r = &self.0.ctx.borrow_mut().user;
                 let s = user_r.backend.subscriber.durable_subscribe(p);
-                s.updates(
-                    UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::NO_SPURIOUS,
-                    user_r.backend.updates.clone(),
-                );
-                match s.last() {
-                    Event::Unsubscribed => (),
-                    Event::Update(v) => {
-                        let v = format!("{}", WVal(&v)).to_value();
-                        self.0.store.set_value(&row, id as u32, &v);
-                    }
-                }
+                s.updates(UpdatesFlags::BEGIN_WITH_LAST, user_r.backend.updates.clone());
                 self.0.by_id.borrow_mut().insert(
                     s.id(),
                     Subscription { _sub: s, row: row.clone(), col: id as u32 },

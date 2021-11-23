@@ -147,7 +147,7 @@ mod publish {
             } else if s.as_str() == "tail" {
                 Ok(State::Tail)
             } else {
-                bail!("expected state [play, pause, tail]")
+                bail!("expected state {play, pause, tail}")
             }
         }
     }
