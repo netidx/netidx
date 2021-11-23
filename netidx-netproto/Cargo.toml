@@ -1,6 +1,6 @@
 [package]
 name = "netidx-netproto"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"
