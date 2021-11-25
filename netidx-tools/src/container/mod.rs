@@ -21,7 +21,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
-        BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
+        DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
         UpdateBatch, Val, WriteRequest,
     },
     resolver::Auth,
@@ -50,7 +50,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use structopt::StructOpt;
 use tokio::{
     runtime::Runtime,
     signal, task,
