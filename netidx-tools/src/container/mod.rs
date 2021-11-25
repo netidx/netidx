@@ -2,6 +2,7 @@ mod db;
 mod rpcs;
 mod stats;
 
+use super::ContainerConfig;
 use anyhow::Result;
 use arcstr::ArcStr;
 use db::{Datum, DatumKind, Reply, Sendable, Txn};
@@ -654,35 +655,6 @@ impl OnWriteEvent {
     fn err() -> Option<Value> {
         Some(Value::Error(Chars::from("event(): expected 0 arguments")))
     }
-}
-
-#[derive(StructOpt, Debug)]
-pub(super) struct ContainerConfig {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
-    )]
-    bind: BindCfg,
-    #[structopt(long = "spn", help = "krb5 use <spn>")]
-    pub(super) spn: Option<String>,
-    #[structopt(
-        long = "timeout",
-        help = "require subscribers to consume values before timeout (seconds)"
-    )]
-    timeout: Option<u64>,
-    #[structopt(long = "api-path", help = "the netidx path of the container api")]
-    api_path: Path,
-    #[structopt(long = "db", help = "the db file")]
-    db: String,
-    #[structopt(long = "compress", help = "use zstd compression")]
-    compress: bool,
-    #[structopt(long = "compress-level", help = "zstd compression level")]
-    compress_level: Option<u32>,
-    #[structopt(long = "cache-size", help = "db page cache size in bytes")]
-    cache_size: Option<u64>,
-    #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
-    sparse: bool,
 }
 
 fn to_chars(value: Value) -> Chars {

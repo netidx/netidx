@@ -1,18 +1,14 @@
 #![recursion_limit = "2048"]
 #[macro_use]
-extern crate lazy_static;
-#[macro_use]
 extern crate anyhow;
-#[macro_use]
+extern crate lazy_static;
 extern crate serde_derive;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
-mod container;
 mod publisher;
-mod recorder;
 mod resolver;
 mod stress_publisher;
 mod stress_subscriber;
@@ -20,6 +16,10 @@ mod subscriber;
 
 #[cfg(unix)]
 mod resolver_server;
+#[cfg(unix)]
+mod recorder;
+#[cfg(unix)]
+mod container;
 
 #[cfg(not(unix))]
 mod resolver_server {
@@ -33,6 +33,41 @@ mod resolver_server {
         _id: usize,
     ) {
         todo!("the resolver server is not yet ported to this platform")
+    }
+}
+
+#[cfg(not(unix))]
+mod recorder {
+    use netidx::{config::Config, publisher::BindCfg, resolver::Auth, path::Path};
+    pub(crate) fn run(
+        _config: Config,
+        _foreground: bool,
+        _bind: Option<BindCfg>,
+        _publish_base: Option<Path>,
+        _auth: Auth,
+        _image_frequency: usize,
+        _poll_interval: u64,
+        _flush_frequency: usize,
+        _flush_interval: u64,
+        _shards: usize,
+        _max_sessions: usize,
+        _max_sessions_per_client: usize,
+        _archive: String,
+        _spec: Vec<String>,
+    ) {
+        todo!("the recorder is not yet ported to this platform")
+    }
+}
+
+#[cfg(not(unix))]
+mod container {
+    use netidx::{resolver::Auth, config::Config};
+    pub(crate) fn run(
+        _config: Config,
+        _auth: Auth,
+        _ccfg: super::ContainerConfig
+    ) {
+        todo!("the container is not yet ported to this platform")
     }
 }
 
@@ -51,6 +86,35 @@ struct Opt {
     upn: Option<String>,
     #[structopt(subcommand)]
     cmd: Sub,
+}
+
+#[derive(StructOpt, Debug)]
+struct ContainerConfig {
+    #[structopt(
+        short = "b",
+        long = "bind",
+        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+    )]
+    bind: BindCfg,
+    #[structopt(long = "spn", help = "krb5 use <spn>")]
+    spn: Option<String>,
+    #[structopt(
+        long = "timeout",
+        help = "require subscribers to consume values before timeout (seconds)"
+    )]
+    timeout: Option<u64>,
+    #[structopt(long = "api-path", help = "the netidx path of the container api")]
+    api_path: Path,
+    #[structopt(long = "db", help = "the db file")]
+    db: String,
+    #[structopt(long = "compress", help = "use zstd compression")]
+    compress: bool,
+    #[structopt(long = "compress-level", help = "zstd compression level")]
+    compress_level: Option<u32>,
+    #[structopt(long = "cache-size", help = "db page cache size in bytes")]
+    cache_size: Option<u64>,
+    #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
+    sparse: bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -122,7 +186,7 @@ enum Sub {
         paths: Vec<String>,
     },
     #[structopt(name = "container", about = "a hierarchical database in netidx")]
-    Container(container::ContainerConfig),
+    Container(ContainerConfig),
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
