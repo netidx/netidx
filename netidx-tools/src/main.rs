@@ -76,7 +76,7 @@ mod container {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "json-pubsub")]
+#[structopt(name = "netidx")]
 struct Opt {
     #[structopt(
         short = "c",
