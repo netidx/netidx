@@ -1,7 +1,11 @@
 #![recursion_limit = "2048"]
+#[cfg(unix)]
+#[macro_use]
+extern crate lazy_static;
 #[macro_use]
 extern crate anyhow;
-extern crate lazy_static;
+#[cfg(unix)]
+#[macro_use]
 extern crate serde_derive;
 use log::warn;
 use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
