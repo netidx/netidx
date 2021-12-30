@@ -3,7 +3,6 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config,
-    os::{Krb5ServerCtx, ServerCtx},
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -18,6 +17,7 @@ use crate::{
     shard_resolver_store::Store,
     utils,
 };
+use cross_krb5::{K5ServerCtx, ServerCtx};
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures::{channel::oneshot, prelude::*, select_biased};
@@ -259,7 +259,7 @@ async fn hello_client_write(
                     send(&cfg, &mut con, h).await?;
                     con.set_ctx(ctx.clone()).await;
                     info!("hello_write all traffic now encrypted");
-                    secstore.ifo(Some(&ctx.client()?))?
+                    secstore.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
                 }
             },
         },
@@ -319,7 +319,7 @@ async fn hello_client_write(
                         if &*tok != &expected[mem::size_of::<u64>()..] {
                             bail!("listener ownership check failed");
                         }
-                        let client = ctx.client()?;
+                        let client = task::block_in_place(|| ctx.lock().client())?;
                         let uifo = secstore.ifo(Some(&client))?;
                         let spn = spn.unwrap_or(Chars::from(client));
                         info!("hello_write listener ownership check succeeded");
@@ -422,7 +422,7 @@ async fn hello_client_read(
                 send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
                     .await?;
                 con.set_ctx(ctx.clone()).await;
-                secstore.ifo(Some(&ctx.client()?))?
+                secstore.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
             }
         },
     };

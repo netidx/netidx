@@ -1,7 +1,7 @@
 use crate::{
     channel::Channel,
+    channel::K5CtxWrap,
     chars::Chars,
-    os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
+use cross_krb5::{ClientCtx, K5Ctx};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -52,9 +53,12 @@ pub enum Auth {
     Krb5 { upn: Option<String>, spn: Option<String> },
 }
 
-fn create_ctx(upn: Option<&str>, target_spn: &str) -> Result<(ClientCtx, Bytes)> {
-    let ctx = os::create_client_ctx(upn, target_spn)?;
-    match ctx.step(None)? {
+fn create_ctx(
+    upn: Option<&str>,
+    target_spn: &str,
+) -> Result<(K5CtxWrap<ClientCtx>, Bytes)> {
+    let ctx = K5CtxWrap::new(ClientCtx::new(upn, target_spn)?);
+    match task::block_in_place(|| ctx.lock().step(None))? {
         None => bail!("client ctx first step produced no token"),
         Some(tok) => Ok((ctx, utils::bytes(&*tok))),
     }
@@ -128,7 +132,11 @@ async fn connect_read(
             (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
             (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
-                try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
+                try_cf!(
+                    "resolver tok",
+                    continue,
+                    task::block_in_place(|| ctx.lock().step(Some(&tok)))
+                );
             }
         };
         break Ok(con);
@@ -265,7 +273,7 @@ async fn connect_write(
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
-    security_context: &mut Option<ClientCtx>,
+    security_context: &mut Option<K5CtxWrap<ClientCtx>>,
     desired_auth: &Auth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
@@ -282,7 +290,7 @@ async fn connect_write(
             bail!("authentication unavailable")
         }
         Auth::Krb5 { upn, spn } => match security_context {
-            Some(ctx) if ctx.ttl().unwrap_or(sec) > sec => {
+            Some(ctx) if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec => {
                 (ClientAuthWrite::Reuse, Some(ctx.clone()))
             }
             _ => {
@@ -320,7 +328,7 @@ async fn connect_write(
         (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
             let ctx = ctx.ok_or_else(|| anyhow!("bug, accepted but no ctx"))?;
             info!("write_con processing resolver mutual authentication");
-            ctx.step(Some(&tok))?;
+            task::block_in_place(|| ctx.lock().step(Some(&tok)))?;
             info!("write_con mutual authentication succeeded");
             con.set_ctx(ctx.clone()).await;
             info!("write_con all traffic now encrypted");
@@ -398,7 +406,7 @@ async fn connection_write(
     let mut receiver = receiver.fuse();
     let mut degraded = false;
     let mut con: Option<Channel<ClientCtx>> = None;
-    let mut ctx: Option<ClientCtx> = None;
+    let mut ctx: Option<K5CtxWrap<ClientCtx>> = None;
     let hb = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(TTL / 10);
     let now = Instant::now();

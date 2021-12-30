@@ -1,7 +1,6 @@
 use crate::{
     auth::{Permissions, UserInfo},
     channel::Channel,
-    os::ServerCtx,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
@@ -17,6 +16,7 @@ use crate::{
     },
     secstore::SecStore,
 };
+use cross_krb5::ServerCtx;
 use anyhow::Result;
 use futures::{
     channel::{

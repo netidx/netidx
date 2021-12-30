@@ -4,7 +4,7 @@ pub use crate::protocol::{
 };
 use crate::{
     auth::Permissions,
-    channel::Channel,
+    channel::{Channel, K5CtxWrap},
     chars::Chars,
     config::Config,
     path::Path,
@@ -13,9 +13,9 @@ use crate::{
     resolver::{Auth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
-use cross_krb5::{K5Ctx, ServerCtx};
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
+use cross_krb5::{K5Ctx, ServerCtx};
 use futures::{
     channel::{
         mpsc::{
@@ -1416,13 +1416,12 @@ async fn hello_client(
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
-                let ctx = ServerCtx::new(p)?;
-                let tok = ctx
-                    .step(Some(&*tok))?
+                let mut ctx = ServerCtx::new(p)?;
+                let tok = task::block_in_place(|| ctx.step(Some(&*tok)))?
                     .map(|b| utils::bytes(&*b))
                     .ok_or_else(|| anyhow!("expected step to generate a token"))?;
                 con.send_one(&Token(tok)).await?;
-                con.set_ctx(ctx).await;
+                con.set_ctx(K5CtxWrap::new(ctx)).await;
                 client_arrived(publisher);
             }
         },
@@ -1641,7 +1640,9 @@ async fn publish_loop(
                 }
             }
             if to_unpublish_default.len() > 0 {
-                if let Err(e) = resolver.unpublish_default(to_unpublish_default.drain()).await {
+                if let Err(e) =
+                    resolver.unpublish_default(to_unpublish_default.drain()).await
+                {
                     error!("failed to unpublish default some paths {} will retry", e)
                 }
             }

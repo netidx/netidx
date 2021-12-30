@@ -1,24 +1,30 @@
 use crate::{
     auth::{PMap, UserDb, UserInfo},
+    channel::K5CtxWrap,
     chars::Chars,
     config,
-    os::{self, Krb5Ctx, Mapper, ServerCtx},
+    os::Mapper,
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
+use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use rand::Rng;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use tokio::task;
 
 pub(crate) struct SecStoreInner {
-    ctxts: HashMap<SocketAddr, (Chars, u128, ServerCtx), FxBuildHasher>,
+    ctxts: HashMap<SocketAddr, (Chars, u128, K5CtxWrap<ServerCtx>), FxBuildHasher>,
     userdb: UserDb,
 }
 
 impl SecStoreInner {
-    pub(crate) fn get(&self, id: &SocketAddr) -> Option<&(Chars, u128, ServerCtx)> {
-        self.ctxts.get(id).and_then(|r| match r.2.ttl() {
+    pub(crate) fn get(
+        &self,
+        id: &SocketAddr,
+    ) -> Option<&(Chars, u128, K5CtxWrap<ServerCtx>)> {
+        self.ctxts.get(id).and_then(|r| match task::block_in_place(|| r.2.lock().ttl()) {
             Ok(ttl) if ttl.as_secs() > 0 => Some(r),
             _ => None,
         })
@@ -58,17 +64,22 @@ impl SecStore {
         &*self.pmap
     }
 
-    pub(crate) fn get(&self, id: &SocketAddr) -> Option<ServerCtx> {
+    pub(crate) fn get(&self, id: &SocketAddr) -> Option<K5CtxWrap<ServerCtx>> {
         let inner = self.store.read();
         inner.get(id).map(|(_, _, c)| c.clone())
     }
 
-    pub(crate) fn create(&self, tok: &[u8]) -> Result<(ServerCtx, u128, Bytes)> {
-        let ctx = os::create_server_ctx(Some(self.spn.as_str()))?;
+    pub(crate) fn create(
+        &self,
+        tok: &[u8],
+    ) -> Result<(K5CtxWrap<ServerCtx>, u128, Bytes)> {
+        let ctx = K5CtxWrap::new(ServerCtx::new(Some(self.spn.as_str()))?);
         let secret = rand::thread_rng().gen::<u128>();
-        let tok = ctx.step(Some(tok))?.map(|b| Bytes::copy_from_slice(&*b)).ok_or_else(
-            || anyhow!("step didn't generate a mutual authentication token"),
-        )?;
+        let tok = task::block_in_place(|| ctx.lock().step(Some(tok)))?
+            .map(|b| Bytes::copy_from_slice(&*b))
+            .ok_or_else(|| {
+                anyhow!("step didn't generate a mutual authentication token")
+            })?;
         Ok((ctx, secret, tok))
     }
 
@@ -77,7 +88,7 @@ impl SecStore {
         addr: SocketAddr,
         spn: Chars,
         secret: u128,
-        ctx: ServerCtx,
+        ctx: K5CtxWrap<ServerCtx>,
     ) {
         let mut inner = self.store.write();
         inner.ctxts.insert(addr, (spn, secret, ctx));
