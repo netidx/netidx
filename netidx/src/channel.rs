@@ -1,24 +1,23 @@
-use crate::{os::Krb5Ctx, pack::Pack};
+use crate::pack::Pack;
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
+use cross_krb5::K5Ctx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender},
         oneshot,
     },
-    prelude::*,
     future,
-    stream,
-    select_biased,
+    prelude::*,
+    select_biased, stream,
 };
 use log::info;
 use std::{fmt::Debug, mem, time::Duration};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
-    task,
-    time,
+    task, time,
 };
 
 const BUF: usize = 4096;
@@ -50,15 +49,12 @@ async fn flush_buf<B: Buf>(
     Ok(())
 }
 
-fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
+fn flush_task<C: K5Ctx + Debug + Send + Sync + 'static>(
     mut soc: WriteHalf<TcpStream>,
 ) -> Sender<ToFlush<C>> {
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
     task::spawn(async move {
         let mut ctx: Option<C> = None;
-        let mut header = BytesMut::new();
-        let mut padding = BytesMut::new();
-        let mut trailer = BytesMut::new();
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
@@ -66,19 +62,12 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
                     ToFlush::SetCtx(c) => {
                         ctx = Some(c);
                     }
-                    ToFlush::Flush(mut data) => match ctx {
+                    ToFlush::Flush(data) => match ctx {
                         None => try_cf!(flush_buf(&mut soc, data, false).await),
                         Some(ref ctx) => {
-                            try_cf!(ctx.wrap_iov(
-                                true,
-                                &mut header,
-                                &mut data,
-                                &mut padding,
-                                &mut trailer
+                            let msg = try_cf!(task::block_in_place(
+                                || ctx.wrap_iov(true, data)
                             ));
-                            let msg = header.split().chain(
-                                data.chain(padding.split().chain(trailer.split())),
-                            );
                             try_cf!(flush_buf(&mut soc, msg, true).await);
                         }
                     },
@@ -96,7 +85,7 @@ pub(crate) struct WriteChannel<C> {
     boundries: Vec<usize>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
+impl<C: K5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
         WriteChannel {
             to_flush: flush_task(socket),
@@ -157,7 +146,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) async fn flush(&mut self) -> Result<()> {
         loop {
             if self.try_flush()? {
-                break Ok(())
+                break Ok(());
             } else {
                 future::poll_fn(|cx| self.to_flush.poll_ready(cx)).await?
             }
@@ -176,17 +165,15 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
                     if self.boundries.len() > 0 {
                         self.boundries.remove(0);
                     }
-                },
-                Err(e) if e.is_full() => {
-                    match e.into_inner() {
-                        ToFlush::Flush(mut chunk) => {
-                            chunk.unsplit(self.buf.split());
-                            self.buf = chunk;
-                            return Ok(false);
-                        }
-                        ToFlush::SetCtx(_) => unreachable!(),
-                    }
                 }
+                Err(e) if e.is_full() => match e.into_inner() {
+                    ToFlush::Flush(mut chunk) => {
+                        chunk.unsplit(self.buf.split());
+                        self.buf = chunk;
+                        return Ok(false);
+                    }
+                    ToFlush::SetCtx(_) => unreachable!(),
+                },
                 Err(_) => bail!("can't flush to closed connection"),
             }
         }
@@ -201,7 +188,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     }
 }
 
-fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
+fn read_task<C: K5Ctx + Clone + Debug + Send + Sync + 'static>(
     stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<TcpStream>,
     mut set_ctx: oneshot::Receiver<C>,
@@ -267,7 +254,7 @@ pub(crate) struct ReadChannel<C> {
     incoming: stream::Fuse<Receiver<BytesMut>>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
+impl<C: K5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -319,7 +306,7 @@ pub(crate) struct Channel<C> {
     write: WriteChannel<C>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
+impl<C: K5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }

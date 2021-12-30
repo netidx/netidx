@@ -7,13 +7,13 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config::Config,
-    os::{self, Krb5Ctx, ServerCtx},
     path::Path,
     pool::{Pool, Pooled},
     protocol::{self, publisher},
     resolver::{Auth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
+use cross_krb5::{K5Ctx, ServerCtx};
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
 use futures::{
@@ -1416,7 +1416,7 @@ async fn hello_client(
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
-                let ctx = os::create_server_ctx(p)?;
+                let ctx = ServerCtx::new(p)?;
                 let tok = ctx
                     .step(Some(&*tok))?
                     .map(|b| utils::bytes(&*b))
