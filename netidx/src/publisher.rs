@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
-use cross_krb5::{K5Ctx, ServerCtx};
+use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{
@@ -1416,11 +1416,8 @@ async fn hello_client(
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
-                let mut ctx = ServerCtx::new(p)?;
-                let tok = task::block_in_place(|| ctx.step(Some(&*tok)))?
-                    .map(|b| utils::bytes(&*b))
-                    .ok_or_else(|| anyhow!("expected step to generate a token"))?;
-                con.send_one(&Token(tok)).await?;
+                let (ctx, tok) = task::block_in_place(|| ServerCtx::new(p, &*tok))?;
+                con.send_one(&Token(utils::bytes(&*tok))).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
                 client_arrived(publisher);
             }

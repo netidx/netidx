@@ -18,7 +18,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
-use cross_krb5::{ClientCtx, K5Ctx};
+use cross_krb5::ClientCtx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -1289,21 +1289,16 @@ async fn hello_publisher(
         }
         Auth::Krb5 { upn, .. } => {
             let p = upn.as_ref().map(|p| p.as_str());
-            let ctx = K5CtxWrap::new(ClientCtx::new(p, target_spn)?);
-            let tok = task::block_in_place(|| ctx.lock().step(None))?
-                .map(|b| utils::bytes(&*b))
-                .ok_or_else(|| anyhow!("expected step to generate a token"))?;
-            con.send_one(&Hello::Token(tok)).await?;
+            let (ctx, tok) = task::block_in_place(|| ClientCtx::new(p, target_spn))?;
+            con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
             match con.receive().await? {
                 Hello::Anonymous => bail!("publisher failed mutual authentication"),
                 Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
                 Hello::Token(tok) => {
-                    if task::block_in_place(|| ctx.lock().step(Some(&*tok)))?.is_some() {
-                        bail!("unexpected second token from step");
-                    }
+                    let ctx = task::block_in_place(|| ctx.finish(&*tok))?;
+                    con.set_ctx(K5CtxWrap::new(ctx)).await
                 }
             }
-            con.set_ctx(ctx.clone()).await;
         }
     }
     Ok(())

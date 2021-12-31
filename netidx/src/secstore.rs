@@ -4,8 +4,9 @@ use crate::{
     chars::Chars,
     config,
     os::Mapper,
+    utils,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxBuildHasher;
@@ -73,14 +74,10 @@ impl SecStore {
         &self,
         tok: &[u8],
     ) -> Result<(K5CtxWrap<ServerCtx>, u128, Bytes)> {
-        let ctx = K5CtxWrap::new(ServerCtx::new(Some(self.spn.as_str()))?);
+        let spn = Some(self.spn.as_str());
+        let (ctx, tok) = task::block_in_place(|| ServerCtx::new(spn, tok))?;
         let secret = rand::thread_rng().gen::<u128>();
-        let tok = task::block_in_place(|| ctx.lock().step(Some(tok)))?
-            .map(|b| Bytes::copy_from_slice(&*b))
-            .ok_or_else(|| {
-                anyhow!("step didn't generate a mutual authentication token")
-            })?;
-        Ok((ctx, secret, tok))
+        Ok((K5CtxWrap::new(ctx), secret, utils::bytes(&*tok)))
     }
 
     pub(crate) fn store(
