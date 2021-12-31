@@ -648,8 +648,8 @@ impl Entry {
 
 #[derive(Clone)]
 struct Series {
-    x: DbgExpr,
-    y: DbgExpr,
+    _x: DbgExpr,
+    _y: DbgExpr,
     spec: Rc<RefCell<view::Series>>,
 }
 
@@ -657,12 +657,12 @@ struct Series {
 pub(super) struct LinePlot {
     root: gtk::Box,
     spec: Rc<RefCell<view::LinePlot>>,
-    x_min: DbgExpr,
-    x_max: DbgExpr,
-    y_min: DbgExpr,
-    y_max: DbgExpr,
-    keep_points: DbgExpr,
-    series: Rc<RefCell<IndexMap<usize, Series>>>,
+    _x_min: DbgExpr,
+    _x_max: DbgExpr,
+    _y_min: DbgExpr,
+    _y_max: DbgExpr,
+    _keep_points: DbgExpr,
+    _series: Rc<RefCell<IndexMap<usize, Series>>>,
 }
 
 impl LinePlot {
@@ -671,10 +671,10 @@ impl LinePlot {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         LinePlot::build_chart_style_editor(&root, &on_change, &spec);
         LinePlot::build_axis_style_editor(&root, &on_change, &spec);
-        let (x_min, x_max, y_min, y_max, keep_points) =
+        let (_x_min, _x_max, _y_min, _y_max, _keep_points) =
             LinePlot::build_axis_range_editor(ctx, &root, &on_change, &spec);
-        let series = LinePlot::build_series_editor(ctx, &root, &on_change, &spec);
-        LinePlot { root, spec, x_min, x_max, y_min, y_max, keep_points, series }
+        let _series = LinePlot::build_series_editor(ctx, &root, &on_change, &spec);
+        LinePlot { root, spec, _x_min, _x_max, _y_min, _y_max, _keep_points, _series }
     }
 
     fn build_axis_style_editor(
@@ -927,7 +927,7 @@ impl LinePlot {
                         on_change()
                     }));
                 grid.add((lbl_line_color, line_color));
-                let (l, e, x) = expr(
+                let (l, e, _x) = expr(
                     &ctx,
                     "X:",
                     &spec.borrow().x,
@@ -937,7 +937,7 @@ impl LinePlot {
                     })
                 );
                 grid.add((l, e));
-                let (l, e, y) = expr(
+                let (l, e, _y) = expr(
                     &ctx,
                     "Y:",
                     &spec.borrow().y,
@@ -951,7 +951,7 @@ impl LinePlot {
                 grid.attach(&remove, 0, 2, 1);
                 let i = series_id.get();
                 series_id.set(i + 1);
-                series.borrow_mut().insert(i, Series { x, y, spec });
+                series.borrow_mut().insert(i, Series { _x, _y, spec });
                 seriesbox.show_all();
                 let grid_root = grid.root();
                 remove.connect_clicked(clone!(
@@ -1112,7 +1112,7 @@ impl Paned {
 #[derive(Clone)]
 pub(super) struct Frame {
     root: TwoColGrid,
-    label_expr: DbgExpr,
+    _label_expr: DbgExpr,
     spec: Rc<RefCell<view::Frame>>,
 }
 
@@ -1120,7 +1120,7 @@ impl Frame {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Frame) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, label_expr) = expr(
+        let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
             &spec.borrow().label,
@@ -1146,7 +1146,7 @@ impl Frame {
                 on_change()
             }),
         ));
-        Frame { root, label_expr, spec }
+        Frame { root, _label_expr, spec }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -1244,8 +1244,8 @@ impl NotebookPage {
 pub(super) struct Notebook {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Notebook>>,
-    page: DbgExpr,
-    on_switch_page: DbgExpr,
+    _page: DbgExpr,
+    _on_switch_page: DbgExpr,
 }
 
 impl Notebook {
@@ -1301,7 +1301,7 @@ impl Notebook {
             on_change()
         }));
         root.attach(&tabs_popup, 0, 2, 1);
-        let (l, e, page) = expr(
+        let (l, e, _page) = expr(
             ctx,
             "Page:",
             &spec.borrow().page,
@@ -1311,7 +1311,7 @@ impl Notebook {
             }),
         );
         root.add((l, e));
-        let (l, e, on_switch_page) = expr(
+        let (l, e, _on_switch_page) = expr(
             ctx,
             "On Switch Page:",
             &spec.borrow().on_switch_page,
@@ -1321,7 +1321,7 @@ impl Notebook {
             }),
         );
         root.add((l, e));
-        Notebook { root, spec, page, on_switch_page }
+        Notebook { root, spec, _page, _on_switch_page }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
