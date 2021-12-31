@@ -102,21 +102,21 @@ fn expr(
 pub(super) struct Table {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Table>>,
-    dbg_path: DbgExpr,
-    dbg_default_sort_column: DbgExpr,
-    dbg_column_filter: DbgExpr,
-    dbg_row_filter: DbgExpr,
-    dbg_column_editable: DbgExpr,
-    dbg_on_activate: DbgExpr,
-    dbg_on_select: DbgExpr,
-    dbg_on_edit: DbgExpr,
+    _dbg_path: DbgExpr,
+    _dbg_default_sort_column: DbgExpr,
+    _dbg_column_filter: DbgExpr,
+    _dbg_row_filter: DbgExpr,
+    _dbg_column_editable: DbgExpr,
+    _dbg_on_activate: DbgExpr,
+    _dbg_on_select: DbgExpr,
+    _dbg_on_edit: DbgExpr,
 }
 
 impl Table {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Table) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
-        let (l, e, dbg_path) = expr(
+        let (l, e, _dbg_path) = expr(
             ctx,
             "Path:",
             &spec.borrow().path,
@@ -126,7 +126,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_default_sort_column) = expr(
+        let (l, e, _dbg_default_sort_column) = expr(
             ctx,
             "Default Sort Column:",
             &spec.borrow().default_sort_column,
@@ -136,7 +136,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_column_filter) = expr(
+        let (l, e, _dbg_column_filter) = expr(
             ctx,
             "Column Filter:",
             &spec.borrow().column_filter,
@@ -146,7 +146,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_row_filter) = expr(
+        let (l, e, _dbg_row_filter) = expr(
             ctx,
             "Row Filter:",
             &spec.borrow().row_filter,
@@ -156,7 +156,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_column_editable) = expr(
+        let (l, e, _dbg_column_editable) = expr(
             ctx,
             "Column Editable:",
             &spec.borrow().column_editable,
@@ -166,7 +166,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_on_activate) = expr(
+        let (l, e, _dbg_on_activate) = expr(
             ctx,
             "On Activate:",
             &spec.borrow().on_activate,
@@ -176,7 +176,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_on_select) = expr(
+        let (l, e, _dbg_on_select) = expr(
             ctx,
             "On Select:",
             &spec.borrow().on_select,
@@ -186,7 +186,7 @@ impl Table {
             }),
         );
         root.add((l, e));
-        let (l, e, dbg_on_edit) = expr(
+        let (l, e, _dbg_on_edit) = expr(
             ctx,
             "On Edit:",
             &spec.borrow().on_edit,
@@ -199,14 +199,14 @@ impl Table {
         Table {
             root,
             spec,
-            dbg_path,
-            dbg_default_sort_column,
-            dbg_column_filter,
-            dbg_row_filter,
-            dbg_column_editable,
-            dbg_on_activate,
-            dbg_on_select,
-            dbg_on_edit,
+            _dbg_path,
+            _dbg_default_sort_column,
+            _dbg_column_filter,
+            _dbg_row_filter,
+            _dbg_column_editable,
+            _dbg_on_activate,
+            _dbg_on_select,
+            _dbg_on_edit,
         }
     }
 
@@ -223,7 +223,7 @@ impl Table {
 pub(super) struct Action {
     root: TwoColGrid,
     spec: Rc<RefCell<expr::Expr>>,
-    expr: DbgExpr,
+    _expr: DbgExpr,
     iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
@@ -249,7 +249,7 @@ impl Action {
             }
         });
         update_desc();
-        let (l, e, expr) = expr(
+        let (l, e, _expr) = expr(
             ctx,
             "Action:",
             &*spec.borrow(),
@@ -260,7 +260,7 @@ impl Action {
             }),
         );
         root.add((l, e));
-        Action { root, spec, expr, iter }
+        Action { root, spec, _expr, iter }
     }
 
     pub(super) fn moved(&self, iter: &gtk::TreeIter) {
@@ -280,7 +280,7 @@ impl Action {
 pub(super) struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<expr::Expr>>,
-    expr: DbgExpr,
+    _expr: DbgExpr,
 }
 
 impl Label {
@@ -289,7 +289,7 @@ impl Label {
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
         root.pack_start(&pathbox, false, false, 0);
-        let (l, e, expr) = expr(
+        let (l, e, _expr) = expr(
             ctx,
             "Expr:",
             &*spec.borrow(),
@@ -300,7 +300,7 @@ impl Label {
         );
         pathbox.pack_start(&l, false, false, 0);
         pathbox.pack_start(&e, true, true, 0);
-        Label { root, spec, expr }
+        Label { root, spec, _expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -316,16 +316,16 @@ impl Label {
 pub(super) struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
-    enabled_expr: DbgExpr,
-    label_expr: DbgExpr,
-    on_click_expr: DbgExpr,
+    _enabled_expr: DbgExpr,
+    _label_expr: DbgExpr,
+    _on_click_expr: DbgExpr,
 }
 
 impl Button {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Button) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_expr) = expr(
+        let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
             &spec.borrow().enabled,
@@ -335,7 +335,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        let (l, e, label_expr) = expr(
+        let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
             &spec.borrow().label,
@@ -345,7 +345,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        let (l, e, on_click_expr) = expr(
+        let (l, e, _on_click_expr) = expr(
             ctx,
             "On Click:",
             &spec.borrow().on_click,
@@ -355,7 +355,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        Button { root, spec, enabled_expr, label_expr, on_click_expr }
+        Button { root, spec, _enabled_expr, _label_expr, _on_click_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -371,17 +371,17 @@ impl Button {
 pub(super) struct LinkButton {
     root: TwoColGrid,
     spec: Rc<RefCell<view::LinkButton>>,
-    enabled_expr: DbgExpr,
-    uri_expr: DbgExpr,
-    label_expr: DbgExpr,
-    on_activate_link_expr: DbgExpr,
+    _enabled_expr: DbgExpr,
+    _uri_expr: DbgExpr,
+    _label_expr: DbgExpr,
+    _on_activate_link_expr: DbgExpr,
 }
 
 impl LinkButton {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::LinkButton) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_expr) = expr(
+        let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
             &spec.borrow().enabled,
@@ -391,7 +391,7 @@ impl LinkButton {
             }),
         );
         root.add((l, e));
-        let (l, e, label_expr) = expr(
+        let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
             &spec.borrow().label,
@@ -401,7 +401,7 @@ impl LinkButton {
             }),
         );
         root.add((l, e));
-        let (l, e, uri_expr) = expr(
+        let (l, e, _uri_expr) = expr(
             ctx,
             "URI:",
             &spec.borrow().uri,
@@ -411,7 +411,7 @@ impl LinkButton {
             }),
         );
         root.add((l, e));
-        let (l, e, on_activate_link_expr) = expr(
+        let (l, e, _on_activate_link_expr) = expr(
             ctx,
             "On Activate Link:",
             &spec.borrow().on_activate_link,
@@ -424,10 +424,10 @@ impl LinkButton {
         LinkButton {
             root,
             spec,
-            enabled_expr,
-            label_expr,
-            uri_expr,
-            on_activate_link_expr,
+            _enabled_expr,
+            _label_expr,
+            _uri_expr,
+            _on_activate_link_expr,
         }
     }
 
@@ -444,16 +444,16 @@ impl LinkButton {
 pub(super) struct Toggle {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Toggle>>,
-    enabled_expr: DbgExpr,
-    value_expr: DbgExpr,
-    on_change_expr: DbgExpr,
+    _enabled_expr: DbgExpr,
+    _value_expr: DbgExpr,
+    _on_change_expr: DbgExpr,
 }
 
 impl Toggle {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Toggle) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_expr) = expr(
+        let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
             &spec.borrow().enabled,
@@ -463,7 +463,7 @@ impl Toggle {
             }),
         );
         root.add((l, e));
-        let (l, e, value_expr) = expr(
+        let (l, e, _value_expr) = expr(
             ctx,
             "Value:",
             &spec.borrow().value,
@@ -473,7 +473,7 @@ impl Toggle {
             }),
         );
         root.add((l, e));
-        let (l, e, on_change_expr) = expr(
+        let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
             &spec.borrow().on_change,
@@ -483,7 +483,7 @@ impl Toggle {
             }),
         );
         root.add((l, e));
-        Toggle { root, spec, enabled_expr, value_expr, on_change_expr }
+        Toggle { root, spec, _enabled_expr, _value_expr, _on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -499,17 +499,17 @@ impl Toggle {
 pub(super) struct Selector {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Selector>>,
-    enabled_expr: DbgExpr,
-    choices_expr: DbgExpr,
-    selected_expr: DbgExpr,
-    on_change_expr: DbgExpr,
+    _enabled_expr: DbgExpr,
+    _choices_expr: DbgExpr,
+    _selected_expr: DbgExpr,
+    _on_change_expr: DbgExpr,
 }
 
 impl Selector {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Selector) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_expr) = expr(
+        let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
             &spec.borrow().enabled,
@@ -519,7 +519,7 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        let (l, e, choices_expr) = expr(
+        let (l, e, _choices_expr) = expr(
             ctx,
             "Choices:",
             &spec.borrow().choices,
@@ -529,7 +529,7 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        let (l, e, selected_expr) = expr(
+        let (l, e, _selected_expr) = expr(
             ctx,
             "Selected:",
             &spec.borrow().selected,
@@ -539,7 +539,7 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        let (l, e, on_change_expr) = expr(
+        let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
             &spec.borrow().on_change,
@@ -549,7 +549,7 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        Selector { root, spec, enabled_expr, choices_expr, selected_expr, on_change_expr }
+        Selector { root, spec, _enabled_expr, _choices_expr, _selected_expr, _on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -565,18 +565,18 @@ impl Selector {
 pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
-    enabled_expr: DbgExpr,
-    visible_expr: DbgExpr,
-    text_expr: DbgExpr,
-    on_change_expr: DbgExpr,
-    on_activate_expr: DbgExpr,
+    _enabled_expr: DbgExpr,
+    _visible_expr: DbgExpr,
+    _text_expr: DbgExpr,
+    _on_change_expr: DbgExpr,
+    _on_activate_expr: DbgExpr,
 }
 
 impl Entry {
     pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Entry) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, enabled_expr) = expr(
+        let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
             &spec.borrow().enabled,
@@ -586,7 +586,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, visible_expr) = expr(
+        let (l, e, _visible_expr) = expr(
             ctx,
             "Visible:",
             &spec.borrow().visible,
@@ -596,7 +596,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, text_expr) = expr(
+        let (l, e, _text_expr) = expr(
             ctx,
             "Text:",
             &spec.borrow().text,
@@ -606,7 +606,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, on_change_expr) = expr(
+        let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
             &spec.borrow().on_change,
@@ -616,7 +616,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        let (l, e, on_activate_expr) = expr(
+        let (l, e, _on_activate_expr) = expr(
             ctx,
             "On Activate:",
             &spec.borrow().on_activate,
@@ -629,11 +629,11 @@ impl Entry {
         Entry {
             root,
             spec,
-            enabled_expr,
-            visible_expr,
-            text_expr,
-            on_change_expr,
-            on_activate_expr,
+            _enabled_expr,
+            _visible_expr,
+            _text_expr,
+            _on_change_expr,
+            _on_activate_expr,
         }
     }
 
