@@ -1416,7 +1416,7 @@ async fn hello_client(
             Auth::Anonymous => bail!("authentication not supported"),
             Auth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
-                let (ctx, tok) = task::block_in_place(|| ServerCtx::new(p, &*tok))?;
+                let (ctx, tok) = task::block_in_place(|| ServerCtx::accept(p, &*tok))?;
                 con.send_one(&Token(utils::bytes(&*tok))).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
                 client_arrived(publisher);

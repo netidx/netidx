@@ -75,7 +75,7 @@ impl SecStore {
         tok: &[u8],
     ) -> Result<(K5CtxWrap<ServerCtx>, u128, Bytes)> {
         let spn = Some(self.spn.as_str());
-        let (ctx, tok) = task::block_in_place(|| ServerCtx::new(spn, tok))?;
+        let (ctx, tok) = task::block_in_place(|| ServerCtx::accept(spn, tok))?;
         let secret = rand::thread_rng().gen::<u128>();
         Ok((K5CtxWrap::new(ctx), secret, utils::bytes(&*tok)))
     }

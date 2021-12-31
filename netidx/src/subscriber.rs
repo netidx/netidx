@@ -1289,7 +1289,7 @@ async fn hello_publisher(
         }
         Auth::Krb5 { upn, .. } => {
             let p = upn.as_ref().map(|p| p.as_str());
-            let (ctx, tok) = task::block_in_place(|| ClientCtx::new(p, target_spn))?;
+            let (ctx, tok) = task::block_in_place(|| ClientCtx::initiate(p, target_spn))?;
             con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
             match con.receive().await? {
                 Hello::Anonymous => bail!("publisher failed mutual authentication"),

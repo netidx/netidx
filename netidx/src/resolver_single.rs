@@ -12,7 +12,7 @@ use crate::{
     utils,
 };
 use anyhow::{anyhow, Error, Result};
-use cross_krb5::{PendingClientCtx, ClientCtx, K5Ctx};
+use cross_krb5::{ClientCtx, K5Ctx, PendingClientCtx};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -20,7 +20,7 @@ use futures::{
     select_biased,
 };
 use fxhash::FxBuildHasher;
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
@@ -100,7 +100,7 @@ async fn connect_read(
                 let (ctx, tok) = try_cf!(
                     "create ctx",
                     continue,
-                    task::block_in_place(|| ClientCtx::new(upn, target_spn))
+                    task::block_in_place(|| ClientCtx::initiate(upn, target_spn))
                 );
                 (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
             }
@@ -120,7 +120,7 @@ async fn connect_read(
             (Auth::Krb5 { .. }, ServerHelloRead::Reused) => {
                 error!("protocol error, we didn't ask to reuse a security context");
                 continue;
-            },
+            }
             (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
                 let ctx = try_cf!(
@@ -272,7 +272,7 @@ async fn connect_write(
     enum SecState {
         Anonymous,
         Reused(K5CtxWrap<ClientCtx>),
-        Pending(PendingClientCtx)
+        Pending(PendingClientCtx),
     }
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
@@ -298,7 +298,8 @@ async fn connect_write(
                     resolver.krb5_spns.get(&resolver_addr).ok_or_else(|| {
                         anyhow!("no target spn for resolver {:?}", resolver_addr)
                     })?;
-                let (ctx, token) = task::block_in_place(|| ClientCtx::new(upnr, target_spn))?;
+                let (ctx, token) =
+                    task::block_in_place(|| ClientCtx::initiate(upnr, target_spn))?;
                 let token = utils::bytes(&*token);
                 let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
                 (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))
