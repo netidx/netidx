@@ -4,6 +4,7 @@ use crate::{
 use anyhow::Result;
 use fxhash::FxBuildHasher;
 use serde_json::from_str;
+use log::debug;
 use std::{
     collections::{
         BTreeMap, Bound,
@@ -263,16 +264,19 @@ impl Config {
     /// load then Err will be returned.
     pub fn load_default() -> Result<Config> {
         if let Some(cfg) = env::var_os("NETIDX_CFG") {
+	    debug!("loading {}", cfg.to_string_lossy());
             return Config::load(cfg);
         }
         if let Some(mut cfg) = dirs::config_dir() {
             cfg.push("netidx.json");
+	    debug!("loading {}", cfg.to_string_lossy());
             if cfg.is_file() {
                 return Config::load(cfg);
             }
         }
         if let Some(mut home) = dirs::home_dir() {
             home.push(".netidx.json");
+	    debug!("loading {}", home.to_string_lossy());
             if home.is_file() {
                 return Config::load(home);
             }

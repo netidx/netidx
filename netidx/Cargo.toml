@@ -19,7 +19,7 @@ krb5_iov = ["cross-krb5/iov"]
 [dependencies]
 netidx-core = { version = "0.10", path = "../netidx-core" }
 netidx-netproto = { version = "0.10", path = "../netidx-netproto" }
-cross-krb5 = { version = "0.1", path = "../../cross-krb5" }
+cross-krb5 = { version = "0.1", path = "../../cross-krb5", default_features = false }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"
