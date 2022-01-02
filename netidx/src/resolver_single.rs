@@ -1,7 +1,7 @@
 use crate::{
     channel::Channel,
+    channel::K5CtxWrap,
     chars::Chars,
-    os::{self, ClientCtx, Krb5Ctx},
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -12,7 +12,7 @@ use crate::{
     utils,
 };
 use anyhow::{anyhow, Error, Result};
-use bytes::Bytes;
+use cross_krb5::{ClientCtx, K5Ctx, PendingClientCtx};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -20,7 +20,7 @@ use futures::{
     select_biased,
 };
 use fxhash::FxBuildHasher;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
@@ -50,14 +50,6 @@ lazy_static! {
 pub enum Auth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
-}
-
-fn create_ctx(upn: Option<&str>, target_spn: &str) -> Result<(ClientCtx, Bytes)> {
-    let ctx = os::create_client_ctx(upn, target_spn)?;
-    match ctx.step(None)? {
-        None => bail!("client ctx first step produced no token"),
-        Some(tok) => Ok((ctx, utils::bytes(&*tok))),
-    }
 }
 
 // continue with timeout
@@ -105,30 +97,38 @@ async fn connect_read(
                     .krb5_spns
                     .get(&addr)
                     .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
-                let (ctx, tok) =
-                    try_cf!("create ctx", continue, create_ctx(upn, target_spn));
-                (ClientAuthRead::Initiate(tok), Some(ctx))
+                let (ctx, tok) = try_cf!(
+                    "create ctx",
+                    continue,
+                    task::block_in_place(|| ClientCtx::initiate(upn, target_spn))
+                );
+                (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
             }
         };
         cwt!("hello", con.send_one(&ClientHello::ReadOnly(auth)));
         let r: ServerHelloRead = cwt!("hello reply", con.receive());
-        if let Some(ref ctx) = ctx {
-            con.set_ctx(ctx.clone()).await
-        }
         match (desired_auth, r) {
             (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
             (Auth::Anonymous, _) => {
-                info!("server requires authentication");
+                error!("server requires authentication");
                 continue;
             }
             (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
-                info!("could not authenticate resolver server");
+                error!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => (),
+            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => {
+                error!("protocol error, we didn't ask to reuse a security context");
+                continue;
+            }
             (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
-                try_cf!("resolver tok", continue, ctx.step(Some(&tok)));
+                let ctx = try_cf!(
+                    "resolver tok",
+                    continue,
+                    task::block_in_place(|| ctx.finish(&tok))
+                );
+                con.set_ctx(K5CtxWrap::new(ctx)).await
             }
         };
         break Ok(con);
@@ -265,10 +265,15 @@ async fn connect_write(
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
-    security_context: &mut Option<ClientCtx>,
+    security_context: &mut Option<K5CtxWrap<ClientCtx>>,
     desired_auth: &Auth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
+    enum SecState {
+        Anonymous,
+        Reused(K5CtxWrap<ClientCtx>),
+        Pending(PendingClientCtx),
+    }
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
     con.set_nodelay(true)?;
@@ -277,13 +282,15 @@ async fn connect_write(
     let _version: u64 = wt!(con.receive())??;
     let sec = Duration::from_secs(1);
     let (auth, ctx) = match desired_auth {
-        Auth::Anonymous => (ClientAuthWrite::Anonymous, None),
+        Auth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
         Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
             bail!("authentication unavailable")
         }
         Auth::Krb5 { upn, spn } => match security_context {
-            Some(ctx) if ctx.ttl().unwrap_or(sec) > sec => {
-                (ClientAuthWrite::Reuse, Some(ctx.clone()))
+            Some(ctx)
+                if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
+            {
+                (ClientAuthWrite::Reuse, SecState::Reused(ctx.clone()))
             }
             _ => {
                 let upnr = upn.as_ref().map(|s| s.as_str());
@@ -291,9 +298,11 @@ async fn connect_write(
                     resolver.krb5_spns.get(&resolver_addr).ok_or_else(|| {
                         anyhow!("no target spn for resolver {:?}", resolver_addr)
                     })?;
-                let (ctx, token) = create_ctx(upnr, target_spn)?;
+                let (ctx, token) =
+                    task::block_in_place(|| ClientCtx::initiate(upnr, target_spn))?;
+                let token = utils::bytes(&*token);
                 let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                (ClientAuthWrite::Initiate { spn, token }, Some(ctx))
+                (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))
             }
         },
     };
@@ -302,29 +311,30 @@ async fn connect_write(
     wt!(con.send_one(&h))??;
     let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
-    match (desired_auth, r.auth) {
-        (Auth::Anonymous, ServerAuthWrite::Anonymous) => {
+    match (desired_auth, r.auth, ctx) {
+        (Auth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
             *security_context = None;
         }
-        (Auth::Anonymous, _) => {
+        (Auth::Anonymous, _, _) => {
             bail!("server requires authentication");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous) => {
+        (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
             bail!("could not authenticate resolver server");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Reused) => {
-            let ctx = ctx.ok_or_else(|| anyhow!("bug, reused but no ctx"))?;
-            con.set_ctx(ctx.clone()).await;
+        (Auth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
+            con.set_ctx(ctx).await;
             info!("write_con all traffic now encrypted");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok)) => {
-            let ctx = ctx.ok_or_else(|| anyhow!("bug, accepted but no ctx"))?;
+        (Auth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
+            bail!("missing security context to reuse")
+        }
+        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok), SecState::Pending(ctx)) => {
             info!("write_con processing resolver mutual authentication");
-            ctx.step(Some(&tok))?;
+            let ctx = K5CtxWrap::new(task::block_in_place(|| ctx.finish(&tok))?);
             info!("write_con mutual authentication succeeded");
             con.set_ctx(ctx.clone()).await;
             info!("write_con all traffic now encrypted");
-            *security_context = Some(ctx.clone());
+            *security_context = Some(ctx);
             let secret: Secret = wt!(con.receive())??;
             {
                 let mut secrets = secrets.write();
@@ -332,6 +342,9 @@ async fn connect_write(
                 secrets.insert(r.resolver_id, secret.0);
             }
             wt!(con.send_one(&ReadyForOwnershipCheck))??;
+        }
+        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
+            bail!("missing pending security context")
         }
     }
     if !r.ttl_expired && !*degraded {
@@ -398,7 +411,7 @@ async fn connection_write(
     let mut receiver = receiver.fuse();
     let mut degraded = false;
     let mut con: Option<Channel<ClientCtx>> = None;
-    let mut ctx: Option<ClientCtx> = None;
+    let mut ctx: Option<K5CtxWrap<ClientCtx>> = None;
     let hb = Duration::from_secs(TTL / 2);
     let linger = Duration::from_secs(TTL / 10);
     let now = Instant::now();

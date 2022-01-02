@@ -1,24 +1,24 @@
-use crate::{os::Krb5Ctx, pack::Pack};
+use crate::pack::Pack;
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
+use cross_krb5::K5Ctx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender},
         oneshot,
     },
-    prelude::*,
     future,
-    stream,
-    select_biased,
+    prelude::*,
+    select_biased, stream,
 };
 use log::info;
-use std::{fmt::Debug, mem, time::Duration};
+use parking_lot::Mutex;
+use std::{fmt::Debug, mem, ops::Deref, clone::Clone, sync::Arc, time::Duration};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
-    task,
-    time,
+    task, time,
 };
 
 const BUF: usize = 4096;
@@ -27,9 +27,32 @@ const MAX_BATCH: usize = 0x3FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
 
 #[derive(Debug)]
-enum ToFlush<C> {
+pub struct K5CtxWrap<C: K5Ctx + Debug + Send + Sync + 'static>(Arc<Mutex<C>>);
+
+impl<C: K5Ctx + Debug + Send + Sync + 'static> K5CtxWrap<C> {
+    pub fn new(ctx: C) -> Self {
+        K5CtxWrap(Arc::new(Mutex::new(ctx)))
+    }
+}
+
+impl<C: K5Ctx + Debug + Send + Sync + 'static> Clone for K5CtxWrap<C> {
+    fn clone(&self) -> Self {
+        K5CtxWrap(Arc::clone(&self.0))
+    }
+}
+
+impl<C: K5Ctx + Debug + Send + Sync + 'static> Deref for K5CtxWrap<C> {
+    type Target = Mutex<C>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+#[derive(Debug)]
+enum ToFlush<C: K5Ctx + Debug + Send + Sync + 'static> {
     Flush(BytesMut),
-    SetCtx(C),
+    SetCtx(K5CtxWrap<C>),
 }
 
 async fn flush_buf<B: Buf>(
@@ -50,15 +73,12 @@ async fn flush_buf<B: Buf>(
     Ok(())
 }
 
-fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
+fn flush_task<C: K5Ctx + Debug + Send + Sync + 'static>(
     mut soc: WriteHalf<TcpStream>,
 ) -> Sender<ToFlush<C>> {
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
     task::spawn(async move {
-        let mut ctx: Option<C> = None;
-        let mut header = BytesMut::new();
-        let mut padding = BytesMut::new();
-        let mut trailer = BytesMut::new();
+        let mut ctx: Option<K5CtxWrap<C>> = None;
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
@@ -66,19 +86,12 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
                     ToFlush::SetCtx(c) => {
                         ctx = Some(c);
                     }
-                    ToFlush::Flush(mut data) => match ctx {
+                    ToFlush::Flush(data) => match ctx {
                         None => try_cf!(flush_buf(&mut soc, data, false).await),
                         Some(ref ctx) => {
-                            try_cf!(ctx.wrap_iov(
-                                true,
-                                &mut header,
-                                &mut data,
-                                &mut padding,
-                                &mut trailer
-                            ));
-                            let msg = header.split().chain(
-                                data.chain(padding.split().chain(trailer.split())),
-                            );
+                            let msg = try_cf!(task::block_in_place(|| ctx
+                                .lock()
+                                .wrap_iov(true, data)));
                             try_cf!(flush_buf(&mut soc, msg, true).await);
                         }
                     },
@@ -90,13 +103,13 @@ fn flush_task<C: Krb5Ctx + Debug + Send + Sync + 'static>(
     tx
 }
 
-pub(crate) struct WriteChannel<C> {
+pub(crate) struct WriteChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
     to_flush: Sender<ToFlush<C>>,
     buf: BytesMut,
     boundries: Vec<usize>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
+impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
         WriteChannel {
             to_flush: flush_task(socket),
@@ -105,7 +118,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
         }
     }
 
-    pub(crate) async fn set_ctx(&mut self, ctx: C) -> Result<()> {
+    pub(crate) async fn set_ctx(&mut self, ctx: K5CtxWrap<C>) -> Result<()> {
         Ok(self.to_flush.send(ToFlush::SetCtx(ctx)).await?)
     }
 
@@ -157,7 +170,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     pub(crate) async fn flush(&mut self) -> Result<()> {
         loop {
             if self.try_flush()? {
-                break Ok(())
+                break Ok(());
             } else {
                 future::poll_fn(|cx| self.to_flush.poll_ready(cx)).await?
             }
@@ -176,17 +189,15 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
                     if self.boundries.len() > 0 {
                         self.boundries.remove(0);
                     }
-                },
-                Err(e) if e.is_full() => {
-                    match e.into_inner() {
-                        ToFlush::Flush(mut chunk) => {
-                            chunk.unsplit(self.buf.split());
-                            self.buf = chunk;
-                            return Ok(false);
-                        }
-                        ToFlush::SetCtx(_) => unreachable!(),
-                    }
                 }
+                Err(e) if e.is_full() => match e.into_inner() {
+                    ToFlush::Flush(mut chunk) => {
+                        chunk.unsplit(self.buf.split());
+                        self.buf = chunk;
+                        return Ok(false);
+                    }
+                    ToFlush::SetCtx(_) => unreachable!(),
+                },
                 Err(_) => bail!("can't flush to closed connection"),
             }
         }
@@ -201,15 +212,15 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> WriteChannel<C> {
     }
 }
 
-fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
+fn read_task<C: K5Ctx + Debug + Send + Sync + 'static>(
     stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<TcpStream>,
-    mut set_ctx: oneshot::Receiver<C>,
+    mut set_ctx: oneshot::Receiver<K5CtxWrap<C>>,
 ) -> Receiver<BytesMut> {
     let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
-        let mut ctx: Option<C> = None;
+        let mut ctx: Option<K5CtxWrap<C>> = None;
         let mut buf = BytesMut::with_capacity(BUF);
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
@@ -239,7 +250,9 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
                         }
                     };
                     buf.advance(mem::size_of::<u32>());
-                    let decrypted = try_cf!(break, 'main, ctx.unwrap_iov(len, &mut buf));
+                    let decrypted = try_cf!(break, 'main, task::block_in_place(|| {
+                        ctx.lock().unwrap_iov(len, &mut buf)
+                    }));
                     try_cf!(break, 'main, tx.send(decrypted).await);
                 }
             }
@@ -260,14 +273,14 @@ fn read_task<C: Krb5Ctx + Clone + Debug + Send + Sync + 'static>(
     rx
 }
 
-pub(crate) struct ReadChannel<C> {
+pub(crate) struct ReadChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
     buf: BytesMut,
     _stop: oneshot::Sender<()>,
-    set_ctx: Option<oneshot::Sender<C>>,
+    set_ctx: Option<oneshot::Sender<K5CtxWrap<C>>>,
     incoming: stream::Fuse<Receiver<BytesMut>>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
+impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
     pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -281,7 +294,7 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
 
     /// Read context may only be set once. This method will panic if
     /// you try to set it twice.
-    pub(crate) fn set_ctx(&mut self, ctx: C) {
+    pub(crate) fn set_ctx(&mut self, ctx: K5CtxWrap<C>) {
         let _ = mem::replace(&mut self.set_ctx, None).unwrap().send(ctx);
     }
 
@@ -314,18 +327,18 @@ impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> ReadChannel<C> {
     }
 }
 
-pub(crate) struct Channel<C> {
+pub(crate) struct Channel<C: K5Ctx + Debug + Send + Sync + 'static> {
     read: ReadChannel<C>,
     write: WriteChannel<C>,
 }
 
-impl<C: Krb5Ctx + Debug + Clone + Send + Sync + 'static> Channel<C> {
+impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
     pub(crate) fn new(socket: TcpStream) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
     }
 
-    pub(crate) async fn set_ctx(&mut self, ctx: C) {
+    pub(crate) async fn set_ctx(&mut self, ctx: K5CtxWrap<C>) {
         self.read.set_ctx(ctx.clone());
         let _ = self.write.set_ctx(ctx).await;
     }

@@ -50,7 +50,6 @@ macro_rules! break_err {
 #[derive(Clone, Debug)]
 pub(crate) struct Ctx {
     pub(crate) subscriber: Subscriber,
-    pub(crate) resolver: ResolverRead,
     pub(crate) to_gui: glib::Sender<ToGui>,
     pub(crate) from_gui: mpsc::UnboundedSender<FromGui>,
     pub(crate) updates: mpsc::Sender<RawBatch>,
@@ -137,7 +136,6 @@ impl CtxInner {
         };
         task::spawn(inner.run());
         Ctx {
-            resolver: subscriber.resolver(),
             subscriber,
             to_gui,
             from_gui: tx_from_gui,

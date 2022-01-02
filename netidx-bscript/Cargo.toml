@@ -10,6 +10,10 @@ documentation = "https://docs.rs/netidx-bscript"
 readme = "../README.md"
 license = "MIT"
 
+[features]
+default = ["krb5_iov"]
+krb5_iov = ["netidx/krb5_iov"]
+
 [dependencies]
 anyhow = "1"
 base64 = "0.13"
@@ -20,7 +24,7 @@ fxhash = "0.2"
 lazy_static = "1"
 netidx-netproto = { path = "../netidx-netproto", version = "^0.10.1" }
 netidx-core = { path = "../netidx-core", version = "0.10" }
-netidx = { path = "../netidx", version = "0.10" }
+netidx = { path = "../netidx", version = "0.10", default_features = false }
 regex = "1"
 serde = "1"
 serde_derive = "1"
