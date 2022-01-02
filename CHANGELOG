@@ -1,3 +1,8 @@
+* 0.10.4 netidx, netidx-tools, bscript, protocols
+
+  - use cross-krb5 instead of gssapi and winapi directly
+  - fix build on mac os
+
 * 0.10.3 netidx-tools
 
   - fix building on windows, which has been broken for some time due to 
