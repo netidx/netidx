@@ -49,7 +49,7 @@ fn expr(
     entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak ibox => move |e| {
-        match e.get_text().parse::<expr::Expr>() {
+        match e.text().parse::<expr::Expr>() {
             Err(e) => err_modal(&ibox, &format!("parse error: {}", e)),
             Ok(s) => {
                 e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
@@ -64,7 +64,7 @@ fn expr(
         @strong source,
         @strong on_change,
         @weak entry => move |b| {
-        if !b.get_active() {
+        if !b.is_active() {
             if let Some((w, _)) = inspector.borrow_mut().take() {
                 w.close()
             }
@@ -85,7 +85,7 @@ fn expr(
                 source.borrow().clone()
             );
             w.add(si.root());
-            si.root().set_property_margin(5);
+            si.root().set_margin(5);
             w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
                 *inspector.borrow_mut() = None;
                 b.set_active(false);
@@ -549,7 +549,14 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        Selector { root, spec, _enabled_expr, _choices_expr, _selected_expr, _on_change_expr }
+        Selector {
+            root,
+            spec,
+            _enabled_expr,
+            _choices_expr,
+            _selected_expr,
+            _on_change_expr,
+        }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -722,14 +729,14 @@ impl LinePlot {
         let x_grid = gtk::CheckButton::with_label("X Axis Grid");
         x_grid.set_active(spec.borrow().x_grid);
         x_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
-            spec.borrow_mut().x_grid = b.get_active();
+            spec.borrow_mut().x_grid = b.is_active();
             on_change()
         }));
         axis.attach(&x_grid, 0, 2, 1);
         let y_grid = gtk::CheckButton::with_label("Y Axis Grid");
         y_grid.set_active(spec.borrow().y_grid);
         y_grid.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
-            spec.borrow_mut().y_grid = b.get_active();
+            spec.borrow_mut().y_grid = b.is_active();
             on_change()
         }));
         axis.attach(&y_grid, 0, 2, 1);
@@ -825,22 +832,17 @@ impl LinePlot {
         if let Some(c) = spec.borrow().fill {
             has_fill.set_active(true);
             fill_reveal.set_reveal_child(true);
-            fill_color.set_rgba(&gdk::RGBA {
-                red: c.r,
-                green: c.g,
-                blue: c.b,
-                alpha: 1.,
-            });
+            fill_color.set_rgba(&gdk::RGBA::new(c.r, c.g, c.b, 1.));
         }
         has_fill.connect_toggled(clone!(
             @strong on_change,
             @strong spec,
             @weak fill_reveal,
             @weak fill_color => move |b| {
-                if b.get_active() {
+                if b.is_active() {
                     fill_reveal.set_reveal_child(true);
-                    let c = fill_color.get_rgba();
-                    let c = view::RGB { r: c.red, g: c.green, b: c.blue };
+                    let c = fill_color.rgba();
+                    let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
                     spec.borrow_mut().fill = Some(c);
                 } else {
                     fill_reveal.set_reveal_child(false);
@@ -850,8 +852,8 @@ impl LinePlot {
         }));
         fill_color.connect_color_set(
             clone!(@strong on_change, @strong spec => move |b| {
-                let c = b.get_rgba();
-                let c = view::RGB { r: c.red, g: c.green, b: c.blue };
+                let c = b.rgba();
+                let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
                 spec.borrow_mut().fill = Some(c);
                 on_change()
             }),
@@ -916,13 +918,13 @@ impl LinePlot {
                     })
                 ));
                 let c = spec.borrow().line_color;
-                let rgba = gdk::RGBA { red: c.r, green: c.g, blue: c.b, alpha: 1.};
+                let rgba = gdk::RGBA::new(c.r, c.g, c.b, 1.);
                 let line_color = gtk::ColorButton::with_rgba(&rgba);
                 let lbl_line_color = gtk::Label::new(Some("Line Color:"));
                 line_color.connect_color_set(clone!(
                     @strong on_change, @strong spec => move |b| {
-                        let c = b.get_rgba();
-                        let c = view::RGB { r: c.red, g: c.green, b: c.blue };
+                        let c = b.rgba();
+                        let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
                         spec.borrow_mut().line_color = c;
                         on_change()
                     }));
@@ -960,7 +962,7 @@ impl LinePlot {
                     @weak seriesbox,
                     @strong on_change => move |_| {
                         grid_root.hide();
-                        for c in seriesbox.get_children() {
+                        for c in seriesbox.children() {
                             if c == grid_root {
                                 seriesbox.remove(&c);
                             }
@@ -1023,7 +1025,7 @@ impl BoxChild {
             view::Pack::End => "End",
         }));
         packcb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            spec.borrow_mut().pack = match c.get_active_id() {
+            spec.borrow_mut().pack = match c.active_id() {
                 Some(s) if &*s == "Start" => view::Pack::Start,
                 Some(s) if &*s == "End" => view::Pack::End,
                 _ => view::Pack::Start
@@ -1063,7 +1065,7 @@ fn dirselect(
         view::Direction::Vertical => dircb.set_active_id(Some("Vertical")),
     };
     dircb.connect_changed(move |c| {
-        on_change(match c.get_active_id() {
+        on_change(match c.active_id() {
             Some(s) if &*s == "Horizontal" => view::Direction::Horizontal,
             Some(s) if &*s == "Vertical" => view::Direction::Vertical,
             _ => view::Direction::Horizontal,
@@ -1094,7 +1096,7 @@ impl Paned {
         let wide = gtk::CheckButton::with_label("Wide Handle:");
         root.attach(&wide, 0, 2, 1);
         wide.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
-            spec.borrow_mut().wide_handle = b.get_active();
+            spec.borrow_mut().wide_handle = b.is_active();
             on_change()
         }));
         Paned { root, spec }
@@ -1180,7 +1182,7 @@ impl BoxContainer {
         let homo = gtk::CheckButton::with_label("Homogeneous:");
         root.attach(&homo, 0, 2, 1);
         homo.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
-            spec.borrow_mut().homogeneous = b.get_active();
+            spec.borrow_mut().homogeneous = b.is_active();
             on_change()
         }));
         root.add(parse_entry(
@@ -1224,7 +1226,7 @@ impl NotebookPage {
         let reorderable = gtk::CheckButton::with_label("Reorderable");
         reorderable.set_active(spec.borrow().reorderable);
         reorderable.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
-            spec.borrow_mut().reorderable = b.get_active();
+            spec.borrow_mut().reorderable = b.is_active();
             on_change()
         }));
         root.attach(&reorderable, 0, 2, 1);
@@ -1265,7 +1267,7 @@ impl Notebook {
             view::TabPosition::Right => Some("Right"),
         });
         poscb.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
-            let pos = match c.get_active_id() {
+            let pos = match c.active_id() {
                 Some(s) if &*s == "Top" => view::TabPosition::Top,
                 Some(s) if &*s == "Bottom" => view::TabPosition::Bottom,
                 Some(s) if &*s == "Left" => view::TabPosition::Left,
@@ -1280,7 +1282,7 @@ impl Notebook {
         tabs_visible.set_active(spec.borrow().tabs_visible);
         tabs_visible.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
-                spec.borrow_mut().tabs_visible = b.get_active();
+                spec.borrow_mut().tabs_visible = b.is_active();
                 on_change();
             }),
         );
@@ -1289,7 +1291,7 @@ impl Notebook {
         tabs_scrollable.set_active(spec.borrow().tabs_scrollable);
         tabs_scrollable.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
-                spec.borrow_mut().tabs_scrollable = b.get_active();
+                spec.borrow_mut().tabs_scrollable = b.is_active();
                 on_change();
             }),
         );
@@ -1297,7 +1299,7 @@ impl Notebook {
         let tabs_popup = gtk::CheckButton::with_label("Tabs Have Popup Menu");
         tabs_popup.set_active(spec.borrow().tabs_popup);
         tabs_popup.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
-            spec.borrow_mut().tabs_popup = b.get_active();
+            spec.borrow_mut().tabs_popup = b.is_active();
             on_change()
         }));
         root.attach(&tabs_popup, 0, 2, 1);
@@ -1385,7 +1387,7 @@ impl Grid {
         homogeneous_columns.set_active(spec.borrow().homogeneous_columns);
         homogeneous_columns.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
-                spec.borrow_mut().homogeneous_columns = b.get_active();
+                spec.borrow_mut().homogeneous_columns = b.is_active();
                 on_change()
             }),
         );
@@ -1394,7 +1396,7 @@ impl Grid {
         homogeneous_rows.set_active(spec.borrow().homogeneous_rows);
         homogeneous_rows.connect_toggled(
             clone!(@strong on_change, @strong spec => move |b| {
-                spec.borrow_mut().homogeneous_rows = b.get_active();
+                spec.borrow_mut().homogeneous_rows = b.is_active();
                 on_change()
             }),
         );

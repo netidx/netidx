@@ -207,7 +207,7 @@ pub(super) struct Table {
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
-    match store.get_sort_column_id() {
+    match store.sort_column_id() {
         None | Some((SortColumn::Default, _)) => None,
         Some((SortColumn::Index(c), _)) => {
             if c == 0 {
@@ -220,18 +220,15 @@ fn get_sort_column(store: &ListStore) -> Option<u32> {
 }
 
 fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Ordering {
-    let v0_v = m.get_value(r0, col);
-    let v1_v = m.get_value(r1, col);
+    let v0_v = m.value(r0, col);
+    let v1_v = m.value(r1, col);
     let v0_r = v0_v.get::<&str>();
     let v1_r = v1_v.get::<&str>();
     match (v0_r, v1_r) {
         (Err(_), Err(_)) => Ordering::Equal,
         (Err(_), _) => Ordering::Greater,
         (_, Err(_)) => Ordering::Less,
-        (Ok(None), Ok(None)) => Ordering::Equal,
-        (Ok(None), _) => Ordering::Less,
-        (_, Ok(None)) => Ordering::Greater,
-        (Ok(Some(v0)), Ok(Some(v1))) => match (v0.parse::<f64>(), v1.parse::<f64>()) {
+        (Ok(v0), Ok(v1)) => match (v0.parse::<f64>(), v1.parse::<f64>()) {
             (Ok(v0f), Ok(v1f)) => v0f.partial_cmp(&v1f).unwrap_or(Ordering::Equal),
             (_, _) => v0.cmp(v1),
         },
@@ -304,7 +301,7 @@ impl RaeifiedTable {
         }
         let view = TreeView::new();
         root.add(&view);
-        view.get_selection().set_mode(SelectionMode::None);
+        view.selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
             vec![String::static_type(); 2]
@@ -320,7 +317,7 @@ impl RaeifiedTable {
             let row = store.append();
             store.set_value(&row, 0, &row_name.to_value());
         }
-        let style = view.get_style_context();
+        let style = view.style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
         let t = RaeifiedTable(Rc::new(RaeifiedTableInner {
             path,
@@ -367,7 +364,7 @@ impl RaeifiedTable {
             };
             column.pack_start(&cell, true);
             if column_editable.is_match(&*name) {
-                cell.set_property_editable(true);
+                cell.set_editable(true);
             }
             let f = Box::new(clone!(@weak t =>
                 move |c: &TreeViewColumn,
@@ -412,8 +409,8 @@ impl RaeifiedTable {
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
         t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
-            if let Some(iter) = t.store().get_iter(&p) {
-                if let Ok(Some(row_name)) = t.store().get_value(&iter, 0).get::<&str>() {
+            if let Some(iter) = t.store().iter(&p) {
+                if let Ok(row_name) = t.store().value(&iter, 0).get::<&str>() {
                     let path = String::from(&*t.0.path.append(row_name));
                     let e = LocalEvent::Event(Value::String(Chars::from(path)));
                     t.0.on_activate.borrow_mut().update(
@@ -424,14 +421,12 @@ impl RaeifiedTable {
             }
         }));
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
-        t.0.root.get_vadjustment().map(|va| {
-            va.connect_value_changed(clone!(@weak t => move |_| {
-                idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
-                    t.update_subscriptions();
-                    Continue(false)
-                }));
+        t.0.root.vadjustment().connect_value_changed(clone!(@weak t => move |_| {
+            idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
+                t.update_subscriptions();
+                Continue(false)
             }));
-        });
+        }));
         match &default_sort_column {
             SortSpec::None => (),
             SortSpec::Ascending(col) | SortSpec::Descending(col) => {
@@ -460,39 +455,43 @@ impl RaeifiedTable {
 
     fn render_cell(&self, id: i32, c: &TreeViewColumn, cr: &CellRenderer, i: &TreeIter) {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
-        let rn_v = self.store().get_value(i, 0);
+        let rn_v = self.store().value(i, 0);
         let rn = rn_v.get::<&str>();
-        cr.set_property_text(match self.store().get_value(i, id).get::<&str>() {
-            Ok(v) => v,
+        cr.set_text(match self.store().value(i, id).get::<&str>() {
+            Ok(v) => Some(v),
             _ => return,
         });
         match (&*self.0.focus_column.borrow(), &*self.0.focus_row.borrow(), rn) {
-            (Some(fc), Some(fr), Ok(Some(rn))) if fc == c && fr.as_str() == rn => {
+            (Some(fc), Some(fr), Ok(rn)) if fc == c && fr.as_str() == rn => {
                 let st = StateFlags::SELECTED;
-                let fg = self.0.style.get_color(st);
-                let bg =
-                    StyleContextExt::get_property(&self.0.style, "background-color", st);
-                let bg = bg.get::<RGBA>().unwrap();
-                cr.set_property_cell_background_rgba(bg.as_ref());
-                cr.set_property_foreground_rgba(Some(&fg));
+                let fg = self.0.style.color(st);
+                let bg = StyleContextExt::style_property_for_state(
+                    &self.0.style,
+                    "background-color",
+                    st,
+                )
+                .get::<RGBA>()
+                .unwrap();
+                cr.set_cell_background_rgba(Some(&bg));
+                cr.set_foreground_rgba(Some(&fg));
             }
             _ => {
-                cr.set_property_cell_background(None);
-                cr.set_property_foreground(None);
+                cr.set_cell_background(None);
+                cr.set_foreground(None);
             }
         }
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
-        if key.get_keyval() == keys::constants::Escape {
+        if key.keyval() == keys::constants::Escape {
             // unset the focus
-            self.view().set_cursor::<TreeViewColumn>(&TreePath::new(), None, false);
+            self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
             *self.0.focus_column.borrow_mut() = None;
             *self.0.focus_row.borrow_mut() = None;
             self.0.selected_path.set_label("");
         }
-        if key.get_keyval() == keys::constants::w
-            && key.get_state().contains(gdk::ModifierType::CONTROL_MASK)
+        if key.keyval() == keys::constants::w
+            && key.state().contains(gdk::ModifierType::CONTROL_MASK)
         {
             self.write_dialog()
         }
@@ -501,7 +500,7 @@ impl RaeifiedTable {
 
     fn write_dialog(&self) {
         let window = toplevel(self.view());
-        let selected = self.0.selected_path.get_text();
+        let selected = self.0.selected_path.text();
         if &*selected == "" {
             err_modal(&window, "Select a cell before write");
         } else {
@@ -522,7 +521,7 @@ impl RaeifiedTable {
                     ("Write", gtk::ResponseType::Accept),
                 ],
             );
-            let root = d.get_content_area();
+            let root = d.content_area();
             let data_lbl = gtk::Label::new(Some("value:"));
             let data = gtk::Entry::new();
             let data_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -530,14 +529,14 @@ impl RaeifiedTable {
             data_box.add(&data);
             let err = gtk::Label::new(None);
             let err_attrs = pango::AttrList::new();
-            err_attrs.insert(pango::Attribute::new_foreground(0xFFFFu16, 0, 0).unwrap());
+            err_attrs.insert(pango::AttrColor::new_foreground(0xFFFFu16, 0, 0));
             err.set_attributes(Some(&err_attrs));
             if let Some(v) = &*val.borrow() {
                 data.set_text(&format!("{}", WVal(v)));
             }
             data.connect_changed(clone!(
                 @strong val,
-                @strong err => move |data| match data.get_text().parse::<Value>() {
+                @strong err => move |data| match data.text().parse::<Value>() {
                     Err(e) => {
                         *val.borrow_mut() = None;
                         err.set_text(&format!("{}", e));
@@ -574,27 +573,27 @@ impl RaeifiedTable {
     }
 
     fn cursor_changed(&self) {
-        let (p, c) = self.view().get_cursor();
+        let (p, c) = self.view().cursor();
         let row_name = match p {
             None => None,
-            Some(p) => match self.store().get_iter(&p) {
+            Some(p) => match self.store().iter(&p) {
                 None => None,
-                Some(i) => Some(self.store().get_value(&i, 0)),
+                Some(i) => Some(self.store().value(&i, 0)),
             },
         };
         let path = match row_name {
             None => None,
-            Some(row_name) => match row_name.get::<&str>().ok().flatten() {
-                None => None,
-                Some(row_name) => {
+            Some(row_name) => match row_name.get::<&str>() {
+                Err(_) => None,
+                Ok(row_name) => {
                     *self.0.focus_column.borrow_mut() = c.clone();
                     *self.0.focus_row.borrow_mut() = Some(String::from(row_name));
                     let col_name = if self.0.vector_mode {
                         None
-                    } else if self.view().get_column(0) == c {
+                    } else if self.view().column(0) == c {
                         None
                     } else {
-                        c.as_ref().and_then(|c| c.get_title())
+                        c.as_ref().and_then(|c| c.title())
                     };
                     match col_name {
                         None => Some(self.0.path.append(row_name)),
@@ -618,7 +617,7 @@ impl RaeifiedTable {
             return;
         }
         let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
-        let (mut start, mut end) = match self.view().get_visible_range() {
+        let (mut start, mut end) = match self.view().visible_range() {
             Some((s, e)) => (s, e),
             None => {
                 if self.0.descriptor.rows.len() > 0 {
@@ -638,14 +637,14 @@ impl RaeifiedTable {
             end.next();
         }
         // unsubscribe invisible rows
-        self.0.by_id.borrow_mut().retain(|_, v| match self.store().get_path(&v.row) {
+        self.0.by_id.borrow_mut().retain(|_, v| match self.store().path(&v.row) {
             None => false,
             Some(p) => {
                 let visible =
                     (p >= start && p <= end) || (Some(v.col) == self.0.sort_column.get());
                 if !visible {
-                    let row_name_v = self.store().get_value(&v.row, 0);
-                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                    let row_name_v = self.store().value(&v.row, 0);
+                    if let Ok(row_name) = row_name_v.get::<&str>() {
                         let mut subscribed = self.0.subscribed.borrow_mut();
                         if let Some(set) = subscribed.get_mut(row_name) {
                             set.remove(&v.col);
@@ -679,9 +678,9 @@ impl RaeifiedTable {
         };
         // subscribe to all the visible rows
         while start < end {
-            if let Some(row) = self.store().get_iter(&start) {
-                let row_name_v = self.store().get_value(&row, 0);
-                if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+            if let Some(row) = self.store().iter(&start) {
+                let row_name_v = self.store().value(&row, 0);
+                if let Ok(row_name) = row_name_v.get::<&str>() {
                     for col in 0..ncols {
                         maybe_subscribe_col(&row, row_name, (col + 1) as u32);
                     }
@@ -691,10 +690,10 @@ impl RaeifiedTable {
         }
         // subscribe to all rows in the sort column
         if let Some(id) = self.0.sort_column.get() {
-            if let Some(row) = self.store().get_iter_first() {
+            if let Some(row) = self.store().iter_first() {
                 loop {
-                    let row_name_v = self.store().get_value(&row, 0);
-                    if let Ok(Some(row_name)) = row_name_v.get::<&str>() {
+                    let row_name_v = self.store().value(&row, 0);
+                    if let Ok(row_name) = row_name_v.get::<&str>() {
                         maybe_subscribe_col(&row, row_name, id);
                     }
                     if !self.store().iter_next(&row) {
@@ -708,7 +707,7 @@ impl RaeifiedTable {
 
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
         self.0.sort_temp_disabled.set(true);
-        let col = self.store().get_sort_column_id();
+        let col = self.store().sort_column_id();
         self.store().set_unsorted();
         self.0.sort_temp_disabled.set(false);
         col
@@ -755,12 +754,12 @@ impl RaeifiedTable {
                         let _: result::Result<_, _> = tx.send(());
                     }
                     t.enable_sort(sctx);
-                    let (mut start, end) = match t.view().get_visible_range() {
+                    let (mut start, end) = match t.view().visible_range() {
                         None => return Continue(false),
                         Some((s, e)) => (s, e),
                     };
                     while start <= end {
-                        if let Some(i) = t.store().get_iter(&start) {
+                        if let Some(i) = t.store().iter(&start) {
                             t.store().row_changed(&start, &i);
                         }
                         start.next();
@@ -887,7 +886,7 @@ impl Table {
                 }
             },
         }
-        if let Some(c) = self.root.get_child() {
+        if let Some(c) = self.root.child() {
             self.root.remove(&c);
         }
     }

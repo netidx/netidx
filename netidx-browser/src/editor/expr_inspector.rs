@@ -10,8 +10,8 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, GBoxed)]
-#[gboxed(type_name = "NetidxExprInspectorWrap")]
+#[derive(Clone, Boxed)]
+#[boxed_type(name = "NetidxExprInspectorWrap")]
 struct ExprWrap(Arc<dyn Fn(&Value)>);
 
 fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, v: &Value) {
@@ -214,19 +214,19 @@ impl ExprEditor {
         let root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.set_property_expand(true);
-        let view = sv::ViewBuilder::new()
+        root.set_expand(true);
+        let view = sv::View::builder()
             .insert_spaces_instead_of_tabs(true)
             .show_line_numbers(true)
             .auto_indent(true)
             .build();
-        view.set_property_expand(true);
+        view.set_expand(true);
         root.add(&view);
-        if let Some(buf) = view.get_buffer() {
+        if let Some(buf) = view.buffer() {
             buf.set_text(&expr.borrow().to_string_pretty(80));
             buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
                 unsaved.set(true);
-                if let Some(text) = buf.get_slice(&buf.get_start_iter(), &buf.get_end_iter(), false) {
+                if let Some(text) = buf.slice(&buf.start_iter(), &buf.end_iter(), false) {
                     match text.parse::<expr::Expr>() {
                         Err(e) => {
                             tools.set_error(&format!("{}", e));
