@@ -145,7 +145,7 @@ impl Notebook {
             view::TabPosition::Top => gtk::PositionType::Top,
             view::TabPosition::Bottom => gtk::PositionType::Bottom,
         });
-        root.set_property_enable_popup(spec.tabs_popup);
+        root.set_enable_popup(spec.tabs_popup);
         let mut children = Vec::new();
         for (i, s) in spec.children.iter().enumerate() {
             let scope = scope.append(&format!("n{}", i));

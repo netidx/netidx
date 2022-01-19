@@ -1,7 +1,7 @@
 use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, WVal};
 use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, Result};
-//use cairo;
+use cairo;
 use chrono::prelude::*;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
@@ -631,7 +631,6 @@ impl<'a, I: Iterator<Item = &'a Value>> Iterator for ValidTypIter<'a, I> {
     }
 }
 
-/*
 struct Series {
     line_color: view::RGB,
     x: BSNode,
@@ -996,4 +995,3 @@ impl LinePlot {
         }
     }
 }
-*/
