@@ -261,7 +261,7 @@ pub mod server {
 pub mod client {
     use super::*;
 
-    pub(crate) mod file {
+    mod file {
         use super::Auth;
         use std::net::SocketAddr;
 
