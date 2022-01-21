@@ -53,6 +53,6 @@ glib = "0.15"
 gdk = "0.15"
 sourceview4 = "0.3"
 plotters = { version = "0.3", default_features = false, features = ["datetime", "line_series", "ttf"] }
-plotters-svg = "0.3"
+plotters-backend = "0.3"
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }

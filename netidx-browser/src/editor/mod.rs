@@ -2,7 +2,7 @@ mod expr_inspector;
 mod util;
 mod widgets;
 use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
+use glib::{clone, idle_add_local, prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_bscript::expr;

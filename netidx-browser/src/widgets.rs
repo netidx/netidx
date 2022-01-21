@@ -1,9 +1,8 @@
 use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, WVal};
 use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, Result};
-use cairo;
 use chrono::prelude::*;
-use gdk::{self, prelude::*};
+use gdk::{self, cairo, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use log::warn;
@@ -107,7 +106,7 @@ impl LinkButton {
             spec.on_activate_link.clone(),
         )));
         let cur_label = label.current().and_then(|v| v.get_as::<Chars>());
-        let cur_label = cur_label.as_ref().map(|s| s.as_ref());
+        let cur_label = cur_label.as_ref().map(|s| s.as_ref()).unwrap_or("");
         let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
         let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("file:///");
         let button = gtk::LinkButton::with_label(cur_uri, cur_label);
@@ -285,7 +284,7 @@ impl Selector {
             @strong ctx,
             @strong selected => move |combo| {
             if !we_set.get() {
-                if let Some(id) = combo.get_active_id() {
+                if let Some(id) = combo.active_id() {
                     if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
                         on_change.borrow_mut().update(
                             &mut *ctx.borrow_mut(),
@@ -524,7 +523,7 @@ impl Entry {
             on_activate.borrow_mut().update(
                 &mut *ctx.borrow_mut(),
                 &vm::Event::User(
-                    LocalEvent::Event(Value::String(Chars::from(String::from(entry.get_text()))))
+                    LocalEvent::Event(Value::String(Chars::from(String::from(entry.text()))))
                 ),
             );
             idle_add_local(clone!(
@@ -547,7 +546,7 @@ impl Entry {
                 let v = on_change.borrow_mut().update(
                     &mut *ctx.borrow_mut(),
                     &vm::Event::User(LocalEvent::Event(
-                        Value::String(Chars::from(String::from(e.get_text())))
+                        Value::String(Chars::from(String::from(e.text())))
                     )),
                 );
                 if let Some(v) = v {
@@ -714,8 +713,8 @@ impl LinePlot {
         canvas.connect_size_allocate(clone!(
         @strong allocated_width,
         @strong allocated_height => move |_, a| {
-            allocated_width.set(i32::abs(a.width) as u32);
-            allocated_height.set(i32::abs(a.height) as u32);
+            allocated_width.set(i32::abs(a.width()) as u32);
+            allocated_height.set(i32::abs(a.height()) as u32);
         }));
         LinePlot { root, x_min, x_max, y_min, y_max, keep_points, series }
     }
@@ -733,7 +732,7 @@ impl LinePlot {
     ) -> Result<()> {
         use chrono::Duration;
         use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
-        use plotters_cairo::CairoBackend;
+        use super::cairo_backend::CairoBackend;
         use std::cmp::max;
         fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
             match specified {

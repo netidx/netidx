@@ -1,5 +1,5 @@
 use super::super::{util::ask_modal, BSCtx};
-use glib::{clone, prelude::*, subclass::prelude::*};
+use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
@@ -55,11 +55,11 @@ impl DataFlow {
         let call_root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         call_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        call_root.set_property_expand(false);
+        call_root.set_expand(false);
         let event_root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         event_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        event_root.set_property_expand(false);
+        event_root.set_expand(false);
         let call_store = gtk::TreeStore::new(&[
             String::static_type(),
             String::static_type(),
