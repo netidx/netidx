@@ -8,7 +8,10 @@ use futures::channel::oneshot;
 use fxhash::FxBuildHasher;
 use gdk::{keys, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
+use glib::{
+    self, clone, idle_add_local, signal::Inhibit, source::Continue,
+    value::ValueTypeMismatchOrNoneError,
+};
 use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
@@ -459,6 +462,7 @@ impl RaeifiedTable {
         let rn = rn_v.get::<&str>();
         cr.set_text(match self.store().value(i, id).get::<&str>() {
             Ok(v) => Some(v),
+            Err(ValueTypeMismatchOrNoneError::UnexpectedNone) => None,
             _ => return,
         });
         match (&*self.0.focus_column.borrow(), &*self.0.focus_row.borrow(), rn) {
