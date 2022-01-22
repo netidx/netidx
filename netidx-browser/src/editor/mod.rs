@@ -666,8 +666,8 @@ impl Editor {
         win_lower.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let root_lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
         win_lower.add(&root_lower);
-        root.add1(&root_upper);
-        root.add2(&win_lower);
+        root.pack1(&root_upper, true, false);
+        root.pack2(&win_lower, true, true);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root_upper.pack_start(&treebtns, false, false, 0);
         let addbtnicon = gtk::Image::from_icon_name(

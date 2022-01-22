@@ -735,7 +735,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
     group.add_window(&ctx.borrow().user.window);
     let headerbar = gtk::HeaderBar::new();
-    let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
     let design_img = gtk::Image::from_icon_name(
         Some("document-page-setup"),
@@ -766,7 +765,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         w.set_titlebar(Some(&headerbar));
         w.set_title("Netidx browser");
         w.set_default_size(800, 600);
-        w.add(&mainbox);
         w.show_all();
         if let Some(screen) = w.screen() {
             setup_css(&screen);
@@ -779,6 +777,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
+    let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     ctx.borrow().user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
@@ -791,30 +790,41 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             }
     }));
     design_mode.connect_toggled(clone!(
-    @weak mainbox,
+    @strong editor_window,
     @strong editor,
     @strong highlight,
     @strong current,
     @strong current_spec,
     @weak ctx => move |b| {
         if b.is_active() {
-            if let Some(editor) = editor.borrow_mut().take() {
-                mainbox.remove(editor.root());
-            }
+            editor_window.borrow_mut().take();
+            editor.borrow_mut().take();
             let s = current_spec.borrow().clone();
             let e = Editor::new(ctx, s);
-            mainbox.add1(e.root());
-            mainbox.show_all();
+            let win = gtk::Window::builder()
+                .default_width(800)
+                .default_height(600)
+                .type_(gtk::WindowType::Toplevel)
+                .visible(true)
+                .build();
+            win.connect_destroy(clone!(@strong b, @strong editor_window => move |_| {
+                editor_window.borrow_mut().take();
+                b.set_active(false);
+            }));
+            win.add(e.root());
+            win.show_all();
+            *editor_window.borrow_mut() = Some(win);
             *editor.borrow_mut() = Some(e);
         } else {
-            if let Some(editor) = editor.borrow_mut().take() {
-                mainbox.remove(editor.root());
-                if let Some(cur) = &*current.borrow() {
-                    let hl = highlight.borrow();
-                    cur.widget.set_highlight(hl.iter().copied(), false);
-                }
-                highlight.borrow_mut().clear();
+            if let Some(win) = editor_window.borrow_mut().take() {
+                win.close();
             }
+            editor.borrow_mut().take();
+            if let Some(cur) = &*current.borrow() {
+                let hl = highlight.borrow();
+                cur.widget.set_highlight(hl.iter().copied(), false);
+            }
+            highlight.borrow_mut().clear();
         }
     }));
     save_button.connect_clicked(clone!(
@@ -935,17 +945,19 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 }
             }
             if let Some(cur) = current.borrow_mut().take() {
-                mainbox.remove(cur.root());
+                ctx.borrow().user.window.remove(cur.root());
             }
             ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
-            ctx.borrow()
-                .user
-                .window
-                .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
-            mainbox.add2(cur.root());
-            mainbox.show_all();
+            {
+                let ctx = ctx.borrow();
+                ctx.user
+                    .window
+                    .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
+                ctx.user.window.add(cur.root());
+                ctx.user.window.show_all();
+            }
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter().copied(), true);
             *current.borrow_mut() = Some(cur);
