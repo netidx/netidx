@@ -501,24 +501,32 @@ impl Widget {
                 }
                 .to_expr(),
             })),
-            Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
-                title: String::from("Line Plot"),
-                x_label: String::from("x axis"),
-                y_label: String::from("y axis"),
-                x_labels: 4,
-                y_labels: 4,
-                x_grid: true,
-                y_grid: true,
-                fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
-                margin: 3,
-                label_area: 50,
-                x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
-                series: Vec::new(),
-            })),
+            Some("LinePlot") => {
+                let props = Some(view::WidgetProps {
+                    vexpand: true,
+                    hexpand: true,
+                    ..DEFAULT_PROPS
+                });
+                let kind = view::WidgetKind::LinePlot(view::LinePlot {
+                    title: String::from("Line Plot"),
+                    x_label: String::from("x axis"),
+                    y_label: String::from("y axis"),
+                    x_labels: 4,
+                    y_labels: 4,
+                    x_grid: true,
+                    y_grid: true,
+                    fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
+                    margin: 3,
+                    label_area: 50,
+                    x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
+                    series: Vec::new(),
+                });
+                view::Widget { kind, props }
+            }
             Some("Frame") => widget(view::WidgetKind::Frame(view::Frame {
                 label: expr::ExprKind::Constant(Value::Null).to_expr(),
                 label_align_horizontal: 0.,
