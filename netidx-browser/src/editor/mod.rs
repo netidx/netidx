@@ -346,7 +346,6 @@ impl Widget {
         }
         if let Some(r) = kind.root() {
             root.pack_start(r, true, true, 0);
-            root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
         }
         store.set_value(iter, 0, &name.to_value());
         root.set_sensitive(false);
