@@ -693,6 +693,7 @@ impl LinePlot {
         util::expander_touch_enable(&axis_exp);
         let mut axis = TwoColGrid::new();
         root.pack_start(&axis_exp, false, false, 0);
+        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
         axis_exp.add(axis.root());
         axis.add(parse_entry(
             "X Axis Label:",
@@ -752,6 +753,7 @@ impl LinePlot {
         util::expander_touch_enable(&range_exp);
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
+        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
         range_exp.add(range.root());
         let (l, e, x_min) = expr(
             ctx,
@@ -815,6 +817,7 @@ impl LinePlot {
         util::expander_touch_enable(&style_exp);
         let mut style = TwoColGrid::new();
         root.pack_start(&style_exp, false, false, 0);
+        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
         style_exp.add(style.root());
         style.add(parse_entry(
             "Title:",
@@ -888,6 +891,7 @@ impl LinePlot {
         let addbtn = gtk::Button::with_label("+");
         series_exp.add(&seriesbox);
         root.pack_start(&series_exp, false, false, 0);
+        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
         let series_id = Rc::new(Cell::new(0));
         let series: Rc<RefCell<IndexMap<usize, Series>>> =
             Rc::new(RefCell::new(IndexMap::new()));
