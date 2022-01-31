@@ -1,5 +1,9 @@
 use super::super::{util::ask_modal, BSCtx};
-use glib::{clone, prelude::*};
+use glib::{
+    clone,
+    prelude::*,
+    subclass::{self, prelude::*},
+};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
@@ -9,6 +13,90 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
+
+glib::wrapper! {
+    struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
+        @implements sv::CompletionProvider;
+}
+
+mod imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub(super) struct BScriptCompletionProvider;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for BScriptCompletionProvider {
+        const NAME: &'static str = "BScriptCompletionProvider";
+
+        type Type = super::BScriptCompletionProvider;
+
+        type ParentType = glib::Object;
+
+        type Interfaces = (sv::CompletionProvider,);
+    }
+
+    impl ObjectImpl for BScriptCompletionProvider {}
+
+    impl sv::subclass::completion_provider::CompletionProviderImpl
+        for BScriptCompletionProvider
+    {
+        fn activate_proposal(
+            &self,
+            proposal: &impl IsA<sv::CompletionProposal>,
+            iter: &mut gtk::TextIter,
+        ) -> bool {
+            unimplemented!()
+        }
+        fn activation(&self) -> sv::CompletionActivation {
+            unimplemented!()
+        }
+        fn gicon(&self) -> Option<gio::Icon> {
+            unimplemented!()
+        }
+        fn icon(&self) -> Option<gdk_pixbuf::Pixbuf> {
+            unimplemented!()
+        }
+        fn icon_name(&self) -> Option<glib::GString> {
+            unimplemented!()
+        }
+        fn info_widget(
+            &self,
+            proposal: &impl IsA<sv::CompletionProposal>,
+        ) -> Option<gtk::Widget> {
+            unimplemented!()
+        }
+        fn interactive_delay(&self) -> i32 {
+            unimplemented!()
+        }
+        fn name(&self) -> Option<glib::GString> {
+            unimplemented!()
+        }
+        fn priority(&self) -> i32 {
+            unimplemented!()
+        }
+        fn start_iter(
+            &self,
+            context: &impl IsA<sv::CompletionContext>,
+            proposal: &impl IsA<sv::CompletionProposal>,
+        ) -> Option<gtk::TextIter> {
+            unimplemented!()
+        }
+        fn match_(&self, context: &impl IsA<sv::CompletionContext>) -> bool {
+            unimplemented!()
+        }
+        fn populate(&self, context: &impl IsA<sv::CompletionContext>) {
+            unimplemented!()
+        }
+        fn update_info(
+            &self,
+            proposal: &impl IsA<sv::CompletionProposal>,
+            info: &impl IsA<sv::CompletionInfo>,
+        ) {
+            unimplemented!()
+        }
+    }
+}
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
