@@ -7,7 +7,8 @@ use glib::{
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
-use sourceview4 as sv;
+use sourceview4::{self as sv, prelude::*};
+use sv::traits::ViewExt;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -17,6 +18,12 @@ use std::{
 glib::wrapper! {
     struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
         @implements sv::CompletionProvider;
+}
+
+impl BScriptCompletionProvider {
+    fn new() -> Self {
+        glib::Object::new(&[]).expect("failed to create BScriptCompletionProvider")
+    }
 }
 
 mod imp {
@@ -49,7 +56,7 @@ mod imp {
             unimplemented!()
         }
         fn activation(&self) -> sv::CompletionActivation {
-            unimplemented!()
+            sv::CompletionActivation::USER_REQUESTED
         }
         fn gicon(&self) -> Option<gio::Icon> {
             unimplemented!()
@@ -309,6 +316,9 @@ impl ExprEditor {
             .auto_indent(true)
             .build();
         view.set_expand(true);
+        if let Some(completion) = dbg!(view.completion()) {
+            dbg!(completion.add_provider(&BScriptCompletionProvider::new()).expect("completion"))
+        }
         root.add(&view);
         if let Some(buf) = view.buffer() {
             buf.set_text(&expr.borrow().to_string_pretty(80));
