@@ -103,8 +103,17 @@ mod imp {
             dbg!("match_");
             true
         }
-        fn populate(&self, _context: &impl IsA<sv::CompletionContext>) {
+        fn populate(&self, context: &impl IsA<sv::CompletionContext>) {
             dbg!("populate");
+            let p = sv::CompletionItem::builder().text("foobarbaz").build();
+            if let Some(completion) = context.completion() {
+                dbg!("get completion");
+                let providers = completion.providers();
+                if !providers.is_empty() {
+                    dbg!("get providers and populate");
+                    context.add_proposals(&providers[0], &[p.upcast()], true)
+                }
+            }
         }
         fn update_info(
             &self,
