@@ -8,12 +8,12 @@ use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
 use sourceview4::{self as sv, prelude::*};
-use sv::traits::ViewExt;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
 };
+use sv::traits::ViewExt;
 
 glib::wrapper! {
     struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
@@ -50,57 +50,68 @@ mod imp {
     {
         fn activate_proposal(
             &self,
-            proposal: &impl IsA<sv::CompletionProposal>,
-            iter: &mut gtk::TextIter,
+            _proposal: &impl IsA<sv::CompletionProposal>,
+            _iter: &mut gtk::TextIter,
         ) -> bool {
-            unimplemented!()
+            dbg!("activate_proposal");
+            false
         }
         fn activation(&self) -> sv::CompletionActivation {
+            dbg!("activation");
             sv::CompletionActivation::USER_REQUESTED
         }
         fn gicon(&self) -> Option<gio::Icon> {
-            unimplemented!()
+            dbg!("gicon");
+            None
         }
         fn icon(&self) -> Option<gdk_pixbuf::Pixbuf> {
-            unimplemented!()
+            dbg!("icon");
+            None
         }
         fn icon_name(&self) -> Option<glib::GString> {
-            unimplemented!()
+            dbg!("icon_name");
+            None
         }
         fn info_widget(
             &self,
-            proposal: &impl IsA<sv::CompletionProposal>,
+            _proposal: &impl IsA<sv::CompletionProposal>,
         ) -> Option<gtk::Widget> {
-            unimplemented!()
+            dbg!("info_widget");
+            None
         }
         fn interactive_delay(&self) -> i32 {
-            unimplemented!()
+            dbg!("interactive_delay");
+            100
         }
         fn name(&self) -> Option<glib::GString> {
-            unimplemented!()
+            dbg!("name");
+            Some("bscript".into())
         }
         fn priority(&self) -> i32 {
-            unimplemented!()
+            dbg!("priority");
+            1
         }
         fn start_iter(
             &self,
-            context: &impl IsA<sv::CompletionContext>,
-            proposal: &impl IsA<sv::CompletionProposal>,
+            _context: &impl IsA<sv::CompletionContext>,
+            _proposal: &impl IsA<sv::CompletionProposal>,
         ) -> Option<gtk::TextIter> {
-            unimplemented!()
+            dbg!("start_iter");
+            None
         }
-        fn match_(&self, context: &impl IsA<sv::CompletionContext>) -> bool {
-            unimplemented!()
+        fn match_(&self, _context: &impl IsA<sv::CompletionContext>) -> bool {
+            dbg!("match_");
+            true
         }
-        fn populate(&self, context: &impl IsA<sv::CompletionContext>) {
-            unimplemented!()
+        fn populate(&self, _context: &impl IsA<sv::CompletionContext>) {
+            dbg!("populate");
         }
         fn update_info(
             &self,
-            proposal: &impl IsA<sv::CompletionProposal>,
-            info: &impl IsA<sv::CompletionInfo>,
+            _proposal: &impl IsA<sv::CompletionProposal>,
+            _info: &impl IsA<sv::CompletionInfo>,
         ) {
-            unimplemented!()
+            dbg!("update_info");
         }
     }
 }
@@ -317,7 +328,9 @@ impl ExprEditor {
             .build();
         view.set_expand(true);
         if let Some(completion) = dbg!(view.completion()) {
-            dbg!(completion.add_provider(&BScriptCompletionProvider::new()).expect("completion"))
+            dbg!(completion
+                .add_provider(&BScriptCompletionProvider::new())
+                .expect("completion"))
         }
         root.add(&view);
         if let Some(buf) = view.buffer() {
