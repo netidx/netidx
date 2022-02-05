@@ -1,4 +1,5 @@
 mod expr_inspector;
+mod completion;
 mod util;
 mod widgets;
 use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};

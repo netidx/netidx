@@ -1,4 +1,5 @@
 use super::super::{util::ask_modal, BSCtx};
+use super::completion::BScriptCompletionProvider;
 use glib::{
     clone,
     prelude::*,
@@ -14,116 +15,6 @@ use std::{
     sync::Arc,
 };
 use sv::traits::ViewExt;
-
-glib::wrapper! {
-    struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
-        @implements sv::CompletionProvider;
-}
-
-impl BScriptCompletionProvider {
-    fn new() -> Self {
-        glib::Object::new(&[]).expect("failed to create BScriptCompletionProvider")
-    }
-}
-
-mod imp {
-    use super::*;
-
-    #[derive(Default)]
-    pub(super) struct BScriptCompletionProvider;
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for BScriptCompletionProvider {
-        const NAME: &'static str = "BScriptCompletionProvider";
-
-        type Type = super::BScriptCompletionProvider;
-
-        type ParentType = glib::Object;
-
-        type Interfaces = (sv::CompletionProvider,);
-    }
-
-    impl ObjectImpl for BScriptCompletionProvider {}
-
-    impl sv::subclass::completion_provider::CompletionProviderImpl
-        for BScriptCompletionProvider
-    {
-        fn activate_proposal(
-            &self,
-            _proposal: &impl IsA<sv::CompletionProposal>,
-            _iter: &mut gtk::TextIter,
-        ) -> bool {
-            dbg!("activate_proposal");
-            false
-        }
-        fn activation(&self) -> sv::CompletionActivation {
-            dbg!("activation");
-            sv::CompletionActivation::USER_REQUESTED
-        }
-        fn gicon(&self) -> Option<gio::Icon> {
-            dbg!("gicon");
-            None
-        }
-        fn icon(&self) -> Option<gdk_pixbuf::Pixbuf> {
-            dbg!("icon");
-            None
-        }
-        fn icon_name(&self) -> Option<glib::GString> {
-            dbg!("icon_name");
-            None
-        }
-        fn info_widget(
-            &self,
-            _proposal: &impl IsA<sv::CompletionProposal>,
-        ) -> Option<gtk::Widget> {
-            dbg!("info_widget");
-            None
-        }
-        fn interactive_delay(&self) -> i32 {
-            dbg!("interactive_delay");
-            100
-        }
-        fn name(&self) -> Option<glib::GString> {
-            dbg!("name");
-            Some("bscript".into())
-        }
-        fn priority(&self) -> i32 {
-            dbg!("priority");
-            1
-        }
-        fn start_iter(
-            &self,
-            _context: &impl IsA<sv::CompletionContext>,
-            _proposal: &impl IsA<sv::CompletionProposal>,
-        ) -> Option<gtk::TextIter> {
-            dbg!("start_iter");
-            None
-        }
-        fn match_(&self, _context: &impl IsA<sv::CompletionContext>) -> bool {
-            dbg!("match_");
-            true
-        }
-        fn populate(&self, context: &impl IsA<sv::CompletionContext>) {
-            dbg!("populate");
-            let p = sv::CompletionItem::builder().text("foobarbaz").build();
-            if let Some(completion) = context.completion() {
-                dbg!("get completion");
-                let providers = completion.providers();
-                if !providers.is_empty() {
-                    dbg!("get providers and populate");
-                    context.add_proposals(&providers[0], &[p.upcast()], true)
-                }
-            }
-        }
-        fn update_info(
-            &self,
-            _proposal: &impl IsA<sv::CompletionProposal>,
-            _info: &impl IsA<sv::CompletionInfo>,
-        ) {
-            dbg!("update_info");
-        }
-    }
-}
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
