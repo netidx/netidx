@@ -1,10 +1,12 @@
-use super::super::BSCtx;
+use super::super::{bscript::LocalEvent, WidgetCtx};
 use glib::{prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use sourceview4::{
     prelude::*, subclass::prelude::*, CompletionItem, CompletionProposal,
     CompletionProvider, CompletionActivation, CompletionContext, CompletionInfo
 };
+use netidx_bscript::vm::ExecCtx;
+use std::{rc::Rc, default::Default};
 
 glib::wrapper! {
     pub(crate) struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
@@ -17,11 +19,30 @@ impl BScriptCompletionProvider {
     }
 }
 
-mod imp {
+pub(crate) mod imp {
+    use std::cell::RefCell;
+
+    use crate::BSCtx;
+
     use super::*;
 
-    #[derive(Default)]
-    pub(super) struct BScriptCompletionProvider;
+    pub(crate) struct BScriptCompletionProvider {
+        ctx: Rc<RefCell<Option<BSCtx>>>
+    }
+
+    impl BScriptCompletionProvider {
+        pub(crate) fn set_ctx(&self, ctx: BSCtx) {
+            *self.ctx.borrow_mut() = Some(ctx);
+        }
+    }
+
+    impl Default for BScriptCompletionProvider {
+        fn default() -> Self {
+            BScriptCompletionProvider {
+                ctx: Rc::new(RefCell::new(None))
+            }
+        }
+    }
 
     #[glib::object_subclass]
     impl ObjectSubclass for BScriptCompletionProvider {

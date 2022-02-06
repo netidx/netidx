@@ -215,6 +215,7 @@ impl ExprEditor {
         tools: Rc<Tools>,
         save_button: gtk::ToolButton,
         unsaved: Rc<Cell<bool>>,
+        ctx: BSCtx,
         expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
         let root =
@@ -228,9 +229,11 @@ impl ExprEditor {
             .build();
         view.set_expand(true);
         if let Some(completion) = dbg!(view.completion()) {
-            dbg!(completion
-                .add_provider(&BScriptCompletionProvider::new())
-                .expect("completion"))
+            let provider = BScriptCompletionProvider::new();
+            provider.imp().set_ctx(ctx);
+            completion
+                .add_provider(&provider)
+                .expect("completion")
         }
         root.add(&view);
         if let Some(buf) = view.buffer() {
@@ -285,6 +288,7 @@ impl ExprInspector {
             tools.clone(),
             save_button.clone(),
             unsaved.clone(),
+            ctx.clone(),
             expr.clone(),
         );
         save_button.connect_clicked(
