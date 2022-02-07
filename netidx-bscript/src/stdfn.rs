@@ -51,6 +51,7 @@ impl<C: Ctx, E> Register<C, E> for Any {
             Box::new(Any(from.iter().find_map(|s| s.current())))
         });
         ctx.functions.insert("any".into(), f);
+        ctx.user.register_fn("any".into(), Path::root());
     }
 }
 
@@ -85,6 +86,7 @@ impl<C: Ctx, E> Register<C, E> for Do {
             Box::new(Do(from.iter().fold(None, |_, s| s.current())))
         });
         ctx.functions.insert("do".into(), f);
+        ctx.user.register_fn("do".into(), Path::root());
     }
 }
 
@@ -123,6 +125,7 @@ impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
             Box::new(CachedCur::<T> { cached, current, t: PhantomData })
         });
         ctx.functions.insert(T::name().into(), f);
+        ctx.user.register_fn(T::name().into(), Path::root());
     }
 }
 
@@ -861,6 +864,7 @@ impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
             Box::new(t)
         });
         ctx.functions.insert("eval".into(), f);
+        ctx.user.register_fn("eval".into(), Path::root());
     }
 }
 
@@ -899,6 +903,7 @@ impl<C: Ctx, E> Register<C, E> for Count {
             Box::new(Count { from: CachedVals::new(from), count: 0 })
         });
         ctx.functions.insert("count".into(), f);
+        ctx.user.register_fn("count".into(), Path::root());
     }
 }
 
@@ -945,6 +950,7 @@ impl<C: Ctx, E> Register<C, E> for Sample {
             Box::new(Sample { current })
         });
         ctx.functions.insert("sample".into(), f);
+        ctx.user.register_fn("sample".into(), Path::root());
     }
 }
 
@@ -993,6 +999,7 @@ impl<C: Ctx, E> Register<C, E> for Mean {
             Box::new(Mean { from: CachedVals::new(from), total: 0., samples: 0 })
         });
         ctx.functions.insert("mean".into(), f);
+        ctx.user.register_fn("mean".into(), Path::root());
     }
 }
 
@@ -1046,6 +1053,7 @@ impl<C: Ctx, E> Register<C, E> for Uniq {
             Box::new(t)
         });
         ctx.functions.insert("uniq".into(), f);
+        ctx.user.register_fn("uniq".into(), Path::root());
     }
 }
 
@@ -1128,6 +1136,7 @@ impl<C: Ctx, E> Register<C, E> for Store {
             Box::new(t)
         });
         ctx.functions.insert("store".into(), f);
+        ctx.user.register_fn("store".into(), Path::root());
     }
 }
 
@@ -1283,7 +1292,9 @@ impl<C: Ctx, E> Register<C, E> for Set {
             })
         };
         ctx.functions.insert("set".into(), f(false));
+        ctx.user.register_fn("set".into(), Path::root());
         ctx.functions.insert("let".into(), f(true));
+        ctx.user.register_fn("let".into(), Path::root());
     }
 }
 
@@ -1400,6 +1411,7 @@ impl<C: Ctx, E> Register<C, E> for Load {
             Box::new(t)
         });
         ctx.functions.insert("load".into(), f);
+        ctx.user.register_fn("load".into(), Path::root());
     }
 }
 
@@ -1512,6 +1524,7 @@ impl<C: Ctx, E> Register<C, E> for Get {
             Box::new(t)
         });
         ctx.functions.insert("get".into(), f);
+        ctx.user.register_fn("get".into(), Path::root());
     }
 }
 
@@ -1648,6 +1661,7 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
             Box::new(t)
         });
         ctx.functions.insert("call".into(), f);
+        ctx.user.register_fn("call".into(), Path::root());
     }
 }
 

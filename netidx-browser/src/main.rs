@@ -49,6 +49,7 @@ use std::{
 };
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
+use radix_trie::Trie;
 
 struct WVal<'a>(&'a Value);
 
@@ -161,12 +162,19 @@ enum FromGui {
     Terminate,
 }
 
+#[derive(Clone, Copy)]
+enum WordKind {
+    Fn,
+    Var
+}
+
 struct WidgetCtx {
     backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
+    words: Trie<String, WordKind>,
 }
 
 impl vm::Ctx for WidgetCtx {
@@ -188,6 +196,10 @@ impl vm::Ctx for WidgetCtx {
     fn ref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
 
     fn unref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
+
+    fn register_fn(&mut self, name: Chars, _scope: Path) {
+        self.words.insert(name.into(), WordKind::Fn);
+    }
 
     fn set_var(
         &mut self,

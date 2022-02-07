@@ -57,3 +57,4 @@ plotters = { version = "0.3", default_features = false, features = ["datetime", 
 plotters-backend = "0.3"
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }
+radix_trie = "0.2"

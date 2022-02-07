@@ -1,12 +1,13 @@
 use super::super::{bscript::LocalEvent, WidgetCtx};
 use glib::{prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use sourceview4::{
-    prelude::*, subclass::prelude::*, CompletionItem, CompletionProposal,
-    CompletionProvider, CompletionActivation, CompletionContext, CompletionInfo
-};
 use netidx_bscript::vm::ExecCtx;
-use std::{rc::Rc, default::Default};
+use radix_trie::TrieCommon;
+use sourceview4::{
+    prelude::*, subclass::prelude::*, CompletionActivation, CompletionContext,
+    CompletionInfo, CompletionItem, CompletionProposal, CompletionProvider,
+};
+use std::{default::Default, rc::Rc};
 
 glib::wrapper! {
     pub(crate) struct BScriptCompletionProvider(ObjectSubclass<imp::BScriptCompletionProvider>)
@@ -27,7 +28,7 @@ pub(crate) mod imp {
     use super::*;
 
     pub(crate) struct BScriptCompletionProvider {
-        ctx: Rc<RefCell<Option<BSCtx>>>
+        ctx: Rc<RefCell<Option<BSCtx>>>,
     }
 
     impl BScriptCompletionProvider {
@@ -38,9 +39,7 @@ pub(crate) mod imp {
 
     impl Default for BScriptCompletionProvider {
         fn default() -> Self {
-            BScriptCompletionProvider {
-                ctx: Rc::new(RefCell::new(None))
-            }
+            BScriptCompletionProvider { ctx: Rc::new(RefCell::new(None)) }
         }
     }
 
@@ -124,10 +123,45 @@ pub(crate) mod imp {
             true
         }
 
-        fn populate(&self, provider: &impl IsA<CompletionProvider>, context: &impl IsA<CompletionContext>) {
+        fn populate(
+            &self,
+            provider: &impl IsA<CompletionProvider>,
+            context: &impl IsA<CompletionContext>,
+        ) {
             dbg!("populate");
-            let p = CompletionItem::builder().text("foobarbaz").label("foobarbaz").build();
-            context.add_proposals(provider, &[p.upcast()], true)
+            macro_rules! get {
+                ($e:expr) => {
+                    match $e {
+                        None => return,
+                        Some(e) => e,
+                    }
+                };
+            }
+            let ctx = self.ctx.borrow();
+            let ctx = get!(&*ctx);
+            let ctx = ctx.borrow();
+            let iter = get!(context.iter());
+            let fin = iter.clone();
+            let coff = iter.line_offset();
+            let mut i = 0;
+            iter.backward_find_char(
+                |c| {
+                    let r = i >= coff
+                        || c.is_ascii_whitespace()
+                        || (c != '_' && c.is_ascii_punctuation());
+                    i += 1;
+                    r
+                },
+                Some(&fin),
+            );
+            let word = iter.slice(&fin);
+            let word = word.as_ref().map(|s| &**s).unwrap_or("");
+            let candidates = get!(ctx.user.words.get_raw_descendant(word));
+            let candidates = candidates
+                .iter()
+                .map(|(c, _)| CompletionItem::builder().text(c).label(c).build().upcast())
+                .collect::<Vec<_>>();
+            context.add_proposals(provider, &*candidates, true);
         }
 
         fn update_info(

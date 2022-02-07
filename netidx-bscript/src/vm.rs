@@ -113,6 +113,7 @@ pub trait Ctx {
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
     fn ref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
     fn unref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
+    fn register_fn(&mut self, name: Chars, scope: Path);
     fn set_var(
         &mut self,
         variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
