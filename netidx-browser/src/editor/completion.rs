@@ -128,27 +128,31 @@ pub(crate) mod imp {
             let ctx = self.ctx.borrow();
             let ctx = get!(&*ctx);
             let ctx = ctx.borrow();
-            let mut iter = get!(context.iter());
-            let fin = iter.clone();
-            let coff = iter.line_offset();
-            let mut start = iter.clone();
-            start.backward_chars(coff);
-            let mut i = 0;
-            iter.backward_find_char(
-                |c| {
-                    let r = i >= coff
-                        || c.is_ascii_whitespace()
-                        || (c != '_' && c.is_ascii_punctuation());
-                    i += 1;
-                    r
-                },
-                Some(&start),
-            );
-            let wc = iter.char().unwrap_or('a');
-            if (wc.is_ascii_punctuation() || wc.is_ascii_whitespace()) && iter.offset() < fin.offset() {
-                iter.forward_char();
-            }
-            let word = iter.text(&fin);
+            let word = {
+                let mut iter = get!(context.iter());
+                let fin = iter.clone();
+                let coff = iter.line_offset();
+                let mut start = iter.clone();
+                start.backward_chars(coff);
+                let mut i = 0;
+                iter.backward_find_char(
+                    |c| {
+                        let r = i >= coff
+                            || c.is_ascii_whitespace()
+                            || (c != '_' && c.is_ascii_punctuation());
+                        i += 1;
+                        r
+                    },
+                    Some(&start),
+                );
+                let wc = iter.char().unwrap_or('a');
+                if (wc.is_ascii_punctuation() || wc.is_ascii_whitespace())
+                    && iter.offset() < fin.offset()
+                {
+                    iter.forward_char();
+                }
+                iter.text(&fin)
+            };
             let word = word.as_ref().map(|s| &**s).unwrap_or("");
             let candidates = get!(ctx.user.words.get_raw_descendant(word));
             let candidates = candidates

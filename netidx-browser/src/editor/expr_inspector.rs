@@ -3,10 +3,10 @@ use super::completion::BScriptCompletionProvider;
 use glib::{
     clone,
     prelude::*,
-    subclass::{self, prelude::*},
+    subclass::prelude::*,
 };
 use gtk::{self, prelude::*};
-use netidx::subscriber::Value;
+use netidx::{path::Path, subscriber::Value};
 use netidx_bscript::expr;
 use sourceview4::{self as sv, prelude::*};
 use std::{
@@ -216,6 +216,7 @@ impl ExprEditor {
         save_button: gtk::ToolButton,
         unsaved: Rc<Cell<bool>>,
         ctx: BSCtx,
+        scope: Path,
         expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
         let root =
@@ -270,6 +271,7 @@ impl ExprInspector {
         ctx: BSCtx,
         window: &gtk::Window,
         on_change: impl Fn(expr::Expr) + 'static,
+        scope: Path,
         init: expr::Expr,
     ) -> Self {
         let unsaved = Rc::new(Cell::new(false));
@@ -289,6 +291,7 @@ impl ExprInspector {
             save_button.clone(),
             unsaved.clone(),
             ctx.clone(),
+            scope,
             expr.clone(),
         );
         save_button.connect_clicked(

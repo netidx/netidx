@@ -7,7 +7,7 @@ use super::{
 use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
-use netidx::subscriber::Value;
+use netidx::{path::Path, subscriber::Value};
 use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
@@ -20,6 +20,7 @@ type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 fn expr(
     ctx: &BSCtx,
     txt: &str,
+    scope: Path,
     init: &expr::Expr,
     on_change: impl Fn(expr::Expr) + 'static,
 ) -> (gtk::Label, gtk::Box, DbgExpr) {
@@ -82,6 +83,7 @@ fn expr(
                 ctx.clone(),
                 &w,
                 on_change,
+                scope,
                 source.borrow().clone()
             );
             w.add(si.root());
@@ -113,12 +115,18 @@ pub(super) struct Table {
 }
 
 impl Table {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Table) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::Table,
+    ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
         let (l, e, _dbg_path) = expr(
             ctx,
             "Path:",
+            scope.clone(),
             &spec.borrow().path,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().path = e;
@@ -129,6 +137,7 @@ impl Table {
         let (l, e, _dbg_default_sort_column) = expr(
             ctx,
             "Default Sort Column:",
+            scope.clone(),
             &spec.borrow().default_sort_column,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().default_sort_column = e;
@@ -139,6 +148,7 @@ impl Table {
         let (l, e, _dbg_column_filter) = expr(
             ctx,
             "Column Filter:",
+            scope.clone(),
             &spec.borrow().column_filter,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().column_filter = e;
@@ -149,6 +159,7 @@ impl Table {
         let (l, e, _dbg_row_filter) = expr(
             ctx,
             "Row Filter:",
+            scope.clone(),
             &spec.borrow().row_filter,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().row_filter = e;
@@ -159,6 +170,7 @@ impl Table {
         let (l, e, _dbg_column_editable) = expr(
             ctx,
             "Column Editable:",
+            scope.clone(),
             &spec.borrow().column_editable,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().column_editable = e;
@@ -169,6 +181,7 @@ impl Table {
         let (l, e, _dbg_on_activate) = expr(
             ctx,
             "On Activate:",
+            scope.clone(),
             &spec.borrow().on_activate,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_activate = e;
@@ -179,6 +192,7 @@ impl Table {
         let (l, e, _dbg_on_select) = expr(
             ctx,
             "On Select:",
+            scope.clone(),
             &spec.borrow().on_select,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_select = e;
@@ -189,6 +203,7 @@ impl Table {
         let (l, e, _dbg_on_edit) = expr(
             ctx,
             "On Edit:",
+            scope.clone(),
             &spec.borrow().on_edit,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_edit = e;
@@ -233,6 +248,7 @@ impl Action {
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
+        scope: Path,
         spec: expr::Expr,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -252,6 +268,7 @@ impl Action {
         let (l, e, _expr) = expr(
             ctx,
             "Action:",
+            scope.clone(),
             &*spec.borrow(),
             clone!(@strong update_desc, @strong spec, @strong on_change => move |s| {
                 *spec.borrow_mut() = s;
@@ -284,7 +301,12 @@ pub(super) struct Label {
 }
 
 impl Label {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: expr::Expr) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: expr::Expr,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let spec = Rc::new(RefCell::new(spec));
@@ -292,6 +314,7 @@ impl Label {
         let (l, e, _expr) = expr(
             ctx,
             "Expr:",
+            scope.clone(),
             &*spec.borrow(),
             clone!(@strong spec => move |s| {
                 *spec.borrow_mut() = s;
@@ -322,12 +345,18 @@ pub(super) struct Button {
 }
 
 impl Button {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Button) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::Button,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
+            scope.clone(),
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
@@ -338,6 +367,7 @@ impl Button {
         let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
+            scope.clone(),
             &spec.borrow().label,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().label = s;
@@ -348,6 +378,7 @@ impl Button {
         let (l, e, _on_click_expr) = expr(
             ctx,
             "On Click:",
+            scope.clone(),
             &spec.borrow().on_click,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_click = s;
@@ -378,12 +409,18 @@ pub(super) struct LinkButton {
 }
 
 impl LinkButton {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::LinkButton) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::LinkButton,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
+            scope.clone(),
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
@@ -394,6 +431,7 @@ impl LinkButton {
         let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
+            scope.clone(),
             &spec.borrow().label,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().label = s;
@@ -404,6 +442,7 @@ impl LinkButton {
         let (l, e, _uri_expr) = expr(
             ctx,
             "URI:",
+            scope.clone(),
             &spec.borrow().uri,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().uri = s;
@@ -414,6 +453,7 @@ impl LinkButton {
         let (l, e, _on_activate_link_expr) = expr(
             ctx,
             "On Activate Link:",
+            scope.clone(),
             &spec.borrow().on_activate_link,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_activate_link = s;
@@ -450,12 +490,18 @@ pub(super) struct Toggle {
 }
 
 impl Toggle {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Toggle) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::Toggle,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
+            scope.clone(),
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
@@ -466,6 +512,7 @@ impl Toggle {
         let (l, e, _value_expr) = expr(
             ctx,
             "Value:",
+            scope.clone(),
             &spec.borrow().value,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().value = s;
@@ -476,6 +523,7 @@ impl Toggle {
         let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
+            scope.clone(),
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_change = s;
@@ -506,12 +554,18 @@ pub(super) struct Selector {
 }
 
 impl Selector {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Selector) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::Selector,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
+            scope.clone(),
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
@@ -522,6 +576,7 @@ impl Selector {
         let (l, e, _choices_expr) = expr(
             ctx,
             "Choices:",
+            scope.clone(),
             &spec.borrow().choices,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().choices = s;
@@ -532,6 +587,7 @@ impl Selector {
         let (l, e, _selected_expr) = expr(
             ctx,
             "Selected:",
+            scope.clone(),
             &spec.borrow().selected,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().selected = s;
@@ -542,6 +598,7 @@ impl Selector {
         let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
+            scope.clone(),
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_change = s;
@@ -580,12 +637,18 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Entry) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::Entry,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _enabled_expr) = expr(
             ctx,
             "Enabled:",
+            scope.clone(),
             &spec.borrow().enabled,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().enabled = s;
@@ -596,6 +659,7 @@ impl Entry {
         let (l, e, _visible_expr) = expr(
             ctx,
             "Visible:",
+            scope.clone(),
             &spec.borrow().visible,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().visible = s;
@@ -606,6 +670,7 @@ impl Entry {
         let (l, e, _text_expr) = expr(
             ctx,
             "Text:",
+            scope.clone(),
             &spec.borrow().text,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().text = s;
@@ -616,6 +681,7 @@ impl Entry {
         let (l, e, _on_change_expr) = expr(
             ctx,
             "On Change:",
+            scope.clone(),
             &spec.borrow().on_change,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_change = s;
@@ -626,6 +692,7 @@ impl Entry {
         let (l, e, _on_activate_expr) = expr(
             ctx,
             "On Activate:",
+            scope.clone(),
             &spec.borrow().on_activate,
             clone!(@strong on_change, @strong spec => move |s| {
                 spec.borrow_mut().on_activate = s;
@@ -673,14 +740,19 @@ pub(super) struct LinePlot {
 }
 
 impl LinePlot {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::LinePlot) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Path,
+        spec: view::LinePlot,
+    ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         LinePlot::build_chart_style_editor(&root, &on_change, &spec);
         LinePlot::build_axis_style_editor(&root, &on_change, &spec);
         let (_x_min, _x_max, _y_min, _y_max, _keep_points) =
-            LinePlot::build_axis_range_editor(ctx, &root, &on_change, &spec);
-        let _series = LinePlot::build_series_editor(ctx, &root, &on_change, &spec);
+            LinePlot::build_axis_range_editor(ctx, &root, &on_change, scope.clone(), &spec);
+        let _series = LinePlot::build_series_editor(ctx, &root, &on_change, scope, &spec);
         LinePlot { root, spec, _x_min, _x_max, _y_min, _y_max, _keep_points, _series }
     }
 
@@ -693,7 +765,12 @@ impl LinePlot {
         util::expander_touch_enable(&axis_exp);
         let mut axis = TwoColGrid::new();
         root.pack_start(&axis_exp, false, false, 0);
-        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
+        root.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Horizontal),
+            false,
+            false,
+            0,
+        );
         axis_exp.add(axis.root());
         axis.add(parse_entry(
             "X Axis Label:",
@@ -747,17 +824,24 @@ impl LinePlot {
         ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
+        scope: Path,
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> (DbgExpr, DbgExpr, DbgExpr, DbgExpr, DbgExpr) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         util::expander_touch_enable(&range_exp);
         let mut range = TwoColGrid::new();
         root.pack_start(&range_exp, false, false, 0);
-        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
+        root.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Horizontal),
+            false,
+            false,
+            0,
+        );
         range_exp.add(range.root());
         let (l, e, x_min) = expr(
             ctx,
             "x min:",
+            scope.clone(),
             &spec.borrow().x_min,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().x_min = s;
@@ -768,6 +852,7 @@ impl LinePlot {
         let (l, e, x_max) = expr(
             ctx,
             "x max:",
+            scope.clone(),
             &spec.borrow().x_max,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().x_max = s;
@@ -778,6 +863,7 @@ impl LinePlot {
         let (l, e, y_min) = expr(
             ctx,
             "y min:",
+            scope.clone(),
             &spec.borrow().y_min,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().y_min = s;
@@ -788,6 +874,7 @@ impl LinePlot {
         let (l, e, y_max) = expr(
             ctx,
             "y max:",
+            scope.clone(),
             &spec.borrow().y_max,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().y_max = s;
@@ -798,6 +885,7 @@ impl LinePlot {
         let (l, e, keep_points) = expr(
             ctx,
             "Keep Points:",
+            scope.clone(),
             &spec.borrow().keep_points,
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().keep_points = s;
@@ -817,7 +905,12 @@ impl LinePlot {
         util::expander_touch_enable(&style_exp);
         let mut style = TwoColGrid::new();
         root.pack_start(&style_exp, false, false, 0);
-        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
+        root.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Horizontal),
+            false,
+            false,
+            0,
+        );
         style_exp.add(style.root());
         style.add(parse_entry(
             "Title:",
@@ -883,6 +976,7 @@ impl LinePlot {
         ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
+        scope: Path,
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> Rc<RefCell<IndexMap<usize, Series>>> {
         let series_exp = gtk::Expander::new(Some("Series"));
@@ -891,7 +985,12 @@ impl LinePlot {
         let addbtn = gtk::Button::with_label("+");
         series_exp.add(&seriesbox);
         root.pack_start(&series_exp, false, false, 0);
-        root.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 0);
+        root.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Horizontal),
+            false,
+            false,
+            0,
+        );
         let series_id = Rc::new(Cell::new(0));
         let series: Rc<RefCell<IndexMap<usize, Series>>> =
             Rc::new(RefCell::new(IndexMap::new()));
@@ -936,6 +1035,7 @@ impl LinePlot {
                 let (l, e, _x) = expr(
                     &ctx,
                     "X:",
+                    scope.clone(),
                     &spec.borrow().x,
                     clone!(@strong spec, @strong on_change => move |s| {
                         spec.borrow_mut().x = s;
@@ -946,6 +1046,7 @@ impl LinePlot {
                 let (l, e, _y) = expr(
                     &ctx,
                     "Y:",
+                    scope.clone(),
                     &spec.borrow().y,
                     clone!(@strong spec, @strong on_change => move |s| {
                         spec.borrow_mut().y = s;
@@ -1017,7 +1118,7 @@ pub(super) struct BoxChild {
 }
 
 impl BoxChild {
-    pub(super) fn new(on_change: OnChange, spec: view::BoxChild) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
         let packlbl = gtk::Label::new(Some("Pack:"));
@@ -1085,7 +1186,7 @@ pub(super) struct Paned {
 }
 
 impl Paned {
-    pub(super) fn new(on_change: OnChange, spec: view::Paned) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Paned) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = dirselect(
@@ -1123,12 +1224,13 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Frame) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, scope: Path, spec: view::Frame) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
+            scope.clone(),
             &spec.borrow().label,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().label = e;
@@ -1171,7 +1273,7 @@ pub(super) struct BoxContainer {
 }
 
 impl BoxContainer {
-    pub(super) fn new(on_change: OnChange, spec: view::Box) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Box) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = dirselect(
@@ -1216,7 +1318,7 @@ pub(super) struct NotebookPage {
 }
 
 impl NotebookPage {
-    pub(super) fn new(on_change: OnChange, spec: view::NotebookPage) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::NotebookPage) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -1255,7 +1357,7 @@ pub(super) struct Notebook {
 }
 
 impl Notebook {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, spec: view::Notebook) -> Self {
+    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, _scope: Path, spec: view::Notebook) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let poscb_lbl = gtk::Label::new(Some("Position:"));
@@ -1346,7 +1448,7 @@ pub(super) struct GridChild {
 }
 
 impl GridChild {
-    pub(super) fn new(on_change: OnChange, spec: view::GridChild) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::GridChild) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -1384,7 +1486,7 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    pub(super) fn new(on_change: OnChange, spec: view::Grid) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Grid) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let homogeneous_columns = gtk::CheckButton::with_label("Homogeneous Columns");
