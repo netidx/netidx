@@ -62,27 +62,22 @@ pub(crate) mod imp {
             _proposal: &impl IsA<CompletionProposal>,
             _iter: &gtk::TextIter,
         ) -> bool {
-            dbg!("activate_proposal");
             false
         }
 
         fn activation(&self) -> CompletionActivation {
-            dbg!("activation");
             CompletionActivation::USER_REQUESTED
         }
 
         fn gicon(&self) -> Option<gio::Icon> {
-            dbg!("gicon");
             None
         }
 
         fn icon(&self) -> Option<gdk_pixbuf::Pixbuf> {
-            dbg!("icon");
             None
         }
 
         fn icon_name(&self) -> Option<glib::GString> {
-            dbg!("icon_name");
             None
         }
 
@@ -90,22 +85,18 @@ pub(crate) mod imp {
             &self,
             _proposal: &impl IsA<CompletionProposal>,
         ) -> Option<gtk::Widget> {
-            dbg!("info_widget");
             None
         }
 
         fn interactive_delay(&self) -> i32 {
-            dbg!("interactive_delay");
             100
         }
 
         fn name(&self) -> Option<glib::GString> {
-            dbg!("name");
             Some("bscript".into())
         }
 
         fn priority(&self) -> i32 {
-            dbg!("priority");
             1
         }
 
@@ -114,12 +105,10 @@ pub(crate) mod imp {
             _context: &impl IsA<CompletionContext>,
             _proposal: &impl IsA<CompletionProposal>,
         ) -> Option<gtk::TextIter> {
-            dbg!("start_iter");
             None
         }
 
         fn match_(&self, _context: &impl IsA<CompletionContext>) -> bool {
-            dbg!("match_");
             true
         }
 
@@ -128,7 +117,6 @@ pub(crate) mod imp {
             provider: &impl IsA<CompletionProvider>,
             context: &impl IsA<CompletionContext>,
         ) {
-            dbg!("populate");
             macro_rules! get {
                 ($e:expr) => {
                     match $e {
@@ -140,9 +128,11 @@ pub(crate) mod imp {
             let ctx = self.ctx.borrow();
             let ctx = get!(&*ctx);
             let ctx = ctx.borrow();
-            let iter = get!(context.iter());
+            let mut iter = get!(context.iter());
             let fin = iter.clone();
             let coff = iter.line_offset();
+            let mut start = iter.clone();
+            start.backward_chars(coff);
             let mut i = 0;
             iter.backward_find_char(
                 |c| {
@@ -152,9 +142,13 @@ pub(crate) mod imp {
                     i += 1;
                     r
                 },
-                Some(&fin),
+                Some(&start),
             );
-            let word = iter.slice(&fin);
+            let wc = iter.char().unwrap_or('a');
+            if (wc.is_ascii_punctuation() || wc.is_ascii_whitespace()) && iter.offset() < fin.offset() {
+                iter.forward_char();
+            }
+            let word = iter.text(&fin);
             let word = word.as_ref().map(|s| &**s).unwrap_or("");
             let candidates = get!(ctx.user.words.get_raw_descendant(word));
             let candidates = candidates
@@ -169,7 +163,6 @@ pub(crate) mod imp {
             _proposal: &impl IsA<CompletionProposal>,
             _info: &impl IsA<CompletionInfo>,
         ) {
-            dbg!("update_info");
         }
     }
 }

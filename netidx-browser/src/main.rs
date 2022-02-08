@@ -1075,6 +1075,7 @@ fn main() {
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
+                words: Trie::new(),
             })));
             run_gui(ctx, app, rx_to_gui);
         }
