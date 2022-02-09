@@ -1,5 +1,5 @@
 use super::super::{util::ask_modal, BSCtx};
-use super::completion::BScriptCompletionProvider;
+use super::{Scope, completion::BScriptCompletionProvider};
 use glib::{
     clone,
     prelude::*,
@@ -216,7 +216,7 @@ impl ExprEditor {
         save_button: gtk::ToolButton,
         unsaved: Rc<Cell<bool>>,
         ctx: BSCtx,
-        scope: Path,
+        scope: Scope,
         expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
         let root =
@@ -271,7 +271,7 @@ impl ExprInspector {
         ctx: BSCtx,
         window: &gtk::Window,
         on_change: impl Fn(expr::Expr) + 'static,
-        scope: Path,
+        scope: Scope,
         init: expr::Expr,
     ) -> Self {
         let unsaved = Rc::new(Cell::new(false));

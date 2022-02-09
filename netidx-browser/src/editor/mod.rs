@@ -16,6 +16,7 @@ use std::{
 use util::{parse_entry, TwoColGrid};
 
 type OnChange = Rc<dyn Fn()>;
+type Scope = Rc<RefCell<Path>>;
 
 #[derive(Clone)]
 struct WidgetProps {
@@ -227,16 +228,16 @@ struct Widget {
     root: gtk::Box,
     props: Option<WidgetProps>,
     kind: WidgetKind,
-    scope: Path,
+    scope: Scope,
 }
 
 impl Widget {
     fn insert(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
+        scope: Scope,
         spec: view::Widget,
     ) {
         let (name, kind, props) = match spec {
@@ -808,7 +809,8 @@ impl Editor {
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
         let spec = Rc::new(RefCell::new(spec));
-        let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
+        let undo_stack: Rc<RefCell<Vec<view::View>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let undoing = Rc::new(Cell::new(false));
         let on_change: OnChange = Rc::new({
             let ctx = ctx.clone();
@@ -821,23 +823,24 @@ impl Editor {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
-                    @strong ctx,
-                    @strong spec,
-                    @strong store,
-                    @strong scheduled,
-                    @strong undo_stack,
-                    @strong undoing => move || {
-                        if let Some(root) = store.iter_first() {
-                            if undoing.get() {
-                                undoing.set(false)
-                            } else {
-                                undo_stack.borrow_mut().push(spec.borrow().clone());
+                        @strong ctx,
+                        @strong spec,
+                        @strong store,
+                        @strong scheduled,
+                        @strong undo_stack,
+                        @strong undoing => move || {
+                            if let Some(root) = store.iter_first() {
+                                if undoing.get() {
+                                    undoing.set(false)
+                                } else {
+                                    undo_stack.borrow_mut().push(spec.borrow().clone());
+                                }
+                                spec.borrow_mut().root =
+                                    Editor::build_spec(&store, &root);
+                                ctx.borrow().user.backend.render(spec.borrow().clone());
                             }
-                            spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            ctx.borrow().user.backend.render(spec.borrow().clone());
-                        }
-                        scheduled.set(false);
-                        glib::Continue(false)
+                            scheduled.set(false);
+                            glib::Continue(false)
                     }));
                 }
             }
@@ -854,44 +857,45 @@ impl Editor {
             kind.append(Some(k), k);
         }
         kind.connect_changed(clone!(
+            @strong scope,
             @strong on_change,
             @strong store,
             @strong selected,
             @strong ctx,
             @weak properties,
             @strong inhibit_change => move |c| {
-            if let Some(iter) = selected.borrow().clone() {
-                if !inhibit_change.get() {
-                    let wv = store.value(&iter, 1);
-                    let scope = match wv.get::<&Widget>() {
-                        Err(_) => Path::root(),
-                        Ok(w) => {
-                            w.root().hide();
-                            w.root().set_sensitive(false);
-                            properties.remove(w.root());
-                            w.scope.clone()
+                if let Some(iter) = selected.borrow().clone() {
+                    if !inhibit_change.get() {
+                        let wv = store.value(&iter, 1);
+                        let scope = match wv.get::<&Widget>() {
+                            Err(_) => scope.clone(),
+                            Ok(w) => {
+                                w.root().hide();
+                                w.root().set_sensitive(false);
+                                properties.remove(w.root());
+                                w.scope.clone()
+                            }
+                        };
+                        let id = c.active_id();
+                        let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
+                        Widget::insert(
+                            &ctx,
+                            on_change.clone(),
+                            &store,
+                            &iter,
+                            scope,
+                            spec
+                        );
+                        let wv = store.value(&iter, 1);
+                        if let Ok(w) = wv.get::<&Widget>() {
+                            properties.pack_start(w.root(), true, true, 5);
+                            w.root().set_sensitive(true);
+                            w.root().grab_focus();
                         }
-                    };
-                    let id = c.active_id();
-                    let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
-                    Widget::insert(
-                        &ctx,
-                        on_change.clone(),
-                        &store,
-                        &iter,
-                        scope,
-                        spec
-                    );
-                    let wv = store.value(&iter, 1);
-                    if let Ok(w) = wv.get::<&Widget>() {
-                        properties.pack_start(w.root(), true, true, 5);
-                        w.root().set_sensitive(true);
-                        w.root().grab_focus();
+                        properties.show_all();
+                        on_change();
                     }
-                    properties.show_all();
-                    on_change();
                 }
-            }
         }));
         properties.pack_start(&kind, false, false, 0);
         properties.pack_start(
@@ -903,48 +907,48 @@ impl Editor {
         let selection = view.selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
-        @strong ctx,
-        @strong selected,
-        @weak store,
-        @weak kind,
-        @weak reveal_properties,
-        @weak properties,
-        @strong inhibit_change => move |s| {
-            {
-                let children = properties.children();
-                if children.len() == 3 {
-                    children[2].hide();
-                    children[2].set_sensitive(false);
-                    properties.remove(&children[2]);
-                }
-            }
-            match s.selected() {
-                None => {
-                    *selected.borrow_mut() = None;
-                    ctx.borrow().user.backend.highlight(vec![]);
-                    reveal_properties.set_reveal_child(false);
-                }
-                Some((_, iter)) => {
-                    *selected.borrow_mut() = Some(iter.clone());
-                    let mut path = Vec::new();
-                    Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
-                    ctx.borrow().user.backend.highlight(path);
-                    let v = store.value(&iter, 0);
-                    if let Ok(id) = v.get::<&str>() {
-                        inhibit_change.set(true);
-                        kind.set_active_id(Some(id));
-                        inhibit_change.set(false);
+            @strong ctx,
+            @strong selected,
+            @weak store,
+            @weak kind,
+            @weak reveal_properties,
+            @weak properties,
+            @strong inhibit_change => move |s| {
+                {
+                    let children = properties.children();
+                    if children.len() == 3 {
+                        children[2].hide();
+                        children[2].set_sensitive(false);
+                        properties.remove(&children[2]);
                     }
-                    let v = store.value(&iter, 1);
-                    if let Ok(w) = v.get::<&Widget>() {
-                        properties.pack_start(w.root(), true, true, 5);
-                        w.root().set_sensitive(true);
-                        w.root().grab_focus();
-                    }
-                    properties.show_all();
-                    reveal_properties.set_reveal_child(true);
                 }
-            }
+                match s.selected() {
+                    None => {
+                        *selected.borrow_mut() = None;
+                        ctx.borrow().user.backend.highlight(vec![]);
+                        reveal_properties.set_reveal_child(false);
+                    }
+                    Some((_, iter)) => {
+                        *selected.borrow_mut() = Some(iter.clone());
+                        let mut path = Vec::new();
+                        Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
+                        ctx.borrow().user.backend.highlight(path);
+                        let v = store.value(&iter, 0);
+                        if let Ok(id) = v.get::<&str>() {
+                            inhibit_change.set(true);
+                            kind.set_active_id(Some(id));
+                            inhibit_change.set(false);
+                        }
+                        let v = store.value(&iter, 1);
+                        if let Ok(w) = v.get::<&Widget>() {
+                            properties.pack_start(w.root(), true, true, 5);
+                            w.root().set_sensitive(true);
+                            w.root().grab_focus();
+                        }
+                        properties.show_all();
+                        reveal_properties.set_reveal_child(true);
+                    }
+                }
         }));
         let menu = gtk::Menu::new();
         let duplicate = gtk::MenuItem::with_label("Duplicate");
@@ -958,57 +962,68 @@ impl Editor {
         menu.append(&delete);
         menu.append(&undo);
         let dup = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            if let Some(iter) = &*selected.borrow() {
-                let spec = Editor::build_spec(&store, iter);
-                let parent = store.iter_parent(iter);
-                Editor::build_tree(
-                    &ctx,
-                    &on_change,
-                    &store,
-                    parent.as_ref(),
-                    &spec
-                );
-                on_change()
-            }
+                if let Some(iter) = &*selected.borrow() {
+                    let scope = match store.value(&iter, 1).get::<&Widget>() {
+                        Err(_) => scope.clone(),
+                        Ok(w) => w.scope.clone()
+                    };
+                    let spec = Editor::build_spec(&store, iter);
+                    let parent = store.iter_parent(iter);
+                    Editor::build_tree(
+                        &ctx,
+                        &on_change,
+                        &store,
+                        scope,
+                        parent.as_ref(),
+                        &spec
+                    );
+                    on_change()
+                }
         }));
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let newsib = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            let iter = store.insert_after(None, selected.borrow().as_ref());
-            let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
-            on_change();
+                let iter = store.insert_after(None, selected.borrow().as_ref());
+                let spec = Widget::default_spec(Some("Label"));
+                Widget::insert(&ctx, on_change.clone(), &store, &iter, scope, spec);
+                on_change();
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         let newch = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            let iter = store.insert_after(selected.borrow().as_ref(), None);
-            let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
-            on_change();
+                let iter = store.insert_after(selected.borrow().as_ref(), None);
+                let spec = Widget::default_spec(Some("Label"));
+                Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
+                on_change();
         }));
         new_child.connect_activate(clone!(@strong newch => move |_| newch()));
         addchbtn.connect_clicked(clone!(@strong newch => move |_| newch()));
         let del = Rc::new(clone!(
-            @weak selection, @strong on_change, @weak store, @strong selected => move || {
-            let iter = selected.borrow().clone();
-            if let Some(iter) = iter {
-                selection.unselect_iter(&iter);
-                store.remove(&iter);
-                on_change();
-            }
+            @weak selection,
+            @strong on_change,
+            @weak store,
+            @strong selected => move || {
+                let iter = selected.borrow().clone();
+                if let Some(iter) = iter {
+                    selection.unselect_iter(&iter);
+                    store.remove(&iter);
+                    on_change();
+                }
         }));
         delete.connect_activate(clone!(@strong del => move |_| del()));
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
@@ -1056,19 +1071,21 @@ impl Editor {
             on_change();
         }));
         store.connect_row_inserted(clone!(
-        @strong store, @strong on_change => move |_, _, iter| {
-            idle_add_local(clone!(@strong store, @strong iter => move || {
-                let v = store.value(&iter, 1);
-                match v.get::<&Widget>() {
-                    Err(_) => (),
-                    Ok(w) => w.moved(&iter),
-                }
-                glib::Continue(false)
-            }));
-            on_change();
+            @strong store, @strong on_change => move |_, _, iter| {
+                idle_add_local(clone!(@strong store, @strong iter => move || {
+                    let v = store.value(&iter, 1);
+                    match v.get::<&Widget>() {
+                        Err(_) => (),
+                        Ok(w) => w.moved(&iter),
+                    }
+                    glib::Continue(false)
+                }));
+                on_change();
         }));
         Editor { root }
     }
+
+    fn build_scope() {}
 
     fn build_tree(
         ctx: &BSCtx,
