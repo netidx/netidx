@@ -308,11 +308,11 @@ impl Grid {
         let root = gtk::Grid::new();
         let attach_child = |props: view::WidgetProps,
                             spec: view::GridChild,
+                            scope: Path,
                             max_height: &mut i32,
                             i: &mut i32,
                             j: i32|
          -> Widget {
-            let scope = scope.append(&format!("g{}{}", i, j));
             let height = spec.height as i32;
             let width = spec.width as i32;
             let w =
@@ -325,16 +325,16 @@ impl Grid {
             *max_height = max(*max_height, height);
             w
         };
-        let attach_normal = |spec: view::Widget, i: &mut i32, j: i32| -> Widget {
-            let scope = scope.append(&format!("g{}{}", i, j));
-            let w = Widget::new(ctx, spec.clone(), scope, selected_path.clone());
-            if let Some(r) = w.root() {
-                root.attach(r, *i, j, 1, 1);
-                set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
-            }
-            *i += 1;
-            w
-        };
+        let attach_normal =
+            |spec: view::Widget, scope: Path, i: &mut i32, j: i32| -> Widget {
+                let w = Widget::new(ctx, spec.clone(), scope, selected_path.clone());
+                if let Some(r) = w.root() {
+                    root.attach(r, *i, j, 1, 1);
+                    set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
+                }
+                *i += 1;
+                w
+            };
         root.set_column_homogeneous(spec.homogeneous_columns);
         root.set_row_homogeneous(spec.homogeneous_rows);
         root.set_column_spacing(spec.column_spacing);
@@ -344,13 +344,16 @@ impl Grid {
         let children = spec
             .rows
             .into_iter()
-            .map(|spec| {
+            .enumerate()
+            .map(|(n, spec)| {
+                let scope = scope.append(&format!("g{}", n));
                 let mut max_height = 1;
                 let row = match spec.kind {
                     view::WidgetKind::GridChild(c) => {
                         vec![attach_child(
                             spec.props.unwrap_or(DEFAULT_PROPS),
                             c,
+                            scope,
                             &mut max_height,
                             &mut i,
                             j,
@@ -358,18 +361,23 @@ impl Grid {
                     }
                     view::WidgetKind::GridRow(view::GridRow { columns }) => columns
                         .into_iter()
-                        .map(|spec| match spec.kind {
-                            view::WidgetKind::GridChild(c) => attach_child(
-                                spec.props.unwrap_or(DEFAULT_PROPS),
-                                c,
-                                &mut max_height,
-                                &mut i,
-                                j,
-                            ),
-                            _ => attach_normal(spec, &mut i, j),
+                        .enumerate()
+                        .map(|(n, spec)| {
+                            let scope = scope.append(&n.to_string());
+                            match spec.kind {
+                                view::WidgetKind::GridChild(c) => attach_child(
+                                    spec.props.unwrap_or(DEFAULT_PROPS),
+                                    c,
+                                    scope,
+                                    &mut max_height,
+                                    &mut i,
+                                    j,
+                                ),
+                                _ => attach_normal(spec, scope, &mut i, j),
+                            }
                         })
                         .collect(),
-                    _ => vec![attach_normal(spec, &mut i, j)],
+                    _ => vec![attach_normal(spec, scope, &mut i, j)],
                 };
                 j += max_height;
                 i = 0;

@@ -237,9 +237,10 @@ impl Widget {
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        scope: Scope,
+        scope: Path,
         spec: view::Widget,
     ) {
+        let scope = Rc::new(Refell::new(scope));
         let (name, kind, props) = match spec {
             view::Widget { props: _, kind: view::WidgetKind::Action(s) } => (
                 "Action",
@@ -809,8 +810,7 @@ impl Editor {
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
         let spec = Rc::new(RefCell::new(spec));
-        let undo_stack: Rc<RefCell<Vec<view::View>>> =
-            Rc::new(RefCell::new(Vec::new()));
+        let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
         let undoing = Rc::new(Cell::new(false));
         let on_change: OnChange = Rc::new({
             let ctx = ctx.clone();
@@ -1085,7 +1085,7 @@ impl Editor {
         Editor { root }
     }
 
-    fn build_scope() {}
+    fn update_scope() {}
 
     fn build_tree(
         ctx: &BSCtx,
@@ -1096,48 +1096,54 @@ impl Editor {
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(ctx, on_change.clone(), scope, store, &iter, w.clone());
+        Widget::insert(ctx, on_change.clone(), store, &iter, scope.clone(), w.clone());
         match &w.kind {
             view::WidgetKind::Frame(f) => {
                 if let Some(w) = &f.child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::NotebookPage(p) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*p.widget);
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*p.widget);
             }
             view::WidgetKind::Notebook(n) => {
-                for w in &n.children {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                for (i, w) in n.children.iter().enumerate() {
+                    let scope = scope.append(&format!("n{}", i));
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::Box(b) => {
-                for w in &b.children {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                for (i, w) in b.children.iter().enumerate() {
+                    let scope = scope.append(&format!("b{}", i));
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::BoxChild(b) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*b.widget)
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*b.widget)
             }
             view::WidgetKind::Grid(g) => {
-                for w in &g.rows {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                for (n, w) in g.rows.iter().enumerate() {
+                    let scope = scope.append(&format!("g{}", n));
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::GridChild(g) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*g.widget)
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*g.widget)
             }
             view::WidgetKind::GridRow(g) => {
-                for w in &g.columns {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                for (n, w) in g.columns.iter().enumerate() {
+                    let scope = scope.append(n.to_string());
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::Paned(p) => {
                 if let Some(w) = &p.first_child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    let scope = scope.append("p0");
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
                 if let Some(w) = &p.second_child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    let scope = scope.append("p1");
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::Action(_)
