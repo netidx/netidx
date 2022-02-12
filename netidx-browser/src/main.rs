@@ -812,7 +812,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             editor_window.borrow_mut().take();
             editor.borrow_mut().take();
             let s = current_spec.borrow().clone();
-            let e = Editor::new(ctx, s);
+            let e = Editor::new(ctx, Path::root(), s);
             let win = gtk::Window::builder()
                 .default_width(800)
                 .default_height(600)

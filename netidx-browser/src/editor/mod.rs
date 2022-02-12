@@ -240,7 +240,7 @@ impl Widget {
         scope: Path,
         spec: view::Widget,
     ) {
-        let scope = Rc::new(Refell::new(scope));
+        let scope = Rc::new(RefCell::new(scope));
         let (name, kind, props) = match spec {
             view::Widget { props: _, kind: view::WidgetKind::Action(s) } => (
                 "Action",
@@ -848,7 +848,7 @@ impl Editor {
                 }
             }
         });
-        Editor::build_tree(&ctx, &on_change, &store, scope, None, &spec.borrow().root);
+        Editor::build_tree(&ctx, &on_change, &store, scope.clone(), None, &spec.borrow().root);
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root_lower.pack_start(&reveal_properties, true, true, 5);
@@ -869,16 +869,6 @@ impl Editor {
             @strong inhibit_change => move |c| {
                 if let Some(iter) = selected.borrow().clone() {
                     if !inhibit_change.get() {
-                        let wv = store.value(&iter, 1);
-                        let scope = match wv.get::<&Widget>() {
-                            Err(_) => scope.clone(),
-                            Ok(w) => {
-                                w.root().hide();
-                                w.root().set_sensitive(false);
-                                properties.remove(w.root());
-                                w.scope.clone()
-                            }
-                        };
                         let id = c.active_id();
                         let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
                         Widget::insert(
@@ -886,7 +876,7 @@ impl Editor {
                             on_change.clone(),
                             &store,
                             &iter,
-                            scope,
+                            scope.clone(), // will be overwritten by on_change
                             spec
                         );
                         let wv = store.value(&iter, 1);
@@ -971,17 +961,13 @@ impl Editor {
             @strong selected,
             @strong ctx => move || {
                 if let Some(iter) = &*selected.borrow() {
-                    let scope = match store.value(&iter, 1).get::<&Widget>() {
-                        Err(_) => scope.clone(),
-                        Ok(w) => w.scope.clone()
-                    };
                     let spec = Editor::build_spec(&store, iter);
                     let parent = store.iter_parent(iter);
                     Editor::build_tree(
                         &ctx,
                         &on_change,
                         &store,
-                        scope,
+                        scope.clone(), // overwritten by on_change
                         parent.as_ref(),
                         &spec
                     );
@@ -998,7 +984,7 @@ impl Editor {
             @strong ctx => move || {
                 let iter = store.insert_after(None, selected.borrow().as_ref());
                 let spec = Widget::default_spec(Some("Label"));
-                Widget::insert(&ctx, on_change.clone(), &store, &iter, scope, spec);
+                Widget::insert(&ctx, on_change.clone(), &store, &iter, scope.clone(), spec);
                 on_change();
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
@@ -1011,7 +997,14 @@ impl Editor {
             @strong ctx => move || {
                 let iter = store.insert_after(selected.borrow().as_ref(), None);
                 let spec = Widget::default_spec(Some("Label"));
-                Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
+                Widget::insert(
+                    &ctx,
+                    on_change.clone(),
+                    &store,
+                    &iter,
+                    scope.clone(),
+                    spec
+                );
                 on_change();
         }));
         new_child.connect_activate(clone!(@strong newch => move |_| newch()));
@@ -1051,6 +1044,7 @@ impl Editor {
                         &ctx,
                         &on_change,
                         &store,
+                        scope.clone(),
                         None,
                         &s.root
                     );
@@ -1078,7 +1072,7 @@ impl Editor {
                 idle_add_local(clone!(@strong store, @strong iter => move || {
                     let v = store.value(&iter, 1);
                     if let Ok(w) = v.get::<&Widget>() {
-                        w.moved(&iter),
+                        w.moved(&iter)
                     }
                     glib::Continue(false)
                 }));
@@ -1095,7 +1089,14 @@ impl Editor {
                 WidgetKind::Notebook(_) => scope.append(&format!("n{}", i)),
                 WidgetKind::Box(_) => scope.append(&format!("b{}", i)),
                 WidgetKind::Grid(_) => scope.append(&format!("g{}", i)),
-                WidgetKind::GridRow(_) => scope.append(&i.to_string()),
+                WidgetKind::GridRow => scope.append(&i.to_string()),
+                WidgetKind::Paned(_) => {
+                    if i == 0 {
+                        scope.append("p0")
+                    } else {
+                        scope.append("p1")
+                    }
+                }
                 WidgetKind::Frame(_)
                 | WidgetKind::NotebookPage(_)
                 | WidgetKind::BoxChild(_)
@@ -1108,7 +1109,7 @@ impl Editor {
                 | WidgetKind::Toggle(_)
                 | WidgetKind::Selector(_)
                 | WidgetKind::Entry(_)
-                | WidgetKind::LinePlot(_) => scope,
+                | WidgetKind::LinePlot(_) => scope.clone(),
             };
             if let Some(iter) = store.iter_children(Some(root)) {
                 let mut i = 0;
@@ -1168,7 +1169,7 @@ impl Editor {
             }
             view::WidgetKind::GridRow(g) => {
                 for (n, w) in g.columns.iter().enumerate() {
-                    let scope = scope.append(n.to_string());
+                    let scope = scope.append(&n.to_string());
                     Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }

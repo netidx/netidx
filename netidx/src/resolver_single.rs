@@ -12,7 +12,7 @@ use crate::{
     utils,
 };
 use anyhow::{anyhow, Error, Result};
-use cross_krb5::{ClientCtx, K5Ctx, PendingClientCtx};
+use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -100,7 +100,11 @@ async fn connect_read(
                 let (ctx, tok) = try_cf!(
                     "create ctx",
                     continue,
-                    task::block_in_place(|| ClientCtx::initiate(upn, target_spn))
+                    task::block_in_place(|| ClientCtx::initiate(
+                        InitiateFlags::empty(),
+                        upn,
+                        target_spn
+                    ))
                 );
                 (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
             }
@@ -298,8 +302,9 @@ async fn connect_write(
                     resolver.krb5_spns.get(&resolver_addr).ok_or_else(|| {
                         anyhow!("no target spn for resolver {:?}", resolver_addr)
                     })?;
-                let (ctx, token) =
-                    task::block_in_place(|| ClientCtx::initiate(upnr, target_spn))?;
+                let (ctx, token) = task::block_in_place(|| {
+                    ClientCtx::initiate(InitiateFlags::empty(), upnr, target_spn)
+                })?;
                 let token = utils::bytes(&*token);
                 let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
                 (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))

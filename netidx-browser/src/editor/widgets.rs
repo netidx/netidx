@@ -2,12 +2,12 @@ use super::super::{util::err_modal, BSCtx};
 use super::{
     expr_inspector::ExprInspector,
     util::{self, parse_entry, TwoColGrid},
-    OnChange,
+    OnChange, Scope,
 };
 use glib::{clone, prelude::*};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
-use netidx::{path::Path, subscriber::Value};
+use netidx::subscriber::Value;
 use netidx_bscript::expr;
 use netidx_protocols::view;
 use std::{
@@ -20,7 +20,7 @@ type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 fn expr(
     ctx: &BSCtx,
     txt: &str,
-    scope: Path,
+    scope: Scope,
     init: &expr::Expr,
     on_change: impl Fn(expr::Expr) + 'static,
 ) -> (gtk::Label, gtk::Box, DbgExpr) {
@@ -83,7 +83,7 @@ fn expr(
                 ctx.clone(),
                 &w,
                 on_change,
-                scope,
+                scope.clone(),
                 source.borrow().clone()
             );
             w.add(si.root());
@@ -118,7 +118,7 @@ impl Table {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::Table,
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
@@ -248,7 +248,7 @@ impl Action {
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
-        scope: Path,
+        scope: Scope,
         spec: expr::Expr,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -304,7 +304,7 @@ impl Label {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: expr::Expr,
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -348,7 +348,7 @@ impl Button {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::Button,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -412,7 +412,7 @@ impl LinkButton {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::LinkButton,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -493,7 +493,7 @@ impl Toggle {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::Toggle,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -557,7 +557,7 @@ impl Selector {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::Selector,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -640,7 +640,7 @@ impl Entry {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::Entry,
     ) -> Self {
         let mut root = TwoColGrid::new();
@@ -743,7 +743,7 @@ impl LinePlot {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
-        scope: Path,
+        scope: Scope,
         spec: view::LinePlot,
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
@@ -751,7 +751,13 @@ impl LinePlot {
         LinePlot::build_chart_style_editor(&root, &on_change, &spec);
         LinePlot::build_axis_style_editor(&root, &on_change, &spec);
         let (_x_min, _x_max, _y_min, _y_max, _keep_points) =
-            LinePlot::build_axis_range_editor(ctx, &root, &on_change, scope.clone(), &spec);
+            LinePlot::build_axis_range_editor(
+                ctx,
+                &root,
+                &on_change,
+                scope.clone(),
+                &spec,
+            );
         let _series = LinePlot::build_series_editor(ctx, &root, &on_change, scope, &spec);
         LinePlot { root, spec, _x_min, _x_max, _y_min, _y_max, _keep_points, _series }
     }
@@ -824,7 +830,7 @@ impl LinePlot {
         ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
-        scope: Path,
+        scope: Scope,
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> (DbgExpr, DbgExpr, DbgExpr, DbgExpr, DbgExpr) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
@@ -976,7 +982,7 @@ impl LinePlot {
         ctx: &BSCtx,
         root: &gtk::Box,
         on_change: &OnChange,
-        scope: Path,
+        scope: Scope,
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> Rc<RefCell<IndexMap<usize, Series>>> {
         let series_exp = gtk::Expander::new(Some("Series"));
@@ -1118,7 +1124,7 @@ pub(super) struct BoxChild {
 }
 
 impl BoxChild {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::BoxChild) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Scope, spec: view::BoxChild) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let mut root = TwoColGrid::new();
         let packlbl = gtk::Label::new(Some("Pack:"));
@@ -1186,7 +1192,7 @@ pub(super) struct Paned {
 }
 
 impl Paned {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Paned) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Scope, spec: view::Paned) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = dirselect(
@@ -1224,7 +1230,12 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, scope: Path, spec: view::Frame) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::Frame,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _label_expr) = expr(
@@ -1273,7 +1284,7 @@ pub(super) struct BoxContainer {
 }
 
 impl BoxContainer {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Box) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Scope, spec: view::Box) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let dircb = dirselect(
@@ -1318,7 +1329,11 @@ pub(super) struct NotebookPage {
 }
 
 impl NotebookPage {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::NotebookPage) -> Self {
+    pub(super) fn new(
+        on_change: OnChange,
+        _scope: Scope,
+        spec: view::NotebookPage,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -1357,7 +1372,12 @@ pub(super) struct Notebook {
 }
 
 impl Notebook {
-    pub(super) fn new(ctx: &BSCtx, on_change: OnChange, _scope: Path, spec: view::Notebook) -> Self {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::Notebook,
+    ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let poscb_lbl = gtk::Label::new(Some("Position:"));
@@ -1412,6 +1432,7 @@ impl Notebook {
         let (l, e, _page) = expr(
             ctx,
             "Page:",
+            scope.clone(),
             &spec.borrow().page,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().page = e;
@@ -1422,6 +1443,7 @@ impl Notebook {
         let (l, e, _on_switch_page) = expr(
             ctx,
             "On Switch Page:",
+            scope.clone(),
             &spec.borrow().on_switch_page,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().on_switch_page = e;
@@ -1448,7 +1470,7 @@ pub(super) struct GridChild {
 }
 
 impl GridChild {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::GridChild) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Scope, spec: view::GridChild) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         root.add(parse_entry(
@@ -1486,7 +1508,7 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    pub(super) fn new(on_change: OnChange, _scope: Path, spec: view::Grid) -> Self {
+    pub(super) fn new(on_change: OnChange, _scope: Scope, spec: view::Grid) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
         let homogeneous_columns = gtk::CheckButton::with_label("Homogeneous Columns");
