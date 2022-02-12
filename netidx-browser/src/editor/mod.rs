@@ -813,6 +813,7 @@ impl Editor {
         let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
         let undoing = Rc::new(Cell::new(false));
         let on_change: OnChange = Rc::new({
+            let scope = scope.clone();
             let ctx = ctx.clone();
             let spec = Rc::clone(&spec);
             let store = store.clone();
@@ -823,6 +824,7 @@ impl Editor {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
+                        @strong scope,
                         @strong ctx,
                         @strong spec,
                         @strong store,
@@ -835,6 +837,7 @@ impl Editor {
                                 } else {
                                     undo_stack.borrow_mut().push(spec.borrow().clone());
                                 }
+                                Editor::update_scope(&store, scope.clone(), &root);
                                 spec.borrow_mut().root =
                                     Editor::build_spec(&store, &root);
                                 ctx.borrow().user.backend.render(spec.borrow().clone());
@@ -1074,9 +1077,8 @@ impl Editor {
             @strong store, @strong on_change => move |_, _, iter| {
                 idle_add_local(clone!(@strong store, @strong iter => move || {
                     let v = store.value(&iter, 1);
-                    match v.get::<&Widget>() {
-                        Err(_) => (),
-                        Ok(w) => w.moved(&iter),
+                    if let Ok(w) = v.get::<&Widget>() {
+                        w.moved(&iter),
                     }
                     glib::Continue(false)
                 }));
@@ -1085,7 +1087,41 @@ impl Editor {
         Editor { root }
     }
 
-    fn update_scope() {}
+    fn update_scope(store: &gtk::TreeStore, scope: Path, root: &gtk::TreeIter) {
+        let v = store.value(root, 1);
+        if let Ok(w) = v.get::<&Widget>() {
+            *w.scope.borrow_mut() = scope.clone();
+            let scope = |i: usize| match &w.kind {
+                WidgetKind::Notebook(_) => scope.append(&format!("n{}", i)),
+                WidgetKind::Box(_) => scope.append(&format!("b{}", i)),
+                WidgetKind::Grid(_) => scope.append(&format!("g{}", i)),
+                WidgetKind::GridRow(_) => scope.append(&i.to_string()),
+                WidgetKind::Frame(_)
+                | WidgetKind::NotebookPage(_)
+                | WidgetKind::BoxChild(_)
+                | WidgetKind::GridChild(_)
+                | WidgetKind::Action(_)
+                | WidgetKind::Table(_)
+                | WidgetKind::Label(_)
+                | WidgetKind::Button(_)
+                | WidgetKind::LinkButton(_)
+                | WidgetKind::Toggle(_)
+                | WidgetKind::Selector(_)
+                | WidgetKind::Entry(_)
+                | WidgetKind::LinePlot(_) => scope,
+            };
+            if let Some(iter) = store.iter_children(Some(root)) {
+                let mut i = 0;
+                loop {
+                    Editor::update_scope(store, scope(i), &iter);
+                    i += 1;
+                    if !store.iter_next(&iter) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     fn build_tree(
         ctx: &BSCtx,
