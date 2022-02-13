@@ -204,7 +204,8 @@ impl vm::Ctx for WidgetCtx {
         name: Chars,
         value: Value,
     ) {
-        if vm::store_var(variables, local, &scope, &name, value.clone()) {
+        let (new, scope) = vm::store_var(variables, local, &scope, &name, value.clone());
+        if new {
             match self.vars.get_mut(&*name) {
                 Some(scopes) => {
                     scopes.insert(scope.to_string(), ());

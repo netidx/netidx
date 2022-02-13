@@ -3,6 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
 };
+use arcstr::ArcStr;
 use fxhash::{FxBuildHasher, FxHashMap};
 use netidx::{
     chars::Chars,
@@ -141,7 +142,7 @@ pub fn store_var(
     scope: &Path,
     name: &Chars,
     value: Value,
-) -> bool {
+) -> (bool, Path) {
     if local {
         let mut new = false;
         variables
@@ -151,7 +152,7 @@ pub fn store_var(
                 HashMap::with_hasher(FxBuildHasher::default())
             })
             .insert(name.clone(), value);
-        new
+        (new, scope.clone())
     } else {
         let mut iter = Path::dirnames(scope);
         loop {
@@ -160,7 +161,7 @@ pub fn store_var(
                     if let Some(vars) = variables.get_mut(scope) {
                         if let Some(var) = vars.get_mut(name) {
                             *var = value;
-                            break false;
+                            break (false, Path::from(ArcStr::from(scope)));
                         }
                     }
                 }
@@ -179,6 +180,7 @@ pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
 
 impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn lookup_var(&self, scope: &Path, name: &Chars) -> Option<(&Path, &Value)> {
+        dbg!(&self.variables);
         let mut iter = Path::dirnames(scope);
         loop {
             match iter.next_back() {

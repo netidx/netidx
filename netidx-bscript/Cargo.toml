@@ -28,6 +28,7 @@ netidx = { path = "../netidx", version = "0.10", default_features = false }
 regex = "1"
 serde = "1"
 serde_derive = "1"
+arcstr = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -1561,9 +1561,9 @@ impl<C: Ctx, E> Apply<C, E> for Get {
                 } else {
                     match (self.name.as_ref(), self.var.as_mut(), event) {
                         (Some(vn), Some(bv), Event::Variable(es, en, v))
-                            if vn == en
-                                && Path::is_parent(es, &self.scope)
-                                && Path::is_parent(&bv.scope, es) =>
+                            if dbg!(dbg!(vn) == dbg!(en))
+                                && dbg!(Path::is_parent(dbg!(es), dbg!(&self.scope)))
+                                && dbg!(Path::is_parent(dbg!(&bv.scope), dbg!(es))) =>
                         {
                             if &bv.scope != es {
                                 bv.scope = es.clone();
