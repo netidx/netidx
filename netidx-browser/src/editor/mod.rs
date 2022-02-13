@@ -869,6 +869,12 @@ impl Editor {
             @strong inhibit_change => move |c| {
                 if let Some(iter) = selected.borrow().clone() {
                     if !inhibit_change.get() {
+                        let wv = store.value(&iter, 1);
+                        if let Ok(w) = wv.get::<&Widget>() {
+                            w.root().hide();
+                            w.root().set_sensitive(false);
+                            properties.remove(w.root());
+                        }
                         let id = c.active_id();
                         let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
                         Widget::insert(
