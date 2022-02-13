@@ -1,12 +1,8 @@
 use super::super::{util::ask_modal, BSCtx};
-use super::{Scope, completion::BScriptCompletionProvider};
-use glib::{
-    clone,
-    prelude::*,
-    subclass::prelude::*,
-};
+use super::{completion::BScriptCompletionProvider, Scope};
+use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
-use netidx::{path::Path, subscriber::Value};
+use netidx::subscriber::Value;
 use netidx_bscript::expr;
 use sourceview4::{self as sv, prelude::*};
 use std::{
@@ -231,10 +227,8 @@ impl ExprEditor {
         view.set_expand(true);
         if let Some(completion) = dbg!(view.completion()) {
             let provider = BScriptCompletionProvider::new();
-            provider.imp().set_ctx(ctx);
-            completion
-                .add_provider(&provider)
-                .expect("completion")
+            provider.imp().init(ctx, scope);
+            completion.add_provider(&provider).expect("completion")
         }
         root.add(&view);
         if let Some(buf) = view.buffer() {

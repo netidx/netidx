@@ -35,6 +35,7 @@ use netidx_bscript::{
     vm::{self, ExecCtx, Node, RpcCallId},
 };
 use netidx_protocols::view;
+use radix_trie::Trie;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -49,7 +50,6 @@ use std::{
 };
 use structopt::StructOpt;
 use util::{ask_modal, err_modal};
-use radix_trie::Trie;
 
 struct WVal<'a>(&'a Value);
 
@@ -162,19 +162,14 @@ enum FromGui {
     Terminate,
 }
 
-#[derive(Clone, Copy)]
-enum WordKind {
-    Fn,
-    Var
-}
-
 struct WidgetCtx {
     backend: backend::Ctx,
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
-    words: Trie<String, WordKind>,
+    fns: Trie<String, ()>,
+    vars: Trie<String, Trie<String, ()>>,
 }
 
 impl vm::Ctx for WidgetCtx {
@@ -198,7 +193,7 @@ impl vm::Ctx for WidgetCtx {
     fn unref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
 
     fn register_fn(&mut self, name: Chars, _scope: Path) {
-        self.words.insert(name.into(), WordKind::Fn);
+        self.fns.insert(name.into(), ());
     }
 
     fn set_var(
@@ -209,7 +204,18 @@ impl vm::Ctx for WidgetCtx {
         name: Chars,
         value: Value,
     ) {
-        vm::store_var(variables, local, &scope, &name, value.clone());
+        if vm::store_var(variables, local, &scope, &name, value.clone()) {
+            match self.vars.get_mut(&*name) {
+                Some(scopes) => {
+                    scopes.insert(scope.to_string(), ());
+                }
+                None => {
+                    let mut scopes = Trie::new();
+                    scopes.insert(scope.to_string(), ());
+                    self.vars.insert(name.to_string(), scopes);
+                }
+            }
+        }
         let _: Result<_, _> =
             self.backend.to_gui.send(ToGui::UpdateVar(scope, name, value));
     }
@@ -1075,7 +1081,8 @@ fn main() {
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
-                words: Trie::new(),
+                fns: Trie::new(),
+                vars: Trie::new(),
             })));
             run_gui(ctx, app, rx_to_gui);
         }

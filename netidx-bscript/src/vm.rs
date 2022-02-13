@@ -141,12 +141,17 @@ pub fn store_var(
     scope: &Path,
     name: &Chars,
     value: Value,
-) {
+) -> bool {
     if local {
+        let mut new = false;
         variables
             .entry(scope.clone())
-            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .or_insert_with(|| {
+                new = true;
+                HashMap::with_hasher(FxBuildHasher::default())
+            })
             .insert(name.clone(), value);
+        new
     } else {
         let mut iter = Path::dirnames(scope);
         loop {
@@ -154,7 +159,8 @@ pub fn store_var(
                 Some(scope) => {
                     if let Some(vars) = variables.get_mut(scope) {
                         if let Some(var) = vars.get_mut(name) {
-                            break *var = value;
+                            *var = value;
+                            break false;
                         }
                     }
                 }

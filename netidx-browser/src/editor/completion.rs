@@ -1,6 +1,8 @@
 use super::super::{bscript::LocalEvent, WidgetCtx};
+use super::Scope;
 use glib::{prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
+use netidx::path::Path;
 use netidx_bscript::vm::ExecCtx;
 use radix_trie::TrieCommon;
 use sourceview4::{
@@ -27,19 +29,24 @@ pub(crate) mod imp {
 
     use super::*;
 
-    pub(crate) struct BScriptCompletionProvider {
-        ctx: Rc<RefCell<Option<BSCtx>>>,
+    struct BScriptCompletionProviderInner {
+        ctx: BSCtx,
+        scope: Scope,
     }
 
+    pub(crate) struct BScriptCompletionProvider(
+        Rc<RefCell<Option<BScriptCompletionProviderInner>>>,
+    );
+
     impl BScriptCompletionProvider {
-        pub(crate) fn set_ctx(&self, ctx: BSCtx) {
-            *self.ctx.borrow_mut() = Some(ctx);
+        pub(crate) fn init(&self, ctx: BSCtx, scope: Scope) {
+            *self.0.borrow_mut() = Some(BScriptCompletionProviderInner { ctx, scope });
         }
     }
 
     impl Default for BScriptCompletionProvider {
         fn default() -> Self {
-            BScriptCompletionProvider { ctx: Rc::new(RefCell::new(None)) }
+            BScriptCompletionProvider(Rc::new(RefCell::new(None)))
         }
     }
 
@@ -125,9 +132,9 @@ pub(crate) mod imp {
                     }
                 };
             }
-            let ctx = self.ctx.borrow();
-            let ctx = get!(&*ctx);
-            let ctx = ctx.borrow();
+            let inner = self.0.borrow();
+            let inner = get!(&*inner);
+            let ctx = inner.ctx.borrow();
             let word = {
                 let mut iter = get!(context.iter());
                 let fin = iter.clone();
@@ -154,11 +161,43 @@ pub(crate) mod imp {
                 iter.text(&fin)
             };
             let word = word.as_ref().map(|s| &**s).unwrap_or("");
-            let candidates = get!(ctx.user.words.get_raw_descendant(word));
-            let candidates = candidates
-                .iter()
-                .map(|(c, _)| CompletionItem::builder().text(c).label(c).build().upcast())
-                .collect::<Vec<_>>();
+            let fn_candidates = ctx
+                .user
+                .fns
+                .get_raw_descendant(word)
+                .into_iter()
+                .map(|st| st.iter())
+                .flatten()
+                .map(|(c, ())| {
+                    let l = format!("fn {}(..)", c);
+                    CompletionItem::builder().text(c).label(&l).build().upcast()
+                });
+            let scope = inner.scope.borrow();
+            let var_candidates = ctx
+                .user
+                .vars
+                .get_raw_descendant(word)
+                .into_iter()
+                .map(|st| st.iter())
+                .flatten()
+                .filter(|(_, scopes)| {
+                    scopes.get(&**scope).is_some()
+                        || scopes.get_ancestor(&**scope).is_some()
+                        || scopes
+                            .get_raw_descendant(&**scope)
+                            .into_iter()
+                            .map(|st| st.iter())
+                            .flatten()
+                            .any(|(s, ())| {
+                                let s = s.trim_start_matches(&**scope);
+                                Path::parts(s).all(|p| p.starts_with("do"))
+                            })
+                })
+                .map(|(c, _)| {
+                    let l = format!("var {}", c);
+                    CompletionItem::builder().text(c).label(&l).build().upcast()
+                });
+            let candidates = fn_candidates.chain(var_candidates).collect::<Vec<_>>();
             context.add_proposals(provider, &*candidates, true);
         }
 
