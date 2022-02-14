@@ -1277,13 +1277,8 @@ impl<C: Ctx, E> Register<C, E> for Set {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f = |local| -> InitFn<C, E> {
             Arc::new(move |ctx, from, scope, _| {
-                let mut t = Set {
-                    queued: Vec::new(),
-                    local,
-                    scope,
-                    name: None,
-                    invalid: false,
-                };
+                let mut t =
+                    Set { queued: Vec::new(), local, scope, name: None, invalid: false };
                 match from {
                     [name, value] => t.set(ctx, name.current(), value.current()),
                     _ => t.invalid = true,
