@@ -225,7 +225,7 @@ impl ExprEditor {
             .auto_indent(true)
             .build();
         view.set_expand(true);
-        if let Some(completion) = dbg!(view.completion()) {
+        if let Some(completion) = view.completion() {
             let provider = BScriptCompletionProvider::new();
             provider.imp().init(ctx, scope);
             completion.add_provider(&provider).expect("completion")
