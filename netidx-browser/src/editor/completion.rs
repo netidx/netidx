@@ -1,9 +1,6 @@
-use super::super::{bscript::LocalEvent, WidgetCtx};
 use super::Scope;
 use glib::{prelude::*, subclass::prelude::*};
-use gtk::{self, prelude::*};
 use netidx::path::Path;
-use netidx_bscript::vm::ExecCtx;
 use radix_trie::TrieCommon;
 use sourceview4::{
     prelude::*, subclass::prelude::*, CompletionActivation, CompletionContext,
