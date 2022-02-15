@@ -180,7 +180,6 @@ pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
 
 impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn lookup_var(&self, scope: &Path, name: &Chars) -> Option<(&Path, &Value)> {
-        dbg!(&self.variables);
         let mut iter = Path::dirnames(scope);
         loop {
             match iter.next_back() {
