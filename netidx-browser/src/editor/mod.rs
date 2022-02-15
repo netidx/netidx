@@ -848,7 +848,14 @@ impl Editor {
                 }
             }
         });
-        Editor::build_tree(&ctx, &on_change, &store, scope.clone(), None, &spec.borrow().root);
+        Editor::build_tree(
+            &ctx,
+            &on_change,
+            &store,
+            scope.clone(),
+            None,
+            &spec.borrow().root,
+        );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root_lower.pack_start(&reveal_properties, true, true, 5);
@@ -1091,19 +1098,13 @@ impl Editor {
         let v = store.value(root, 1);
         if let Ok(w) = v.get::<&Widget>() {
             *w.scope.borrow_mut() = scope.clone();
-            let scope = |i: usize| match &w.kind {
-                WidgetKind::Notebook(_) => scope.append(&format!("n{}", i)),
-                WidgetKind::Box(_) => scope.append(&format!("b{}", i)),
-                WidgetKind::Grid(_) => scope.append(&format!("g{}", i)),
-                WidgetKind::GridRow => scope.append(&i.to_string()),
-                WidgetKind::Paned(_) => {
-                    if i == 0 {
-                        scope.append("p0")
-                    } else {
-                        scope.append("p1")
-                    }
-                }
+            let scope = match &w.kind {
+                WidgetKind::Notebook(_) => scope.append("n"),
+                WidgetKind::Box(_) => scope.append("b"),
+                WidgetKind::Grid(_) => scope.append("g"),
+                WidgetKind::Paned(_) => scope.append("p"),
                 WidgetKind::Frame(_)
+                | WidgetKind::GridRow
                 | WidgetKind::NotebookPage(_)
                 | WidgetKind::BoxChild(_)
                 | WidgetKind::GridChild(_)
@@ -1118,10 +1119,8 @@ impl Editor {
                 | WidgetKind::LinePlot(_) => scope.clone(),
             };
             if let Some(iter) = store.iter_children(Some(root)) {
-                let mut i = 0;
                 loop {
-                    Editor::update_scope(store, scope(i), &iter);
-                    i += 1;
+                    Editor::update_scope(store, scope.clone(), &iter);
                     if !store.iter_next(&iter) {
                         break;
                     }
@@ -1150,42 +1149,75 @@ impl Editor {
                 Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*p.widget);
             }
             view::WidgetKind::Notebook(n) => {
-                for (i, w) in n.children.iter().enumerate() {
-                    let scope = scope.append(&format!("n{}", i));
-                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
+                let scope = scope.append("n");
+                for w in n.children.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::Box(b) => {
-                for (i, w) in b.children.iter().enumerate() {
-                    let scope = scope.append(&format!("b{}", i));
-                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
+                let scope = scope.append("b");
+                for w in b.children.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::BoxChild(b) => {
                 Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*b.widget)
             }
             view::WidgetKind::Grid(g) => {
-                for (n, w) in g.rows.iter().enumerate() {
-                    let scope = scope.append(&format!("g{}", n));
-                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
+                let scope = scope.append("g");
+                for w in g.rows.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::GridChild(g) => {
                 Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*g.widget)
             }
             view::WidgetKind::GridRow(g) => {
-                for (n, w) in g.columns.iter().enumerate() {
-                    let scope = scope.append(&n.to_string());
-                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
+                for w in g.columns.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::Paned(p) => {
+                let scope = scope.append("p");
                 if let Some(w) = &p.first_child {
-                    let scope = scope.append("p0");
-                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
                 if let Some(w) = &p.second_child {
-                    let scope = scope.append("p1");
                     Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }

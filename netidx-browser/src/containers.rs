@@ -27,18 +27,18 @@ impl Paned {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
+        let scope = scope.append("p");
         let root = gtk::Paned::new(dir_to_gtk(&spec.direction));
         root.set_wide_handle(spec.wide_handle);
         let first_child = spec.first_child.map(|child| {
-            let scope = scope.append("p0");
-            let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
+            let w =
+                Widget::new(ctx, (*child).clone(), scope.clone(), selected_path.clone());
             if let Some(w) = w.root() {
                 root.pack1(w, true, true);
             }
             boxed::Box::new(w)
         });
         let second_child = spec.second_child.map(|child| {
-            let scope = scope.append("p1");
             let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
             if let Some(w) = w.root() {
                 root.pack2(w, true, true);
@@ -129,6 +129,7 @@ impl Notebook {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
+        let scope = scope.append("n");
         let root = gtk::Notebook::new();
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
@@ -147,8 +148,7 @@ impl Notebook {
         });
         root.set_enable_popup(spec.tabs_popup);
         let mut children = Vec::new();
-        for (i, s) in spec.children.iter().enumerate() {
-            let scope = scope.append(&format!("n{}", i));
+        for s in spec.children.iter() {
             match &s.kind {
                 view::WidgetKind::NotebookPage(view::NotebookPage {
                     label,
@@ -158,7 +158,7 @@ impl Notebook {
                     let w = Widget::new(
                         ctx,
                         (&**widget).clone(),
-                        scope,
+                        scope.clone(),
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
@@ -170,7 +170,7 @@ impl Notebook {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), scope, selected_path.clone());
+                    let w = Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.append_page(r, None::<&gtk::Label>);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -228,18 +228,18 @@ impl Box {
                 view::Align::Start | view::Align::Center | view::Align::End => false,
             }
         }
+        let scope = scope.append("b");
         let root = gtk::Box::new(dir_to_gtk(&spec.direction), 0);
         root.set_homogeneous(spec.homogeneous);
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
-        for (i, s) in spec.children.iter().enumerate() {
-            let scope = scope.append(&format!("b{}", i));
+        for s in spec.children.iter() {
             match &s.kind {
                 view::WidgetKind::BoxChild(view::BoxChild { pack, padding, widget }) => {
                     let w = Widget::new(
                         ctx,
                         (&**widget).clone(),
-                        scope,
+                        scope.clone(),
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
@@ -265,7 +265,7 @@ impl Box {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), scope, selected_path.clone());
+                    let w = Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.add(r);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -305,18 +305,22 @@ impl Grid {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
+        let scope = scope.append("g");
         let root = gtk::Grid::new();
         let attach_child = |props: view::WidgetProps,
                             spec: view::GridChild,
-                            scope: Path,
                             max_height: &mut i32,
                             i: &mut i32,
                             j: i32|
          -> Widget {
             let height = spec.height as i32;
             let width = spec.width as i32;
-            let w =
-                Widget::new(ctx, (&*spec.widget).clone(), scope, selected_path.clone());
+            let w = Widget::new(
+                ctx,
+                (&*spec.widget).clone(),
+                scope.clone(),
+                selected_path.clone(),
+            );
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, width, height);
                 set_common_props(props, r);
@@ -325,16 +329,15 @@ impl Grid {
             *max_height = max(*max_height, height);
             w
         };
-        let attach_normal =
-            |spec: view::Widget, scope: Path, i: &mut i32, j: i32| -> Widget {
-                let w = Widget::new(ctx, spec.clone(), scope, selected_path.clone());
-                if let Some(r) = w.root() {
-                    root.attach(r, *i, j, 1, 1);
-                    set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
-                }
-                *i += 1;
-                w
-            };
+        let attach_normal = |spec: view::Widget, i: &mut i32, j: i32| -> Widget {
+            let w = Widget::new(ctx, spec.clone(), scope.clone(), selected_path.clone());
+            if let Some(r) = w.root() {
+                root.attach(r, *i, j, 1, 1);
+                set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
+            }
+            *i += 1;
+            w
+        };
         root.set_column_homogeneous(spec.homogeneous_columns);
         root.set_row_homogeneous(spec.homogeneous_rows);
         root.set_column_spacing(spec.column_spacing);
@@ -344,16 +347,13 @@ impl Grid {
         let children = spec
             .rows
             .into_iter()
-            .enumerate()
-            .map(|(n, spec)| {
-                let scope = scope.append(&format!("g{}", n));
+            .map(|spec| {
                 let mut max_height = 1;
                 let row = match spec.kind {
                     view::WidgetKind::GridChild(c) => {
                         vec![attach_child(
                             spec.props.unwrap_or(DEFAULT_PROPS),
                             c,
-                            scope,
                             &mut max_height,
                             &mut i,
                             j,
@@ -361,23 +361,18 @@ impl Grid {
                     }
                     view::WidgetKind::GridRow(view::GridRow { columns }) => columns
                         .into_iter()
-                        .enumerate()
-                        .map(|(n, spec)| {
-                            let scope = scope.append(&n.to_string());
-                            match spec.kind {
-                                view::WidgetKind::GridChild(c) => attach_child(
-                                    spec.props.unwrap_or(DEFAULT_PROPS),
-                                    c,
-                                    scope,
-                                    &mut max_height,
-                                    &mut i,
-                                    j,
-                                ),
-                                _ => attach_normal(spec, scope, &mut i, j),
-                            }
+                        .map(|spec| match spec.kind {
+                            view::WidgetKind::GridChild(c) => attach_child(
+                                spec.props.unwrap_or(DEFAULT_PROPS),
+                                c,
+                                &mut max_height,
+                                &mut i,
+                                j,
+                            ),
+                            _ => attach_normal(spec, &mut i, j),
                         })
                         .collect(),
-                    _ => vec![attach_normal(spec, scope, &mut i, j)],
+                    _ => vec![attach_normal(spec, &mut i, j)],
                 };
                 j += max_height;
                 i = 0;
