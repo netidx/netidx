@@ -6,6 +6,7 @@ debug = false
 
 [profile.dev]
 opt-level = "s"
+lto = "thin"
 debug = 1
 
 [workspace]
