@@ -228,7 +228,8 @@ impl ExprEditor {
         if let Some(completion) = view.completion() {
             let provider = BScriptCompletionProvider::new();
             provider.imp().init(ctx, scope);
-            completion.add_provider(&provider).expect("completion")
+            completion.add_provider(&provider).expect("bscript completion");
+            completion.add_provider(&sv::CompletionWords::default()).expect("words completion");
         }
         root.add(&view);
         if let Some(buf) = view.buffer() {
