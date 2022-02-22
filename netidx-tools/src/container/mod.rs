@@ -21,8 +21,8 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
-        DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
-        UpdateBatch, Val, WriteRequest,
+        DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher, UpdateBatch, Val,
+        WriteRequest,
     },
     resolver::Auth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
@@ -276,6 +276,8 @@ impl Ctx for Lc {
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).subs.insert(dv.id());
         dv
     }
+
+    fn register_fn(&mut self, _: netidx::chars::Chars, _: netidx::path::Path) {}
 
     fn unsubscribe(&mut self, _path: Path, dv: Dval, ref_id: ExprId) {
         if let Entry::Occupied(mut etbl) = self.sub.entry(dv.id()) {
