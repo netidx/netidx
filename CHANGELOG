@@ -7,8 +7,6 @@
     functions as well as variables that are in scope. Use CRTL+Space
     to trigger it.
 
-  - port remaining text bscript boxes to expression inspector boxes.
-
 * 0.10.4 netidx, netidx-tools, bscript, protocols
 
   - use cross-krb5 instead of gssapi and winapi directly
