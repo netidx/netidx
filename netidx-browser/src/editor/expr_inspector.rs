@@ -4,7 +4,7 @@ use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
-use sourceview4::{self as sv, prelude::*};
+use sourceview4_sc::{self as sv, prelude::*};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
