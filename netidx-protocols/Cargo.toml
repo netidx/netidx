@@ -1,6 +1,6 @@
 [package]
 name = "netidx-protocols"
-version = "0.10.4"
+version = "0.10.5"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -28,7 +28,7 @@ lazy_static = "1"
 log = "0.4"
 futures = "0.3"
 uuid = { version = "0.8", features = ["v4"] }
-parking_lot = "0.11"
+parking_lot = "0.12"
 
 [dev-dependencies]
 proptest = "1"

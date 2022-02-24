@@ -1,17 +1,19 @@
 use super::super::{util::ask_modal, BSCtx};
+use super::{completion::BScriptCompletionProvider, Scope};
 use glib::{clone, prelude::*, subclass::prelude::*};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
-use sourceview4 as sv;
+use sourceview4_sc::{self as sv, prelude::*};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
 };
+use sv::traits::ViewExt;
 
-#[derive(Clone, GBoxed)]
-#[gboxed(type_name = "NetidxExprInspectorWrap")]
+#[derive(Clone, Boxed)]
+#[boxed_type(name = "NetidxExprInspectorWrap")]
 struct ExprWrap(Arc<dyn Fn(&Value)>);
 
 fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, v: &Value) {
@@ -55,11 +57,11 @@ impl DataFlow {
         let call_root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         call_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        call_root.set_property_expand(false);
+        call_root.set_expand(false);
         let event_root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         event_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        event_root.set_property_expand(false);
+        event_root.set_expand(false);
         let call_store = gtk::TreeStore::new(&[
             String::static_type(),
             String::static_type(),
@@ -209,24 +211,32 @@ impl ExprEditor {
         tools: Rc<Tools>,
         save_button: gtk::ToolButton,
         unsaved: Rc<Cell<bool>>,
+        ctx: BSCtx,
+        scope: Scope,
         expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
         let root =
             gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.set_property_expand(true);
-        let view = sv::ViewBuilder::new()
+        root.set_expand(true);
+        let view = sv::View::builder()
             .insert_spaces_instead_of_tabs(true)
             .show_line_numbers(true)
             .auto_indent(true)
             .build();
-        view.set_property_expand(true);
+        view.set_expand(true);
+        if let Some(completion) = view.completion() {
+            let provider = BScriptCompletionProvider::new();
+            provider.imp().init(ctx, scope);
+            completion.add_provider(&provider).expect("bscript completion");
+            completion.add_provider(&sv::CompletionWords::default()).expect("words completion");
+        }
         root.add(&view);
-        if let Some(buf) = view.get_buffer() {
+        if let Some(buf) = view.buffer() {
             buf.set_text(&expr.borrow().to_string_pretty(80));
             buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
                 unsaved.set(true);
-                if let Some(text) = buf.get_slice(&buf.get_start_iter(), &buf.get_end_iter(), false) {
+                if let Some(text) = buf.slice(&buf.start_iter(), &buf.end_iter(), false) {
                     match text.parse::<expr::Expr>() {
                         Err(e) => {
                             tools.set_error(&format!("{}", e));
@@ -256,6 +266,7 @@ impl ExprInspector {
         ctx: BSCtx,
         window: &gtk::Window,
         on_change: impl Fn(expr::Expr) + 'static,
+        scope: Scope,
         init: expr::Expr,
     ) -> Self {
         let unsaved = Rc::new(Cell::new(false));
@@ -274,6 +285,8 @@ impl ExprInspector {
             tools.clone(),
             save_button.clone(),
             unsaved.clone(),
+            ctx.clone(),
+            scope,
             expr.clone(),
         );
         save_button.connect_clicked(

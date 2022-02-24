@@ -1,3 +1,12 @@
+* 0.10.5 browser, netidx, netidx-tools, bscript, protocols
+
+  - bump dependencies for all modules
+
+  - implement context sensitive completion in the browser expression
+    inspector windows. It is able to suggest completions for built in
+    functions as well as variables that are in scope. Use CRTL+Space
+    to trigger it.
+
 * 0.10.4 netidx, netidx-tools, bscript, protocols
 
   - use cross-krb5 instead of gssapi and winapi directly

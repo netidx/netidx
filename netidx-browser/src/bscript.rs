@@ -1,6 +1,6 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use netidx::{chars::Chars, path::Path, resolver, subscriber::Value};
-use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register};
+use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register, Ctx};
 use std::{cell::RefCell, mem, result::Result, sync::Arc};
 
 pub(crate) enum LocalEvent {
@@ -18,6 +18,7 @@ impl Register<WidgetCtx, LocalEvent> for Event {
         let f: InitFn<WidgetCtx, LocalEvent> =
             Arc::new(|_, from, _, _| Box::new(Event { cur: None, invalid: from.len() > 0 }));
         ctx.functions.insert("event".into(), f);
+        ctx.user.register_fn("event".into(), Path::root());
     }
 }
 
@@ -92,6 +93,7 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
             })
         });
         ctx.functions.insert("confirm".into(), f);
+        ctx.user.register_fn("confirm".into(), Path::root());
     }
 }
 
@@ -170,6 +172,7 @@ impl Register<WidgetCtx, LocalEvent> for Navigate {
             Box::new(t)
         });
         ctx.functions.insert("navigate".into(), f);
+        ctx.user.register_fn("navigate".into(), Path::root());
     }
 }
 

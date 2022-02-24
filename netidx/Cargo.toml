@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.10.4"
+version = "0.10.5"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -19,7 +19,7 @@ krb5_iov = ["cross-krb5/iov"]
 [dependencies]
 netidx-core = { version = "0.10", path = "../netidx-core" }
 netidx-netproto = { version = "0.10", path = "../netidx-netproto" }
-cross-krb5 = { version = "0.1", path = "../../cross-krb5", default_features = false }
+cross-krb5 = { version = "0.2", path = "../../cross-krb5", default_features = false }
 log = "0.4"
 anyhow = "1"
 fxhash = "0.2"
@@ -34,9 +34,9 @@ lazy_static = "1"
 bytes = { version = "1", features = ["serde"] }
 byteorder = "1"
 crossbeam = "0.8"
-parking_lot = "0.11"
+parking_lot = "0.12"
 bitflags = "1"
 get_if_addrs = "0.5"
-dirs = "3"
+dirs = "4"
 num_cpus = "1"
 triomphe = "0.1"

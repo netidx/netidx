@@ -1,8 +1,9 @@
+mod completion;
 mod expr_inspector;
 mod util;
 mod widgets;
 use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};
-use glib::{clone, idle_add_local, prelude::*, subclass::prelude::*, GString};
+use glib::{clone, idle_add_local, prelude::*, GString};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_bscript::expr;
@@ -15,6 +16,7 @@ use std::{
 use util::{parse_entry, TwoColGrid};
 
 type OnChange = Rc<dyn Fn()>;
+type Scope = Rc<RefCell<Path>>;
 
 #[derive(Clone)]
 struct WidgetProps {
@@ -80,7 +82,7 @@ impl WidgetProps {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS);
                 spec.halign =
-                    c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+                    c.active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             }
             on_change()
         }));
@@ -89,7 +91,7 @@ impl WidgetProps {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS);
                 spec.valign =
-                    c.get_active_id().map(align_from_str).unwrap_or(view::Align::Fill);
+                    c.active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             }
             on_change()
         }));
@@ -99,7 +101,7 @@ impl WidgetProps {
             {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.hexpand = b.get_active();
+                spec.hexpand = b.is_active();
             }
             on_change()
         }));
@@ -109,7 +111,7 @@ impl WidgetProps {
             {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS);
-                spec.vexpand = b.get_active();
+                spec.vexpand = b.is_active();
             }
             on_change()
         }));
@@ -220,12 +222,13 @@ impl WidgetKind {
     }
 }
 
-#[derive(Clone, GBoxed)]
-#[gboxed(type_name = "NetidxEditorWidget")]
+#[derive(Clone, Boxed)]
+#[boxed_type(name = "NetidxEditorWidget")]
 struct Widget {
     root: gtk::Box,
     props: Option<WidgetProps>,
     kind: WidgetKind,
+    scope: Scope,
 }
 
 impl Widget {
@@ -234,8 +237,10 @@ impl Widget {
         on_change: OnChange,
         store: &gtk::TreeStore,
         iter: &gtk::TreeIter,
+        scope: Path,
         spec: view::Widget,
     ) {
+        let scope = Rc::new(RefCell::new(scope));
         let (name, kind, props) = match spec {
             view::Widget { props: _, kind: view::WidgetKind::Action(s) } => (
                 "Action",
@@ -244,23 +249,39 @@ impl Widget {
                     on_change.clone(),
                     store,
                     iter,
+                    scope.clone(),
                     s,
                 )),
                 None,
             ),
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
                 "Table",
-                WidgetKind::Table(widgets::Table::new(ctx, on_change.clone(), s)),
+                WidgetKind::Table(widgets::Table::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
-                WidgetKind::Label(widgets::Label::new(ctx, on_change.clone(), s)),
+                WidgetKind::Label(widgets::Label::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
-                WidgetKind::Button(widgets::Button::new(ctx, on_change.clone(), s)),
+                WidgetKind::Button(widgets::Button::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::LinkButton(s) } => (
@@ -268,48 +289,77 @@ impl Widget {
                 WidgetKind::LinkButton(widgets::LinkButton::new(
                     ctx,
                     on_change.clone(),
+                    scope.clone(),
                     s,
                 )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
                 "Toggle",
-                WidgetKind::Toggle(widgets::Toggle::new(ctx, on_change.clone(), s)),
+                WidgetKind::Toggle(widgets::Toggle::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
-                WidgetKind::Selector(widgets::Selector::new(ctx, on_change.clone(), s)),
+                WidgetKind::Selector(widgets::Selector::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
-                WidgetKind::Entry(widgets::Entry::new(ctx, on_change.clone(), s)),
+                WidgetKind::Entry(widgets::Entry::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Frame(s) } => (
                 "Frame",
-                WidgetKind::Frame(widgets::Frame::new(ctx, on_change.clone(), s)),
+                WidgetKind::Frame(widgets::Frame::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
-                WidgetKind::Box(widgets::BoxContainer::new(on_change.clone(), s)),
+                WidgetKind::Box(widgets::BoxContainer::new(
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::BoxChild(s) } => (
                 "BoxChild",
-                WidgetKind::BoxChild(widgets::BoxChild::new(on_change, s)),
+                WidgetKind::BoxChild(widgets::BoxChild::new(on_change, scope.clone(), s)),
                 None,
             ),
             view::Widget { props, kind: view::WidgetKind::Grid(s) } => (
                 "Grid",
-                WidgetKind::Grid(widgets::Grid::new(on_change.clone(), s)),
+                WidgetKind::Grid(widgets::Grid::new(on_change.clone(), scope.clone(), s)),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::GridChild(s) } => (
                 "GridChild",
-                WidgetKind::GridChild(widgets::GridChild::new(on_change, s)),
+                WidgetKind::GridChild(widgets::GridChild::new(
+                    on_change,
+                    scope.clone(),
+                    s,
+                )),
                 None,
             ),
             view::Widget { props: _, kind: view::WidgetKind::GridRow(_) } => {
@@ -317,38 +367,59 @@ impl Widget {
             }
             view::Widget { props, kind: view::WidgetKind::Paned(s) } => (
                 "Paned",
-                WidgetKind::Paned(widgets::Paned::new(on_change.clone(), s)),
+                WidgetKind::Paned(widgets::Paned::new(
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Notebook(s) } => (
                 "Notebook",
-                WidgetKind::Notebook(widgets::Notebook::new(ctx, on_change.clone(), s)),
+                WidgetKind::Notebook(widgets::Notebook::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::NotebookPage(s) } => (
                 "NotebookPage",
                 WidgetKind::NotebookPage(widgets::NotebookPage::new(
                     on_change.clone(),
+                    scope.clone(),
                     s,
                 )),
                 None,
             ),
             view::Widget { props, kind: view::WidgetKind::LinePlot(s) } => (
                 "LinePlot",
-                WidgetKind::LinePlot(widgets::LinePlot::new(ctx, on_change.clone(), s)),
+                WidgetKind::LinePlot(widgets::LinePlot::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
                 Some(WidgetProps::new(on_change, props)),
             ),
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(p) = props.as_ref() {
             root.pack_start(p.root(), false, false, 0);
+            root.pack_start(
+                &gtk::Separator::new(gtk::Orientation::Horizontal),
+                false,
+                false,
+                0,
+            );
         }
         if let Some(r) = kind.root() {
             root.pack_start(r, true, true, 0);
         }
         store.set_value(iter, 0, &name.to_value());
         root.set_sensitive(false);
-        let t = Widget { root, props, kind };
+        let t = Widget { root, props, kind, scope };
         store.set_value(iter, 1, &t.to_value());
     }
 
@@ -501,24 +572,32 @@ impl Widget {
                 }
                 .to_expr(),
             })),
-            Some("LinePlot") => widget(view::WidgetKind::LinePlot(view::LinePlot {
-                title: String::from("Line Plot"),
-                x_label: String::from("x axis"),
-                y_label: String::from("y axis"),
-                x_labels: 4,
-                y_labels: 4,
-                x_grid: true,
-                y_grid: true,
-                fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
-                margin: 3,
-                label_area: 50,
-                x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
-                series: Vec::new(),
-            })),
+            Some("LinePlot") => {
+                let props = Some(view::WidgetProps {
+                    vexpand: true,
+                    hexpand: true,
+                    ..DEFAULT_PROPS
+                });
+                let kind = view::WidgetKind::LinePlot(view::LinePlot {
+                    title: String::from("Line Plot"),
+                    x_label: String::from("x axis"),
+                    y_label: String::from("y axis"),
+                    x_labels: 4,
+                    y_labels: 4,
+                    x_grid: true,
+                    y_grid: true,
+                    fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
+                    margin: 3,
+                    label_area: 50,
+                    x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
+                    series: Vec::new(),
+                });
+                view::Widget { kind, props }
+            }
             Some("Frame") => widget(view::WidgetKind::Frame(view::Frame {
                 label: expr::ExprKind::Constant(Value::Null).to_expr(),
                 label_align_horizontal: 0.,
@@ -650,11 +729,11 @@ pub(super) struct Editor {
 }
 
 impl Editor {
-    pub(super) fn new(ctx: BSCtx, spec: view::View) -> Editor {
+    pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::View) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
-                root.set_position(root.get_allocated_height() / 2);
+                root.set_position(root.allocated_height() / 2);
                 glib::Continue(false)
             }),
         );
@@ -666,8 +745,8 @@ impl Editor {
         win_lower.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let root_lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
         win_lower.add(&root_lower);
-        root.add1(&root_upper);
-        root.add2(&win_lower);
+        root.pack1(&root_upper, true, false);
+        root.pack2(&win_lower, true, true);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root_upper.pack_start(&treebtns, false, false, 0);
         let addbtnicon = gtk::Image::from_icon_name(
@@ -734,6 +813,7 @@ impl Editor {
         let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
         let undoing = Rc::new(Cell::new(false));
         let on_change: OnChange = Rc::new({
+            let scope = scope.clone();
             let ctx = ctx.clone();
             let spec = Rc::clone(&spec);
             let store = store.clone();
@@ -744,28 +824,38 @@ impl Editor {
                 if !scheduled.get() {
                     scheduled.set(true);
                     idle_add_local(clone!(
-                    @strong ctx,
-                    @strong spec,
-                    @strong store,
-                    @strong scheduled,
-                    @strong undo_stack,
-                    @strong undoing => move || {
-                        if let Some(root) = store.get_iter_first() {
-                            if undoing.get() {
-                                undoing.set(false)
-                            } else {
-                                undo_stack.borrow_mut().push(spec.borrow().clone());
+                        @strong scope,
+                        @strong ctx,
+                        @strong spec,
+                        @strong store,
+                        @strong scheduled,
+                        @strong undo_stack,
+                        @strong undoing => move || {
+                            if let Some(root) = store.iter_first() {
+                                if undoing.get() {
+                                    undoing.set(false)
+                                } else {
+                                    undo_stack.borrow_mut().push(spec.borrow().clone());
+                                }
+                                Editor::update_scope(&store, scope.clone(), &root);
+                                spec.borrow_mut().root =
+                                    Editor::build_spec(&store, &root);
+                                ctx.borrow().user.backend.render(spec.borrow().clone());
                             }
-                            spec.borrow_mut().root = Editor::build_spec(&store, &root);
-                            ctx.borrow().user.backend.render(spec.borrow().clone());
-                        }
-                        scheduled.set(false);
-                        glib::Continue(false)
+                            scheduled.set(false);
+                            glib::Continue(false)
                     }));
                 }
             }
         });
-        Editor::build_tree(&ctx, &on_change, &store, None, &spec.borrow().root);
+        Editor::build_tree(
+            &ctx,
+            &on_change,
+            &store,
+            scope.clone(),
+            None,
+            &spec.borrow().root,
+        );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
         root_lower.pack_start(&reveal_properties, true, true, 5);
@@ -777,39 +867,41 @@ impl Editor {
             kind.append(Some(k), k);
         }
         kind.connect_changed(clone!(
+            @strong scope,
             @strong on_change,
             @strong store,
             @strong selected,
             @strong ctx,
             @weak properties,
             @strong inhibit_change => move |c| {
-            if let Some(iter) = selected.borrow().clone() {
-                if !inhibit_change.get() {
-                    let wv = store.get_value(&iter, 1);
-                    if let Ok(Some(w)) = wv.get::<&Widget>() {
-                        w.root().hide();
-                        w.root().set_sensitive(false);
-                        properties.remove(w.root());
+                if let Some(iter) = selected.borrow().clone() {
+                    if !inhibit_change.get() {
+                        let wv = store.value(&iter, 1);
+                        if let Ok(w) = wv.get::<&Widget>() {
+                            w.root().hide();
+                            w.root().set_sensitive(false);
+                            properties.remove(w.root());
+                        }
+                        let id = c.active_id();
+                        let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
+                        Widget::insert(
+                            &ctx,
+                            on_change.clone(),
+                            &store,
+                            &iter,
+                            scope.clone(), // will be overwritten by on_change
+                            spec
+                        );
+                        let wv = store.value(&iter, 1);
+                        if let Ok(w) = wv.get::<&Widget>() {
+                            properties.pack_start(w.root(), true, true, 5);
+                            w.root().set_sensitive(true);
+                            w.root().grab_focus();
+                        }
+                        properties.show_all();
+                        on_change();
                     }
-                    let id = c.get_active_id();
-                    let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
-                    Widget::insert(
-                        &ctx,
-                        on_change.clone(),
-                        &store,
-                        &iter,
-                        spec
-                    );
-                    let wv = store.get_value(&iter, 1);
-                    if let Ok(Some(w)) = wv.get::<&Widget>() {
-                        properties.pack_start(w.root(), true, true, 5);
-                        w.root().set_sensitive(true);
-                        w.root().grab_focus();
-                    }
-                    properties.show_all();
-                    on_change();
                 }
-            }
         }));
         properties.pack_start(&kind, false, false, 0);
         properties.pack_start(
@@ -818,51 +910,51 @@ impl Editor {
             false,
             0,
         );
-        let selection = view.get_selection();
+        let selection = view.selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
-        @strong ctx,
-        @strong selected,
-        @weak store,
-        @weak kind,
-        @weak reveal_properties,
-        @weak properties,
-        @strong inhibit_change => move |s| {
-            {
-                let children = properties.get_children();
-                if children.len() == 3 {
-                    children[2].hide();
-                    children[2].set_sensitive(false);
-                    properties.remove(&children[2]);
-                }
-            }
-            match s.get_selected() {
-                None => {
-                    *selected.borrow_mut() = None;
-                    ctx.borrow().user.backend.highlight(vec![]);
-                    reveal_properties.set_reveal_child(false);
-                }
-                Some((_, iter)) => {
-                    *selected.borrow_mut() = Some(iter.clone());
-                    let mut path = Vec::new();
-                    Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
-                    ctx.borrow().user.backend.highlight(path);
-                    let v = store.get_value(&iter, 0);
-                    if let Ok(Some(id)) = v.get::<&str>() {
-                        inhibit_change.set(true);
-                        kind.set_active_id(Some(id));
-                        inhibit_change.set(false);
+            @strong ctx,
+            @strong selected,
+            @weak store,
+            @weak kind,
+            @weak reveal_properties,
+            @weak properties,
+            @strong inhibit_change => move |s| {
+                {
+                    let children = properties.children();
+                    if children.len() == 3 {
+                        children[2].hide();
+                        children[2].set_sensitive(false);
+                        properties.remove(&children[2]);
                     }
-                    let v = store.get_value(&iter, 1);
-                    if let Ok(Some(w)) = v.get::<&Widget>() {
-                        properties.pack_start(w.root(), true, true, 5);
-                        w.root().set_sensitive(true);
-                        w.root().grab_focus();
-                    }
-                    properties.show_all();
-                    reveal_properties.set_reveal_child(true);
                 }
-            }
+                match s.selected() {
+                    None => {
+                        *selected.borrow_mut() = None;
+                        ctx.borrow().user.backend.highlight(vec![]);
+                        reveal_properties.set_reveal_child(false);
+                    }
+                    Some((_, iter)) => {
+                        *selected.borrow_mut() = Some(iter.clone());
+                        let mut path = Vec::new();
+                        Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
+                        ctx.borrow().user.backend.highlight(path);
+                        let v = store.value(&iter, 0);
+                        if let Ok(id) = v.get::<&str>() {
+                            inhibit_change.set(true);
+                            kind.set_active_id(Some(id));
+                            inhibit_change.set(false);
+                        }
+                        let v = store.value(&iter, 1);
+                        if let Ok(w) = v.get::<&Widget>() {
+                            properties.pack_start(w.root(), true, true, 5);
+                            w.root().set_sensitive(true);
+                            w.root().grab_focus();
+                        }
+                        properties.show_all();
+                        reveal_properties.set_reveal_child(true);
+                    }
+                }
         }));
         let menu = gtk::Menu::new();
         let duplicate = gtk::MenuItem::with_label("Duplicate");
@@ -876,57 +968,71 @@ impl Editor {
         menu.append(&delete);
         menu.append(&undo);
         let dup = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            if let Some(iter) = &*selected.borrow() {
-                let spec = Editor::build_spec(&store, iter);
-                let parent = store.iter_parent(iter);
-                Editor::build_tree(
-                    &ctx,
-                    &on_change,
-                    &store,
-                    parent.as_ref(),
-                    &spec
-                );
-                on_change()
-            }
+                if let Some(iter) = &*selected.borrow() {
+                    let spec = Editor::build_spec(&store, iter);
+                    let parent = store.iter_parent(iter);
+                    Editor::build_tree(
+                        &ctx,
+                        &on_change,
+                        &store,
+                        scope.clone(), // overwritten by on_change
+                        parent.as_ref(),
+                        &spec
+                    );
+                    on_change()
+                }
         }));
         duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let newsib = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            let iter = store.insert_after(None, selected.borrow().as_ref());
-            let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
-            on_change();
+                let iter = store.insert_after(None, selected.borrow().as_ref());
+                let spec = Widget::default_spec(Some("Label"));
+                Widget::insert(&ctx, on_change.clone(), &store, &iter, scope.clone(), spec);
+                on_change();
         }));
         new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         let newch = Rc::new(clone!(
+            @strong scope,
             @strong on_change,
             @weak store,
             @strong selected,
             @strong ctx => move || {
-            let iter = store.insert_after(selected.borrow().as_ref(), None);
-            let spec = Widget::default_spec(Some("Label"));
-            Widget::insert(&ctx, on_change.clone(), &store, &iter, spec);
-            on_change();
+                let iter = store.insert_after(selected.borrow().as_ref(), None);
+                let spec = Widget::default_spec(Some("Label"));
+                Widget::insert(
+                    &ctx,
+                    on_change.clone(),
+                    &store,
+                    &iter,
+                    scope.clone(),
+                    spec
+                );
+                on_change();
         }));
         new_child.connect_activate(clone!(@strong newch => move |_| newch()));
         addchbtn.connect_clicked(clone!(@strong newch => move |_| newch()));
         let del = Rc::new(clone!(
-            @weak selection, @strong on_change, @weak store, @strong selected => move || {
-            let iter = selected.borrow().clone();
-            if let Some(iter) = iter {
-                selection.unselect_iter(&iter);
-                store.remove(&iter);
-                on_change();
-            }
+            @weak selection,
+            @strong on_change,
+            @weak store,
+            @strong selected => move || {
+                let iter = selected.borrow().clone();
+                if let Some(iter) = iter {
+                    selection.unselect_iter(&iter);
+                    store.remove(&iter);
+                    on_change();
+                }
         }));
         delete.connect_activate(clone!(@strong del => move |_| del()));
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
@@ -951,6 +1057,7 @@ impl Editor {
                         &ctx,
                         &on_change,
                         &store,
+                        scope.clone(),
                         None,
                         &s.root
                     );
@@ -961,7 +1068,7 @@ impl Editor {
         undobtn.connect_clicked(clone!(@strong und => move |_| und()));
         view.connect_button_press_event(move |_, b| {
             let right_click =
-                gdk::EventType::ButtonPress == b.get_event_type() && b.get_button() == 3;
+                gdk::EventType::ButtonPress == b.event_type() && b.button() == 3;
             if right_click {
                 menu.show_all();
                 menu.popup_at_pointer(Some(&*b));
@@ -974,70 +1081,144 @@ impl Editor {
             on_change();
         }));
         store.connect_row_inserted(clone!(
-        @strong store, @strong on_change => move |_, _, iter| {
-            idle_add_local(clone!(@strong store, @strong iter => move || {
-                let v = store.get_value(&iter, 1);
-                match v.get::<&Widget>() {
-                    Err(_) | Ok(None) => (),
-                    Ok(Some(w)) => w.moved(&iter),
-                }
-                glib::Continue(false)
-            }));
-            on_change();
+            @strong store, @strong on_change => move |_, _, iter| {
+                idle_add_local(clone!(@strong store, @strong iter => move || {
+                    let v = store.value(&iter, 1);
+                    if let Ok(w) = v.get::<&Widget>() {
+                        w.moved(&iter)
+                    }
+                    glib::Continue(false)
+                }));
+                on_change();
         }));
         Editor { root }
+    }
+
+    fn update_scope(store: &gtk::TreeStore, scope: Path, root: &gtk::TreeIter) {
+        let v = store.value(root, 1);
+        if let Ok(w) = v.get::<&Widget>() {
+            *w.scope.borrow_mut() = scope.clone();
+            let scope = match &w.kind {
+                WidgetKind::Notebook(_) => scope.append("n"),
+                WidgetKind::Box(_) => scope.append("b"),
+                WidgetKind::Grid(_) => scope.append("g"),
+                WidgetKind::Paned(_) => scope.append("p"),
+                WidgetKind::Frame(_)
+                | WidgetKind::GridRow
+                | WidgetKind::NotebookPage(_)
+                | WidgetKind::BoxChild(_)
+                | WidgetKind::GridChild(_)
+                | WidgetKind::Action(_)
+                | WidgetKind::Table(_)
+                | WidgetKind::Label(_)
+                | WidgetKind::Button(_)
+                | WidgetKind::LinkButton(_)
+                | WidgetKind::Toggle(_)
+                | WidgetKind::Selector(_)
+                | WidgetKind::Entry(_)
+                | WidgetKind::LinePlot(_) => scope.clone(),
+            };
+            if let Some(iter) = store.iter_children(Some(root)) {
+                loop {
+                    Editor::update_scope(store, scope.clone(), &iter);
+                    if !store.iter_next(&iter) {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn build_tree(
         ctx: &BSCtx,
         on_change: &OnChange,
         store: &gtk::TreeStore,
+        scope: Path,
         parent: Option<&gtk::TreeIter>,
         w: &view::Widget,
     ) {
         let iter = store.insert_before(parent, None);
-        Widget::insert(ctx, on_change.clone(), store, &iter, w.clone());
+        Widget::insert(ctx, on_change.clone(), store, &iter, scope.clone(), w.clone());
         match &w.kind {
             view::WidgetKind::Frame(f) => {
                 if let Some(w) = &f.child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::NotebookPage(p) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*p.widget);
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*p.widget);
             }
             view::WidgetKind::Notebook(n) => {
-                for w in &n.children {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                let scope = scope.append("n");
+                for w in n.children.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::Box(b) => {
-                for w in &b.children {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                let scope = scope.append("b");
+                for w in b.children.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::BoxChild(b) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*b.widget)
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*b.widget)
             }
             view::WidgetKind::Grid(g) => {
-                for w in &g.rows {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                let scope = scope.append("g");
+                for w in g.rows.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::GridChild(g) => {
-                Editor::build_tree(ctx, on_change, store, Some(&iter), &*g.widget)
+                Editor::build_tree(ctx, on_change, store, scope, Some(&iter), &*g.widget)
             }
             view::WidgetKind::GridRow(g) => {
-                for w in &g.columns {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                for w in g.columns.iter() {
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
             }
             view::WidgetKind::Paned(p) => {
+                let scope = scope.append("p");
                 if let Some(w) = &p.first_child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(
+                        ctx,
+                        on_change,
+                        store,
+                        scope.clone(),
+                        Some(&iter),
+                        w,
+                    );
                 }
                 if let Some(w) = &p.second_child {
-                    Editor::build_tree(ctx, on_change, store, Some(&iter), w);
+                    Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
             view::WidgetKind::Action(_)
@@ -1053,7 +1234,7 @@ impl Editor {
     }
 
     fn build_spec(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Widget {
-        let v = store.get_value(root, 1);
+        let v = store.value(root, 1);
         match v.get::<&Widget>() {
             Err(e) => {
                 let s = Value::from(format!("tree error: {}", e));
@@ -1062,14 +1243,7 @@ impl Editor {
                     props: None,
                 }
             }
-            Ok(None) => {
-                let s = Value::from("tree error: missing widget");
-                view::Widget {
-                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
-                    props: None,
-                }
-            }
-            Ok(Some(w)) => {
+            Ok(w) => {
                 let mut spec = w.spec();
                 match &mut spec.kind {
                     view::WidgetKind::Frame(ref mut f) => {
@@ -1173,10 +1347,10 @@ impl Editor {
         nchild: usize,
         path: &mut Vec<WidgetPath>,
     ) {
-        let v = store.get_value(start, 1);
+        let v = store.value(start, 1);
         let skip_idx = match v.get::<&Widget>() {
-            Err(_) | Ok(None) => false,
-            Ok(Some(w)) => match &w.kind {
+            Err(_) => false,
+            Ok(w) => match &w.kind {
                 WidgetKind::Action(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
@@ -1249,7 +1423,7 @@ impl Editor {
                     false
                 }
                 WidgetKind::GridRow => {
-                    if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
+                    if let Some(idx) = store.path(start).map(|t| t.indices()) {
                         if let Some(i) = idx.last() {
                             nrow = *i as usize;
                         }
@@ -1264,7 +1438,7 @@ impl Editor {
             },
         };
         if let Some(parent) = store.iter_parent(start) {
-            if let Some(idx) = store.get_path(start).map(|t| t.get_indices()) {
+            if let Some(idx) = store.path(start).map(|t| t.indices()) {
                 if let Some(i) = idx.last() {
                     let nchild = if skip_idx { nchild } else { *i as usize };
                     Editor::build_widget_path(store, &parent, nrow, nchild, path);

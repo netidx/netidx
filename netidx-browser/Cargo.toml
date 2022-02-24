@@ -1,6 +1,6 @@
 [package]
 name = "netidx-browser"
-version = "0.10.4"
+version = "0.10.5"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -41,19 +41,20 @@ bytes = "1"
 fxhash = "0.2"
 anyhow = "1"
 log = "0.4"
-env_logger = "0.8"
+env_logger = "0.9"
 base64 = "0.13"
-parking_lot = "0.11"
+parking_lot = "0.12"
 indexmap = "1"
 once_cell = "1"
-gtk = { version = "0.9", features = ["v3_24"] }
-pango = "0.9"
-gio = "0.9"
-glib = "0.10"
-gdk = "0.13"
-sourceview4 = "0.2"
-cairo-rs = "0.9"
+gtk = { version = "0.15", features = ["v3_24"] }
+pango = "0.15"
+gio = "0.15"
+glib = "0.15"
+gdk = "0.15"
+gdk-pixbuf = "0.15"
+sourceview4-sc = "0.3"
 plotters = { version = "0.3", default_features = false, features = ["datetime", "line_series", "ttf"] }
-plotters-cairo = "0.3"
+plotters-backend = "0.3"
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }
+radix_trie = "0.2"

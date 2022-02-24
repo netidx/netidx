@@ -3,6 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
 };
+use arcstr::ArcStr;
 use fxhash::{FxBuildHasher, FxHashMap};
 use netidx::{
     chars::Chars,
@@ -113,6 +114,7 @@ pub trait Ctx {
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
     fn ref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
     fn unref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
+    fn register_fn(&mut self, name: Chars, scope: Path);
     fn set_var(
         &mut self,
         variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
@@ -140,12 +142,17 @@ pub fn store_var(
     scope: &Path,
     name: &Chars,
     value: Value,
-) {
+) -> (bool, Path) {
     if local {
+        let mut new = false;
         variables
             .entry(scope.clone())
-            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .or_insert_with(|| {
+                new = true;
+                HashMap::with_hasher(FxBuildHasher::default())
+            })
             .insert(name.clone(), value);
+        (new, scope.clone())
     } else {
         let mut iter = Path::dirnames(scope);
         loop {
@@ -153,7 +160,8 @@ pub fn store_var(
                 Some(scope) => {
                     if let Some(vars) = variables.get_mut(scope) {
                         if let Some(var) = vars.get_mut(name) {
-                            break *var = value;
+                            *var = value;
+                            break (false, Path::from(ArcStr::from(scope)));
                         }
                     }
                 }

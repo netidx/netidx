@@ -21,7 +21,7 @@ where
     });
     entry.connect_icon_press(move |e, _, _| e.emit_activate());
     entry.connect_activate(move |e| {
-        let txt = e.get_text();
+        let txt = e.text();
         match txt.parse::<T>() {
             Err(e) => warn!("invalid value: {}, {}", &*txt, e),
             Ok(src) => {
@@ -82,10 +82,10 @@ pub(super) fn expander_touch_enable(root: &gtk::Expander) {
     root.connect_button_press_event(
         clone!(@weak root => @default-return gtk::Inhibit(false), move |_, ev| {
             let left_click =
-                gdk::EventType::ButtonPress == ev.get_event_type()
-                && ev.get_button() == 1;
+                gdk::EventType::ButtonPress == ev.event_type()
+                && ev.button() == 1;
             if left_click {
-                root.set_expanded(!root.get_expanded());
+                root.set_expanded(!root.is_expanded());
                 gtk::Inhibit(true)
             } else {
                 gtk::Inhibit(false)

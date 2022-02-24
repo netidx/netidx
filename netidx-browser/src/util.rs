@@ -1,7 +1,7 @@
 use gtk::{self, prelude::*};
 
 pub(super) fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
-    w.get_toplevel()
+    w.toplevel()
         .expect("modal dialog must have a toplevel window")
         .downcast::<gtk::Window>()
         .expect("not a window")

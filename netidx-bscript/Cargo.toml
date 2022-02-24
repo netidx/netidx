@@ -1,6 +1,6 @@
 [package]
 name = "netidx-bscript"
-version = "0.10.4"
+version = "0.10.5"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -28,6 +28,7 @@ netidx = { path = "../netidx", version = "0.10", default_features = false }
 regex = "1"
 serde = "1"
 serde_derive = "1"
+arcstr = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = "1"

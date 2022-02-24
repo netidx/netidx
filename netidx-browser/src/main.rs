@@ -6,6 +6,7 @@ extern crate lazy_static;
 
 mod backend;
 mod bscript;
+mod cairo_backend;
 mod containers;
 mod editor;
 mod table;
@@ -19,7 +20,6 @@ use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use gdk::{self, prelude::*};
-use gio::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use netidx::{
@@ -35,6 +35,7 @@ use netidx_bscript::{
     vm::{self, ExecCtx, Node, RpcCallId},
 };
 use netidx_protocols::view;
+use radix_trie::Trie;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -167,6 +168,8 @@ struct WidgetCtx {
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
+    fns: Trie<String, ()>,
+    vars: Trie<String, Trie<String, ()>>,
 }
 
 impl vm::Ctx for WidgetCtx {
@@ -189,6 +192,10 @@ impl vm::Ctx for WidgetCtx {
 
     fn unref_var(&mut self, _name: Chars, _scope: Path, _ref_id: ExprId) {}
 
+    fn register_fn(&mut self, name: Chars, _scope: Path) {
+        self.fns.insert(name.into(), ());
+    }
+
     fn set_var(
         &mut self,
         variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
@@ -197,7 +204,19 @@ impl vm::Ctx for WidgetCtx {
         name: Chars,
         value: Value,
     ) {
-        vm::store_var(variables, local, &scope, &name, value.clone());
+        let (new, scope) = vm::store_var(variables, local, &scope, &name, value.clone());
+        if new {
+            match self.vars.get_mut(&*name) {
+                Some(scopes) => {
+                    scopes.insert(scope.to_string(), ());
+                }
+                None => {
+                    let mut scopes = Trie::new();
+                    scopes.insert(scope.to_string(), ());
+                    self.vars.insert(name.to_string(), scopes);
+                }
+            }
+        }
         let _: Result<_, _> =
             self.backend.to_gui.send(ToGui::UpdateVar(scope, name, value));
     }
@@ -374,7 +393,7 @@ impl Widget {
 
     fn set_highlight(&self, mut path: impl Iterator<Item = WidgetPath>, h: bool) {
         fn set<T: WidgetExt>(w: &T, h: bool) {
-            let s = w.get_style_context();
+            let s = w.style_context();
             if h {
                 s.add_class("highlighted");
             } else {
@@ -545,7 +564,7 @@ impl View {
         let widget =
             Widget::new(ctx, spec.root.clone(), Path::root(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.set_property_margin(2);
+        root.set_margin(2);
         root.add(&make_crumbs(ctx, path));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
@@ -611,7 +630,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
     );
     let loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let mainw: Rc<RefCell<Option<W>>> = Rc::new(RefCell::new(None));
-    let root = d.get_content_area();
+    let root = d.content_area();
     let cb = gtk::ComboBoxText::new();
     cb.append(Some("Netidx"), "Netidx");
     cb.append(Some("File"), "File");
@@ -624,7 +643,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                 W::Netidx(w) => root.remove(&w),
             }
         }
-        let id = cb.get_active_id();
+        let id = cb.active_id();
         match id.as_ref().map(|i| &**i) {
             Some("File") => {
                 let w = gtk::FileChooserWidget::new(
@@ -634,7 +653,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                         gtk::FileChooserAction::Open
                     });
                 w.connect_selection_changed(clone!(@strong loc => move |w| {
-                    *loc.borrow_mut() = w.get_filename().map(|f| ViewLoc::File(f));
+                    *loc.borrow_mut() = w.filename().map(|f| ViewLoc::File(f));
                 }));
                 root.add(&w);
                 *mainw.borrow_mut() = Some(W::File(w));
@@ -647,7 +666,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                 b.pack_start(&e, true, true, 5);
                 root.add(&b);
                 e.connect_changed(clone!(@strong loc => move |e| {
-                    let p = Path::from(String::from(e.get_text()));
+                    let p = Path::from(String::from(e.text()));
                     *loc.borrow_mut() = Some(ViewLoc::Netidx(p));
                 }));
                 *mainw.borrow_mut() = Some(W::Netidx(b));
@@ -735,7 +754,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let group = gtk::WindowGroup::new();
     group.add_window(&ctx.borrow().user.window);
     let headerbar = gtk::HeaderBar::new();
-    let mainbox = gtk::Paned::new(gtk::Orientation::Horizontal);
     let design_mode = gtk::ToggleButton::new();
     let design_img = gtk::Image::from_icon_name(
         Some("document-page-setup"),
@@ -766,9 +784,8 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         w.set_titlebar(Some(&headerbar));
         w.set_title("Netidx browser");
         w.set_default_size(800, 600);
-        w.add(&mainbox);
         w.show_all();
-        if let Some(screen) = w.get_screen() {
+        if let Some(screen) = w.screen() {
             setup_css(&screen);
         }
     }
@@ -779,6 +796,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
+    let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     ctx.borrow().user.window.connect_delete_event(clone!(
         @weak ctx => @default-return Inhibit(false), move |w, _| {
@@ -791,30 +809,41 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             }
     }));
     design_mode.connect_toggled(clone!(
-    @weak mainbox,
+    @strong editor_window,
     @strong editor,
     @strong highlight,
     @strong current,
     @strong current_spec,
     @weak ctx => move |b| {
-        if b.get_active() {
-            if let Some(editor) = editor.borrow_mut().take() {
-                mainbox.remove(editor.root());
-            }
+        if b.is_active() {
+            editor_window.borrow_mut().take();
+            editor.borrow_mut().take();
             let s = current_spec.borrow().clone();
-            let e = Editor::new(ctx, s);
-            mainbox.add1(e.root());
-            mainbox.show_all();
+            let e = Editor::new(ctx, Path::root(), s);
+            let win = gtk::Window::builder()
+                .default_width(800)
+                .default_height(600)
+                .type_(gtk::WindowType::Toplevel)
+                .visible(true)
+                .build();
+            win.connect_destroy(clone!(@strong b, @strong editor_window => move |_| {
+                editor_window.borrow_mut().take();
+                b.set_active(false);
+            }));
+            win.add(e.root());
+            win.show_all();
+            *editor_window.borrow_mut() = Some(win);
             *editor.borrow_mut() = Some(e);
         } else {
-            if let Some(editor) = editor.borrow_mut().take() {
-                mainbox.remove(editor.root());
-                if let Some(cur) = &*current.borrow() {
-                    let hl = highlight.borrow();
-                    cur.widget.set_highlight(hl.iter().copied(), false);
-                }
-                highlight.borrow_mut().clear();
+            if let Some(win) = editor_window.borrow_mut().take() {
+                win.close();
             }
+            editor.borrow_mut().take();
+            if let Some(cur) = &*current.borrow() {
+                let hl = highlight.borrow();
+                cur.widget.set_highlight(hl.iter().copied(), false);
+            }
+            highlight.borrow_mut().clear();
         }
     }));
     save_button.connect_clicked(clone!(
@@ -850,7 +879,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ctx.borrow().user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
-        if let Some(v) = a.get_state() {
+        if let Some(v) = a.state() {
             let new_v = !v.get::<bool>().expect("invalid state");
             let m = "Unsaved view will be lost.";
             let u = &ctx.borrow().user;
@@ -929,23 +958,25 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                         *save_loc.borrow_mut() = None;
                     }
                     *current_loc.borrow_mut() = loc;
-                    if design_mode.get_active() {
+                    if design_mode.is_active() {
                         design_mode.set_active(false);
                     }
                 }
             }
             if let Some(cur) = current.borrow_mut().take() {
-                mainbox.remove(cur.root());
+                ctx.borrow().user.window.remove(cur.root());
             }
             ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
-            ctx.borrow()
-                .user
-                .window
-                .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
-            mainbox.add2(cur.root());
-            mainbox.show_all();
+            {
+                let ctx = ctx.borrow();
+                ctx.user
+                    .window
+                    .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
+                ctx.user.window.add(cur.root());
+                ctx.user.window.show_all();
+            }
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter().copied(), true);
             *current.borrow_mut() = Some(cur);
@@ -1023,8 +1054,7 @@ fn main() {
     let application = Application::new(
         Some("org.netidx.browser"),
         gio::ApplicationFlags::NON_UNIQUE | Default::default(),
-    )
-    .expect("failed to initialize GTK application");
+    );
     let (jh, backend) = backend::Backend::new(cfg, auth);
     let default_loc = match &opt.path {
         Some(path) => ViewLoc::Netidx(path.clone()),
@@ -1052,11 +1082,13 @@ fn main() {
                 window: window.clone(),
                 new_window_loc: new_window_loc.clone(),
                 view_saved: Cell::new(true),
+                fns: Trie::new(),
+                vars: Trie::new(),
             })));
             run_gui(ctx, app, rx_to_gui);
         }
     });
-    application.run(&[]);
+    application.run();
     backend.stop();
     drop(application);
     let _: result::Result<_, _> = jh.join();
