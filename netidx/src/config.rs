@@ -1,6 +1,4 @@
-use crate::{
-    chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral, utils,
-};
+use crate::{chars::Chars, path::Path, pool::Pooled, utils};
 use anyhow::Result;
 use fxhash::FxBuildHasher;
 use log::debug;
@@ -21,16 +19,39 @@ use std::{
     time::Duration,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
-    Krb5(HashMap<SocketAddr, String>),
+    Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
     Local(String),
 }
 
-pub mod server {
-    use crossbeam::epoch::Pointable;
+#[derive(Debug, Clone)]
+pub struct Server {
+    pub path: Path,
+    pub ttl: u64,
+    pub addrs: Pooled<Vec<SocketAddr>>,
+    pub auth: Auth,
+}
 
+impl From<crate::protocol::resolver::Referral> for Server {
+    fn from(mut r: crate::protocol::resolver::Referral) -> Server {
+        Server {
+            path: r.path,
+            ttl: r.ttl,
+            addrs: r.addrs,
+            auth: {
+                if r.krb5_spns.is_empty() {
+                    Auth::Anonymous
+                } else {
+                    Auth::Krb5(r.krb5_spns)
+                }
+            },
+        }
+    }
+}
+
+pub mod server {
     use super::*;
 
     type Permissions = String;
@@ -62,30 +83,48 @@ pub mod server {
     }
 
     pub(crate) mod file {
-        use super::Auth;
-        use crate::{
-            chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral as Pref,
-            utils,
-        };
+        use crate::{chars::Chars, path::Path, pool::Pooled, utils};
         use anyhow::Result;
         use std::{collections::HashMap, net::SocketAddr};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(super) struct Referral {
+        pub(crate) enum Auth {
+            Anonymous,
+            Krb5(HashMap<SocketAddr, String>),
+            Local(String),
+        }
+
+        impl Into<super::Auth> for Auth {
+            fn into(self) -> super::Auth {
+                match self {
+                    Auth::Anonymous => super::Auth::Anonymous,
+                    Auth::Local(s) => super::Auth::Local(s),
+                    Auth::Krb5(spns) => super::Auth::Krb5(Pooled::orphan(
+                        spns.into_iter().map(|(a, s)| (a, Chars::from(s))).collect(),
+                    )),
+                }
+            }
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub(super) struct Server {
             path: String,
             ttl: u64,
             addrs: Vec<SocketAddr>,
-            krb5_spns: HashMap<SocketAddr, String>,
+            auth: Auth,
         }
 
-        impl Referral {
-            pub(super) fn check(self, us: Option<&Vec<SocketAddr>>) -> Result<Pref> {
+        impl Server {
+            pub(super) fn check(
+                self,
+                us: Option<&Vec<SocketAddr>>,
+            ) -> Result<super::Server> {
                 let path = Path::from(self.path);
                 if !Path::is_absolute(&path) {
-                    bail!("absolute referral path is required")
+                    bail!("absolute server path is required")
                 }
                 if self.addrs.is_empty() {
-                    bail!("empty referral addrs")
+                    bail!("empty server addrs")
                 }
                 for addr in &self.addrs {
                     utils::check_addr(addr.ip(), &[])?;
@@ -93,10 +132,20 @@ pub mod server {
                         bail!("non zero port required {:?}", addr);
                     }
                 }
-                if !self.krb5_spns.is_empty() {
-                    for a in &self.addrs {
-                        if !self.krb5_spns.contains_key(a) {
-                            bail!("spn for server {:?} is required", a)
+                match &self.auth {
+                    Auth::Anonymous => (),
+                    Auth::Local(_) => bail!("local auth is not allowed for a remote server"),
+                    Auth::Krb5(spns) => {
+                        if spns.is_empty() {
+                            bail!("at least one SPN is required in krb5 mode")
+                        }
+                        for a in &self.addrs {
+                            if !spns.contains_key(a) {
+                                bail!("spn for server {:?} is required", a)
+                            }
+                        }
+                        if spns.len() > self.addrs.len() {
+                            bail!("there should be exactly 1 spn for each server address")
                         }
                     }
                 }
@@ -110,24 +159,19 @@ pub mod server {
                         }
                     }
                 }
-                Ok(Pref {
+                Ok(super::Server {
                     path,
                     ttl: self.ttl,
                     addrs: Pooled::orphan(self.addrs),
-                    krb5_spns: Pooled::orphan(
-                        self.krb5_spns
-                            .into_iter()
-                            .map(|(a, s)| (a, Chars::from(s)))
-                            .collect(),
-                    ),
+                    auth: self.auth.into(),
                 })
             }
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
-            pub(super) parent: Option<Referral>,
-            pub(super) children: Vec<Referral>,
+            pub(super) parent: Option<Server>,
+            pub(super) children: Vec<Server>,
             pub(super) pid_file: String,
             pub(super) max_connections: usize,
             pub(super) reader_ttl: u64,
@@ -140,8 +184,8 @@ pub mod server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
-        pub parent: Option<Referral>,
-        pub children: BTreeMap<Path, Referral>,
+        pub parent: Option<Server>,
+        pub children: BTreeMap<Path, Server>,
         pub pid_file: String,
         pub max_connections: usize,
         pub reader_ttl: Duration,
@@ -185,7 +229,7 @@ pub mod server {
                         let r = r.check(Some(&addrs))?;
                         Ok((r.path.clone(), r))
                     })
-                    .collect::<Result<BTreeMap<Path, Referral>>>()?;
+                    .collect::<Result<BTreeMap<Path, Server>>>()?;
                 for (p, r) in children.iter() {
                     if !p.starts_with(&*root) {
                         bail!("child paths much be under the root path {}", p)
@@ -217,7 +261,7 @@ pub mod server {
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
                 hello_timeout: Duration::from_secs(cfg.hello_timeout),
-                auth: cfg.auth,
+                auth: cfg.auth.into(),
             })
         }
 
@@ -232,7 +276,8 @@ pub mod client {
     use super::*;
 
     mod file {
-        use super::Auth;
+        use super::*;
+        use server::file::Auth;
         use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +308,7 @@ pub mod client {
     impl Config {
         pub fn parse(s: &str) -> Result<Config> {
             let cfg: file::Config = from_str(s)?;
-            if cfg.addrs.len() < 1 || cfg.local.is_some() {
+            if cfg.addrs.is_empty() && cfg.local.is_none() {
                 bail!("you must specify at least one address, or local machine server");
             }
             for addr in &cfg.addrs {
@@ -274,13 +319,19 @@ pub mod client {
             {
                 bail!("can't mix loopback addrs with non loopback addrs")
             }
+            match &cfg.auth {
+                server::file::Auth::Anonymous | server::file::Auth::Krb5(_) => (),
+                server::file::Auth::Local(_) => {
+                    bail!("local auth is only allowed for the local machine server")
+                }
+            }
             Ok(Config {
                 local: cfg
                     .local
                     .take()
-                    .map(|local| Local { port: local.port, auth: local.auth }),
+                    .map(|l| Local { port: l.port, auth: l.auth.into() }),
                 addrs: cfg.addrs,
-                auth: cfg.auth,
+                auth: cfg.auth.into(),
             })
         }
 
@@ -319,73 +370,30 @@ pub mod client {
             bail!("no default config file was found")
         }
 
-        /// return a referral to the local machine resolver, if it exists
-        pub fn to_local(self) -> Option<Referral> {
-            self.local.take().map(|local| {
+        /// return the local and remote servers in this config (in that order)
+        pub fn to_servers(self) -> (Option<Server>, Option<Server>) {
+            let local = self.local.take().map(|local| {
                 let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
                 let port = self.local.unwrap().port;
                 let addrs = Vec::from([SocketAddr::new(ip, port)]);
-                Referral {
+                Server {
                     path: Path::from("/"),
                     ttl: u32::MAX as u64,
                     addrs: Pooled::orphan(addrs),
-                    krb5_spns: match local.auth {
-                        Auth::Local(_) | Auth::Anonymous => {
-                            Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
-                        }
-                        Auth::Krb5(mut spns) => {
-                            let mut h = Pooled::orphan(HashMap::with_hasher(
-                                FxBuildHasher::default(),
-                            ));
-                            h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
-                            h
-                        }
-                    },
+                    auth: local.auth.into(),
                 }
-            })
-        }
-
-        /// return a referral to the remote resolver, if it exists
-        pub fn to_remote(self) -> Option<Referral> {
-            if self.addrs.is_empty() {
+            });
+            let remote = if self.addrs.is_empty() {
                 None
             } else {
-                Some(Referral {
+                Some(Server {
                     path: Path::from("/"),
                     ttl: u32::MAX as u64,
                     addrs: Pooled::orphan(self.addrs),
-                    krb5_spns: match self.auth {
-                        Auth::Local(_) | Auth::Anonymous => {
-                            Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
-                        }
-                        Auth::Krb5(mut spns) => {
-                            let mut h = Pooled::orphan(HashMap::with_hasher(
-                                FxBuildHasher::default(),
-                            ));
-                            h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
-                            h
-                        }
-                    },
+                    auth: self.auth.into(),
                 })
-            }
-        }
-    }
-
-    impl From<Referral> for Config {
-        fn from(mut r: Referral) -> Config {
-            Config {
-                local: None,
-                addrs: r.addrs.detach(),
-                auth: {
-                    if r.krb5_spns.is_empty() {
-                        Auth::Anonymous
-                    } else {
-                        Auth::Krb5(
-                            r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect(),
-                        )
-                    }
-                },
-            }
+            };
+            (local, remote)
         }
     }
 }
