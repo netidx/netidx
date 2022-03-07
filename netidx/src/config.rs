@@ -16,7 +16,7 @@ use std::{
     default::Default,
     env,
     fs::read_to_string,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path as FsPath,
     time::Duration,
 };
@@ -225,6 +225,69 @@ pub mod server {
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             Config::parse(&read_to_string(file)?)
         }
+    }
+}
+
+pub mod client {
+    use super::*;
+
+    mod file {
+        use super::Auth;
+        use std::net::SocketAddr;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub(super) struct Local {
+            pub(super) port: u16,
+            pub(super) auth: Auth,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub(super) struct Config {
+            pub(super) local: Option<Local>,
+            pub(super) addrs: Vec<SocketAddr>,
+            pub(super) auth: Auth,
+        }
+    }
+
+    pub struct Local {
+        port: u16,
+        auth: Auth,
+    }
+
+    pub struct Config {
+        pub local: Option<Local>,
+        pub addrs: Vec<SocketAddr>,
+        pub auth: Auth,
+    }
+
+    impl Config {
+        pub fn parse(s: &str) -> Result<Config> {
+            let cfg: file::Config = from_str(s)?;
+            if cfg.addrs.len() < 1 || cfg.local.is_some() {
+                bail!("you must specify at least one address, or local machine server");
+            }
+            for addr in &cfg.addrs {
+                utils::check_addr(addr.ip(), &[])?;
+            }
+            if !cfg.addrs.iter().all(|a| a.ip().is_loopback())
+                && !cfg.addrs.iter().all(|a| !a.ip().is_loopback())
+            {
+                bail!("can't mix loopback addrs with non loopback addrs")
+            }
+            Ok(Config {
+                local: cfg
+                    .local
+                    .take()
+                    .map(|local| Local { port: local.port, auth: local.auth }),
+                addrs: cfg.addrs,
+                auth: cfg.auth,
+            })
+        }
+
+        /// Load the cluster config from the specified file.
+        pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
+            Config::parse(&read_to_string(file)?)
+        }
 
         /// This will try in order,
         ///
@@ -255,37 +318,63 @@ pub mod server {
             }
             bail!("no default config file was found")
         }
-    }
-}
 
-pub mod client {
-    use super::*;
-
-    mod file {
-        use super::Auth;
-        use std::net::SocketAddr;
-
-        #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(super) struct Config {
-            pub(super) local_addr: Option<SocketAddr>,
-            pub(super) local_auth: Auth,
-            pub(super) addrs: Vec<SocketAddr>,
-            pub(super) auth: Auth,
+        /// return a referral to the local machine resolver, if it exists
+        pub fn to_local(self) -> Option<Referral> {
+            self.local.take().map(|local| {
+                let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                let port = self.local.unwrap().port;
+                let addrs = Vec::from([SocketAddr::new(ip, port)]);
+                Referral {
+                    path: Path::from("/"),
+                    ttl: u32::MAX as u64,
+                    addrs: Pooled::orphan(addrs),
+                    krb5_spns: match local.auth {
+                        Auth::Local(_) | Auth::Anonymous => {
+                            Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
+                        }
+                        Auth::Krb5(mut spns) => {
+                            let mut h = Pooled::orphan(HashMap::with_hasher(
+                                FxBuildHasher::default(),
+                            ));
+                            h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
+                            h
+                        }
+                    },
+                }
+            })
         }
-    }
 
-    pub struct Config {
-        pub local_addr: Option<SocketAddr>,
-        pub local_auth: Auth,
-        pub addrs: Vec<SocketAddr>,
-        pub auth: Auth,
+        /// return a referral to the remote resolver, if it exists
+        pub fn to_remote(self) -> Option<Referral> {
+            if self.addrs.is_empty() {
+                None
+            } else {
+                Some(Referral {
+                    path: Path::from("/"),
+                    ttl: u32::MAX as u64,
+                    addrs: Pooled::orphan(self.addrs),
+                    krb5_spns: match self.auth {
+                        Auth::Local(_) | Auth::Anonymous => {
+                            Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
+                        }
+                        Auth::Krb5(mut spns) => {
+                            let mut h = Pooled::orphan(HashMap::with_hasher(
+                                FxBuildHasher::default(),
+                            ));
+                            h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
+                            h
+                        }
+                    },
+                })
+            }
+        }
     }
 
     impl From<Referral> for Config {
         fn from(mut r: Referral) -> Config {
             Config {
-                local_addr: None,
-                local_auth: Auth::Anonymous,
+                local: None,
                 addrs: r.addrs.detach(),
                 auth: {
                     if r.krb5_spns.is_empty() {
@@ -294,28 +383,6 @@ pub mod client {
                         Auth::Krb5(
                             r.krb5_spns.drain().map(|(k, v)| (k, v.into())).collect(),
                         )
-                    }
-                },
-            }
-        }
-    }
-
-    impl Into<Referral> for Config {
-        fn into(self) -> Referral {
-            Referral {
-                path: Path::from("/"),
-                ttl: u32::MAX as u64,
-                addrs: Pooled::orphan(self.addrs),
-                krb5_spns: match self.auth {
-                    Auth::Local(_) | Auth::Anonymous => {
-                        Pooled::orphan(HashMap::with_hasher(FxBuildHasher::default()))
-                    }
-                    Auth::Krb5(mut spns) => {
-                        let mut h = Pooled::orphan(HashMap::with_hasher(
-                            FxBuildHasher::default(),
-                        ));
-                        h.extend(spns.drain().map(|(k, v)| (k, Chars::from(v))));
-                        h
                     }
                 },
             }
