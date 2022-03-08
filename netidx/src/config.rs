@@ -387,7 +387,6 @@ pub mod client {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
             pub(super) local: Option<Local>,
-            pub(super) path: String,
             pub(super) addrs: Vec<SocketAddr>,
             pub(super) auth: Auth,
         }
@@ -400,7 +399,6 @@ pub mod client {
 
     pub struct Config {
         pub local: Option<Local>,
-        pub path: Path,
         pub addrs: Vec<SocketAddr>,
         pub auth: Auth,
     }
@@ -430,7 +428,6 @@ pub mod client {
                     .local
                     .take()
                     .map(|l| Local { port: l.port, auth: l.auth.into() }),
-                path: Path::from(cfg.path),
                 addrs: cfg.addrs,
                 auth: cfg.auth.into(),
             })
@@ -488,7 +485,7 @@ pub mod client {
                 None
             } else {
                 Some(Server {
-                    path: self.path,
+                    path: Path::from("/"),
                     ttl: u32::MAX as u64,
                     addrs: Pooled::orphan(self.addrs),
                     auth: self.auth.into(),
