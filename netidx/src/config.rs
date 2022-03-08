@@ -134,7 +134,9 @@ pub mod server {
                 }
                 match &self.auth {
                     Auth::Anonymous => (),
-                    Auth::Local(_) => bail!("local auth is not allowed for a remote server"),
+                    Auth::Local(_) => {
+                        bail!("local auth is not allowed for a remote server")
+                    }
                     Auth::Krb5(spns) => {
                         if spns.is_empty() {
                             bail!("at least one SPN is required in krb5 mode")
@@ -169,7 +171,7 @@ pub mod server {
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(super) struct Config {
+        pub(super) struct Remote {
             pub(super) parent: Option<Server>,
             pub(super) children: Vec<Server>,
             pub(super) pid_file: String,
@@ -180,10 +182,27 @@ pub mod server {
             pub(super) addrs: Vec<SocketAddr>,
             pub(super) auth: Auth,
         }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub(super) struct Local {
+            pub(super) pid_file: String,
+            pub(super) max_connections: usize,
+            pub(super) reader_ttl: u64,
+            pub(super) writer_ttl: u64,
+            pub(super) hello_timeout: u64,
+            pub(super) port: u16,
+            pub(super) auth: Auth,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub(super) enum Config {
+            Remote(Remote),
+            Local(Local),
+        }
     }
 
     #[derive(Debug, Clone)]
-    pub struct Config {
+    pub struct Remote {
         pub parent: Option<Server>,
         pub children: BTreeMap<Path, Server>,
         pub pid_file: String,
@@ -195,74 +214,153 @@ pub mod server {
         pub auth: Auth,
     }
 
+    #[derive(Debug, Clone)]
+    pub struct Local {
+        pub pid_file: String,
+        pub max_connections: usize,
+        pub reader_ttl: Duration,
+        pub writer_ttl: Duration,
+        pub hello_timeout: Duration,
+        pub port: u16,
+        pub auth: Auth,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Config {
+        Remote(Remote),
+        Local(Local),
+    }
+
     impl Config {
+        pub fn pid_file(&self) -> &str {
+            match self {
+                Config::Remote(r) => &r.pid_file,
+                Config::Local(l) => &l.pid_file,
+            }
+        }
+
+        pub fn max_connections(&self) -> usize {
+            match self {
+                Config::Remote(r) => r.max_connections,
+                Config::Local(l) => l.max_connections,
+            }
+        }
+
+        pub fn reader_ttl(&self) -> Duration {
+            match self {
+                Config::Remote(r) => r.reader_ttl,
+                Config::Local(l) => l.reader_ttl,
+            }
+        }
+
+        pub fn writer_ttl(&self) -> Duration {
+            match self {
+                Config::Remote(r) => r.writer_ttl,
+                Config::Local(l) => l.writer_ttl,
+            }
+        }
+
+        pub fn hello_timeout(&self) -> Duration {
+            match self {
+                Config::Remote(r) => r.hello_timeout,
+                Config::Local(l) => l.hello_timeout,
+            }
+        }
+
+        pub fn auth(&self) -> &Auth {
+            match self {
+                Config::Remote(r) => &r.auth,
+                Config::Local(l) => &l.auth,
+            }
+        }
+        
         pub fn root(&self) -> &str {
-            self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
+            match self {
+                Config::Local(_) => "/",
+                Config::Remote(cfg) => {
+                    cfg.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
+                }
+            }
         }
 
         pub fn parse(s: &str) -> Result<Config> {
             let cfg: file::Config = from_str(s)?;
-            if cfg.addrs.len() < 1 {
-                bail!("you must specify at least one address");
-            }
-            for addr in &cfg.addrs {
-                utils::check_addr(addr.ip(), &[])?;
-            }
-            if !cfg.addrs.iter().all(|a| a.ip().is_loopback())
-                && !cfg.addrs.iter().all(|a| !a.ip().is_loopback())
-            {
-                bail!("can't mix loopback addrs with non loopback addrs")
-            }
-            if cfg.addrs.iter().any(|a| a.ip().is_loopback()) {
-                if !cfg.children.is_empty() || cfg.parent.is_some() {
-                    bail!("local servers may not have parents or children")
-                }
-            }
-            let addrs = cfg.addrs;
-            let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
-            let children = {
-                let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
-                let children = cfg
-                    .children
-                    .into_iter()
-                    .map(|r| {
-                        let r = r.check(Some(&addrs))?;
-                        Ok((r.path.clone(), r))
-                    })
-                    .collect::<Result<BTreeMap<Path, Server>>>()?;
-                for (p, r) in children.iter() {
-                    if !p.starts_with(&*root) {
-                        bail!("child paths much be under the root path {}", p)
+            match cfg {
+                file::Config::Local(local) => Ok(Config::Local(Local {
+                    pid_file: local.pid_file,
+                    max_connections: local.max_connections,
+                    reader_ttl: Duration::from_secs(local.reader_ttl),
+                    writer_ttl: Duration::from_secs(local.writer_ttl),
+                    hello_timeout: Duration::from_secs(local.hello_timeout),
+                    port: local.port,
+                    auth: local.auth.into(),
+                })),
+                file::Config::Remote(remote) => {
+                    if remote.addrs.len() < 1 {
+                        bail!("you must specify at least one address");
                     }
-                    if Path::levels(&*p) <= Path::levels(&*root) {
-                        bail!("child paths must be deeper than the root {}", p);
+                    for addr in &remote.addrs {
+                        utils::check_addr(addr.ip(), &[])?;
                     }
-                    let mut res = children.range::<str, (Bound<&str>, Bound<&str>)>((
-                        Excluded(r.path.as_ref()),
-                        Unbounded,
-                    ));
-                    match res.next() {
-                        None => (),
-                        Some((p, _)) => {
-                            if r.path.starts_with(p.as_ref()) {
-                                bail!("can't put a referral {} below {}", p, r.path);
+                    if !remote.addrs.iter().all(|a| a.ip().is_loopback())
+                        && !remote.addrs.iter().all(|a| !a.ip().is_loopback())
+                    {
+                        bail!("can't mix loopback addrs with non loopback addrs")
+                    }
+                    let addrs = remote.addrs;
+                    let parent =
+                        remote.parent.map(|r| r.check(Some(&addrs))).transpose()?;
+                    let children = {
+                        let root =
+                            parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
+                        let children = remote
+                            .children
+                            .into_iter()
+                            .map(|r| {
+                                let r = r.check(Some(&addrs))?;
+                                Ok((r.path.clone(), r))
+                            })
+                            .collect::<Result<BTreeMap<Path, Server>>>()?;
+                        for (p, r) in children.iter() {
+                            if !p.starts_with(&*root) {
+                                bail!("child paths much be under the root path {}", p)
+                            }
+                            if Path::levels(&*p) <= Path::levels(&*root) {
+                                bail!("child paths must be deeper than the root {}", p);
+                            }
+                            let mut res = children
+                                .range::<str, (Bound<&str>, Bound<&str>)>((
+                                    Excluded(r.path.as_ref()),
+                                    Unbounded,
+                                ));
+                            match res.next() {
+                                None => (),
+                                Some((p, _)) => {
+                                    if r.path.starts_with(p.as_ref()) {
+                                        bail!(
+                                            "can't put a referral {} below {}",
+                                            p,
+                                            r.path
+                                        );
+                                    }
+                                }
                             }
                         }
-                    }
+                        children
+                    };
+                    Ok(Config::Remote(Remote {
+                        parent,
+                        children,
+                        pid_file: remote.pid_file,
+                        addrs,
+                        max_connections: remote.max_connections,
+                        reader_ttl: Duration::from_secs(remote.reader_ttl),
+                        writer_ttl: Duration::from_secs(remote.writer_ttl),
+                        hello_timeout: Duration::from_secs(remote.hello_timeout),
+                        auth: remote.auth.into(),
+                    }))
                 }
-                children
-            };
-            Ok(Config {
-                parent,
-                children,
-                pid_file: cfg.pid_file,
-                addrs,
-                max_connections: cfg.max_connections,
-                reader_ttl: Duration::from_secs(cfg.reader_ttl),
-                writer_ttl: Duration::from_secs(cfg.writer_ttl),
-                hello_timeout: Duration::from_secs(cfg.hello_timeout),
-                auth: cfg.auth.into(),
-            })
+            }
         }
 
         /// Load the cluster config from the specified file.
