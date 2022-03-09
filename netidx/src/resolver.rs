@@ -1,5 +1,5 @@
 use crate::{
-    config::Config,
+    config::client::Config,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},

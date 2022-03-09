@@ -2,12 +2,13 @@ use crate::{
     channel::Channel,
     channel::K5CtxWrap,
     chars::Chars,
+    config::{Server, ServerAuth},
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
         ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Referral, Secret, ServerAuthWrite,
-        ServerHelloRead, ServerHelloWrite, ToRead, ToWrite,
+        FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
+        ServerHelloWrite, ToRead, ToWrite,
     },
     utils,
 };
@@ -47,9 +48,10 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone)]
-pub enum Auth {
+pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
+    Local,
 }
 
 // continue with timeout
@@ -64,8 +66,8 @@ macro_rules! cwt {
 }
 
 async fn connect_read(
-    resolver: &Referral,
-    desired_auth: &Auth,
+    resolver: &Server,
+    desired_auth: &DesiredAuth,
 ) -> Result<Channel<ClientCtx>> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut thread_rng());
@@ -87,45 +89,48 @@ async fn connect_read(
         cwt!("send version", con.send_one(&1u64));
         let _ver: u64 = cwt!("recv version", con.receive());
         let (auth, ctx) = match desired_auth {
-            Auth::Anonymous => (ClientAuthRead::Anonymous, None),
-            Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
-                bail!("authentication unavailable")
-            }
-            Auth::Krb5 { upn, .. } => {
-                let upn = upn.as_ref().map(|s| s.as_str());
-                let target_spn = resolver
-                    .krb5_spns
-                    .get(&addr)
-                    .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
-                let (ctx, tok) = try_cf!(
-                    "create ctx",
-                    continue,
-                    task::block_in_place(|| ClientCtx::initiate(
-                        InitiateFlags::empty(),
-                        upn,
-                        target_spn
-                    ))
-                );
-                (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
-            }
+            DesiredAuth::Anonymous => (ClientAuthRead::Anonymous, None),
+            DesiredAuth::Local => unimplemented!(),
+            DesiredAuth::Krb5 { upn, .. } => match &resolver.auth {
+                ServerAuth::Anonymous | ServerAuth::Local(_) => {
+                    bail!("requested auth mechanism is not available")
+                }
+                ServerAuth::Krb5(spns) => {
+                    let upn = upn.as_ref().map(|s| s.as_str());
+                    let target_spn = spns.get(&addr).ok_or_else(|| {
+                        anyhow!("no target spn for resolver {:?}", addr)
+                    })?;
+                    let (ctx, tok) = try_cf!(
+                        "create ctx",
+                        continue,
+                        task::block_in_place(|| ClientCtx::initiate(
+                            InitiateFlags::empty(),
+                            upn,
+                            target_spn
+                        ))
+                    );
+                    (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
+                }
+            },
         };
         cwt!("hello", con.send_one(&ClientHello::ReadOnly(auth)));
         let r: ServerHelloRead = cwt!("hello reply", con.receive());
         match (desired_auth, r) {
-            (Auth::Anonymous, ServerHelloRead::Anonymous) => (),
-            (Auth::Anonymous, _) => {
+            (DesiredAuth::Anonymous, ServerHelloRead::Anonymous) => (),
+            (DesiredAuth::Local, _) => unimplemented!(),
+            (DesiredAuth::Anonymous, _) => {
                 error!("server requires authentication");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
+            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
                 error!("could not authenticate resolver server");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Reused) => {
+            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Reused) => {
                 error!("protocol error, we didn't ask to reuse a security context");
                 continue;
             }
-            (Auth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
+            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
                 let ctx = try_cf!(
                     "resolver tok",
@@ -144,8 +149,8 @@ type ReadBatch =
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
-    resolver: Arc<Referral>,
-    desired_auth: Auth,
+    resolver: Arc<Server>,
+    desired_auth: DesiredAuth,
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
@@ -238,7 +243,7 @@ async fn connection_read(
 pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
-    pub(crate) fn new(resolver: Arc<Referral>, desired_auth: Auth) -> ResolverRead {
+    pub(crate) fn new(resolver: Arc<Server>, desired_auth: DesiredAuth) -> ResolverRead {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
             connection_read(to_rx, resolver, desired_auth).await;
@@ -264,13 +269,13 @@ macro_rules! wt {
 }
 
 async fn connect_write(
-    resolver: &Referral,
+    resolver: &Server,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     security_context: &mut Option<K5CtxWrap<ClientCtx>>,
-    desired_auth: &Auth,
+    desired_auth: &DesiredAuth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
     enum SecState {
@@ -286,29 +291,31 @@ async fn connect_write(
     let _version: u64 = wt!(con.receive())??;
     let sec = Duration::from_secs(1);
     let (auth, ctx) = match desired_auth {
-        Auth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
-        Auth::Krb5 { .. } if resolver.krb5_spns.is_empty() => {
-            bail!("authentication unavailable")
-        }
-        Auth::Krb5 { upn, spn } => match security_context {
-            Some(ctx)
-                if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
-            {
-                (ClientAuthWrite::Reuse, SecState::Reused(ctx.clone()))
+        DesiredAuth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
+        DesiredAuth::Local => unimplemented!(),
+        DesiredAuth::Krb5 { upn, spn } => match &resolver.auth {
+            ServerAuth::Anonymous | ServerAuth::Local(_) => {
+                bail!("authentication unavailable")
             }
-            _ => {
-                let upnr = upn.as_ref().map(|s| s.as_str());
-                let target_spn =
-                    resolver.krb5_spns.get(&resolver_addr).ok_or_else(|| {
+            ServerAuth::Krb5(spns) => match security_context {
+                Some(ctx)
+                    if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
+                {
+                    (ClientAuthWrite::Reuse, SecState::Reused(ctx.clone()))
+                }
+                _ => {
+                    let upnr = upn.as_ref().map(|s| s.as_str());
+                    let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
                         anyhow!("no target spn for resolver {:?}", resolver_addr)
                     })?;
-                let (ctx, token) = task::block_in_place(|| {
-                    ClientCtx::initiate(InitiateFlags::empty(), upnr, target_spn)
-                })?;
-                let token = utils::bytes(&*token);
-                let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))
-            }
+                    let (ctx, token) = task::block_in_place(|| {
+                        ClientCtx::initiate(InitiateFlags::empty(), upnr, target_spn)
+                    })?;
+                    let token = utils::bytes(&*token);
+                    let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
+                    (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))
+                }
+            },
         },
     };
     let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
@@ -317,23 +324,24 @@ async fn connect_write(
     let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
     match (desired_auth, r.auth, ctx) {
-        (Auth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
+        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
             *security_context = None;
         }
-        (Auth::Anonymous, _, _) => {
+        (DesiredAuth::Anonymous, _, _) => {
             bail!("server requires authentication");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
+        (DesiredAuth::Local, _, _) => unimplemented!(),
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
             bail!("could not authenticate resolver server");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
             con.set_ctx(ctx).await;
             info!("write_con all traffic now encrypted");
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
             bail!("missing security context to reuse")
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(tok), SecState::Pending(ctx)) => {
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(tok), SecState::Pending(ctx)) => {
             info!("write_con processing resolver mutual authentication");
             let ctx = K5CtxWrap::new(task::block_in_place(|| ctx.finish(&tok))?);
             info!("write_con mutual authentication succeeded");
@@ -348,7 +356,7 @@ async fn connect_write(
             }
             wt!(con.send_one(&ReadyForOwnershipCheck))??;
         }
-        (Auth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
             bail!("missing pending security context")
         }
     }
@@ -406,11 +414,11 @@ async fn connection_write(
         Arc<Pooled<Vec<(usize, ToWrite)>>>,
         oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
     )>,
-    resolver: Arc<Referral>,
+    resolver: Arc<Server>,
     resolver_addr: SocketAddr,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashMap<Path, ToWrite>>>,
-    desired_auth: Auth,
+    desired_auth: DesiredAuth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
 ) {
     let mut receiver = receiver.fuse();
@@ -580,8 +588,8 @@ type WriteBatch =
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
-    resolver: Arc<Referral>,
-    desired_auth: Auth,
+    resolver: Arc<Server>,
+    desired_auth: DesiredAuth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
 ) -> Result<()> {
@@ -653,8 +661,8 @@ pub(crate) struct ResolverWrite(mpsc::UnboundedSender<WriteBatch>);
 
 impl ResolverWrite {
     pub(crate) fn new(
-        resolver: Arc<Referral>,
-        desired_auth: Auth,
+        resolver: Arc<Server>,
+        desired_auth: DesiredAuth,
         write_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> ResolverWrite {
