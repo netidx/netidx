@@ -17,6 +17,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path as FsPath,
     time::Duration,
+    hash::{Hash, Hasher},
+    cmp::{PartialEq, Eq},
 };
 
 /// The type of authentication used by a resolver server or publisher
@@ -35,6 +37,20 @@ pub struct Server {
     pub addrs: Pooled<Vec<SocketAddr>>,
     pub auth: ServerAuth,
 }
+
+impl Hash for Server {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Hash::hash(&self.addrs, state)
+    }
+}
+
+impl PartialEq for Server {
+    fn eq(&self, other: &Server) -> bool {
+        self.addrs == other.addrs
+    }
+}
+
+impl Eq for Server {}
 
 impl From<crate::protocol::resolver::Referral> for Server {
     fn from(mut r: crate::protocol::resolver::Referral) -> Server {

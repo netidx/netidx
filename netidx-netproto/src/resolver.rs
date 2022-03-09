@@ -460,7 +460,7 @@ pub struct Referral {
     pub addrs: Pooled<Vec<SocketAddr>>,
     pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
 }
-
+// CR estokes: These are probably not needed anymore
 impl Hash for Referral {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&self.addrs, state)
