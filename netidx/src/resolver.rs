@@ -234,7 +234,7 @@ lazy_static! {
 }
 
 #[derive(Debug)]
-struct ResolverWrapInner<C, T, F>
+struct ResolverRemote<C, T, F>
 where
     T: Send + Sync + 'static,
     F: Send + Sync + 'static,
@@ -242,7 +242,7 @@ where
     router: Router,
     desired_auth: DesiredAuth,
     default: Arc<Server>,
-    by_referral: HashMap<Arc<Server>, C>,
+    by_server: HashMap<Arc<Server>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     phantom: PhantomData<(T, F)>,
@@ -251,7 +251,7 @@ where
     ti_pool: Pool<Vec<(usize, T)>>,
 }
 
-impl<C, T, F> ResolverWrapInner<C, T, F>
+impl<C, T, F> ResolverRemote<C, T, F>
 where
     C: Connection<T, F> + Clone + 'static,
     T: ToPath + Clone + Send + Sync + 'static,
@@ -263,7 +263,7 @@ where
         batch: Pooled<Vec<(usize, T)>>,
     ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>> {
         let r = server.unwrap_or_else(|| self.default.clone());
-        match self.by_referral.get_mut(&r) {
+        match self.by_server.get_mut(&r) {
             Some(con) => con.send(batch),
             None => {
                 let mut con = C::new(
@@ -272,7 +272,7 @@ where
                     self.writer_addr,
                     self.secrets.clone(),
                 );
-                self.by_referral.insert(r, con.clone());
+                self.by_server.insert(r, con.clone());
                 con.send(batch)
             }
         }
@@ -280,9 +280,11 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static>(
-    Arc<Mutex<ResolverWrapInner<C, T, F>>>,
-);
+enum ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static> {
+    Local(Arc<Mutex<C>>),
+    Remote(Arc<Mutex<ResolverRemote<C, T, F>>>),
+    Both { local: Arc<Mutex<C>>, remote: Arc<Mutex<ResolverRemote<C, T, F>>> },
+}
 
 impl<C, T, F> ResolverWrap<C, T, F>
 where
