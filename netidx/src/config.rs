@@ -80,6 +80,23 @@ impl From<client::Config> for Server {
     }
 }
 
+fn check_addrs(a: &Vec<SocketAddr>) {
+    if self.addrs.is_empty() {
+        bail!("empty addrs")
+    }
+    for addr in &self.addrs {
+        utils::check_addr(addr.ip(), &[])?;
+        if cfg!(not(test)) && addr.port() == 0 {
+            bail!("non zero port required {:?}", addr);
+        }
+    }
+    if !self.addrs.iter().all(|a| a.ip().is_loopback())
+        && !self.addrs.iter().all(|a| !a.ip().is_loopback())
+    {
+        bail!("can't mix loopback addrs with non loopback addrs")
+    }
+}
+
 /// This is the configuration of a resolver server, either the local
 /// machine server, or a network server.
 pub mod server {
@@ -156,20 +173,7 @@ pub mod server {
                 if !Path::is_absolute(&path) {
                     bail!("absolute server path is required")
                 }
-                if self.addrs.is_empty() {
-                    bail!("empty server addrs")
-                }
-                for addr in &self.addrs {
-                    utils::check_addr(addr.ip(), &[])?;
-                    if cfg!(not(test)) && addr.port() == 0 {
-                        bail!("non zero port required {:?}", addr);
-                    }
-                }
-                if !self.addrs.iter().all(|a| a.ip().is_loopback())
-                    && !self.addrs.iter().all(|a| !a.ip().is_loopback())
-                {
-                    bail!("can't mix loopback addrs with non loopback addrs")
-                }
+                check_addrs(&self.addrs);
                 match &self.auth {
                     ServerAuth::Anonymous => (),
                     ServerAuth::Local(_) if !self.addrs[0].ip().is_loopback() => {
@@ -239,17 +243,7 @@ pub mod server {
     impl Config {
         pub fn parse(s: &str) -> Result<Config> {
             let cfg: file::Config = from_str(s)?;
-            if cfg.addrs.len() < 1 {
-                bail!("you must specify at least one address");
-            }
-            for addr in &cfg.addrs {
-                utils::check_addr(addr.ip(), &[])?;
-            }
-            if !cfg.addrs.iter().all(|a| a.ip().is_loopback())
-                && !cfg.addrs.iter().all(|a| !a.ip().is_loopback())
-            {
-                bail!("can't mix loopback addrs with non loopback addrs")
-            }
+            check_addrs(&cfg.addrs);
             let addrs = cfg.addrs;
             let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
             let children = {
