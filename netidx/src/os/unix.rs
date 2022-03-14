@@ -23,13 +23,25 @@ impl Mapper {
     pub(crate) fn groups(&mut self, user: &str) -> Result<Vec<String>> {
         task::block_in_place(|| {
             let out = Command::new(&self.0).arg(user).output()?;
-            Mapper::parse_output(&String::from_utf8_lossy(&out.stdout))
+            Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "groups=")
         })
     }
 
-    fn parse_output(out: &str) -> Result<Vec<String>> {
+    pub(crate) fn user(&mut self, user: u32) -> Result<String> {
+        task::block_in_place(|| {
+            let out = Command::new(&self.0).arg(user.to_string()).output()?;
+            let user = Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
+            if user.is_empty() {
+                bail!("user not found")
+            } else {
+                Ok(user.pop().unwrap())
+            }
+        })
+    }
+    
+    fn parse_output(out: &str, key: &str) -> Result<Vec<String>> {
         let mut groups = Vec::new();
-        match out.find("groups=") {
+        match out.find(key) {
             None => Ok(Vec::new()),
             Some(i) => {
                 let mut s = &out[i..];
@@ -49,5 +61,35 @@ impl Mapper {
                 Ok(groups)
             }
         }
+    }
+}
+
+mod local_auth {
+    use anyhow::Result;
+    use tokio::{
+        net::{unix::UCred, UnixListener, UnixStream},
+        sync::oneshot,
+        task::spawn,
+    };
+    use netidx_core::{utils::make_sha3_token, pack::Pack};
+
+    pub(crate) struct Credential {
+        user: String,
+        token: String,
+    }
+    
+    pub(crate) struct AuthServer {
+        secret: u128,
+        stop: oneshot::Sender<()>,
+    }
+
+    impl AuthServer {
+        async fn run(listener: UnixListener, secret: u128, stop: oneshot::Receiver<()>) {
+            loop {
+                
+            }
+        }
+
+        pub(crate) async fn start(socket_path: String) -> Result<AuthServer> {}
     }
 }
