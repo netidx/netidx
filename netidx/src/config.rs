@@ -165,11 +165,17 @@ pub mod server {
                         bail!("non zero port required {:?}", addr);
                     }
                 }
+                if !self.addrs.iter().all(|a| a.ip().is_loopback())
+                    && !self.addrs.iter().all(|a| !a.ip().is_loopback())
+                {
+                    bail!("can't mix loopback addrs with non loopback addrs")
+                }
                 match &self.auth {
                     ServerAuth::Anonymous => (),
-                    ServerAuth::Local(_) => {
-                        bail!("local auth is not allowed for a remote server")
+                    ServerAuth::Local(_) if !self.addrs[0].ip().is_loopback() => {
+                        bail!("local auth is not allowed for a network server")
                     }
+                    ServerAuth::Local(_) => (),
                     ServerAuth::Krb5(spns) => {
                         if spns.is_empty() {
                             bail!("at least one SPN is required in krb5 mode")
