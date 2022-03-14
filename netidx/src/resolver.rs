@@ -1,8 +1,5 @@
 use crate::{
-    config::{
-        client::{Config, DefaultServers},
-        Server,
-    },
+    config::{client::Config, Server},
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
@@ -237,7 +234,7 @@ lazy_static! {
 }
 
 #[derive(Debug)]
-struct ResolverRemote<C, T, F>
+struct ResolverWrapInner<C, T, F>
 where
     T: Send + Sync + 'static,
     F: Send + Sync + 'static,
@@ -254,7 +251,7 @@ where
     ti_pool: Pool<Vec<(usize, T)>>,
 }
 
-impl<C, T, F> ResolverRemote<C, T, F>
+impl<C, T, F> ResolverWrapInner<C, T, F>
 where
     C: Connection<T, F> + Clone + 'static,
     T: ToPath + Clone + Send + Sync + 'static,
@@ -283,11 +280,9 @@ where
 }
 
 #[derive(Debug, Clone)]
-enum ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static> {
-    Local(Arc<Mutex<C>>),
-    Remote(Arc<Mutex<ResolverRemote<C, T, F>>>),
-    Both { local: Arc<Mutex<C>>, remote: Arc<Mutex<ResolverRemote<C, T, F>>> },
-}
+struct ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static>(
+    Arc<Mutex<ResolverWrapInner<C, T, F>>>,
+);
 
 impl<C, T, F> ResolverWrap<C, T, F>
 where
@@ -299,52 +294,27 @@ where
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
-        local_writer_addr: SocketAddr,
         f_pool: Pool<Vec<F>>,
         fi_pool: Pool<Vec<(usize, F)>>,
         ti_pool: Pool<Vec<(usize, T)>>,
     ) -> ResolverWrap<C, T, F> {
         let secrets =
             Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
-        let router = Router::new();
-        match default.into_servers() {
-            DefaultServers::Local(s) => {
-                let c = C::new(s, desired_auth, local_writer_addr, secrets);
-                ResolverWrap::Local(Arc::new(Mutex::new(c)))
-            }
-            DefaultServers::Remote(s) => {
-                ResolverWrap::Remote(Arc::new(Mutex::new(ResolverRemote {
-                    router,
-                    desired_auth,
-                    default: Arc::new(s),
-                    by_server: HashMap::new(),
-                    writer_addr,
-                    secrets,
-                    f_pool,
-                    fi_pool,
-                    ti_pool,
-                    phantom: PhantomData,
-                })))
-            }
-            DefaultServers::Both { local, remote } => {
-                let local = Arc::new(Mutex::new(C::new(local, desired_auth, local_writer_addr, secrets)));
-                ResolverWrap::Both {
-                    local,
-                    remote: Arc::new(Mutex::new(ResolverRemote {
-                        router,
-                        desired_auth,
-                        default: Arc::new(remote),
-                        by_server: HashMap::new(),
-                        writer_addr,
-                        secrets,
-                        f_pool,
-                        fi_pool,
-                        ti_pool,
-                        phantom: PhantomData,
-                    })),
-                }
-            }
-        }
+        let mut router = Router::new();
+        let default = default.into();
+        router.add_server(default.clone());
+        ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
+            router,
+            desired_auth,
+            default,
+            by_server: HashMap::new(),
+            writer_addr,
+            secrets,
+            f_pool,
+            fi_pool,
+            ti_pool,
+            phantom: PhantomData,
+        })))
     }
 
     fn secrets(&self) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
