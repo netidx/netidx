@@ -1,5 +1,8 @@
 use crate::{
-    config::{client::Config, Server},
+    config::{
+        client::{Config, DefaultServers},
+        Server,
+    },
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
@@ -296,6 +299,7 @@ where
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
+        local_writer_addr: SocketAddr,
         f_pool: Pool<Vec<F>>,
         fi_pool: Pool<Vec<(usize, F)>>,
         ti_pool: Pool<Vec<(usize, T)>>,
@@ -303,18 +307,44 @@ where
         let secrets =
             Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let router = Router::new();
-        ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
-            router,
-            desired_auth,
-            default: Arc::new(default.into()),
-            by_referral: HashMap::new(),
-            writer_addr,
-            secrets,
-            f_pool,
-            fi_pool,
-            ti_pool,
-            phantom: PhantomData,
-        })))
+        match default.into_servers() {
+            DefaultServers::Local(s) => {
+                let c = C::new(s, desired_auth, local_writer_addr, secrets);
+                ResolverWrap::Local(Arc::new(Mutex::new(c)))
+            }
+            DefaultServers::Remote(s) => {
+                ResolverWrap::Remote(Arc::new(Mutex::new(ResolverRemote {
+                    router,
+                    desired_auth,
+                    default: Arc::new(s),
+                    by_server: HashMap::new(),
+                    writer_addr,
+                    secrets,
+                    f_pool,
+                    fi_pool,
+                    ti_pool,
+                    phantom: PhantomData,
+                })))
+            }
+            DefaultServers::Both { local, remote } => {
+                let local = Arc::new(Mutex::new(C::new(local, desired_auth, local_writer_addr, secrets)));
+                ResolverWrap::Both {
+                    local,
+                    remote: Arc::new(Mutex::new(ResolverRemote {
+                        router,
+                        desired_auth,
+                        default: Arc::new(remote),
+                        by_server: HashMap::new(),
+                        writer_addr,
+                        secrets,
+                        f_pool,
+                        fi_pool,
+                        ti_pool,
+                        phantom: PhantomData,
+                    })),
+                }
+            }
+        }
     }
 
     fn secrets(&self) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
