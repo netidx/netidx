@@ -29,7 +29,7 @@ impl Mapper {
 
     pub(crate) fn user(&mut self, user: u32) -> Result<String> {
         task::block_in_place(|| {
-            let out = Command::new(&self.0).arg(user.to_string()).output()?;
+            let out = Command::new(&self.0).arg(user).output()?;
             let user = Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
             if user.is_empty() {
                 bail!("user not found")
@@ -65,17 +65,39 @@ impl Mapper {
 }
 
 mod local_auth {
-    use anyhow::Result;
     use tokio::{
         net::{unix::UCred, UnixListener, UnixStream},
         sync::oneshot,
         task::spawn,
     };
-    use netidx_core::{utils::make_sha3_token, pack::Pack};
+    use netidx_core::{utils::make_sha3_token, pack::{Pack, PackError}};
+    use std::result::Result;
+    use bytes::{Buf, BufMut, Bytes};
 
     pub(crate) struct Credential {
         user: String,
-        token: String,
+        token: Bytes,
+    }
+
+    impl Pack for Credential {
+        fn const_encoded_len() -> Option<usize> {
+            None
+        }
+
+        fn encoded_len(&self) -> usize {
+            Pack::encoded_len(&self.user) + Pack::encoded_len(&self.token)
+        }
+
+        fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+            Pack::encode(&self.user, buf)?;
+            Pack::encode(&self.token, buf)
+        }
+
+        fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+            let user: String = Pack::decode(buf)?;
+            let token: Bytes = Pack::decode(buf)?;
+            Ok(Credential { user, token })
+        }
     }
     
     pub(crate) struct AuthServer {
@@ -84,6 +106,8 @@ mod local_auth {
     }
 
     impl AuthServer {
+        async fn process_request(client: UnixStream, secret: u128)
+
         async fn run(listener: UnixListener, secret: u128, stop: oneshot::Receiver<()>) {
             loop {
                 
