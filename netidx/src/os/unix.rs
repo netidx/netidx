@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use arcstr::ArcStr;
 use std::process::Command;
 use tokio::task;
 
@@ -7,7 +8,8 @@ use tokio::task;
 // level, it seems libc provides getgrouplist on most platforms,
 // but unfortunatly Apple doesn't implement it. Luckily the 'id'
 // command is specified in POSIX.
-pub(crate) struct Mapper(String);
+#[derive(Clone)]
+pub(crate) struct Mapper(ArcStr);
 
 impl Mapper {
     pub(crate) fn new() -> Result<Mapper> {
@@ -16,21 +18,22 @@ impl Mapper {
             let buf = String::from_utf8_lossy(&out.stdout);
             let path =
                 buf.lines().next().ok_or_else(|| anyhow!("can't find the id command"))?;
-            Ok(Mapper(String::from(path)))
+            Ok(Mapper(ArcStr::from(path)))
         })
     }
 
-    pub(crate) fn groups(&mut self, user: &str) -> Result<Vec<String>> {
+    pub(crate) fn groups(&self, user: &str) -> Result<Vec<String>> {
         task::block_in_place(|| {
-            let out = Command::new(&self.0).arg(user).output()?;
+            let out = Command::new(&*self.0).arg(user).output()?;
             Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "groups=")
         })
     }
 
-    pub(crate) fn user(&mut self, user: u32) -> Result<String> {
+    pub(crate) fn user(&self, user: u32) -> Result<String> {
         task::block_in_place(|| {
-            let out = Command::new(&self.0).arg(user).output()?;
-            let user = Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
+            let out = Command::new(&*self.0).arg(user.to_string()).output()?;
+            let user =
+                Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
             if user.is_empty() {
                 bail!("user not found")
             } else {
@@ -38,7 +41,7 @@ impl Mapper {
             }
         })
     }
-    
+
     fn parse_output(out: &str, key: &str) -> Result<Vec<String>> {
         let mut groups = Vec::new();
         match out.find(key) {
@@ -65,16 +68,34 @@ impl Mapper {
 }
 
 mod local_auth {
+    use super::Mapper;
+    use anyhow::Result as AResult;
+    use bytes::{Buf, BufMut, Bytes};
+    use futures::{prelude::*, select_biased};
+    use log::warn;
+    use netidx_core::{
+        pack::{Pack, PackError},
+        utils::{make_sha3_token, pack},
+    };
+    use rand::{thread_rng, Rng};
+    use std::{
+        result::Result,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
     use tokio::{
-        net::{unix::UCred, UnixListener, UnixStream},
+        io::AsyncWriteExt,
+        net::{UnixListener, UnixStream},
         sync::oneshot,
         task::spawn,
+        time::{sleep, timeout},
     };
-    use netidx_core::{utils::make_sha3_token, pack::{Pack, PackError}};
-    use std::result::Result;
-    use bytes::{Buf, BufMut, Bytes};
 
     pub(crate) struct Credential {
+        salt: u64,
         user: String,
         token: Bytes,
     }
@@ -85,35 +106,96 @@ mod local_auth {
         }
 
         fn encoded_len(&self) -> usize {
-            Pack::encoded_len(&self.user) + Pack::encoded_len(&self.token)
+            Pack::encoded_len(&self.salt)
+                + Pack::encoded_len(&self.user)
+                + Pack::encoded_len(&self.token)
         }
 
         fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+            Pack::encode(&self.salt, buf)?;
             Pack::encode(&self.user, buf)?;
             Pack::encode(&self.token, buf)
         }
 
         fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+            let salt: u64 = Pack::decode(buf)?;
             let user: String = Pack::decode(buf)?;
             let token: Bytes = Pack::decode(buf)?;
-            Ok(Credential { user, token })
+            Ok(Credential { salt, user, token })
         }
     }
-    
+
     pub(crate) struct AuthServer {
         secret: u128,
         stop: oneshot::Sender<()>,
     }
 
     impl AuthServer {
-        async fn process_request(client: UnixStream, secret: u128)
+        async fn process_request(
+            mapper: Mapper,
+            mut client: UnixStream,
+            secret: u128,
+        ) -> AResult<()> {
+            let cred = client.peer_cred()?;
+            let user = mapper.user(cred.uid())?;
+            let salt: u64 = thread_rng().gen();
+            let token =
+                make_sha3_token(Some(salt), &[user.as_bytes(), &secret.to_be_bytes()]);
+            let mut msg = pack(&Credential { salt, user, token })?;
+            client.write_all_buf(&mut msg).await?;
+            Ok(())
+        }
 
-        async fn run(listener: UnixListener, secret: u128, stop: oneshot::Receiver<()>) {
+        async fn run(
+            mapper: Mapper,
+            listener: UnixListener,
+            secret: u128,
+            stop: oneshot::Receiver<()>,
+        ) {
+            let open = Arc::new(AtomicUsize::new(0));
+            let stop = stop.fuse();
             loop {
-                
+                select_biased! {
+                    _ = stop => break,
+                    r = listener.accept() => match r {
+                        Err(e) => {
+                            warn!("accept: {}", e);
+                            sleep(Duration::from_millis(100)).await
+                        }
+                        Ok((client, _addr)) => {
+                            if open.load(Ordering::Relaxed) >= 32 {
+                                continue;
+                            } else {
+                                open.fetch_add(1, Ordering::Relaxed);
+                                let mapper = mapper.clone();
+                                let open = Arc::clone(&open);
+                                spawn(async move {
+                                    match timeout(
+                                        Duration::from_secs(10),
+                                        Self::process_request(mapper, client, secret),
+                                    )
+                                        .await
+                                    {
+                                        Ok(Ok(())) => (),
+                                        Err(_) => warn!("auth request timed out"),
+                                        Ok(Err(e)) => warn!("process request: {}", e),
+                                    }
+                                    open.fetch_sub(1, Ordering::Relaxed);
+                                });
+                            }
+                        }
+                    },
+                }
             }
         }
 
-        pub(crate) async fn start(socket_path: String) -> Result<AuthServer> {}
+        pub(crate) async fn start(socket_path: &str) -> AResult<AuthServer> {
+            let listener = UnixListener::bind(socket_path)?;
+            let mapper = Mapper::new()?;
+            let secret: u128 = thread_rng().gen();
+            let (tx, rx) = oneshot::channel();
+            spawn(Self::run(mapper, listener, secret, rx));
+            Ok(AuthServer { secret, stop: tx })
+        }
     }
 }

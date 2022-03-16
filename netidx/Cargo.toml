@@ -40,3 +40,4 @@ get_if_addrs = "0.5"
 dirs = "4"
 num_cpus = "1"
 triomphe = "0.1"
+arcstr = { version = "1", features = ["serde"] }
