@@ -153,11 +153,11 @@ mod local_auth {
             stop: oneshot::Receiver<()>,
         ) {
             let open = Arc::new(AtomicUsize::new(0));
-            let stop = stop.fuse();
+            let mut stop = stop.fuse();
             loop {
                 select_biased! {
                     _ = stop => break,
-                    r = listener.accept() => match r {
+                    r = listener.accept().fuse() => match r {
                         Err(e) => {
                             warn!("accept: {}", e);
                             sleep(Duration::from_millis(100)).await
