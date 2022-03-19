@@ -72,26 +72,29 @@ mod local_auth {
     use anyhow::Result as AResult;
     use bytes::{Buf, BufMut, Bytes};
     use futures::{prelude::*, select_biased};
+    use fxhash::{FxBuildHasher, FxHashMap};
     use log::warn;
     use netidx_core::{
         pack::{Pack, PackError},
         utils::{make_sha3_token, pack},
     };
+    use parking_lot::Mutex;
     use rand::{thread_rng, Rng};
     use std::{
+        collections::{hash_map::Entry, HashMap},
         result::Result,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
     use tokio::{
         io::AsyncWriteExt,
         net::{UnixListener, UnixStream},
         sync::oneshot,
         task::spawn,
-        time::{sleep, timeout},
+        time::{interval, sleep, timeout},
     };
 
     pub(crate) struct Credential {
@@ -127,6 +130,7 @@ mod local_auth {
 
     pub(crate) struct AuthServer {
         secret: u128,
+        issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
         stop: oneshot::Sender<()>,
     }
 
@@ -135,10 +139,19 @@ mod local_auth {
             mapper: Mapper,
             mut client: UnixStream,
             secret: u128,
+            issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
         ) -> AResult<()> {
             let cred = client.peer_cred()?;
             let user = mapper.user(cred.uid())?;
-            let salt: u64 = thread_rng().gen();
+            let salt: u64 = loop {
+                let ts = Instant::now();
+                let salt: u64 = thread_rng().gen();
+                let mut issued = issued.lock();
+                if let Entry::Vacant(e) = issued.entry(salt) {
+                    e.insert(ts);
+                    break salt;
+                }
+            };
             let token =
                 make_sha3_token(Some(salt), &[user.as_bytes(), &secret.to_be_bytes()]);
             let mut msg = pack(&Credential { salt, user, token })?;
@@ -150,13 +163,18 @@ mod local_auth {
             mapper: Mapper,
             listener: UnixListener,
             secret: u128,
+            issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
             stop: oneshot::Receiver<()>,
         ) {
             let open = Arc::new(AtomicUsize::new(0));
             let mut stop = stop.fuse();
+            let mut gc = interval(Duration::from_secs(60));
             loop {
                 select_biased! {
                     _ = stop => break,
+                    _ = gc.tick().fuse() => issued.lock().retain(|_, ts| {
+                        ts.elapsed() < Duration::from_secs(60)
+                    }),
                     r = listener.accept().fuse() => match r {
                         Err(e) => {
                             warn!("accept: {}", e);
@@ -168,11 +186,12 @@ mod local_auth {
                             } else {
                                 open.fetch_add(1, Ordering::Relaxed);
                                 let mapper = mapper.clone();
+                                let issued = issued.clone();
                                 let open = Arc::clone(&open);
                                 spawn(async move {
                                     match timeout(
                                         Duration::from_secs(10),
-                                        Self::process_request(mapper, client, secret),
+                                        Self::process_request(mapper, client, secret, issued),
                                     )
                                         .await
                                     {
@@ -192,10 +211,20 @@ mod local_auth {
         pub(crate) async fn start(socket_path: &str) -> AResult<AuthServer> {
             let listener = UnixListener::bind(socket_path)?;
             let mapper = Mapper::new()?;
+            let issued =
+                Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
             let secret: u128 = thread_rng().gen();
             let (tx, rx) = oneshot::channel();
-            spawn(Self::run(mapper, listener, secret, rx));
-            Ok(AuthServer { secret, stop: tx })
+            spawn(Self::run(mapper, listener, secret, issued.clone(), rx));
+            Ok(AuthServer { secret, stop: tx, issued })
+        }
+
+        pub(crate) fn validate(&self, cred: &Credential) -> bool {
+            let token = make_sha3_token(
+                Some(cred.salt),
+                &[cred.user.as_bytes(), &self.secret.to_be_bytes()],
+            );
+            token == cred.token && self.issued.lock().remove(&cred.salt).is_some()
         }
     }
 }
