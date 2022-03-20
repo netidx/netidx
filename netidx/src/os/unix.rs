@@ -70,7 +70,7 @@ impl Mapper {
 mod local_auth {
     use super::Mapper;
     use anyhow::Result as AResult;
-    use bytes::{Buf, BufMut, Bytes};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
     use futures::{prelude::*, select_biased};
     use fxhash::{FxBuildHasher, FxHashMap};
     use log::warn;
@@ -90,7 +90,7 @@ mod local_auth {
         time::{Duration, Instant},
     };
     use tokio::{
-        io::AsyncWriteExt,
+        io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
         sync::oneshot,
         task::spawn,
@@ -225,6 +225,43 @@ mod local_auth {
                 &[cred.user.as_bytes(), &self.secret.to_be_bytes()],
             );
             token == cred.token && self.issued.lock().remove(&cred.salt).is_some()
+        }
+    }
+
+    pub(crate) struct AuthClient(String);
+
+    impl AuthClient {
+        pub(crate) fn new(path: String) -> Self {
+            AuthClient(path)
+        }
+
+        async fn token_once(&self) -> AResult<Bytes> {
+            let mut soc = UnixStream::connect(&self.0).await?;
+            let mut buf = BytesMut::new();
+            loop {
+                if soc.read_buf(&mut buf).await? == 0 {
+                    break;
+                }
+            }
+            Ok(buf.freeze())
+        }
+
+        pub(crate) async fn token(&self) -> AResult<Bytes> {
+            let mut tries = 0;
+            loop {
+                match self.token_once().await {
+                    Ok(buf) => return Ok(buf),
+                    Err(e) => {
+                        if tries >= 2 {
+                            return Err(e);
+                        } else {
+                            let delay = Duration::from_secs(thread_rng().gen_range(0..3));
+                            sleep(delay).await
+                        }
+                    }
+                }
+                tries += 1;
+            }
         }
     }
 }
