@@ -37,10 +37,6 @@ pub(crate) mod local_auth {
     pub(crate) struct AuthClient;
 
     impl AuthClient {
-        pub(crate) fn new(_path: String) -> Result<Bytes> {
-            bail!("local auth not implemented on windows")
-        }
-
         pub(crate) async fn token(&self) -> Result<Bytes> {
             bail!("local auth not implemented on windows")
         }

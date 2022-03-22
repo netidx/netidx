@@ -194,15 +194,11 @@ pub(crate) mod local_auth {
         }
     }
 
-    pub(crate) struct AuthClient(String);
+    pub(crate) struct AuthClient;
 
     impl AuthClient {
-        pub(crate) fn new(path: String) -> Self {
-            AuthClient(path)
-        }
-
-        async fn token_once(&self) -> Result<Bytes> {
-            let mut soc = UnixStream::connect(&self.0).await?;
+        async fn token_once(path: &str) -> Result<Bytes> {
+            let mut soc = UnixStream::connect(path).await?;
             let mut buf = BytesMut::new();
             loop {
                 if soc.read_buf(&mut buf).await? == 0 {
@@ -212,10 +208,10 @@ pub(crate) mod local_auth {
             Ok(buf.freeze())
         }
 
-        pub(crate) async fn token(&self) -> Result<Bytes> {
+        pub(crate) async fn token(path: &str) -> Result<Bytes> {
             let mut tries = 0;
             loop {
-                match self.token_once().await {
+                match Self::token_once(path).await {
                     Ok(buf) => return Ok(buf),
                     Err(e) => {
                         if tries >= 2 {

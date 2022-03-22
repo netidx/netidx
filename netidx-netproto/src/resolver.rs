@@ -211,6 +211,7 @@ pub enum ServerHelloRead {
     Anonymous,
     Reused,
     Accepted(Bytes, CtxId),
+    Local,
 }
 
 impl Pack for ServerHelloRead {
@@ -221,6 +222,7 @@ impl Pack for ServerHelloRead {
             ServerHelloRead::Accepted(tok, id) => {
                 Pack::encoded_len(tok) + Pack::encoded_len(id)
             }
+            ServerHelloRead::Local => 0,
         }
     }
 
@@ -233,6 +235,7 @@ impl Pack for ServerHelloRead {
                 Pack::encode(tok, buf)?;
                 Pack::encode(id, buf)
             }
+            ServerHelloRead::Local => Ok(buf.put_u8(3)),
         }
     }
 
@@ -245,6 +248,7 @@ impl Pack for ServerHelloRead {
                 let id = Pack::decode(buf)?;
                 Ok(ServerHelloRead::Accepted(tok, id))
             }
+            3 => Ok(ServerHelloRead::Local),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -255,6 +259,7 @@ pub enum ServerAuthWrite {
     Anonymous,
     Reused,
     Accepted(Bytes),
+    Local,
 }
 
 impl Pack for ServerAuthWrite {
@@ -263,6 +268,7 @@ impl Pack for ServerAuthWrite {
             ServerAuthWrite::Anonymous => 0,
             ServerAuthWrite::Reused => 0,
             ServerAuthWrite::Accepted(b) => Pack::encoded_len(b),
+            ServerAuthWrite::Local => 0,
         }
     }
 
@@ -274,6 +280,7 @@ impl Pack for ServerAuthWrite {
                 buf.put_u8(2);
                 Pack::encode(b, buf)
             }
+            ServerAuthWrite::Local => Ok(buf.put_u8(3))
         }
     }
 
@@ -282,6 +289,7 @@ impl Pack for ServerAuthWrite {
             0 => Ok(ServerAuthWrite::Anonymous),
             1 => Ok(ServerAuthWrite::Reused),
             2 => Ok(ServerAuthWrite::Accepted(Pack::decode(buf)?)),
+            3 => Ok(ServerAuthWrite::Local),
             _ => Err(Error::UnknownTag),
         }
     }

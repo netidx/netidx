@@ -3,6 +3,7 @@ use crate::{
     channel::K5CtxWrap,
     chars::Chars,
     config::{Server, ServerAuth},
+    os::local_auth::AuthClient,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -90,10 +91,24 @@ async fn connect_read(
         let _ver: u64 = cwt!("recv version", con.receive());
         let (auth, ctx) = match desired_auth {
             DesiredAuth::Anonymous => (ClientAuthRead::Anonymous, None),
-            DesiredAuth::Local => unimplemented!(),
+            DesiredAuth::Local => match &resolver.auth {
+                ServerAuth::Anonymous | ServerAuth::Krb5 { .. } => {
+                    bail!("local auth is not available")
+                }
+                ServerAuth::Local(path) => {
+                    let tok =
+                        try_cf!("local token", continue, AuthClient::token(path).await);
+                    (ClientAuthRead::Local(tok), None)
+                }
+            },
             DesiredAuth::Krb5 { upn, .. } => match &resolver.auth {
-                ServerAuth::Anonymous | ServerAuth::Local(_) => {
+                ServerAuth::Anonymous => {
                     bail!("requested auth mechanism is not available")
+                }
+                ServerAuth::Local(path) => {
+                    let tok =
+                        try_cf!("local token", continue, AuthClient::token(path).await);
+                    (ClientAuthRead::Local(tok), None)
                 }
                 ServerAuth::Krb5(spns) => {
                     let upn = upn.as_ref().map(|s| s.as_str());
@@ -117,7 +132,8 @@ async fn connect_read(
         let r: ServerHelloRead = cwt!("hello reply", con.receive());
         match (desired_auth, r) {
             (DesiredAuth::Anonymous, ServerHelloRead::Anonymous) => (),
-            (DesiredAuth::Local, _) => unimplemented!(),
+            (DesiredAuth::Local, ServerHelloRead::Local) => (),
+            (DesiredAuth::Krb5 {..}, ServerHelloRead::Local) => (),
             (DesiredAuth::Anonymous, _) => {
                 error!("server requires authentication");
                 continue;
@@ -341,7 +357,11 @@ async fn connect_write(
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
             bail!("missing security context to reuse")
         }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(tok), SecState::Pending(ctx)) => {
+        (
+            DesiredAuth::Krb5 { .. },
+            ServerAuthWrite::Accepted(tok),
+            SecState::Pending(ctx),
+        ) => {
             info!("write_con processing resolver mutual authentication");
             let ctx = K5CtxWrap::new(task::block_in_place(|| ctx.finish(&tok))?);
             info!("write_con mutual authentication succeeded");
