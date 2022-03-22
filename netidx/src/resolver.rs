@@ -20,6 +20,7 @@ use anyhow::Result;
 use futures::{channel::oneshot, future};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
+use netidx_netproto::resolver::Referral;
 use std::{
     collections::{
         hash_map::Entry,
@@ -301,7 +302,7 @@ where
         let secrets =
             Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let mut router = Router::new();
-        let default = default.into();
+        let default: Arc<Server> = Arc::new(default.into());
         router.add_server(default.clone());
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
@@ -328,8 +329,8 @@ where
             let (mut finished, mut res) = {
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
-                if inner.by_referral.len() > MAX_REFERRALS {
-                    inner.by_referral.clear(); // a workable sledgehammer
+                if inner.by_server.len() > MAX_REFERRALS {
+                    inner.by_server.clear(); // a workable sledgehammer
                 }
                 for (r, batch) in inner.router.route_batch(&inner.ti_pool, batch) {
                     waiters.push(inner.send_to_server(r, batch))
@@ -340,10 +341,10 @@ where
             for r in future::join_all(waiters).await {
                 let mut r = r?;
                 for (id, reply) in r.drain(..) {
-                    match reply.referral() {
+                    match reply.server() {
                         Err(m) => finished.push((id, m)),
                         Ok(r) => {
-                            self.0.lock().router.add_referral(Arc::new(r));
+                            self.0.lock().router.add_server(Arc::new(r));
                             referral = true;
                         }
                     }
@@ -385,7 +386,7 @@ impl ChangeTracker {
 pub struct ResolverRead(ResolverWrap<SingleRead, ToRead, FromRead>);
 
 impl ResolverRead {
-    pub fn new(default: Config, desired_auth: Auth) -> Self {
+    pub fn new(default: Config, desired_auth: DesiredAuth) -> Self {
         ResolverRead(ResolverWrap::new(
             default,
             desired_auth,
@@ -452,8 +453,8 @@ impl ResolverRead {
         message: ToRead,
         mut process_reply: F,
     ) -> Result<()> {
-        let mut pending: Vec<Option<Arc<Referral>>> = vec![None];
-        let mut done: HashSet<Arc<Referral>> = HashSet::new();
+        let mut pending: Vec<Option<Arc<Server>>> = vec![None];
+        let mut done: HashSet<Arc<Server>> = HashSet::new();
         let mut referral_cycles = 0;
         while pending.len() > 0 {
             let mut waiters = Vec::new();
@@ -463,7 +464,7 @@ impl ResolverRead {
                     let server = server.unwrap_or_else(|| inner.default.clone());
                     if !done.contains(&server) {
                         done.insert(server.clone());
-                        let server = inner.router.add_referral(server);
+                        let server = inner.router.add_server(server);
                         let mut to = TOREADPOOL.take();
                         to.push((0, message.clone()));
                         waiters.push(inner.send_to_server(Some(server), to));
@@ -475,7 +476,7 @@ impl ResolverRead {
                 for (_, reply) in r.drain(..) {
                     let mut referrals = process_reply(reply)?;
                     for r in referrals.drain(..) {
-                        pending.push(Some(Arc::new(r)));
+                        pending.push(Some(Arc::new(r.into())));
                     }
                 }
             }
@@ -574,7 +575,7 @@ impl ResolverRead {
 pub struct ResolverWrite(ResolverWrap<SingleWrite, ToWrite, FromWrite>);
 
 impl ResolverWrite {
-    pub fn new(default: Config, desired_auth: Auth, writer_addr: SocketAddr) -> Self {
+    pub fn new(default: Config, desired_auth: DesiredAuth, writer_addr: SocketAddr) -> Self {
         ResolverWrite(ResolverWrap::new(
             default,
             desired_auth,
