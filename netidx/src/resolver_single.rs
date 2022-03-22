@@ -351,16 +351,16 @@ async fn connect_write(
     let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
     match (desired_auth, r.auth, ctx) {
-        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
+        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous)
+        | (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local)
+        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, SecState::Local) => {
             *security_context = None;
         }
         (DesiredAuth::Anonymous, _, _) => {
             bail!("server requires authentication");
         }
-        (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local) => {
-            *security_context = None;
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Local, _) => {
+        (DesiredAuth::Local, ServerAuthWrite::Local, _)
+        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, _) => {
             unreachable!()
         }
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
@@ -394,12 +394,6 @@ async fn connect_write(
         }
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
             bail!("missing pending security context")
-        }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, SecState::Local) => {
-            *security_context = None;
-        }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, _) => {
-            unreachable!()
         }
     }
     if !r.ttl_expired && !*degraded {
