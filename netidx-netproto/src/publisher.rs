@@ -1,13 +1,10 @@
 use crate::value::Value;
+use bytes::{Buf, BufMut, Bytes};
 use netidx_core::{
     pack::{self, Pack, PackError},
     path::Path,
 };
-use bytes::{Buf, BufMut, Bytes};
-use std::{
-    net::SocketAddr,
-    result,
-};
+use std::{net::SocketAddr, result};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -51,17 +48,20 @@ pub enum Hello {
     /// context will be thrown away and the old one will continue
     /// to be associated with the write address.
     ResolverAuthenticate(SocketAddr, Bytes),
+    /// Local machine authentication token, only valid for publishers
+    /// on the same machine as the client, and listening on 127.0.0.1.
+    Local(Bytes),
 }
 
 impl Pack for Hello {
     fn encoded_len(&self) -> usize {
         1 + match self {
             Hello::Anonymous => 0,
-            Hello::Token(tok) => <Bytes as Pack>::encoded_len(tok),
+            Hello::Token(tok) => Pack::encoded_len(tok),
             Hello::ResolverAuthenticate(addr, tok) => {
-                <SocketAddr as Pack>::encoded_len(addr)
-                    + <Bytes as Pack>::encoded_len(tok)
+                Pack::encoded_len(addr) + Pack::encoded_len(tok)
             }
+            Hello::Local(tok) => Pack::encoded_len(tok),
         }
     }
 
@@ -70,12 +70,16 @@ impl Pack for Hello {
             Hello::Anonymous => Ok(buf.put_u8(0)),
             Hello::Token(tok) => {
                 buf.put_u8(1);
-                <Bytes as Pack>::encode(tok, buf)
+                Pack::encode(tok, buf)
             }
             Hello::ResolverAuthenticate(id, tok) => {
                 buf.put_u8(2);
-                <SocketAddr as Pack>::encode(id, buf)?;
-                <Bytes as Pack>::encode(tok, buf)
+                Pack::encode(id, buf)?;
+                Pack::encode(tok, buf)
+            }
+            Hello::Local(tok) => {
+                buf.put_u8(3);
+                Pack::encode(tok, buf)
             }
         }
     }
@@ -83,12 +87,13 @@ impl Pack for Hello {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Hello::Anonymous),
-            1 => Ok(Hello::Token(<Bytes as Pack>::decode(buf)?)),
+            1 => Ok(Hello::Token(Pack::decode(buf)?)),
             2 => {
-                let addr = <SocketAddr as Pack>::decode(buf)?;
-                let tok = <Bytes as Pack>::decode(buf)?;
+                let addr = Pack::decode(buf)?;
+                let tok = Pack::decode(buf)?;
                 Ok(Hello::ResolverAuthenticate(addr, tok))
             }
+            3 => Ok(Hello::Local(Pack::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -120,17 +125,15 @@ impl Pack for To {
     fn encoded_len(&self) -> usize {
         1 + match self {
             To::Subscribe { path, resolver, timestamp, permissions, token } => {
-                <Path as Pack>::encoded_len(path)
-                    + <SocketAddr as Pack>::encoded_len(resolver)
-                    + <u64 as Pack>::encoded_len(timestamp)
-                    + <u32 as Pack>::encoded_len(permissions)
-                    + <Bytes as Pack>::encoded_len(token)
+                Pack::encoded_len(path)
+                    + Pack::encoded_len(resolver)
+                    + Pack::encoded_len(timestamp)
+                    + Pack::encoded_len(permissions)
+                    + Pack::encoded_len(token)
             }
-            To::Unsubscribe(id) => Id::encoded_len(id),
+            To::Unsubscribe(id) => Pack::encoded_len(id),
             To::Write(id, v, reply) => {
-                Id::encoded_len(id)
-                    + Value::encoded_len(v)
-                    + <bool as Pack>::encoded_len(reply)
+                Pack::encoded_len(id) + Pack::encoded_len(v) + Pack::encoded_len(reply)
             }
         }
     }
@@ -139,21 +142,21 @@ impl Pack for To {
         match self {
             To::Subscribe { path, resolver, timestamp, permissions, token } => {
                 buf.put_u8(0);
-                <Path as Pack>::encode(path, buf)?;
-                <SocketAddr as Pack>::encode(resolver, buf)?;
-                <u64 as Pack>::encode(timestamp, buf)?;
-                <u32 as Pack>::encode(permissions, buf)?;
-                <Bytes as Pack>::encode(token, buf)
+                Pack::encode(path, buf)?;
+                Pack::encode(resolver, buf)?;
+                Pack::encode(timestamp, buf)?;
+                Pack::encode(permissions, buf)?;
+                Pack::encode(token, buf)
             }
             To::Unsubscribe(id) => {
                 buf.put_u8(1);
-                Id::encode(id, buf)
+                Pack::encode(id, buf)
             }
             To::Write(id, v, reply) => {
                 buf.put_u8(2);
-                Id::encode(id, buf)?;
-                Value::encode(v, buf)?;
-                <bool as Pack>::encode(reply, buf)
+                Pack::encode(id, buf)?;
+                Pack::encode(v, buf)?;
+                Pack::encode(reply, buf)
             }
         }
     }
@@ -161,18 +164,18 @@ impl Pack for To {
     fn decode(buf: &mut impl Buf) -> anyhow::Result<Self, PackError> {
         match buf.get_u8() {
             0 => {
-                let path = <Path as Pack>::decode(buf)?;
-                let resolver = <SocketAddr as Pack>::decode(buf)?;
-                let timestamp = <u64 as Pack>::decode(buf)?;
-                let permissions = <u32 as Pack>::decode(buf)?;
-                let token = <Bytes as Pack>::decode(buf)?;
+                let path = Pack::decode(buf)?;
+                let resolver = Pack::decode(buf)?;
+                let timestamp = Pack::decode(buf)?;
+                let permissions = Pack::decode(buf)?;
+                let token = Pack::decode(buf)?;
                 Ok(To::Subscribe { path, resolver, timestamp, permissions, token })
             }
-            1 => Ok(To::Unsubscribe(Id::decode(buf)?)),
+            1 => Ok(To::Unsubscribe(Pack::decode(buf)?)),
             2 => {
-                let id = Id::decode(buf)?;
-                let v = Value::decode(buf)?;
-                let reply = <bool as Pack>::decode(buf)?;
+                let id = Pack::decode(buf)?;
+                let v = Pack::decode(buf)?;
+                let reply = Pack::decode(buf)?;
                 Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),

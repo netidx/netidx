@@ -719,29 +719,29 @@ impl Pack for ToWrite {
             }
             ToWrite::UnpublishDefault(p) => {
                 buf.put_u8(7);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(ToWrite::Publish(<Path as Pack>::decode(buf)?)),
-            1 => Ok(ToWrite::PublishDefault(<Path as Pack>::decode(buf)?)),
-            2 => Ok(ToWrite::Unpublish(<Path as Pack>::decode(buf)?)),
+            0 => Ok(ToWrite::Publish(Pack::decode(buf)?)),
+            1 => Ok(ToWrite::PublishDefault(Pack::decode(buf)?)),
+            2 => Ok(ToWrite::Unpublish(Pack::decode(buf)?)),
             3 => Ok(ToWrite::Clear),
             4 => Ok(ToWrite::Heartbeat),
             5 => {
-                let p = <Path as Pack>::decode(buf)?;
-                let f = <u16 as Pack>::decode(buf)?;
+                let p = Pack::decode(buf)?;
+                let f = Pack::decode(buf)?;
                 Ok(ToWrite::PublishWithFlags(p, f))
             }
             6 => {
-                let p = <Path as Pack>::decode(buf)?;
-                let f = <u16 as Pack>::decode(buf)?;
+                let p = Pack::decode(buf)?;
+                let f = Pack::decode(buf)?;
                 Ok(ToWrite::PublishDefaultWithFlags(p, f))
             }
-            7 => Ok(ToWrite::UnpublishDefault(<Path as Pack>::decode(buf)?)),
+            7 => Ok(ToWrite::UnpublishDefault(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -761,9 +761,9 @@ impl Pack for FromWrite {
         1 + match self {
             FromWrite::Published => 0,
             FromWrite::Unpublished => 0,
-            FromWrite::Referral(r) => <Referral as Pack>::encoded_len(r),
+            FromWrite::Referral(r) => Pack::encoded_len(r),
             FromWrite::Denied => 0,
-            FromWrite::Error(c) => <Chars as Pack>::encoded_len(c),
+            FromWrite::Error(c) => Pack::encoded_len(c),
         }
     }
 
@@ -773,12 +773,12 @@ impl Pack for FromWrite {
             FromWrite::Unpublished => Ok(buf.put_u8(1)),
             FromWrite::Referral(r) => {
                 buf.put_u8(2);
-                <Referral as Pack>::encode(r, buf)
+                Pack::encode(r, buf)
             }
             FromWrite::Denied => Ok(buf.put_u8(3)),
             FromWrite::Error(c) => {
                 buf.put_u8(4);
-                <Chars as Pack>::encode(c, buf)
+                Pack::encode(c, buf)
             }
         }
     }
@@ -787,9 +787,9 @@ impl Pack for FromWrite {
         match buf.get_u8() {
             0 => Ok(FromWrite::Published),
             1 => Ok(FromWrite::Unpublished),
-            2 => Ok(FromWrite::Referral(<Referral as Pack>::decode(buf)?)),
+            2 => Ok(FromWrite::Referral(Pack::decode(buf)?)),
             3 => Ok(FromWrite::Denied),
-            4 => Ok(FromWrite::Error(<Chars as Pack>::decode(buf)?)),
+            4 => Ok(FromWrite::Error(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
