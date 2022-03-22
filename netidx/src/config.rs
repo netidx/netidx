@@ -74,31 +74,30 @@ impl From<client::Config> for Server {
         Server {
             path: c.base,
             ttl: u32::MAX as u64,
-            addrs: Pooled::orphan(self.addrs),
-            auth: self.auth.into(),
+            addrs: Pooled::orphan(c.addrs),
+            auth: c.auth.into(),
         }
     }
 }
 
-fn check_addrs(a: &Vec<SocketAddr>) {
-    if self.addrs.is_empty() {
+fn check_addrs(a: &Vec<SocketAddr>) -> Result<()> {
+    if a.is_empty() {
         bail!("empty addrs")
     }
-    for addr in &self.addrs {
+    for addr in a {
         utils::check_addr(addr.ip(), &[])?;
         if cfg!(not(test)) && addr.port() == 0 {
             bail!("non zero port required {:?}", addr);
         }
     }
-    if !self.addrs.iter().all(|a| a.ip().is_loopback())
-        && !self.addrs.iter().all(|a| !a.ip().is_loopback())
+    if !a.iter().all(|a| a.ip().is_loopback()) && !a.iter().all(|a| !a.ip().is_loopback())
     {
         bail!("can't mix loopback addrs with non loopback addrs")
     }
+    Ok(())
 }
 
-/// This is the configuration of a resolver server, either the local
-/// machine server, or a network server.
+/// This is the configuration of a resolver server
 pub mod server {
     use super::*;
 
@@ -133,6 +132,7 @@ pub mod server {
 
     /// The on disk format, encoded as JSON
     pub(crate) mod file {
+        use super::super::check_addrs;
         use crate::{chars::Chars, path::Path, pool::Pooled, utils};
         use anyhow::Result;
         use std::{collections::HashMap, net::SocketAddr};
@@ -173,7 +173,7 @@ pub mod server {
                 if !Path::is_absolute(&path) {
                     bail!("absolute server path is required")
                 }
-                check_addrs(&self.addrs);
+                check_addrs(&self.addrs)?;
                 match &self.auth {
                     ServerAuth::Anonymous => (),
                     ServerAuth::Local(_) if !self.addrs[0].ip().is_loopback() => {
@@ -281,13 +281,13 @@ pub mod server {
             Ok(Config {
                 parent,
                 children,
-                pid_file: remote.pid_file,
+                pid_file: cfg.pid_file,
                 addrs,
-                max_connections: remote.max_connections,
-                reader_ttl: Duration::from_secs(remote.reader_ttl),
-                writer_ttl: Duration::from_secs(remote.writer_ttl),
-                hello_timeout: Duration::from_secs(remote.hello_timeout),
-                auth: remote.auth.into(),
+                max_connections: cfg.max_connections,
+                reader_ttl: Duration::from_secs(cfg.reader_ttl),
+                writer_ttl: Duration::from_secs(cfg.writer_ttl),
+                hello_timeout: Duration::from_secs(cfg.hello_timeout),
+                auth: cfg.auth.into(),
             })
         }
 
