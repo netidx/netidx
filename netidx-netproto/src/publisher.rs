@@ -212,17 +212,17 @@ pub enum From {
 impl Pack for From {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            From::NoSuchValue(p) => <Path as Pack>::encoded_len(p),
-            From::Denied(p) => <Path as Pack>::encoded_len(p),
-            From::Unsubscribed(id) => Id::encoded_len(id),
+            From::NoSuchValue(p) => Pack::encoded_len(p),
+            From::Denied(p) => Pack::encoded_len(p),
+            From::Unsubscribed(id) => Pack::encoded_len(id),
             From::Subscribed(p, id, v) => {
-                <Path as Pack>::encoded_len(p)
-                    + Id::encoded_len(id)
-                    + Value::encoded_len(v)
+                Pack::encoded_len(p)
+                    + Pack::encoded_len(id)
+                    + Pack::encoded_len(v)
             }
-            From::Update(id, v) => Id::encoded_len(id) + Value::encoded_len(v),
+            From::Update(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
             From::Heartbeat => 0,
-            From::WriteResult(id, v) => Id::encoded_len(id) + Value::encoded_len(v),
+            From::WriteResult(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
         }
     }
 
@@ -230,56 +230,56 @@ impl Pack for From {
         match self {
             From::NoSuchValue(p) => {
                 buf.put_u8(0);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
             From::Denied(p) => {
                 buf.put_u8(1);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
             From::Unsubscribed(id) => {
                 buf.put_u8(2);
-                Id::encode(id, buf)
+                Pack::encode(id, buf)
             }
             From::Subscribed(p, id, v) => {
                 buf.put_u8(3);
-                <Path as Pack>::encode(p, buf)?;
-                Id::encode(id, buf)?;
-                Value::encode(v, buf)
+                Pack::encode(p, buf)?;
+                Pack::encode(id, buf)?;
+                Pack::encode(v, buf)
             }
             From::Update(id, v) => {
                 buf.put_u8(4);
-                Id::encode(id, buf)?;
-                Value::encode(v, buf)
+                Pack::encode(id, buf)?;
+                Pack::encode(v, buf)
             }
             From::Heartbeat => Ok(buf.put_u8(5)),
             From::WriteResult(id, v) => {
                 buf.put_u8(6);
-                Id::encode(id, buf)?;
-                Value::encode(v, buf)
+                Pack::encode(id, buf)?;
+                Pack::encode(v, buf)
             }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(From::NoSuchValue(<Path as Pack>::decode(buf)?)),
-            1 => Ok(From::Denied(<Path as Pack>::decode(buf)?)),
-            2 => Ok(From::Unsubscribed(Id::decode(buf)?)),
+            0 => Ok(From::NoSuchValue(Pack::decode(buf)?)),
+            1 => Ok(From::Denied(Pack::decode(buf)?)),
+            2 => Ok(From::Unsubscribed(Pack::decode(buf)?)),
             3 => {
-                let path = <Path as Pack>::decode(buf)?;
-                let id = Id::decode(buf)?;
-                let v = Value::decode(buf)?;
+                let path = Pack::decode(buf)?;
+                let id = Pack::decode(buf)?;
+                let v = Pack::decode(buf)?;
                 Ok(From::Subscribed(path, id, v))
             }
             4 => {
-                let id = Id::decode(buf)?;
-                let value = Value::decode(buf)?;
+                let id = Pack::decode(buf)?;
+                let value = Pack::decode(buf)?;
                 Ok(From::Update(id, value))
             }
             5 => Ok(From::Heartbeat),
             6 => {
-                let id = Id::decode(buf)?;
-                let value = Value::decode(buf)?;
+                let id = Pack::decode(buf)?;
+                let value = Pack::decode(buf)?;
                 Ok(From::WriteResult(id, value))
             }
             _ => Err(PackError::UnknownTag),
