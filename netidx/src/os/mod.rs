@@ -1,3 +1,5 @@
+use anyhow::Result;
+
 #[cfg(unix)]
 pub(crate) mod unix;
 
@@ -5,10 +7,14 @@ pub(crate) mod unix;
 pub(crate) mod windows;
 
 pub(crate) mod local_auth {
+    use super::*;
+    use netidx_core::pack::{Pack, PackError};
+    use bytes::{Bytes, Buf, BufMut};
+
     pub(crate) struct Credential {
-        salt: u64,
-        user: String,
-        token: Bytes,
+        pub(crate) salt: u64,
+        pub(crate) user: String,
+        pub(crate) token: Bytes,
     }
 
     impl Pack for Credential {
@@ -35,6 +41,7 @@ pub(crate) mod local_auth {
             Ok(Credential { salt, user, token })
         }
     }
+
 
     #[cfg(windows)]
     pub(crate) use windows::local_auth::*;

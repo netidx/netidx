@@ -67,22 +67,19 @@ impl Mapper {
     }
 }
 
-mod local_auth {
+pub(crate) mod local_auth {
+    use crate::os::local_auth::Credential;
     use super::Mapper;
-    use anyhow::Result as AResult;
-    use bytes::{Buf, BufMut, Bytes, BytesMut};
+    use anyhow::Result;
+    use bytes::{Bytes, BytesMut};
     use futures::{prelude::*, select_biased};
     use fxhash::{FxBuildHasher, FxHashMap};
     use log::warn;
-    use netidx_core::{
-        pack::{Pack, PackError},
-        utils::{make_sha3_token, pack},
-    };
+    use netidx_core::utils::{make_sha3_token, pack};
     use parking_lot::Mutex;
     use rand::{thread_rng, Rng};
     use std::{
         collections::{hash_map::Entry, HashMap},
-        result::Result,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -97,37 +94,6 @@ mod local_auth {
         time::{interval, sleep, timeout},
     };
 
-    pub(crate) struct Credential {
-        salt: u64,
-        user: String,
-        token: Bytes,
-    }
-
-    impl Pack for Credential {
-        fn const_encoded_len() -> Option<usize> {
-            None
-        }
-
-        fn encoded_len(&self) -> usize {
-            Pack::encoded_len(&self.salt)
-                + Pack::encoded_len(&self.user)
-                + Pack::encoded_len(&self.token)
-        }
-
-        fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-            Pack::encode(&self.salt, buf)?;
-            Pack::encode(&self.user, buf)?;
-            Pack::encode(&self.token, buf)
-        }
-
-        fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-            let salt: u64 = Pack::decode(buf)?;
-            let user: String = Pack::decode(buf)?;
-            let token: Bytes = Pack::decode(buf)?;
-            Ok(Credential { salt, user, token })
-        }
-    }
-
     pub(crate) struct AuthServer {
         secret: u128,
         issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
@@ -140,7 +106,7 @@ mod local_auth {
             mut client: UnixStream,
             secret: u128,
             issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
-        ) -> AResult<()> {
+        ) -> Result<()> {
             let cred = client.peer_cred()?;
             let user = mapper.user(cred.uid())?;
             let salt: u64 = loop {
@@ -208,7 +174,7 @@ mod local_auth {
             }
         }
 
-        pub(crate) async fn start(socket_path: &str) -> AResult<AuthServer> {
+        pub(crate) async fn start(socket_path: &str) -> Result<AuthServer> {
             let listener = UnixListener::bind(socket_path)?;
             let mapper = Mapper::new()?;
             let issued =
@@ -235,7 +201,7 @@ mod local_auth {
             AuthClient(path)
         }
 
-        async fn token_once(&self) -> AResult<Bytes> {
+        async fn token_once(&self) -> Result<Bytes> {
             let mut soc = UnixStream::connect(&self.0).await?;
             let mut buf = BytesMut::new();
             loop {
@@ -246,7 +212,7 @@ mod local_auth {
             Ok(buf.freeze())
         }
 
-        pub(crate) async fn token(&self) -> AResult<Bytes> {
+        pub(crate) async fn token(&self) -> Result<Bytes> {
             let mut tries = 0;
             loop {
                 match self.token_once().await {
