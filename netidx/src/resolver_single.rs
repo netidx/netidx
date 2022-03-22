@@ -133,7 +133,7 @@ async fn connect_read(
         match (desired_auth, r) {
             (DesiredAuth::Anonymous, ServerHelloRead::Anonymous) => (),
             (DesiredAuth::Local, ServerHelloRead::Local) => (),
-            (DesiredAuth::Krb5 {..}, ServerHelloRead::Local) => (),
+            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Local) => (),
             (DesiredAuth::Anonymous, _) => {
                 error!("server requires authentication");
                 continue;
@@ -296,6 +296,7 @@ async fn connect_write(
 ) -> Result<(u64, Channel<ClientCtx>)> {
     enum SecState {
         Anonymous,
+        Local,
         Reused(K5CtxWrap<ClientCtx>),
         Pending(PendingClientCtx),
     }
@@ -308,10 +309,20 @@ async fn connect_write(
     let sec = Duration::from_secs(1);
     let (auth, ctx) = match desired_auth {
         DesiredAuth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
-        DesiredAuth::Local => unimplemented!(),
+        DesiredAuth::Local => match &resolver.auth {
+            ServerAuth::Anonymous | ServerAuth::Krb5(_) => {
+                bail!("local auth not available")
+            }
+            ServerAuth::Local(path) => {
+                (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
+            }
+        },
         DesiredAuth::Krb5 { upn, spn } => match &resolver.auth {
-            ServerAuth::Anonymous | ServerAuth::Local(_) => {
+            ServerAuth::Anonymous => {
                 bail!("authentication unavailable")
+            }
+            ServerAuth::Local(path) => {
+                (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
             }
             ServerAuth::Krb5(spns) => match security_context {
                 Some(ctx)
@@ -346,7 +357,12 @@ async fn connect_write(
         (DesiredAuth::Anonymous, _, _) => {
             bail!("server requires authentication");
         }
-        (DesiredAuth::Local, _, _) => unimplemented!(),
+        (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local) => {
+            *security_context = None;
+        }
+        (DesiredAuth::Local, ServerAuthWrite::Local, _) => {
+            unreachable!()
+        }
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
             bail!("could not authenticate resolver server");
         }
@@ -378,6 +394,12 @@ async fn connect_write(
         }
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
             bail!("missing pending security context")
+        }
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, SecState::Local) => {
+            *security_context = None;
+        }
+        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, _) => {
+            unreachable!()
         }
     }
     if !r.ttl_expired && !*degraded {
