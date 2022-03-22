@@ -22,15 +22,15 @@ atomic_id!(CtxId);
 
 impl Pack for CtxId {
     fn encoded_len(&self) -> usize {
-        <u64 as Pack>::encoded_len(&self.0)
+        Pack::encoded_len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <u64 as Pack>::encode(&self.0, buf)
+        Pack::encode(&self.0, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(CtxId(<u64 as Pack>::decode(buf)?))
+        Ok(CtxId(Pack::decode(buf)?))
     }
 }
 
@@ -39,6 +39,7 @@ pub enum ClientAuthRead {
     Anonymous,
     Reuse(CtxId),
     Initiate(Bytes),
+    Local(Bytes),
 }
 
 impl Pack for ClientAuthRead {
@@ -46,7 +47,9 @@ impl Pack for ClientAuthRead {
         1 + match self {
             ClientAuthRead::Anonymous => 0,
             ClientAuthRead::Reuse(ref i) => Pack::encoded_len(i),
-            ClientAuthRead::Initiate(ref b) => Pack::encoded_len(b),
+            ClientAuthRead::Initiate(ref b) | ClientAuthRead::Local(ref b) => {
+                Pack::encoded_len(b)
+            }
         }
     }
 
@@ -55,11 +58,15 @@ impl Pack for ClientAuthRead {
             ClientAuthRead::Anonymous => Ok(buf.put_u8(0)),
             ClientAuthRead::Reuse(ref id) => {
                 buf.put_u8(1);
-                Ok(<CtxId as Pack>::encode(id, buf)?)
+                Ok(Pack::encode(id, buf)?)
             }
             ClientAuthRead::Initiate(ref tok) => {
                 buf.put_u8(2);
-                Ok(<Bytes as Pack>::encode(tok, buf)?)
+                Ok(Pack::encode(tok, buf)?)
+            }
+            ClientAuthRead::Local(ref tok) => {
+                buf.put_u8(3);
+                Ok(Pack::encode(tok, buf)?)
             }
         }
     }
@@ -67,8 +74,9 @@ impl Pack for ClientAuthRead {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ClientAuthRead::Anonymous),
-            1 => Ok(ClientAuthRead::Reuse(<CtxId as Pack>::decode(buf)?)),
-            2 => Ok(ClientAuthRead::Initiate(<Bytes as Pack>::decode(buf)?)),
+            1 => Ok(ClientAuthRead::Reuse(Pack::decode(buf)?)),
+            2 => Ok(ClientAuthRead::Initiate(Pack::decode(buf)?)),
+            3 => Ok(ClientAuthRead::Local(Pack::decode(buf)?)),
             _ => return Err(Error::UnknownTag),
         }
     }
@@ -79,6 +87,7 @@ pub enum ClientAuthWrite {
     Anonymous,
     Reuse,
     Initiate { spn: Option<Chars>, token: Bytes },
+    Local(Bytes),
 }
 
 impl Pack for ClientAuthWrite {
@@ -87,9 +96,9 @@ impl Pack for ClientAuthWrite {
             ClientAuthWrite::Anonymous => 0,
             ClientAuthWrite::Reuse => 0,
             ClientAuthWrite::Initiate { spn, token } => {
-                <Option<Chars> as Pack>::encoded_len(spn)
-                    + <Bytes as Pack>::encoded_len(token)
+                Pack::encoded_len(spn) + Pack::encoded_len(token)
             }
+            ClientAuthWrite::Local(b) => Pack::encoded_len(b),
         }
     }
 
@@ -99,8 +108,12 @@ impl Pack for ClientAuthWrite {
             ClientAuthWrite::Reuse => Ok(buf.put_u8(1)),
             ClientAuthWrite::Initiate { spn, token } => {
                 buf.put_u8(2);
-                <Option<Chars> as Pack>::encode(spn, buf)?;
-                <Bytes as Pack>::encode(token, buf)
+                Pack::encode(spn, buf)?;
+                Pack::encode(token, buf)
+            }
+            ClientAuthWrite::Local(b) => {
+                buf.put_u8(3);
+                Pack::encode(b, buf)
             }
         }
     }
@@ -110,10 +123,11 @@ impl Pack for ClientAuthWrite {
             0 => Ok(ClientAuthWrite::Anonymous),
             1 => Ok(ClientAuthWrite::Reuse),
             2 => {
-                let spn = <Option<Chars> as Pack>::decode(buf)?;
-                let token = <Bytes as Pack>::decode(buf)?;
+                let spn = Pack::decode(buf)?;
+                let token = Pack::decode(buf)?;
                 Ok(ClientAuthWrite::Initiate { spn, token })
             }
+            3 => Ok(ClientAuthWrite::Local(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -127,24 +141,23 @@ pub struct ClientHelloWrite {
 
 impl Pack for ClientHelloWrite {
     fn encoded_len(&self) -> usize {
-        <SocketAddr as Pack>::encoded_len(&self.write_addr)
-            + ClientAuthWrite::encoded_len(&self.auth)
+        Pack::encoded_len(&self.write_addr) + Pack::encoded_len(&self.auth)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <SocketAddr as Pack>::encode(&self.write_addr, buf)?;
-        ClientAuthWrite::encode(&self.auth, buf)
+        Pack::encode(&self.write_addr, buf)?;
+        Pack::encode(&self.auth, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let write_addr = <SocketAddr as Pack>::decode(buf)?;
-        let auth = ClientAuthWrite::decode(buf)?;
+        let write_addr = Pack::decode(buf)?;
+        let auth = Pack::decode(buf)?;
         Ok(ClientHelloWrite { write_addr, auth })
     }
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<()> {
-        self.write_addr = <SocketAddr as Pack>::decode(buf)?;
-        self.auth = <ClientAuthWrite as Pack>::decode(buf)?;
+        self.write_addr = Pack::decode(buf)?;
+        self.auth = Pack::decode(buf)?;
         Ok(())
     }
 }
@@ -166,8 +179,8 @@ pub enum ClientHello {
 impl Pack for ClientHello {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            ClientHello::ReadOnly(r) => ClientAuthRead::encoded_len(r),
-            ClientHello::WriteOnly(r) => ClientHelloWrite::encoded_len(r),
+            ClientHello::ReadOnly(r) => Pack::encoded_len(r),
+            ClientHello::WriteOnly(r) => Pack::encoded_len(r),
         }
     }
 
@@ -175,19 +188,19 @@ impl Pack for ClientHello {
         match self {
             ClientHello::ReadOnly(r) => {
                 buf.put_u8(0);
-                <ClientAuthRead as Pack>::encode(r, buf)
+                Pack::encode(r, buf)
             }
             ClientHello::WriteOnly(r) => {
                 buf.put_u8(1);
-                <ClientHelloWrite as Pack>::encode(r, buf)
+                Pack::encode(r, buf)
             }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(ClientHello::ReadOnly(ClientAuthRead::decode(buf)?)),
-            1 => Ok(ClientHello::WriteOnly(ClientHelloWrite::decode(buf)?)),
+            0 => Ok(ClientHello::ReadOnly(Pack::decode(buf)?)),
+            1 => Ok(ClientHello::WriteOnly(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -206,7 +219,7 @@ impl Pack for ServerHelloRead {
             ServerHelloRead::Anonymous => 0,
             ServerHelloRead::Reused => 0,
             ServerHelloRead::Accepted(tok, id) => {
-                <Bytes as Pack>::encoded_len(tok) + CtxId::encoded_len(id)
+                Pack::encoded_len(tok) + Pack::encoded_len(id)
             }
         }
     }
@@ -217,8 +230,8 @@ impl Pack for ServerHelloRead {
             ServerHelloRead::Reused => Ok(buf.put_u8(1)),
             ServerHelloRead::Accepted(tok, id) => {
                 buf.put_u8(2);
-                <Bytes as Pack>::encode(tok, buf)?;
-                CtxId::encode(id, buf)
+                Pack::encode(tok, buf)?;
+                Pack::encode(id, buf)
             }
         }
     }
@@ -228,8 +241,8 @@ impl Pack for ServerHelloRead {
             0 => Ok(ServerHelloRead::Anonymous),
             1 => Ok(ServerHelloRead::Reused),
             2 => {
-                let tok = <Bytes as Pack>::decode(buf)?;
-                let id = CtxId::decode(buf)?;
+                let tok = Pack::decode(buf)?;
+                let id = Pack::decode(buf)?;
                 Ok(ServerHelloRead::Accepted(tok, id))
             }
             _ => Err(Error::UnknownTag),
@@ -249,7 +262,7 @@ impl Pack for ServerAuthWrite {
         1 + match self {
             ServerAuthWrite::Anonymous => 0,
             ServerAuthWrite::Reused => 0,
-            ServerAuthWrite::Accepted(b) => <Bytes as Pack>::encoded_len(b),
+            ServerAuthWrite::Accepted(b) => Pack::encoded_len(b),
         }
     }
 
@@ -259,7 +272,7 @@ impl Pack for ServerAuthWrite {
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
             ServerAuthWrite::Accepted(b) => {
                 buf.put_u8(2);
-                <Bytes as Pack>::encode(b, buf)
+                Pack::encode(b, buf)
             }
         }
     }
@@ -268,10 +281,7 @@ impl Pack for ServerAuthWrite {
         match buf.get_u8() {
             0 => Ok(ServerAuthWrite::Anonymous),
             1 => Ok(ServerAuthWrite::Reused),
-            2 => {
-                let tok = <Bytes as Pack>::decode(buf)?;
-                Ok(ServerAuthWrite::Accepted(tok))
-            }
+            2 => Ok(ServerAuthWrite::Accepted(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -287,24 +297,24 @@ pub struct ServerHelloWrite {
 
 impl Pack for ServerHelloWrite {
     fn encoded_len(&self) -> usize {
-        <u64 as Pack>::encoded_len(&self.ttl)
-            + <bool as Pack>::encoded_len(&self.ttl_expired)
-            + ServerAuthWrite::encoded_len(&self.auth)
-            + <SocketAddr as Pack>::encoded_len(&self.resolver_id)
+        Pack::encoded_len(&self.ttl)
+            + Pack::encoded_len(&self.ttl_expired)
+            + Pack::encoded_len(&self.auth)
+            + Pack::encoded_len(&self.resolver_id)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <u64 as Pack>::encode(&self.ttl, buf)?;
-        <bool as Pack>::encode(&self.ttl_expired, buf)?;
-        ServerAuthWrite::encode(&self.auth, buf)?;
-        <SocketAddr as Pack>::encode(&self.resolver_id, buf)
+        Pack::encode(&self.ttl, buf)?;
+        Pack::encode(&self.ttl_expired, buf)?;
+        Pack::encode(&self.auth, buf)?;
+        Pack::encode(&self.resolver_id, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let ttl = <u64 as Pack>::decode(buf)?;
-        let ttl_expired = <bool as Pack>::decode(buf)?;
-        let auth = ServerAuthWrite::decode(buf)?;
-        let resolver_id = <SocketAddr as Pack>::decode(buf)?;
+        let ttl = Pack::decode(buf)?;
+        let ttl_expired = Pack::decode(buf)?;
+        let auth = Pack::decode(buf)?;
+        let resolver_id = Pack::decode(buf)?;
         Ok(ServerHelloWrite { ttl, ttl_expired, auth, resolver_id })
     }
 }
@@ -314,15 +324,15 @@ pub struct Secret(pub u128);
 
 impl Pack for Secret {
     fn encoded_len(&self) -> usize {
-        <u128 as Pack>::encoded_len(&self.0)
+        Pack::encoded_len(&self.0)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <u128 as Pack>::encode(&self.0, buf)
+        Pack::encode(&self.0, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(Secret(<u128 as Pack>::decode(buf)?))
+        Ok(Secret(Pack::decode(buf)?))
     }
 }
 
@@ -366,8 +376,8 @@ impl Pack for ToRead {
             ToRead::Resolve(path)
             | ToRead::List(path)
             | ToRead::Table(path)
-            | ToRead::GetChangeNr(path) => <Path as Pack>::encoded_len(path),
-            ToRead::ListMatching(g) => <GlobSet as Pack>::encoded_len(g),
+            | ToRead::GetChangeNr(path) => Pack::encoded_len(path),
+            ToRead::ListMatching(g) => Pack::encoded_len(g),
         }
     }
 
@@ -375,34 +385,34 @@ impl Pack for ToRead {
         match self {
             ToRead::Resolve(path) => {
                 buf.put_u8(0);
-                <Path as Pack>::encode(path, buf)
+                Pack::encode(path, buf)
             }
             ToRead::List(path) => {
                 buf.put_u8(1);
-                <Path as Pack>::encode(path, buf)
+                Pack::encode(path, buf)
             }
             ToRead::Table(path) => {
                 buf.put_u8(2);
-                <Path as Pack>::encode(path, buf)
+                Pack::encode(path, buf)
             }
             ToRead::ListMatching(globs) => {
                 buf.put_u8(3);
-                <GlobSet as Pack>::encode(globs, buf)
+                Pack::encode(globs, buf)
             }
             ToRead::GetChangeNr(path) => {
                 buf.put_u8(4);
-                <Path as Pack>::encode(path, buf)
+                Pack::encode(path, buf)
             }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(ToRead::Resolve(<Path as Pack>::decode(buf)?)),
-            1 => Ok(ToRead::List(<Path as Pack>::decode(buf)?)),
-            2 => Ok(ToRead::Table(<Path as Pack>::decode(buf)?)),
-            3 => Ok(ToRead::ListMatching(<GlobSet as Pack>::decode(buf)?)),
-            4 => Ok(ToRead::GetChangeNr(<Path as Pack>::decode(buf)?)),
+            0 => Ok(ToRead::Resolve(Pack::decode(buf)?)),
+            1 => Ok(ToRead::List(Pack::decode(buf)?)),
+            2 => Ok(ToRead::Table(Pack::decode(buf)?)),
+            3 => Ok(ToRead::ListMatching(Pack::decode(buf)?)),
+            4 => Ok(ToRead::GetChangeNr(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -420,35 +430,30 @@ pub struct Resolved {
 
 impl Pack for Resolved {
     fn encoded_len(&self) -> usize {
-        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encoded_len(
-            &self.krb5_spns,
-        ) + <SocketAddr as Pack>::encoded_len(&self.resolver)
-            + <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::encoded_len(&self.addrs)
-            + <u64 as Pack>::encoded_len(&self.timestamp)
-            + <u16 as Pack>::encoded_len(&self.flags)
-            + <u16 as Pack>::encoded_len(&self.permissions)
+        Pack::encoded_len(&self.krb5_spns)
+            + Pack::encoded_len(&self.resolver)
+            + Pack::encoded_len(&self.addrs)
+            + Pack::encoded_len(&self.timestamp)
+            + Pack::encoded_len(&self.flags)
+            + Pack::encoded_len(&self.permissions)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encode(
-            &self.krb5_spns,
-            buf,
-        )?;
-        <SocketAddr as Pack>::encode(&self.resolver, buf)?;
-        <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::encode(&self.addrs, buf)?;
-        <u64 as Pack>::encode(&self.timestamp, buf)?;
-        <u16 as Pack>::encode(&self.flags, buf)?;
-        <u16 as Pack>::encode(&self.permissions, buf)
+        Pack::encode(&self.krb5_spns, buf)?;
+        Pack::encode(&self.resolver, buf)?;
+        Pack::encode(&self.addrs, buf)?;
+        Pack::encode(&self.timestamp, buf)?;
+        Pack::encode(&self.flags, buf)?;
+        Pack::encode(&self.permissions, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let krb5_spns =
-            <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::decode(buf)?;
-        let resolver = <SocketAddr as Pack>::decode(buf)?;
-        let addrs = <Pooled<Vec<(SocketAddr, Bytes)>> as Pack>::decode(buf)?;
-        let timestamp = <u64 as Pack>::decode(buf)?;
-        let flags = <u16 as Pack>::decode(buf)?;
-        let permissions = <u16 as Pack>::decode(buf)?;
+        let krb5_spns = Pack::decode(buf)?;
+        let resolver = Pack::decode(buf)?;
+        let addrs = Pack::decode(buf)?;
+        let timestamp = Pack::decode(buf)?;
+        let flags = Pack::decode(buf)?;
+        let permissions = Pack::decode(buf)?;
         Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions, flags })
     }
 }
@@ -477,30 +482,24 @@ impl Eq for Referral {}
 
 impl Pack for Referral {
     fn encoded_len(&self) -> usize {
-        <Path as Pack>::encoded_len(&self.path)
-            + <u64 as Pack>::encoded_len(&self.ttl)
-            + <Pooled<Vec<SocketAddr>> as Pack>::encoded_len(&self.addrs)
-            + <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encoded_len(
-                &self.krb5_spns,
-            )
+        Pack::encoded_len(&self.path)
+            + Pack::encoded_len(&self.ttl)
+            + Pack::encoded_len(&self.addrs)
+            + Pack::encoded_len(&self.krb5_spns)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Path as Pack>::encode(&self.path, buf)?;
-        <u64 as Pack>::encode(&self.ttl, buf)?;
-        <Pooled<Vec<SocketAddr>> as Pack>::encode(&self.addrs, buf)?;
-        <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::encode(
-            &self.krb5_spns,
-            buf,
-        )
+        Pack::encode(&self.path, buf)?;
+        Pack::encode(&self.ttl, buf)?;
+        Pack::encode(&self.addrs, buf)?;
+        Pack::encode(&self.krb5_spns, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let path = <Path as Pack>::decode(buf)?;
-        let ttl = <u64 as Pack>::decode(buf)?;
-        let addrs = <Pooled<Vec<SocketAddr>> as Pack>::decode(buf)?;
-        let krb5_spns =
-            <Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>> as Pack>::decode(buf)?;
+        let path = Pack::decode(buf)?;
+        let ttl = Pack::decode(buf)?;
+        let addrs = Pack::decode(buf)?;
+        let krb5_spns = Pack::decode(buf)?;
         Ok(Referral { path, ttl, addrs, krb5_spns })
     }
 }
@@ -513,18 +512,17 @@ pub struct Table {
 
 impl Pack for Table {
     fn encoded_len(&self) -> usize {
-        <Pooled<Vec<Path>>>::encoded_len(&self.rows)
-            + <Pooled<Vec<(Path, Z64)>>>::encoded_len(&self.cols)
+        Pack::encoded_len(&self.rows) + Pack::encoded_len(&self.cols)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Pooled<Vec<Path>>>::encode(&self.rows, buf)?;
-        <Pooled<Vec<(Path, Z64)>>>::encode(&self.cols, buf)
+        Pack::encode(&self.rows, buf)?;
+        Pack::encode(&self.cols, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let rows = <Pooled<Vec<Path>>>::decode(buf)?;
-        let cols = <Pooled<Vec<(Path, Z64)>>>::decode(buf)?;
+        let rows = Pack::decode(buf)?;
+        let cols = Pack::decode(buf)?;
         Ok(Table { rows, cols })
     }
 }
@@ -537,18 +535,17 @@ pub struct ListMatching {
 
 impl Pack for ListMatching {
     fn encoded_len(&self) -> usize {
-        <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::encoded_len(&self.matched)
-            + <Pooled<Vec<Referral>> as Pack>::encoded_len(&self.referrals)
+        Pack::encoded_len(&self.matched) + Pack::encoded_len(&self.referrals)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::encode(&self.matched, buf)?;
-        <Pooled<Vec<Referral>> as Pack>::encode(&self.referrals, buf)
+        Pack::encode(&self.matched, buf)?;
+        Pack::encode(&self.referrals, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let matched = <Pooled<Vec<Pooled<Vec<Path>>>> as Pack>::decode(buf)?;
-        let referrals = <Pooled<Vec<Referral>> as Pack>::decode(buf)?;
+        let matched = Pack::decode(buf)?;
+        let referrals = Pack::decode(buf)?;
         Ok(ListMatching { matched, referrals })
     }
 }
@@ -562,25 +559,22 @@ pub struct GetChangeNr {
 
 impl Pack for GetChangeNr {
     fn encoded_len(&self) -> usize {
-        <Z64 as Pack>::encoded_len(&self.change_number)
-            + <SocketAddr as Pack>::encoded_len(&self.resolver)
-            + <Pooled<Vec<Referral>> as Pack>::encoded_len(&self.referrals)
+        Pack::encoded_len(&self.change_number)
+            + Pack::encoded_len(&self.resolver)
+            + Pack::encoded_len(&self.referrals)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        <Z64 as Pack>::encode(&self.change_number, buf)?;
-        <SocketAddr as Pack>::encode(&self.resolver, buf)?;
-        <Pooled<Vec<Referral>> as Pack>::encode(&self.referrals, buf)
+        Pack::encode(&self.change_number, buf)?;
+        Pack::encode(&self.resolver, buf)?;
+        Pack::encode(&self.referrals, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let change_number = <Z64 as Pack>::decode(buf)?;
-        let resolver = <SocketAddr as Pack>::decode(buf)?;
-        Ok(GetChangeNr {
-            change_number,
-            resolver,
-            referrals: <Pooled<Vec<Referral>> as Pack>::decode(buf)?,
-        })
+        let change_number = Pack::decode(buf)?;
+        let resolver = Pack::decode(buf)?;
+        let referrals = Pack::decode(buf)?;
+        Ok(GetChangeNr { change_number, resolver, referrals })
     }
 }
 
@@ -599,14 +593,14 @@ pub enum FromRead {
 impl Pack for FromRead {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            FromRead::Resolved(a) => Resolved::encoded_len(a),
-            FromRead::List(l) => <Pooled<Vec<Path>> as Pack>::encoded_len(l),
-            FromRead::Table(t) => <Table as Pack>::encoded_len(t),
-            FromRead::Referral(r) => <Referral as Pack>::encoded_len(r),
-            FromRead::ListMatching(m) => <ListMatching as Pack>::encoded_len(m),
-            FromRead::GetChangeNr(m) => <GetChangeNr as Pack>::encoded_len(m),
+            FromRead::Resolved(a) => Pack::encoded_len(a),
+            FromRead::List(l) => Pack::encoded_len(l),
+            FromRead::Table(t) => Pack::encoded_len(t),
+            FromRead::Referral(r) => Pack::encoded_len(r),
+            FromRead::ListMatching(m) => Pack::encoded_len(m),
+            FromRead::GetChangeNr(m) => Pack::encoded_len(m),
             FromRead::Denied => 0,
-            FromRead::Error(e) => <Chars as Pack>::encoded_len(e),
+            FromRead::Error(e) => Pack::encoded_len(e),
         }
     }
 
@@ -614,46 +608,46 @@ impl Pack for FromRead {
         match self {
             FromRead::Resolved(a) => {
                 buf.put_u8(0);
-                Resolved::encode(a, buf)
+                Pack::encode(a, buf)
             }
             FromRead::List(l) => {
                 buf.put_u8(1);
-                <Pooled<Vec<Path>> as Pack>::encode(l, buf)
+                Pack::encode(l, buf)
             }
             FromRead::Table(t) => {
                 buf.put_u8(2);
-                <Table as Pack>::encode(t, buf)
+                Pack::encode(t, buf)
             }
             FromRead::Referral(r) => {
                 buf.put_u8(3);
-                <Referral as Pack>::encode(r, buf)
+                Pack::encode(r, buf)
             }
             FromRead::Denied => Ok(buf.put_u8(4)),
             FromRead::Error(e) => {
                 buf.put_u8(5);
-                <Chars as Pack>::encode(e, buf)
+                Pack::encode(e, buf)
             }
             FromRead::ListMatching(l) => {
                 buf.put_u8(6);
-                <ListMatching as Pack>::encode(l, buf)
+                Pack::encode(l, buf)
             }
             FromRead::GetChangeNr(l) => {
                 buf.put_u8(7);
-                <GetChangeNr as Pack>::encode(l, buf)
+                Pack::encode(l, buf)
             }
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(FromRead::Resolved(Resolved::decode(buf)?)),
-            1 => Ok(FromRead::List(<Pooled<Vec<Path>> as Pack>::decode(buf)?)),
-            2 => Ok(FromRead::Table(<Table as Pack>::decode(buf)?)),
-            3 => Ok(FromRead::Referral(<Referral as Pack>::decode(buf)?)),
+            0 => Ok(FromRead::Resolved(Pack::decode(buf)?)),
+            1 => Ok(FromRead::List(Pack::decode(buf)?)),
+            2 => Ok(FromRead::Table(Pack::decode(buf)?)),
+            3 => Ok(FromRead::Referral(Pack::decode(buf)?)),
             4 => Ok(FromRead::Denied),
-            5 => Ok(FromRead::Error(<Chars as Pack>::decode(buf)?)),
-            6 => Ok(FromRead::ListMatching(<ListMatching as Pack>::decode(buf)?)),
-            7 => Ok(FromRead::GetChangeNr(<GetChangeNr as Pack>::decode(buf)?)),
+            5 => Ok(FromRead::Error(Pack::decode(buf)?)),
+            6 => Ok(FromRead::ListMatching(Pack::decode(buf)?)),
+            7 => Ok(FromRead::GetChangeNr(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -682,18 +676,18 @@ pub enum ToWrite {
 impl Pack for ToWrite {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            ToWrite::Publish(p) => <Path as Pack>::encoded_len(p),
-            ToWrite::PublishDefault(p) => <Path as Pack>::encoded_len(p),
-            ToWrite::Unpublish(p) => <Path as Pack>::encoded_len(p),
+            ToWrite::Publish(p) => Pack::encoded_len(p),
+            ToWrite::PublishDefault(p) => Pack::encoded_len(p),
+            ToWrite::Unpublish(p) => Pack::encoded_len(p),
             ToWrite::Clear => 0,
             ToWrite::Heartbeat => 0,
             ToWrite::PublishWithFlags(p, f) => {
-                <Path as Pack>::encoded_len(p) + <u16 as Pack>::encoded_len(f)
+                Pack::encoded_len(p) + Pack::encoded_len(f)
             }
             ToWrite::PublishDefaultWithFlags(p, f) => {
-                <Path as Pack>::encoded_len(p) + <u16 as Pack>::encoded_len(f)
+                Pack::encoded_len(p) + Pack::encoded_len(f)
             }
-            ToWrite::UnpublishDefault(p) => <Path as Pack>::encoded_len(p),
+            ToWrite::UnpublishDefault(p) => Pack::encoded_len(p),
         }
     }
 
@@ -701,27 +695,27 @@ impl Pack for ToWrite {
         match self {
             ToWrite::Publish(p) => {
                 buf.put_u8(0);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
             ToWrite::PublishDefault(p) => {
                 buf.put_u8(1);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
             ToWrite::Unpublish(p) => {
                 buf.put_u8(2);
-                <Path as Pack>::encode(p, buf)
+                Pack::encode(p, buf)
             }
             ToWrite::Clear => Ok(buf.put_u8(3)),
             ToWrite::Heartbeat => Ok(buf.put_u8(4)),
             ToWrite::PublishWithFlags(p, f) => {
                 buf.put_u8(5);
-                <Path as Pack>::encode(p, buf)?;
-                <u16 as Pack>::encode(f, buf)
+                Pack::encode(p, buf)?;
+                Pack::encode(f, buf)
             }
             ToWrite::PublishDefaultWithFlags(p, f) => {
                 buf.put_u8(6);
-                <Path as Pack>::encode(p, buf)?;
-                <u16 as Pack>::encode(f, buf)
+                Pack::encode(p, buf)?;
+                Pack::encode(f, buf)
             }
             ToWrite::UnpublishDefault(p) => {
                 buf.put_u8(7);
@@ -747,9 +741,7 @@ impl Pack for ToWrite {
                 let f = <u16 as Pack>::decode(buf)?;
                 Ok(ToWrite::PublishDefaultWithFlags(p, f))
             }
-            7 => {
-                Ok(ToWrite::UnpublishDefault(<Path as Pack>::decode(buf)?))
-            }
+            7 => Ok(ToWrite::UnpublishDefault(<Path as Pack>::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
