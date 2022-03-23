@@ -17,9 +17,9 @@ use crate::{
     shard_resolver_store::Store,
     utils,
 };
-use cross_krb5::{K5ServerCtx, ServerCtx};
 use anyhow::Result;
 use bytes::{Buf, Bytes};
+use cross_krb5::{K5ServerCtx, ServerCtx};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
@@ -495,8 +495,12 @@ async fn server_loop(
             Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
-    let published =
-        Store::new(cfg.parent.clone(), cfg.children.clone(), secstore.clone(), id);
+    let published = Store::new(
+        cfg.parent.clone().map(|s| s.into()),
+        cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),
+        secstore.clone(),
+        id,
+    );
     let listener = TcpListener::bind(id).await?;
     let local_addr = listener.local_addr()?;
     let mut stop = stop.fuse();
@@ -567,8 +571,8 @@ impl Drop for Server {
 
 impl Server {
     pub async fn new(
-        cfg: config::Config,
-        permissions: config::PMap,
+        cfg: config::server::Config,
+        permissions: config::server::PMap,
         delay_reads: bool,
         id: usize,
     ) -> Result<Server> {

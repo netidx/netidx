@@ -1,4 +1,6 @@
-use crate::{chars::Chars, path::Path, pool::Pooled, utils};
+use crate::{
+    chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral, utils,
+};
 use anyhow::Result;
 use fxhash::FxBuildHasher;
 use log::debug;
@@ -52,8 +54,22 @@ impl PartialEq for Server {
 
 impl Eq for Server {}
 
-impl From<crate::protocol::resolver::Referral> for Server {
-    fn from(mut r: crate::protocol::resolver::Referral) -> Server {
+impl Into<Referral> for Server {
+    fn into(self) -> Referral {
+        Referral {
+            path: self.path,
+            ttl: self.ttl,
+            addrs: self.addrs,
+            krb5_spns: match self.auth {
+                Auth::Anonymous | Auth::Local(_) => Pooled::orphan(HashMap::default()),
+                Auth::Krb5(spns) => spns,
+            },
+        }
+    }
+}
+
+impl From<Referral> for Server {
+    fn from(mut r: Referral) -> Server {
         Server {
             path: r.path,
             ttl: r.ttl,
