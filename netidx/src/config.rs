@@ -16,14 +16,14 @@ use std::{
     env,
     fs::read_to_string,
     hash::{Hash, Hasher},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     path::Path as FsPath,
     time::Duration,
 };
 
 /// The type of authentication used by a resolver server or publisher
 #[derive(Debug, Clone)]
-pub enum ServerAuth {
+pub enum Auth {
     Anonymous,
     Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
     Local(String),
@@ -35,7 +35,7 @@ pub struct Server {
     pub path: Path,
     pub ttl: u64,
     pub addrs: Pooled<Vec<SocketAddr>>,
-    pub auth: ServerAuth,
+    pub auth: Auth,
 }
 
 impl Hash for Server {
@@ -60,9 +60,9 @@ impl From<crate::protocol::resolver::Referral> for Server {
             addrs: r.addrs,
             auth: {
                 if r.krb5_spns.is_empty() {
-                    ServerAuth::Anonymous
+                    Auth::Anonymous
                 } else {
-                    ServerAuth::Krb5(r.krb5_spns)
+                    Auth::Krb5(r.krb5_spns)
                 }
             },
         }
@@ -133,23 +133,23 @@ pub mod server {
     /// The on disk format, encoded as JSON
     pub(crate) mod file {
         use super::super::check_addrs;
-        use crate::{chars::Chars, path::Path, pool::Pooled, utils};
+        use crate::{chars::Chars, path::Path, pool::Pooled};
         use anyhow::Result;
         use std::{collections::HashMap, net::SocketAddr};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(crate) enum ServerAuth {
+        pub(crate) enum Auth {
             Anonymous,
             Krb5(HashMap<SocketAddr, String>),
             Local(String),
         }
 
-        impl Into<super::ServerAuth> for ServerAuth {
-            fn into(self) -> super::ServerAuth {
+        impl Into<super::Auth> for Auth {
+            fn into(self) -> super::Auth {
                 match self {
-                    ServerAuth::Anonymous => super::ServerAuth::Anonymous,
-                    ServerAuth::Local(s) => super::ServerAuth::Local(s),
-                    ServerAuth::Krb5(spns) => super::ServerAuth::Krb5(Pooled::orphan(
+                    Auth::Anonymous => super::Auth::Anonymous,
+                    Auth::Local(s) => super::Auth::Local(s),
+                    Auth::Krb5(spns) => super::Auth::Krb5(Pooled::orphan(
                         spns.into_iter().map(|(a, s)| (a, Chars::from(s))).collect(),
                     )),
                 }
@@ -161,7 +161,7 @@ pub mod server {
             path: String,
             ttl: u64,
             addrs: Vec<SocketAddr>,
-            auth: ServerAuth,
+            auth: Auth,
         }
 
         impl Server {
@@ -175,12 +175,12 @@ pub mod server {
                 }
                 check_addrs(&self.addrs)?;
                 match &self.auth {
-                    ServerAuth::Anonymous => (),
-                    ServerAuth::Local(_) if !self.addrs[0].ip().is_loopback() => {
+                    Auth::Anonymous => (),
+                    Auth::Local(_) if !self.addrs[0].ip().is_loopback() => {
                         bail!("local auth is not allowed for a network server")
                     }
-                    ServerAuth::Local(_) => (),
-                    ServerAuth::Krb5(spns) => {
+                    Auth::Local(_) => (),
+                    Auth::Krb5(spns) => {
                         if spns.is_empty() {
                             bail!("at least one SPN is required in krb5 mode")
                         }
@@ -223,7 +223,7 @@ pub mod server {
             pub(super) writer_ttl: u64,
             pub(super) hello_timeout: u64,
             pub(super) addrs: Vec<SocketAddr>,
-            pub(super) auth: ServerAuth,
+            pub(super) auth: Auth,
         }
     }
 
@@ -237,7 +237,7 @@ pub mod server {
         pub writer_ttl: Duration,
         pub hello_timeout: Duration,
         pub addrs: Vec<SocketAddr>,
-        pub auth: ServerAuth,
+        pub auth: Auth,
     }
 
     impl Config {
@@ -295,6 +295,10 @@ pub mod server {
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             Config::parse(&read_to_string(file)?)
         }
+
+        pub fn root(&self) -> &str {
+            self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
+        }
     }
 }
 
@@ -306,14 +310,14 @@ pub mod client {
     /// The on disk format, encoded as JSON
     mod file {
         use super::*;
-        use server::file::ServerAuth;
+        use server::file::Auth;
         use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
             pub(super) base: String,
             pub(super) addrs: Vec<SocketAddr>,
-            pub(super) auth: ServerAuth,
+            pub(super) auth: Auth,
         }
     }
 
@@ -321,7 +325,7 @@ pub mod client {
     pub struct Config {
         pub base: Path,
         pub addrs: Vec<SocketAddr>,
-        pub auth: ServerAuth,
+        pub auth: Auth,
     }
 
     impl Config {
@@ -339,9 +343,8 @@ pub mod client {
                 bail!("can't mix loopback addrs with non loopback addrs")
             }
             match &cfg.auth {
-                server::file::ServerAuth::Anonymous
-                | server::file::ServerAuth::Krb5(_) => (),
-                server::file::ServerAuth::Local(_) => {
+                server::file::Auth::Anonymous | server::file::Auth::Krb5(_) => (),
+                server::file::Auth::Local(_) => {
                     if !cfg.addrs[0].ip().is_loopback() {
                         bail!("local auth is not allowed for remote servers")
                     }

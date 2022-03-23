@@ -75,7 +75,7 @@ lazy_static! {
 }
 
 async fn client_loop_write(
-    cfg: Arc<config::Config>,
+    cfg: Arc<config::server::Config>,
     clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
@@ -193,7 +193,7 @@ async fn client_loop_write(
 }
 
 async fn hello_client_write(
-    cfg: Arc<config::Config>,
+    cfg: Arc<config::server::Config>,
     clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
@@ -208,7 +208,7 @@ async fn hello_client_write(
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
     async fn send(
-        cfg: &Arc<config::Config>,
+        cfg: &Arc<config::server::Config>,
         con: &mut Channel<ServerCtx>,
         msg: impl Pack,
     ) -> Result<()> {
@@ -361,7 +361,7 @@ async fn hello_client_write(
 }
 
 async fn client_loop_read(
-    cfg: Arc<config::Config>,
+    cfg: Arc<config::server::Config>,
     mut store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -395,7 +395,7 @@ async fn client_loop_read(
 }
 
 async fn hello_client_read(
-    cfg: Arc<config::Config>,
+    cfg: Arc<config::server::Config>,
     store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
@@ -403,7 +403,7 @@ async fn hello_client_read(
     hello: ClientAuthRead,
 ) -> Result<()> {
     async fn send(
-        cfg: &Arc<config::Config>,
+        cfg: &Arc<config::server::Config>,
         con: &mut Channel<ServerCtx>,
         hello: ServerHelloRead,
     ) -> Result<()> {
@@ -430,7 +430,7 @@ async fn hello_client_read(
 }
 
 async fn hello_client(
-    cfg: Arc<config::Config>,
+    cfg: Arc<config::server::Config>,
     clinfos: Clinfos,
     ctracker: CTracker,
     connection_id: CId,
@@ -476,8 +476,8 @@ async fn hello_client(
 }
 
 async fn server_loop(
-    cfg: config::Config,
-    permissions: config::PMap,
+    cfg: config::server::Config,
+    permissions: config::server::PMap,
     delay_reads: bool,
     id: usize,
     stop: oneshot::Receiver<()>,

@@ -38,21 +38,21 @@ impl SecStoreInner {
 
 #[derive(Clone)]
 pub(crate) struct SecStore {
-    spn: Arc<String>,
+    spn: Chars,
     pmap: Arc<PMap>,
     pub(crate) store: Arc<RwLock<SecStoreInner>>,
 }
 
 impl SecStore {
     pub(crate) fn new(
-        spn: String,
-        pmap: config::PMap,
-        cfg: &Arc<config::Config>,
+        spn: Chars,
+        pmap: config::server::PMap,
+        cfg: &Arc<config::server::Config>,
     ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
         Ok(SecStore {
-            spn: Arc::new(spn),
+            spn,
             pmap: Arc::new(pmap),
             store: Arc::new(RwLock::new(SecStoreInner {
                 ctxts: HashMap::with_hasher(FxBuildHasher::default()),
@@ -74,7 +74,7 @@ impl SecStore {
         &self,
         tok: &[u8],
     ) -> Result<(K5CtxWrap<ServerCtx>, u128, Bytes)> {
-        let spn = Some(self.spn.as_str());
+        let spn = Some(&*self.spn);
         let (ctx, tok) =
             task::block_in_place(|| ServerCtx::accept(AcceptFlags::empty(), spn, tok))?;
         let secret = rand::thread_rng().gen::<u128>();
