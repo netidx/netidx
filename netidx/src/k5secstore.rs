@@ -15,12 +15,12 @@ use rand::Rng;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::task;
 
-pub(crate) struct SecStoreInner {
+pub(crate) struct K5SecStoreInner {
     ctxts: HashMap<SocketAddr, (Chars, u128, K5CtxWrap<ServerCtx>), FxBuildHasher>,
     userdb: UserDb,
 }
 
-impl SecStoreInner {
+impl K5SecStoreInner {
     pub(crate) fn get(
         &self,
         id: &SocketAddr,
@@ -37,13 +37,13 @@ impl SecStoreInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct SecStore {
+pub(crate) struct K5SecStore {
     spn: Chars,
     pmap: Arc<PMap>,
-    pub(crate) store: Arc<RwLock<SecStoreInner>>,
+    pub(crate) store: Arc<RwLock<K5SecStoreInner>>,
 }
 
-impl SecStore {
+impl K5SecStore {
     pub(crate) fn new(
         spn: Chars,
         pmap: config::server::PMap,
@@ -51,11 +51,11 @@ impl SecStore {
     ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
-        Ok(SecStore {
+        Ok(K5SecStore {
             spn,
             pmap: Arc::new(pmap),
-            store: Arc::new(RwLock::new(SecStoreInner {
-                ctxts: HashMap::with_hasher(FxBuildHasher::default()),
+            store: Arc::new(RwLock::new(K5SecStoreInner {
+                ctxts: HashMap::default(),
                 userdb,
             })),
         })
