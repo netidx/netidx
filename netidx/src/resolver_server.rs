@@ -3,6 +3,7 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config,
+    os::local_auth::{AuthServer, Credential},
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -69,6 +70,21 @@ enum ClientInfo {
 #[derive(Clone)]
 struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 
+enum SecCtx {
+    Anonymous,
+    Krb5(SecStore),
+    Local(AuthServer),
+}
+
+impl SecCtx {
+    fn store(&self) -> Option<&SecStore> {
+        match self {
+            SecCtx::Krb5(store) => Some(store),
+            SecCtx::Anonymous | SecCtx::Local(_) => None,
+        }
+    }
+}
+
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
     static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(5000, 100000);
@@ -81,7 +97,7 @@ async fn client_loop_write(
     connection_id: CId,
     mut store: Store,
     con: Channel<ServerCtx>,
-    secstore: Option<SecStore>,
+    secctx: SecCtx,
     server_stop: oneshot::Receiver<()>,
     rx_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
@@ -123,7 +139,7 @@ async fn client_loop_write(
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
                         inner.insert(write_addr, state);
-                        if let Some(secstore) = secstore {
+                        if let Some(secstore) = secctx.store() {
                             secstore.remove(&write_addr);
                         }
                     }
@@ -201,7 +217,7 @@ async fn hello_client_write(
     store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
-    secstore: Option<SecStore>,
+    secctx: SecCtx,
     resolver_id: SocketAddr,
     hello: ClientHelloWrite,
 ) -> Result<()> {
@@ -243,9 +259,28 @@ async fn hello_client_write(
             send(&cfg, &mut con, h).await?;
             ANONYMOUS.clone()
         }
-        ClientAuthWrite::Reuse => match secstore {
-            None => bail!("authentication not supported"),
-            Some(ref secstore) => match secstore.get(&hello.write_addr) {
+        ClientAuthWrite::Local(tok) => match secctx {
+            SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
+            SecCtx::Local(ref authsrv) => {
+                if tok.len() < 10 {
+                    bail!("token short")
+                }
+                let cred = <Credential as Pack>::decode(&mut &*tok)?;
+                if !authsrv.validate(&cred) {
+                    bail!("invalid or reused token")
+                }
+                send(ServerHelloWrite {
+                    ttl: cfg.writer_ttl.as_secs(),
+                    ttl_expired,
+                    resolver_id,
+                    auth: ServerAuthWrite::Local,
+                })
+                .await?
+            }
+        },
+        ClientAuthWrite::Reuse => match secctx {
+            SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
+            SecCtx::Krb5(ref secstore) => match secstore.get(&hello.write_addr) {
                 None => bail!("session not found"),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
@@ -263,9 +298,9 @@ async fn hello_client_write(
                 }
             },
         },
-        ClientAuthWrite::Initiate { spn, token } => match secstore {
-            None => bail!("authentication not supported"),
-            Some(ref secstore) => {
+        ClientAuthWrite::Initiate { spn, token } => match secctx {
+            SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
+            SecCtx::Krb5(ref secstore) => {
                 info!(
                     "hello_write initiating new krb5 context for {:?}",
                     hello.write_addr
@@ -305,7 +340,7 @@ async fn hello_client_write(
                 let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
                 time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
                 match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-                    PHello::Anonymous | PHello::Token(_) => {
+                    PHello::Anonymous | PHello::Token(_) | PHello::Local(_) => {
                         bail!("listener ownership check unexpected response")
                     }
                     PHello::ResolverAuthenticate(_, mut tok) => {
