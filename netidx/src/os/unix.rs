@@ -68,8 +68,8 @@ impl Mapper {
 }
 
 pub(crate) mod local_auth {
-    use crate::os::local_auth::Credential;
     use super::Mapper;
+    use crate::os::local_auth::Credential;
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use futures::{prelude::*, select_biased};
@@ -94,10 +94,11 @@ pub(crate) mod local_auth {
         time::{interval, sleep, timeout},
     };
 
+    #[derive(Clone)]
     pub(crate) struct AuthServer {
         secret: u128,
         issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
-        stop: oneshot::Sender<()>,
+        stop: Arc<oneshot::Sender<()>>,
     }
 
     impl AuthServer {
@@ -182,7 +183,7 @@ pub(crate) mod local_auth {
             let secret: u128 = thread_rng().gen();
             let (tx, rx) = oneshot::channel();
             spawn(Self::run(mapper, listener, secret, issued.clone(), rx));
-            Ok(AuthServer { secret, stop: tx, issued })
+            Ok(AuthServer { secret, stop: Arc::new(tx), issued })
         }
 
         pub(crate) fn validate(&self, cred: &Credential) -> bool {

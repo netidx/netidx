@@ -22,6 +22,7 @@ pub(crate) mod local_auth {
     use anyhow::Result;
     use bytes::Bytes;
 
+    #[derive(Clone)]
     pub(crate) struct AuthServer;
 
     impl AuthServer {

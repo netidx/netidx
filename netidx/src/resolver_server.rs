@@ -3,7 +3,8 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config,
-    os::local_auth::{AuthServer, Credential},
+    k5secstore::K5SecStore,
+    local_secstore::LocalSecStore,
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -14,7 +15,6 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
-    secstore::SecStore,
     shard_resolver_store::Store,
     utils,
 };
@@ -70,19 +70,11 @@ enum ClientInfo {
 #[derive(Clone)]
 struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 
+#[derive(Clone)]
 enum SecCtx {
     Anonymous,
-    Krb5(SecStore),
-    Local(AuthServer),
-}
-
-impl SecCtx {
-    fn store(&self) -> Option<&SecStore> {
-        match self {
-            SecCtx::Krb5(store) => Some(store),
-            SecCtx::Anonymous | SecCtx::Local(_) => None,
-        }
-    }
+    Krb5(K5SecStore),
+    Local(LocalSecStore),
 }
 
 lazy_static! {
@@ -139,7 +131,7 @@ async fn client_loop_write(
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
                         inner.insert(write_addr, state);
-                        if let Some(secstore) = secctx.store() {
+                        if let SecCtx::Krb5(secstore) = &secctx {
                             secstore.remove(&write_addr);
                         }
                     }
@@ -261,21 +253,18 @@ async fn hello_client_write(
         }
         ClientAuthWrite::Local(tok) => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
-            SecCtx::Local(ref authsrv) => {
-                if tok.len() < 10 {
-                    bail!("token short")
-                }
-                let cred = <Credential as Pack>::decode(&mut &*tok)?;
-                if !authsrv.validate(&cred) {
-                    bail!("invalid or reused token")
-                }
-                send(ServerHelloWrite {
+            SecCtx::Local(ref secstore) => {
+                let uifo = secstore.validate(&*tok)?;
+                info!("hello_write local auth succeeded");
+                let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
                     resolver_id,
                     auth: ServerAuthWrite::Local,
-                })
-                .await?
+                };
+                debug!("hello_write sending {:?}", h);
+                send(&cfg, &mut con, h).await?;
+                uifo
             }
         },
         ClientAuthWrite::Reuse => match secctx {
@@ -386,7 +375,7 @@ async fn hello_client_write(
         connection_id,
         store.clone(),
         con,
-        secstore,
+        secctx,
         server_stop,
         rx_stop,
         uifo,
@@ -434,7 +423,7 @@ async fn hello_client_read(
     store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
-    secstore: Option<SecStore>,
+    secctx: SecCtx,
     hello: ClientAuthRead,
 ) -> Result<()> {
     async fn send(
@@ -449,10 +438,20 @@ async fn hello_client_read(
             send(&cfg, &mut con, ServerHelloRead::Anonymous).await?;
             ANONYMOUS.clone()
         }
+        ClientAuthRead::Local(tok) => match secctx {
+            SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("auth mech not supported"),
+            SecCtx::Local(ref secstore) => {
+                let uifo = secstore.validate(&*tok)?;
+                send(&cfg, &mut con, ServerHelloRead::Local).await?;
+                uifo
+            }
+        },
         ClientAuthRead::Reuse(_) => bail!("read session reuse deprecated"),
-        ClientAuthRead::Initiate(tok) => match secstore {
-            None => bail!("authentication requested but not supported"),
-            Some(ref secstore) => {
+        ClientAuthRead::Initiate(tok) => match secctx {
+            SecCtx::Anonymous | SecCtx::Local(_) => {
+                bail!("authentication requested but not supported")
+            }
+            SecCtx::Krb5(ref secstore) => {
                 let (ctx, _, tok) = secstore.create(&tok)?;
                 send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
                     .await?;
@@ -474,7 +473,7 @@ async fn hello_client(
     store: Store,
     s: TcpStream,
     server_stop: oneshot::Receiver<()>,
-    secstore: Option<SecStore>,
+    secctx: SecCtx,
     id: SocketAddr,
 ) -> Result<()> {
     s.set_nodelay(true)?;
@@ -490,7 +489,7 @@ async fn hello_client(
                     bail!("no read clients allowed yet");
                 }
             }
-            Ok(hello_client_read(cfg, store.clone(), con, server_stop, secstore, hello)
+            Ok(hello_client_read(cfg, store.clone(), con, server_stop, secctx, hello)
                 .await?)
         }
         ClientHello::WriteOnly(hello) => Ok(hello_client_write(
@@ -502,7 +501,7 @@ async fn hello_client(
             store.clone(),
             con,
             server_stop,
-            secstore,
+            secctx,
             id,
             hello,
         )
@@ -524,16 +523,19 @@ async fn server_loop(
     let ctracker = CTracker::new();
     let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
     let id = cfg.addrs[id];
-    let secstore = match &cfg.auth {
-        config::Auth::Anonymous => None,
+    let secctx = match &cfg.auth {
+        config::Auth::Anonymous => SecCtx::Anonymous,
+        config::Auth::Local(path) => {
+            SecCtx::Local(LocalSecStore::new(&path, permissions, &cfg).await?)
+        }
         config::Auth::Krb5(spns) => {
-            Some(SecStore::new(spns[&id].clone(), permissions, &cfg)?)
+            SecCtx::Krb5(K5SecStore::new(spns[&id].clone(), permissions, &cfg)?)
         }
     };
     let published = Store::new(
         cfg.parent.clone().map(|s| s.into()),
         cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),
-        secstore.clone(),
+        secctx.clone(),
         id,
     );
     let listener = TcpListener::bind(id).await?;
@@ -560,7 +562,7 @@ async fn server_loop(
                         let clinfos = clinfos.clone();
                         let ctracker = ctracker.clone();
                         let published = published.clone();
-                        let secstore = secstore.clone();
+                        let secctx = secctx.clone();
                         let cfg = cfg.clone();
                         async move {
                             let r = hello_client(
@@ -573,7 +575,7 @@ async fn server_loop(
                                 published,
                                 client,
                                 rx,
-                                secstore,
+                                secctx,
                                 id
                             ).await;
                             ctracker.close(connection_id);
