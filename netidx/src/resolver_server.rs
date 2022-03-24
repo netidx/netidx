@@ -3,8 +3,6 @@ use crate::{
     channel::Channel,
     chars::Chars,
     config,
-    k5secstore::K5SecStore,
-    local_secstore::LocalSecStore,
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -15,6 +13,7 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
+    secctx::{self, SecCtx},
     shard_resolver_store::Store,
     utils,
 };
@@ -69,13 +68,6 @@ enum ClientInfo {
 
 #[derive(Clone)]
 struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
-
-#[derive(Clone)]
-enum SecCtx {
-    Anonymous,
-    Krb5(Arc<K5SecStore>),
-    Local(Arc<LocalSecStore>),
-}
 
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
@@ -525,11 +517,12 @@ async fn server_loop(
     let id = cfg.addrs[id];
     let secctx = match &cfg.auth {
         config::Auth::Anonymous => SecCtx::Anonymous,
-        config::Auth::Local(path) => {
-            SecCtx::Local(Arc::new(LocalSecStore::new(&path, permissions, &cfg).await?))
-        }
+        config::Auth::Local(path) => SecCtx::Local(Arc::new(
+            secctx::local::Store::new(&path, permissions, &cfg).await?,
+        )),
         config::Auth::Krb5(spns) => {
-            SecCtx::Krb5(Arc::new(K5SecStore::new(spns[&id].clone(), permissions, &cfg)?))
+            let k5 = secctx::k5::Store::new(spns[&id].clone(), permissions, &cfg)?;
+            SecCtx::Krb5(Arc::new(k5))
         }
     };
     let published = Store::new(

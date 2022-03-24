@@ -136,8 +136,7 @@ pub mod resolver_server;
 mod resolver_single;
 mod shard_resolver_store;
 mod resolver_store;
-mod k5secstore;
-mod local_secstore;
+mod secctx;
 pub mod subscriber;
 #[cfg(test)]
 mod test;

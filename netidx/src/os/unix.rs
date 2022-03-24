@@ -72,7 +72,7 @@ pub(crate) mod local_auth {
     use crate::os::local_auth::Credential;
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
-    use futures::{prelude::*, select_biased};
+    use futures::{prelude::*, select_biased, channel::oneshot};
     use fxhash::{FxBuildHasher, FxHashMap};
     use log::warn;
     use netidx_core::utils::{make_sha3_token, pack};
@@ -89,7 +89,6 @@ pub(crate) mod local_auth {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
-        sync::oneshot,
         task::spawn,
         time::{interval, sleep, timeout},
     };
