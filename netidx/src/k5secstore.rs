@@ -36,11 +36,10 @@ impl K5SecStoreInner {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct K5SecStore {
     spn: Chars,
-    pmap: Arc<PMap>,
-    pub(crate) store: Arc<RwLock<K5SecStoreInner>>,
+    pmap: PMap,
+    pub(crate) store: RwLock<K5SecStoreInner>,
 }
 
 impl K5SecStore {
@@ -51,18 +50,12 @@ impl K5SecStore {
     ) -> Result<Self> {
         let mut userdb = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
-        Ok(K5SecStore {
-            spn,
-            pmap: Arc::new(pmap),
-            store: Arc::new(RwLock::new(K5SecStoreInner {
-                ctxts: HashMap::default(),
-                userdb,
-            })),
-        })
+        let store = RwLock::new(K5SecStoreInner { ctxts: HashMap::default(), userdb });
+        Ok(K5SecStore { spn, pmap, store })
     }
 
     pub(crate) fn pmap(&self) -> &PMap {
-        &*self.pmap
+        &self.pmap
     }
 
     pub(crate) fn get(&self, id: &SocketAddr) -> Option<K5CtxWrap<ServerCtx>> {

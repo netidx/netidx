@@ -73,8 +73,8 @@ struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 #[derive(Clone)]
 enum SecCtx {
     Anonymous,
-    Krb5(K5SecStore),
-    Local(LocalSecStore),
+    Krb5(Arc<K5SecStore>),
+    Local(Arc<LocalSecStore>),
 }
 
 lazy_static! {
@@ -526,10 +526,10 @@ async fn server_loop(
     let secctx = match &cfg.auth {
         config::Auth::Anonymous => SecCtx::Anonymous,
         config::Auth::Local(path) => {
-            SecCtx::Local(LocalSecStore::new(&path, permissions, &cfg).await?)
+            SecCtx::Local(Arc::new(LocalSecStore::new(&path, permissions, &cfg).await?))
         }
         config::Auth::Krb5(spns) => {
-            SecCtx::Krb5(K5SecStore::new(spns[&id].clone(), permissions, &cfg)?)
+            SecCtx::Krb5(Arc::new(K5SecStore::new(spns[&id].clone(), permissions, &cfg)?))
         }
     };
     let published = Store::new(

@@ -11,11 +11,10 @@ use netidx_core::pack::Pack;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub(crate) struct LocalSecStore {
-    pmap: Arc<PMap>,
+    pmap: PMap,
     server: AuthServer,
-    users: Arc<Mutex<UserDb>>,
+    users: Mutex<UserDb>,
 }
 
 impl LocalSecStore {
@@ -28,9 +27,13 @@ impl LocalSecStore {
         let pmap = PMap::from_file(pmap, &mut users, cfg.root(), &cfg.children)?;
         Ok(LocalSecStore {
             server: AuthServer::start(socket_path).await?,
-            users: Arc::new(Mutex::new(users)),
-            pmap: Arc::new(pmap),
+            users: Mutex::new(users),
+            pmap,
         })
+    }
+
+    pub(crate) fn pmap(&self) -> &PMap {
+        &self.pmap
     }
 
     pub(crate) fn validate(&self, mut token: &[u8]) -> Result<Arc<UserInfo>> {
