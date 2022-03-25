@@ -14,7 +14,7 @@ use crate::{
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
     },
-    secstore::SecStore,
+    secctx::SecCtx,
 };
 use cross_krb5::ServerCtx;
 use anyhow::Result;
@@ -80,7 +80,7 @@ impl Shard {
         shard: usize,
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
-        secstore: Option<SecStore>,
+        secstore: SecCtx,
         resolver: SocketAddr,
     ) -> Self {
         let (read, read_rx) = unbounded();

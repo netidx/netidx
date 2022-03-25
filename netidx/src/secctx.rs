@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use cross_krb5::{AcceptFlags, K5Ctx, ServerCtx};
-use fxhash::FxBuildHasher;
+use fxhash::FxHashMap;
 use netidx_core::pack::Pack;
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
@@ -21,10 +21,16 @@ use tokio::task;
 
 pub(crate) mod local {
     use super::*;
+
+    struct Inner {
+        users: UserDb,
+        secrets: FxHashMap<SocketAddr, u128>,
+    }
+
     pub(crate) struct Store {
         pmap: PMap,
         server: AuthServer,
-        users: Mutex<UserDb>,
+        inner: Mutex<Inner>,
     }
 
     impl Store {
@@ -37,7 +43,7 @@ pub(crate) mod local {
             let pmap = PMap::from_file(pmap, &mut users, cfg.root(), &cfg.children)?;
             Ok(Store {
                 server: AuthServer::start(socket_path).await?,
-                users: Mutex::new(users),
+                inner: Mutex::new(Inner { users, secrets: HashMap::default() }),
                 pmap,
             })
         }
@@ -54,7 +60,19 @@ pub(crate) mod local {
             if !self.server.validate(&cred) {
                 bail!("invalid token")
             }
-            Ok(self.users.lock().ifo(Some(&*cred.user))?)
+            Ok(self.inner.lock().users.ifo(Some(&*cred.user))?)
+        }
+
+        pub(crate) fn get_secret(&self, id: &SocketAddr) -> Option<u128> {
+            self.inner.lock().secrets.get(&id).map(|s| *s)
+        }
+
+        pub(crate) fn insert_secret(&self, id: SocketAddr, secret: u128) {
+            self.inner.lock().secrets.insert(id, secret);
+        }
+
+        pub(crate) fn remove_secret(&self, id: &SocketAddr) {
+            self.inner.lock().secrets.remove(id);
         }
     }
 }
@@ -62,7 +80,7 @@ pub(crate) mod local {
 pub(crate) mod k5 {
     use super::*;
     pub(crate) struct Inner {
-        ctxts: HashMap<SocketAddr, (Chars, u128, K5CtxWrap<ServerCtx>), FxBuildHasher>,
+        ctxts: FxHashMap<SocketAddr, (Chars, u128, K5CtxWrap<ServerCtx>)>,
         userdb: UserDb,
     }
 

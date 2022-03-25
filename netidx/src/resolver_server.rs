@@ -18,6 +18,7 @@ use crate::{
     utils,
 };
 use anyhow::Result;
+use rand::{thread_rng, Rng};
 use bytes::{Buf, Bytes};
 use cross_krb5::{K5ServerCtx, ServerCtx};
 use futures::{channel::oneshot, prelude::*, select_biased};
@@ -123,8 +124,10 @@ async fn client_loop_write(
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
                         inner.insert(write_addr, state);
-                        if let SecCtx::Krb5(secstore) = &secctx {
-                            secstore.remove(&write_addr);
+                        match &secctx {
+                            SecCtx::Krb5(st) => st.remove(&write_addr),
+                            SecCtx::Local(st) => st.remove_secret(&write_addr),
+                            SecCtx::Anonymous => ()
                         }
                     }
                     store.handle_clear(uifo.clone(), write_addr).await?;
@@ -214,6 +217,46 @@ async fn hello_client_write(
     ) -> Result<()> {
         Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
     }
+    async fn ownership_check(
+        cfg: &Arc<config::server::Config>,
+        con: &mut Channel<ServerCtx>,
+        write_addr: SocketAddr,
+        resolver_id: SocketAddr,
+        secret: u128,
+    ) -> Result<()> {
+        send(cfg, con, Secret(secret)).await?;
+        let _: ReadyForOwnershipCheck =
+            time::timeout(cfg.hello_timeout, con.receive()).await??;
+        info!("hello_write connecting to {:?} for listener ownership check", write_addr);
+        let mut con: Channel<ServerCtx> = Channel::new(
+            time::timeout(cfg.hello_timeout, TcpStream::connect(write_addr)).await??,
+        );
+        time::timeout(cfg.hello_timeout, con.send_one(&1u64)).await??;
+        // we will need to select a protocol version here when
+        // we have more than one.
+        let _version: u64 = time::timeout(cfg.hello_timeout, con.receive()).await??;
+        use publisher::Hello as PHello;
+        let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
+        time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
+        match time::timeout(cfg.hello_timeout, con.receive()).await?? {
+            PHello::Anonymous | PHello::Token(_) | PHello::Local(_) => {
+                bail!("listener ownership check unexpected response")
+            }
+            PHello::ResolverAuthenticate(_, mut tok) => {
+                if tok.len() < 8 {
+                    bail!("listener ownership check buffer short");
+                }
+                let expected = utils::make_sha3_token(
+                    Some(tok.get_u64()),
+                    &[&(!secret).to_be_bytes()],
+                );
+                if &*tok != &expected[mem::size_of::<u64>()..] {
+                    bail!("listener ownership check failed");
+                }
+            }
+        }
+        Ok(())
+    }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
     let ttl_expired = loop {
         let rx = {
@@ -256,6 +299,10 @@ async fn hello_client_write(
                 };
                 debug!("hello_write sending {:?}", h);
                 send(&cfg, &mut con, h).await?;
+                let secret = thread_rng().gen::<u128>();
+                ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
+                    .await?;
+                secstore.insert_secret(hello.write_addr, secret);
                 uifo
             }
         },
@@ -297,52 +344,15 @@ async fn hello_client_write(
                 debug!("hello_write sending {:?}", h);
                 send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
+                ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
+                    .await?;
                 info!("hello_write all traffic now encrypted");
-                send(&cfg, &mut con, Secret(secret)).await?;
-                let _: ReadyForOwnershipCheck =
-                    time::timeout(cfg.hello_timeout, con.receive()).await??;
-                info!(
-                    "hello_write connecting to {:?} for listener ownership check",
-                    hello.write_addr
-                );
-                let mut con: Channel<ServerCtx> = Channel::new(
-                    time::timeout(
-                        cfg.hello_timeout,
-                        TcpStream::connect(hello.write_addr),
-                    )
-                    .await??,
-                );
-                time::timeout(cfg.hello_timeout, con.send_one(&1u64)).await??;
-                // we will need to select a protocol version here when
-                // we have more than one.
-                let _version: u64 =
-                    time::timeout(cfg.hello_timeout, con.receive()).await??;
-                use publisher::Hello as PHello;
-                let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
-                time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
-                match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-                    PHello::Anonymous | PHello::Token(_) | PHello::Local(_) => {
-                        bail!("listener ownership check unexpected response")
-                    }
-                    PHello::ResolverAuthenticate(_, mut tok) => {
-                        if tok.len() < 8 {
-                            bail!("listener ownership check buffer short");
-                        }
-                        let expected = utils::make_sha3_token(
-                            Some(tok.get_u64()),
-                            &[&(!secret).to_be_bytes()],
-                        );
-                        if &*tok != &expected[mem::size_of::<u64>()..] {
-                            bail!("listener ownership check failed");
-                        }
-                        let client = task::block_in_place(|| ctx.lock().client())?;
-                        let uifo = secstore.ifo(Some(&client))?;
-                        let spn = spn.unwrap_or(Chars::from(client));
-                        info!("hello_write listener ownership check succeeded");
-                        secstore.store(hello.write_addr, spn, secret, ctx.clone());
-                        uifo
-                    }
-                }
+                let client = task::block_in_place(|| ctx.lock().client())?;
+                let uifo = secstore.ifo(Some(&client))?;
+                let spn = spn.unwrap_or(Chars::from(client));
+                info!("hello_write listener ownership check succeeded");
+                secstore.store(hello.write_addr, spn, secret, ctx.clone());
+                uifo
             }
         },
     };
