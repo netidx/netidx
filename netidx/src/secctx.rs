@@ -14,7 +14,7 @@ use bytes::Bytes;
 use cross_krb5::{AcceptFlags, K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
 use netidx_core::pack::Pack;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rand::Rng;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::task;
@@ -22,37 +22,14 @@ use tokio::task;
 pub(crate) mod local {
     use super::*;
 
-    struct Inner {
-        users: UserDb,
-        secrets: FxHashMap<SocketAddr, u128>,
-    }
+    pub(crate) struct Authenticator(AuthServer);
 
-    pub(crate) struct Store {
-        pmap: PMap,
-        server: AuthServer,
-        inner: Mutex<Inner>,
-    }
-
-    impl Store {
-        pub(crate) async fn new(
-            socket_path: &str,
-            pmap: config::server::PMap,
-            cfg: &Arc<config::server::Config>,
-        ) -> Result<Self> {
-            let mut users = UserDb::new(Mapper::new()?);
-            let pmap = PMap::from_file(pmap, &mut users, cfg.root(), &cfg.children)?;
-            Ok(Store {
-                server: AuthServer::start(socket_path).await?,
-                inner: Mutex::new(Inner { users, secrets: HashMap::default() }),
-                pmap,
-            })
+    impl Authenticator {
+        pub(crate) async fn new(socket_path: &str) -> Result<Self> {
+            Ok(Authenticator(AuthServer::start(socket_path).await?))
         }
 
-        pub(crate) fn pmap(&self) -> &PMap {
-            &self.pmap
-        }
-
-        pub(crate) fn validate(&self, mut token: &[u8]) -> Result<Arc<UserInfo>> {
+        pub(crate) fn authenticate(&self, mut token: &[u8]) -> Result<Credential> {
             if token.len() < 10 {
                 bail!("token short")
             }
@@ -60,113 +37,92 @@ pub(crate) mod local {
             if !self.server.validate(&cred) {
                 bail!("invalid token")
             }
-            Ok(self.inner.lock().users.ifo(Some(&*cred.user))?)
-        }
-
-        pub(crate) fn get_secret(&self, id: &SocketAddr) -> Option<u128> {
-            self.inner.lock().secrets.get(&id).map(|s| *s)
-        }
-
-        pub(crate) fn insert_secret(&self, id: SocketAddr, secret: u128) {
-            self.inner.lock().secrets.insert(id, secret);
-        }
-
-        pub(crate) fn remove_secret(&self, id: &SocketAddr) {
-            self.inner.lock().secrets.remove(id);
+            Ok(cred)
         }
     }
 }
 
 pub(crate) mod k5 {
     use super::*;
-    pub(crate) struct Inner {
-        ctxts: FxHashMap<SocketAddr, (Chars, u128, K5CtxWrap<ServerCtx>)>,
-        userdb: UserDb,
-    }
 
-    impl Inner {
-        pub(crate) fn get(
-            &self,
-            id: &SocketAddr,
-        ) -> Option<&(Chars, u128, K5CtxWrap<ServerCtx>)> {
-            self.ctxts.get(id).and_then(|r| {
-                match task::block_in_place(|| r.2.lock().ttl()) {
-                    Ok(ttl) if ttl.as_secs() > 0 => Some(r),
-                    _ => None,
-                }
-            })
+    pub(crate) struct Authenticator(Chars);
+
+    impl Authenticator {
+        pub(crate) fn new(spn: Chars) -> Self {
+            Authenticator(spn)
         }
 
-        fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>> {
-            self.userdb.ifo(user)
-        }
-    }
-
-    pub(crate) struct Store {
-        spn: Chars,
-        pmap: PMap,
-        pub(crate) store: RwLock<Inner>,
-    }
-
-    impl Store {
-        pub(crate) fn new(
-            spn: Chars,
-            pmap: config::server::PMap,
-            cfg: &Arc<config::server::Config>,
-        ) -> Result<Self> {
-            let mut userdb = UserDb::new(Mapper::new()?);
-            let pmap = PMap::from_file(pmap, &mut userdb, cfg.root(), &cfg.children)?;
-            let store = RwLock::new(Inner { ctxts: HashMap::default(), userdb });
-            Ok(Store { spn, pmap, store })
-        }
-
-        pub(crate) fn pmap(&self) -> &PMap {
-            &self.pmap
-        }
-
-        pub(crate) fn get(&self, id: &SocketAddr) -> Option<K5CtxWrap<ServerCtx>> {
-            let inner = self.store.read();
-            inner.get(id).map(|(_, _, c)| c.clone())
-        }
-
-        pub(crate) fn create(
+        pub(crate) fn authenticate(
             &self,
             tok: &[u8],
-        ) -> Result<(K5CtxWrap<ServerCtx>, u128, Bytes)> {
+        ) -> Result<(K5CtxWrap<ServerCtx>, Bytes)> {
             let spn = Some(&*self.spn);
             let (ctx, tok) = task::block_in_place(|| {
                 ServerCtx::accept(AcceptFlags::empty(), spn, tok)
             })?;
-            let secret = rand::thread_rng().gen::<u128>();
-            Ok((K5CtxWrap::new(ctx), secret, utils::bytes(&*tok)))
-        }
-
-        pub(crate) fn store(
-            &self,
-            addr: SocketAddr,
-            spn: Chars,
-            secret: u128,
-            ctx: K5CtxWrap<ServerCtx>,
-        ) {
-            let mut inner = self.store.write();
-            inner.ctxts.insert(addr, (spn, secret, ctx));
-        }
-
-        pub(crate) fn remove(&self, addr: &SocketAddr) {
-            let mut inner = self.store.write();
-            inner.ctxts.remove(addr);
-        }
-
-        pub(crate) fn ifo(&self, user: Option<&str>) -> Result<Arc<UserInfo>> {
-            let mut inner = self.store.write();
-            Ok(inner.ifo(user)?)
+            Ok((K5CtxWrap::new(ctx), utils::bytes(&*tok)))
         }
     }
+}
+
+pub(crate) struct SecCtxData<S: 'static> {
+    pub(crate) users: UserDb,
+    secrets: FxHashMap<SocketAddr, S>,
+    pub(crate) pmap: PMap,
+}
+
+impl SecCtxData<S: 'static> {
+    pub(crate) fn new(
+        pmap: config::server::PMap,
+        cfg: &Arc<config::server::Config>,
+    ) -> Result<Self> {
+        let mut users = UserDb::new(Mapper::new()?);
+        let pmap = PMap::from_file(pmap, &mut users, cfg.root(), &cfg.children)?;
+        Ok(Self { users, pmap, secrets: HashMap::default() })
+    }
+}
+
+impl SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)> {
+    pub(crate) fn get_k5(
+        &self,
+        id: &SocketAddr,
+    ) -> Option<&(Chars, u128, K5CtxWrap<ServerCtx>)> {
+        self.secrets.get(id).and_then(|r| {
+            match task::block_in_place(|| r.2.lock().ttl()) {
+                Ok(ttl) if ttl.as_secs() > 0 => Some(r),
+                _ => None,
+            }
+        })
+    }
+}
+
+impl SecCtxData<u128> {
+    pub(crate) fn get_local(&self, id: &SocketAddr) -> Option<u128> {
+        self.secrets.get(id).map(|s| *s)
+    }
+}
+
+pub(crate) enum SecCtxDataReadGuard<'a> {
+    Anonymous,
+    Krb5(RwLockReadGuard<'a, SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>),
+    Local(RwLockReadGuard<'a, SecCtxData<u128>>),
 }
 
 #[derive(Clone)]
 pub(crate) enum SecCtx {
     Anonymous,
-    Krb5(Arc<k5::Store>),
-    Local(Arc<local::Store>),
+    Krb5(
+        Arc<(k5::Authenticator, RwLock<SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>)>,
+    ),
+    Local(Arc<(local::Authenticator, RwLock<SecCtxData<u128>>)>),
+}
+
+impl SecCtx {
+    pub(crate) fn data(&self) -> SecCtxDataReadGuard {
+        match self {
+            SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
+            SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read()),
+            SecCtx::Local(a) => SecCtxDataReadGuard::Local(a.1.read()),
+        }
+    }
 }
